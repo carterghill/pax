@@ -1,50 +1,69 @@
 import { useState } from "react";
-import reactLogo from "./assets/react.svg";
 import { invoke } from "@tauri-apps/api/core";
-import "./App.css";
 
 function App() {
-  const [greetMsg, setGreetMsg] = useState("");
-  const [name, setName] = useState("");
+  const [homeserver, setHomeserver] = useState("https://matrix.currdurr.duckdns.org");
+  const [username, setUsername] = useState("");
+  const [password, setPassword] = useState("");
+  const [userId, setUserId] = useState<string | null>(null);
+  const [rooms, setRooms] = useState<any[]>([]);
+  const [error, setError] = useState<string | null>(null);
+  const [loading, setLoading] = useState(false);
 
-  async function greet() {
-    // Learn more about Tauri commands at https://tauri.app/develop/calling-rust/
-    setGreetMsg(await invoke("greet", { name }));
+  async function handleLogin() {
+    setLoading(true);
+    setError(null);
+    try {
+      const id = await invoke<string>("login", { homeserver, username, password });
+      setUserId(id);
+      const roomList = await invoke<any[]>("get_rooms");
+      setRooms(roomList);
+    } catch (e) {
+      setError(String(e));
+    }
+    setLoading(false);
+  }
+
+  if (userId) {
+    return (
+      <div style={{ padding: "20px" }}>
+        <h2>Logged in as {userId}</h2>
+        <h3>Rooms ({rooms.length})</h3>
+        <ul>
+          {rooms.map((room) => (
+            <li key={room.id}>{room.name} <small>({room.id})</small></li>
+          ))}
+        </ul>
+      </div>
+    );
   }
 
   return (
-    <main className="container">
-      <h1>Welcome to Tauri + React</h1>
-
-      <div className="row">
-        <a href="https://vite.dev" target="_blank">
-          <img src="/vite.svg" className="logo vite" alt="Vite logo" />
-        </a>
-        <a href="https://tauri.app" target="_blank">
-          <img src="/tauri.svg" className="logo tauri" alt="Tauri logo" />
-        </a>
-        <a href="https://react.dev" target="_blank">
-          <img src={reactLogo} className="logo react" alt="React logo" />
-        </a>
-      </div>
-      <p>Click on the Tauri, Vite, and React logos to learn more.</p>
-
-      <form
-        className="row"
-        onSubmit={(e) => {
-          e.preventDefault();
-          greet();
-        }}
-      >
+    <div style={{ padding: "20px", maxWidth: "400px", margin: "0 auto" }}>
+      <h1>Pax</h1>
+      <div style={{ display: "flex", flexDirection: "column", gap: "10px" }}>
         <input
-          id="greet-input"
-          onChange={(e) => setName(e.currentTarget.value)}
-          placeholder="Enter a name..."
+          placeholder="Homeserver URL"
+          value={homeserver}
+          onChange={(e) => setHomeserver(e.target.value)}
         />
-        <button type="submit">Greet</button>
-      </form>
-      <p>{greetMsg}</p>
-    </main>
+        <input
+          placeholder="Username"
+          value={username}
+          onChange={(e) => setUsername(e.target.value)}
+        />
+        <input
+          type="password"
+          placeholder="Password"
+          value={password}
+          onChange={(e) => setPassword(e.target.value)}
+        />
+        <button onClick={handleLogin} disabled={loading}>
+          {loading ? "Logging in..." : "Login"}
+        </button>
+        {error && <p style={{ color: "red" }}>{error}</p>}
+      </div>
+    </div>
   );
 }
 
