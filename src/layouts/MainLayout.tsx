@@ -3,6 +3,7 @@ import RoomSidebar from "../components/RoomSidebar";
 import { useRooms } from "../hooks/useRooms";
 import { useState } from "react";
 import { useTheme } from "../theme/ThemeContext";
+import SettingsMenu from "../components/SettingsMenu";
 
 export default function MainLayout({ userId }: { userId: string }) {
   const { spaces, roomsBySpace, getRoom } = useRooms(userId);
@@ -34,7 +35,7 @@ export default function MainLayout({ userId }: { userId: string }) {
         padding: 20,
       }}>
         {activeRoomId
-          ? activeRoomId === "settings" ? <div>Settings</div> 
+          ? activeRoomId === "settings" ? <SettingsMenu />
           : <div>Messages for {getRoom(activeRoomId)?.name} go here</div>
           : <div>Select a room</div>
         }
