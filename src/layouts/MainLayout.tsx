@@ -1,5 +1,6 @@
 import SpaceSidebar from "../components/SpaceSidebar";
 import RoomSidebar from "../components/RoomSidebar";
+import ChatView from "../layouts/ChatView";
 import { useRooms } from "../hooks/useRooms";
 import { useState } from "react";
 import { useTheme } from "../theme/ThemeContext";
@@ -9,11 +10,11 @@ export default function MainLayout({ userId }: { userId: string }) {
   const { spaces, roomsBySpace, getRoom } = useRooms(userId);
   const [activeSpaceId, setActiveSpaceId] = useState<string | null>(null);
   const [activeRoomId, setActiveRoomId] = useState<string | null>(null);
-  
-  const { palette } = useTheme();
 
+  const { palette } = useTheme();
   const activeSpace = activeSpaceId ? getRoom(activeSpaceId) : null;
   const visibleRooms = roomsBySpace(activeSpaceId);
+  const activeRoom = activeRoomId ? getRoom(activeRoomId) : null;
 
   return (
     <div style={{ display: "flex", height: "100vh" }}>
@@ -32,13 +33,23 @@ export default function MainLayout({ userId }: { userId: string }) {
         flex: 1,
         backgroundColor: palette.bgPrimary,
         color: palette.textPrimary,
-        padding: 20,
+        display: "flex",
       }}>
-        {activeRoomId
-          ? activeRoomId === "settings" ? <SettingsMenu />
-          : <div>Messages for {getRoom(activeRoomId)?.name} go here</div>
-          : <div>Select a room</div>
-        }
+        {activeRoomId === "settings" ? (
+          <SettingsMenu />
+        ) : activeRoom ? (
+          <ChatView room={activeRoom} />
+        ) : (
+          <div style={{
+            flex: 1,
+            display: "flex",
+            alignItems: "center",
+            justifyContent: "center",
+            color: palette.textSecondary,
+          }}>
+            Select a room
+          </div>
+        )}
       </main>
     </div>
   );

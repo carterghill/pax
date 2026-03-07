@@ -5,3 +5,17 @@ export interface Room {
   isSpace: boolean;
   parentSpaceIds: string[];
 }
+
+export interface Message {
+  eventId: string;
+  sender: string;
+  senderName: string | null;
+  body: string;
+  timestamp: number;
+  avatarUrl: string | null;
+}
+
+export interface MessageBatch {
+  messages: Message[];
+  prevBatch: string | null;
+}

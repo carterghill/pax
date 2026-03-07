@@ -34,20 +34,22 @@ export default function RoomSidebar({
       }}>
         {spaceName}
       </h2>
-      <div 
-        onClick={() => onSelectRoom("settings")}
-        style={{
-          padding: `${spacing.unit * 4}px ${spacing.unit * 4}px ${spacing.unit * 3}px`,
-          cursor: "pointer",
-          fontWeight: typography.fontWeightBold,
-          color: activeRoomId==="settings" ? palette.textHeading : palette.textSecondary,
-          backgroundColor: activeRoomId==="settings" ? palette.bgActive : palette.bgSecondary,
-          borderBottom: `1px solid ${palette.border}`,
-          margin: 0,
-        }}
-      >
-        Settings 
-      </div>
+      { spaceName === "Home" &&
+        <div 
+          onClick={() => onSelectRoom("settings")}
+          style={{
+            padding: `${spacing.unit * 4}px ${spacing.unit * 4}px ${spacing.unit * 3}px`,
+            cursor: "pointer",
+            fontWeight: typography.fontWeightBold,
+            color: activeRoomId==="settings" ? palette.textHeading : palette.textSecondary,
+            backgroundColor: activeRoomId==="settings" ? palette.bgActive : palette.bgSecondary,
+            borderBottom: `1px solid ${palette.border}`,
+            margin: 0,
+          }}
+        >
+          Settings 
+        </div>
+      }
       <div style={{ flex: 1, overflowY: "auto", padding: spacing.unit * 2 }}>
         {rooms.map((room) => (
           <div

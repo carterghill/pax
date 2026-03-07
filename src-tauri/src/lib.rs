@@ -4,6 +4,8 @@ use tauri::State;
 use tokio::sync::Mutex;
 use matrix_sdk::{Client, config::SyncSettings, media::MediaFormat};
 use matrix_sdk::ruma::events::StateEventType;
+use matrix_sdk::room::MessagesOptions;
+use matrix_sdk::ruma::UInt;
 use serde::Serialize;
 use data_encoding::BASE64;
 
@@ -19,6 +21,24 @@ struct RoomInfo {
     avatar_url: Option<String>,
     is_space: bool,
     parent_space_ids: Vec<String>,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct MessageInfo {
+    event_id: String,
+    sender: String,
+    sender_name: Option<String>,
+    body: String,
+    timestamp: u64,
+    avatar_url: Option<String>,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct MessageBatch {
+    messages: Vec<MessageInfo>,
+    prev_batch: Option<String>,
 }
 
 #[tauri::command]
@@ -122,6 +142,117 @@ async fn get_rooms(
     Ok(room_list)
 }
 
+#[tauri::command]
+async fn get_messages(
+    state: State<'_, Arc<AppState>>,
+    room_id: String,
+    from: Option<String>,
+    limit: u32,
+) -> Result<MessageBatch, String> {
+    let guard = state.client.lock().await;
+    let client = guard.as_ref().ok_or("Not logged in")?;
+
+    let room_id_parsed = matrix_sdk::ruma::RoomId::parse(&room_id)
+        .map_err(|e| format!("Invalid room ID: {e}"))?;
+
+    let room = client
+        .get_room(&room_id_parsed)
+        .ok_or("Room not found")?;
+
+    let mut options = MessagesOptions::backward();
+    if let Some(token) = &from {
+        options.from = Some(token.to_string());
+    }
+    options.limit = UInt::from(limit);
+
+    let response = room
+        .messages(options)
+        .await
+        .map_err(|e| format!("Failed to fetch messages: {e}"))?;
+
+    let mut messages = Vec::new();
+
+    for event in response.chunk {
+        let raw = match event.raw().deserialize() {
+            Ok(e) => e,
+            Err(_) => continue,
+        };
+
+        // Only handle regular message events
+        if let matrix_sdk::ruma::events::AnySyncTimelineEvent::MessageLike(
+            matrix_sdk::ruma::events::AnySyncMessageLikeEvent::RoomMessage(msg),
+        ) = raw
+        {
+            let original = match msg {
+                matrix_sdk::ruma::events::SyncMessageLikeEvent::Original(o) => o,
+                _ => continue,
+            };
+
+            let body = match &original.content.msgtype {
+                matrix_sdk::ruma::events::room::message::MessageType::Text(text) => {
+                    text.body.clone()
+                }
+                matrix_sdk::ruma::events::room::message::MessageType::Notice(notice) => {
+                    notice.body.clone()
+                }
+                matrix_sdk::ruma::events::room::message::MessageType::Emote(emote) => {
+                    format!("* {}", emote.body)
+                }
+                matrix_sdk::ruma::events::room::message::MessageType::Image(_) => {
+                    "[Image]".to_string()
+                }
+                matrix_sdk::ruma::events::room::message::MessageType::File(_) => {
+                    "[File]".to_string()
+                }
+                matrix_sdk::ruma::events::room::message::MessageType::Video(_) => {
+                    "[Video]".to_string()
+                }
+                matrix_sdk::ruma::events::room::message::MessageType::Audio(_) => {
+                    "[Audio]".to_string()
+                }
+                _ => "[Unsupported message]".to_string(),
+            };
+
+            let sender = original.sender.to_string();
+
+            // Try to get the sender's display name and avatar
+            let (sender_name, avatar_url) = match room
+                .get_member_no_sync(&original.sender)
+                .await
+            {
+                Ok(Some(member)) => {
+                    let name = member.display_name().map(|n| n.to_string());
+                    let avatar = match member.avatar(MediaFormat::File).await {
+                        Ok(Some(bytes)) => {
+                            let b64 = BASE64.encode(&bytes);
+                            Some(format!("data:image/png;base64,{}", b64))
+                        }
+                        _ => None,
+                    };
+                    (name, avatar)
+                }
+                _ => (None, None),
+            };
+
+            let timestamp = original.origin_server_ts.0.into();
+
+            messages.push(MessageInfo {
+                event_id: original.event_id.to_string(),
+                sender,
+                sender_name,
+                body,
+                timestamp,
+                avatar_url,
+            });
+        }
+    }
+
+    Ok(MessageBatch {
+        messages,
+        prev_batch: response.end,
+    })
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     let state = Arc::new(AppState {
@@ -130,7 +261,7 @@ pub fn run() {
 
     tauri::Builder::default()
         .manage(state)
-        .invoke_handler(tauri::generate_handler![login, get_rooms])
+        .invoke_handler(tauri::generate_handler![login, get_rooms, get_messages])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
 }
