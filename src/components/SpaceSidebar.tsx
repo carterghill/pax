@@ -69,7 +69,7 @@ export default function SpaceSidebar({
   activeSpaceId,
   onSelectSpace,
 }: SpaceSidebarProps) {
-  const { palette, spacing, typography } = useTheme();
+  const { palette } = useTheme();
 
   return (
     <div

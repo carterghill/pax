@@ -27,7 +27,7 @@ export default function RoomSidebar({
       <h2 style={{
         padding: `${spacing.unit * 4}px ${spacing.unit * 4}px ${spacing.unit * 3}px`,
         fontSize: typography.fontSizeLarge,
-        // fontWeight: typography.fontWeightBold,
+        fontWeight: typography.fontWeightBold,
         color: palette.textHeading,
         borderBottom: `1px solid ${palette.border}`,
         margin: 0,

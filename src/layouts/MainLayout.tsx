@@ -10,7 +10,7 @@ export default function MainLayout({ userId }: { userId: string }) {
   const [activeSpaceId, setActiveSpaceId] = useState<string | null>(null);
   const [activeRoomId, setActiveRoomId] = useState<string | null>(null);
   
-  const { palette, spacing, typography } = useTheme();
+  const { palette } = useTheme();
 
   const activeSpace = activeSpaceId ? getRoom(activeSpaceId) : null;
   const visibleRooms = roomsBySpace(activeSpaceId);

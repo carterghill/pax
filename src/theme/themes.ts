@@ -8,7 +8,7 @@ const typography: ThemeTypography = {
   fontSizeLarge: 16,
   fontWeightNormal: 400,
   fontWeightMedium: 500,
-  fontWeightBold: 600,
+  fontWeightBold: 700,
   lineHeight: 1.5,
 };
 
