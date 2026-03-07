@@ -1,4 +1,5 @@
 import { Room } from "../types/matrix";
+import { useTheme } from "../theme/ThemeContext";
 
 interface RoomSidebarProps {
   rooms: Room[];
@@ -13,44 +14,66 @@ export default function RoomSidebar({
   onSelectRoom,
   spaceName,
 }: RoomSidebarProps) {
+  const { palette, spacing, typography } = useTheme();
+
   return (
     <div style={{
-      width: 240,
-      backgroundColor: "#2b2d31",
+      width: spacing.sidebarWidth,
+      backgroundColor: palette.bgSecondary,
       display: "flex",
       flexDirection: "column",
       height: "100vh",
     }}>
       <h2 style={{
-        padding: "16px 16px 12px",
-        fontSize: 15,
-        fontWeight: 600,
-        color: "#f2f3f5",
-        borderBottom: "1px solid #1f2023",
+        padding: `${spacing.unit * 4}px ${spacing.unit * 4}px ${spacing.unit * 3}px`,
+        fontSize: typography.fontSizeLarge,
+        // fontWeight: typography.fontWeightBold,
+        color: palette.textHeading,
+        borderBottom: `1px solid ${palette.border}`,
         margin: 0,
       }}>
         {spaceName}
       </h2>
-      <div style={{ flex: 1, overflowY: "auto", padding: "8px" }}>
+      <div 
+        onClick={() => onSelectRoom("settings")}
+        style={{
+          padding: `${spacing.unit * 4}px ${spacing.unit * 4}px ${spacing.unit * 3}px`,
+          cursor: "pointer",
+          fontWeight: typography.fontWeightBold,
+          color: activeRoomId==="settings" ? palette.textHeading : palette.textSecondary,
+          backgroundColor: activeRoomId==="settings" ? palette.bgActive : palette.bgSecondary,
+          borderBottom: `1px solid ${palette.border}`,
+          margin: 0,
+        }}
+      >
+        Settings 
+      </div>
+      <div style={{ flex: 1, overflowY: "auto", padding: spacing.unit * 2 }}>
         {rooms.map((room) => (
           <div
             key={room.id}
             onClick={() => onSelectRoom(room.id)}
             style={{
-              padding: "8px 12px",
-              borderRadius: 4,
+              padding: `${spacing.unit * 2}px ${spacing.unit * 3}px`,
+              borderRadius: spacing.unit,
               cursor: "pointer",
-              color: activeRoomId === room.id ? "#f2f3f5" : "#949ba4",
-              backgroundColor: activeRoomId === room.id ? "#404249" : "transparent",
-              fontSize: 14,
-              fontWeight: activeRoomId === room.id ? 500 : 400,
+              color: activeRoomId === room.id ? palette.textHeading : palette.textSecondary,
+              backgroundColor: activeRoomId === room.id ? palette.bgActive : "transparent",
+              fontSize: typography.fontSizeBase,
+              fontWeight: activeRoomId === room.id
+                ? typography.fontWeightMedium
+                : typography.fontWeightNormal,
             }}
           >
             # {room.name}
           </div>
         ))}
         {rooms.length === 0 && (
-          <div style={{ color: "#949ba4", padding: "8px 12px", fontSize: 13 }}>
+          <div style={{
+            color: palette.textSecondary,
+            padding: `${spacing.unit * 2}px ${spacing.unit * 3}px`,
+            fontSize: typography.fontSizeSmall,
+          }}>
             No rooms in this space
           </div>
         )}

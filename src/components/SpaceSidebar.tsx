@@ -1,3 +1,4 @@
+import { useTheme } from "../theme/ThemeContext";
 import { Room } from "../types/matrix";
 
 interface SpaceSidebarProps {
@@ -68,11 +69,13 @@ export default function SpaceSidebar({
   activeSpaceId,
   onSelectSpace,
 }: SpaceSidebarProps) {
+  const { palette, spacing, typography } = useTheme();
+
   return (
     <div
       style={{
         width: 72,
-        backgroundColor: "#1e1f22",
+        backgroundColor: palette.bgTertiary,
         display: "flex",
         flexDirection: "column",
         alignItems: "center",

@@ -2,6 +2,7 @@ import "./App.css";
 import { useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import MainLayout from "./layouts/MainLayout";
+import { ThemeProvider } from "./theme/ThemeContext";
 
 function App() {
   const [homeserver, setHomeserver] = useState("https://matrix.currdurr.duckdns.org");
@@ -28,7 +29,9 @@ function App() {
 
   if (userId) {
     return (
-      <MainLayout userId={userId} />
+      <ThemeProvider>
+        <MainLayout userId={userId} />
+      </ThemeProvider>
       // <div style={{ padding: "20px" }}>
       //   <h2>Logged in as {userId}</h2>
       //   <h3>Rooms ({rooms.length})</h3>
