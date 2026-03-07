@@ -32,9 +32,9 @@ function SpaceAvatar({ space, isActive }: { space: Room; isActive: boolean }) {
         flexShrink: 0,
       }}
     >
-      {space.avatar_url ? (
+      {space.avatarUrl ? (
         <img
-          src={space.avatar_url}
+          src={space.avatarUrl}
           alt={space.name}
           style={{
             width: "100%",

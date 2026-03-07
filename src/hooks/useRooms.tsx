@@ -9,9 +9,17 @@ export function useRooms(userId: string) {
     invoke<Room[]>("get_rooms").then(setRooms);
   }, [userId]);
 
-  const spaces = rooms.filter((r) => r.is_space);
-  const roomsBySpace = (spaceId: string) =>
-    rooms.filter((r) => !r.is_space); // TODO: filter by actual parent space
+  const spaces = rooms.filter((r) => r.isSpace);
 
-  return { rooms, spaces, roomsBySpace };
+  const roomsBySpace = (spaceId: string | null) => {
+    if (!spaceId) {
+      // "Home" — show rooms that aren't in any space
+      return rooms.filter((r) => !r.isSpace && r.parentSpaceIds.length === 0);
+    }
+    return rooms.filter((r) => !r.isSpace && r.parentSpaceIds.includes(spaceId));
+  };
+
+  const getRoom = (roomId: string) => rooms.find((r) => r.id === roomId) ?? null;
+
+  return { rooms, spaces, roomsBySpace, getRoom };
 }
