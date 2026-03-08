@@ -105,7 +105,7 @@ export default function ChatView({ room, userId }: ChatViewProps) {
       {/* Channel header */}
       <div style={{
         padding: `0 ${spacing.unit * 4}px`,
-        height: spacing.unit * 12,
+        height: spacing.unit * 13,
         borderBottom: `1px solid ${palette.border}`,
         display: "flex",
         alignItems: "center",
@@ -138,6 +138,7 @@ export default function ChatView({ room, userId }: ChatViewProps) {
           <Users
             size={20}
             color={showUsers ? palette.textHeading : palette.textSecondary}
+            fontWeight={showUsers ? typography.fontWeightBold : typography.fontWeightNormal}
           />
         </button>
       </div>
