@@ -1,4 +1,5 @@
 import MessageList from "../components/MessageList";
+import MessageInput from "../components/MessageInput";
 import { useMessages } from "../hooks/useMessages";
 import { useTheme } from "../theme/ThemeContext";
 import { Room } from "../types/matrix";
@@ -8,7 +9,7 @@ interface ChatViewProps {
 }
 
 export default function ChatView({ room }: ChatViewProps) {
-  const { messages, loadMore, hasMore, loading, initialLoading } = useMessages(room.id);
+  const { messages, loadMore, hasMore, loading, initialLoading, refresh } = useMessages(room.id);
   const { palette, typography, spacing } = useTheme();
 
   return (
@@ -45,18 +46,12 @@ export default function ChatView({ room }: ChatViewProps) {
         onLoadMore={loadMore}
       />
 
-      {/* Message input placeholder */}
-      <div style={{ padding: spacing.unit * 2, paddingTop: 0, marginTop: 0 }}>
-        <div style={{
-          backgroundColor: palette.bgActive,
-          borderRadius: spacing.unit * 2,
-          padding: `${spacing.unit * 3}px ${spacing.unit * 4}px`,
-          color: palette.textSecondary,
-          fontSize: typography.fontSizeBase,
-        }}>
-          Message #{room.name}
-        </div>
-      </div>
+      {/* Message input */}
+      <MessageInput
+        roomId={room.id}
+        roomName={room.name}
+        onMessageSent={refresh}
+      />
     </div>
   );
 }
