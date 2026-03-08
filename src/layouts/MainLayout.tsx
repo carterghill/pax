@@ -2,14 +2,22 @@ import SpaceSidebar from "../components/SpaceSidebar";
 import RoomSidebar from "../components/RoomSidebar";
 import ChatView from "../layouts/ChatView";
 import { useRooms } from "../hooks/useRooms";
-import { useState } from "react";
+import { useState, useCallback } from "react";
 import { useTheme } from "../theme/ThemeContext";
 import SettingsMenu from "../components/SettingsMenu";
 
 export default function MainLayout({ userId }: { userId: string }) {
   const { spaces, roomsBySpace, getRoom } = useRooms(userId);
   const [activeSpaceId, setActiveSpaceId] = useState<string | null>(null);
-  const [activeRoomId, setActiveRoomId] = useState<string | null>(null);
+  // Track active room per space — key is spaceId ("" for Home)
+  const [activeRoomBySpace, setActiveRoomBySpace] = useState<Record<string, string | null>>({});
+
+  const spaceKey = activeSpaceId ?? "";
+  const activeRoomId = activeRoomBySpace[spaceKey] ?? null;
+
+  const setActiveRoomId = useCallback((roomId: string | null) => {
+    setActiveRoomBySpace((prev) => ({ ...prev, [spaceKey]: roomId }));
+  }, [spaceKey]);
 
   const { palette } = useTheme();
   const activeSpace = activeSpaceId ? getRoom(activeSpaceId) : null;
