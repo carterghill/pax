@@ -1,12 +1,13 @@
 import SpaceSidebar from "../components/SpaceSidebar";
 import RoomSidebar from "../components/RoomSidebar";
 import ChatView from "../layouts/ChatView";
+import VoiceRoomView from "../components/VoiceRoomView";
 import { useRooms } from "../hooks/useRooms";
 import { usePresence } from "../hooks/usePresence";
 import { useVoiceParticipants } from "../hooks/useVoiceParticipants";
+import { useVoiceCall } from "../hooks/useVoiceCall";
 import { PresenceContext } from "../hooks/PresenceContext";
 import { useState, useCallback, useMemo } from "react";
-import { Volume2 } from "lucide-react";
 import { useTheme } from "../theme/ThemeContext";
 import SettingsMenu from "../components/SettingsMenu";
 
@@ -15,6 +16,7 @@ const VOICE_ROOM_TYPE = "org.matrix.msc3417.call";
 export default function MainLayout({ userId }: { userId: string }) {
   const { spaces, roomsBySpace, getRoom } = useRooms(userId);
   const { manualStatus, setManualStatus, effectivePresence } = usePresence();
+  const voiceCall = useVoiceCall();
   const [activeSpaceId, setActiveSpaceId] = useState<string | null>(null);
   const [activeRoomBySpace, setActiveRoomBySpace] = useState<Record<string, string | null>>({});
 
@@ -37,6 +39,17 @@ export default function MainLayout({ userId }: { userId: string }) {
   );
   const voiceParticipants = useVoiceParticipants(voiceRoomIds);
 
+  // Handle room selection — clicking a voice room joins the call
+  const handleSelectRoom = useCallback((roomId: string) => {
+    setActiveRoomId(roomId);
+
+    const room = getRoom(roomId);
+    if (room && room.roomType === VOICE_ROOM_TYPE) {
+      // Join voice room on click (useVoiceCall handles dedup if already connected)
+      voiceCall.connect(roomId);
+    }
+  }, [setActiveRoomId, getRoom, voiceCall]);
+
   return (
     <PresenceContext.Provider value={{ manualStatus, setManualStatus, effectivePresence }}>
       <div style={{ display: "flex", height: "100vh" }}>
@@ -48,10 +61,11 @@ export default function MainLayout({ userId }: { userId: string }) {
         <RoomSidebar
           rooms={visibleRooms}
           activeRoomId={activeRoomId}
-          onSelectRoom={setActiveRoomId}
+          onSelectRoom={handleSelectRoom}
           spaceName={activeSpace?.name ?? "Home"}
           userId={userId}
           voiceParticipants={voiceParticipants}
+          connectedVoiceRoomId={voiceCall.connectedRoomId}
         />
         <main style={{
           flex: 1,
@@ -62,41 +76,12 @@ export default function MainLayout({ userId }: { userId: string }) {
           {activeRoomId === "settings" ? (
             <SettingsMenu />
           ) : activeRoom && activeRoom.roomType === VOICE_ROOM_TYPE ? (
-            <div style={{
-              flex: 1,
-              display: "flex",
-              flexDirection: "column",
-              height: "100vh",
-            }}>
-              <div style={{
-                padding: `${16}px ${16}px`,
-                borderBottom: `1px solid ${palette.border}`,
-                display: "flex",
-                alignItems: "center",
-                gap: 12,
-              }}>
-                <Volume2 size={20} color={palette.textSecondary} />
-                <span style={{
-                  fontWeight: 600,
-                  color: palette.textHeading,
-                }}>
-                  {activeRoom.name}
-                </span>
-              </div>
-              <div style={{
-                flex: 1,
-                display: "flex",
-                flexDirection: "column",
-                alignItems: "center",
-                justifyContent: "center",
-                gap: 16,
-                color: palette.textSecondary,
-              }}>
-                <Volume2 size={64} color={palette.textSecondary} opacity={0.4} />
-                <span style={{ fontSize: 18 }}>Voice Channel</span>
-                <span style={{ fontSize: 14, opacity: 0.7 }}>Voice chat coming soon</span>
-              </div>
-            </div>
+            <VoiceRoomView
+              room={activeRoom}
+              callState={voiceCall}
+              onDisconnect={voiceCall.disconnect}
+              onToggleMic={voiceCall.toggleMic}
+            />
           ) : activeRoom ? (
             <ChatView room={activeRoom} userId={userId} />
           ) : (

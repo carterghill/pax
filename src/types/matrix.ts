@@ -33,3 +33,8 @@ export interface VoiceParticipant {
   displayName: string | null;
   avatarUrl: string | null;
 }
+
+export interface VoiceJoinResult {
+  jwt: string;
+  livekitUrl: string;
+}

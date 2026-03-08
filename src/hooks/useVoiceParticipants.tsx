@@ -51,34 +51,15 @@ export function useVoiceParticipants(voiceRoomIds: string[]) {
     });
   }, [voiceRoomIds.join(","), fetchAll]);
 
-  // Listen for targeted voice-participants-changed events (from sync detecting call member state changes)
+  // Re-fetch all voice rooms on every sync cycle
+  // The dedup in fetchForRoom prevents unnecessary re-renders
   useEffect(() => {
-    const unlisten = listen<string>("voice-participants-changed", (event) => {
-      const changedRoomId = event.payload;
-      if (roomIdsRef.current.includes(changedRoomId)) {
-        fetchForRoom(changedRoomId);
-      }
+    const unlisten = listen("voice-participants-changed", () => {
+      fetchAll();
     });
 
     return () => {
       unlisten.then((fn) => fn());
-    };
-  }, [fetchForRoom]);
-
-  // Also re-fetch on rooms-changed as a fallback (debounced)
-  useEffect(() => {
-    let debounceTimer: ReturnType<typeof setTimeout> | null = null;
-
-    const unlisten = listen("rooms-changed", () => {
-      if (debounceTimer) clearTimeout(debounceTimer);
-      debounceTimer = setTimeout(() => {
-        fetchAll();
-      }, 3000);
-    });
-
-    return () => {
-      unlisten.then((fn) => fn());
-      if (debounceTimer) clearTimeout(debounceTimer);
     };
   }, [fetchAll]);
 

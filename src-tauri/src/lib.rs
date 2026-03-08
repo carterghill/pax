@@ -351,6 +351,119 @@ async fn get_room_members(
     Ok(result)
 }
 
+/// Check whether a call.member state event JSON represents an active participant.
+/// Handles both MSC4143 (per-device content) and MSC3401 (memberships array) formats,
+/// and filters out expired sessions.
+fn is_call_member_active(json: &serde_json::Value) -> bool {
+    let content = json.get("content");
+
+    // MSC4143: active if content has "application" field (empty content = left)
+    let active_new = content
+        .and_then(|c| c.get("application"))
+        .is_some();
+
+    // MSC3401: active if non-empty "memberships" array
+    let active_old = content
+        .and_then(|c| c.get("memberships"))
+        .and_then(|m| m.as_array())
+        .map(|arr| !arr.is_empty())
+        .unwrap_or(false);
+
+    if !active_new && !active_old {
+        return false;
+    }
+
+    // Check expiry
+    let origin_ts = json.get("origin_server_ts")
+        .and_then(|t| t.as_u64())
+        .unwrap_or(0);
+    let expires_ms = content
+        .and_then(|c| c.get("expires"))
+        .and_then(|e| e.as_u64())
+        .unwrap_or(0);
+
+    if origin_ts > 0 && expires_ms > 0 {
+        let now_ms = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_millis() as u64;
+        if origin_ts + expires_ms < now_ms {
+            return false; // expired
+        }
+    }
+
+    true
+}
+
+/// Scan a room's call.member state events and return the user IDs of active participants.
+async fn collect_active_call_users(room: &Room) -> Vec<String> {
+    let mut active: Vec<String> = Vec::new();
+
+    for event_type_str in &["org.matrix.msc3401.call.member", "m.call.member"] {
+        let event_type: StateEventType = event_type_str.to_string().into();
+        if let Ok(events) = room.get_state_events(event_type).await {
+            for event in &events {
+                let json = match serde_json::to_value(event) {
+                    Ok(v) => v,
+                    Err(_) => continue,
+                };
+
+                let sender = json.get("sender")
+                    .and_then(|s| s.as_str())
+                    .unwrap_or_default()
+                    .to_string();
+
+                if !sender.is_empty() && !active.contains(&sender) && is_call_member_active(&json) {
+                    active.push(sender);
+                }
+            }
+        }
+    }
+
+    active
+}
+
+/// Discover the LiveKit JWT service URL by scanning existing call.member events in the room.
+async fn discover_livekit_service_url(room: &Room) -> Result<String, String> {
+    for event_type_str in &["org.matrix.msc3401.call.member", "m.call.member"] {
+        let event_type: StateEventType = event_type_str.to_string().into();
+        if let Ok(events) = room.get_state_events(event_type).await {
+            for event in &events {
+                let json = match serde_json::to_value(event) {
+                    Ok(v) => v,
+                    Err(_) => continue,
+                };
+
+                // Check content.foci_preferred[].livekit_service_url
+                if let Some(url) = json.get("content")
+                    .and_then(|c| c.get("foci_preferred"))
+                    .and_then(|f| f.as_array())
+                    .and_then(|arr| arr.first())
+                    .and_then(|foci| foci.get("livekit_service_url"))
+                    .and_then(|u| u.as_str())
+                {
+                    return Ok(url.to_string());
+                }
+
+                // Also check unsigned.prev_content for events where user already left
+                if let Some(url) = json.get("unsigned")
+                    .and_then(|u| u.get("prev_content"))
+                    .and_then(|c| c.get("foci_preferred"))
+                    .and_then(|f| f.as_array())
+                    .and_then(|arr| arr.first())
+                    .and_then(|foci| foci.get("livekit_service_url"))
+                    .and_then(|u| u.as_str())
+                {
+                    return Ok(url.to_string());
+                }
+            }
+        }
+    }
+
+    Err("Could not discover LiveKit service URL from room state. \
+         Has anyone joined a call in this room via Element before?".to_string())
+}
+
 #[tauri::command]
 async fn get_voice_participants(
     state: State<'_, Arc<AppState>>,
@@ -366,92 +479,9 @@ async fn get_voice_participants(
         .get_room(&room_id_parsed)
         .ok_or("Room not found")?;
 
-    // Collect active user IDs across all call member events
-    let mut active_user_ids: Vec<String> = Vec::new();
+    let active_user_ids = collect_active_call_users(&room).await;
 
-    let event_type_strings = [
-        "org.matrix.msc3401.call.member",
-        "m.call.member",
-    ];
-
-    for event_type_str in &event_type_strings {
-        let event_type: StateEventType = event_type_str.to_string().into();
-
-        match room.get_state_events(event_type).await {
-            Ok(events) => {
-                eprintln!("[voice] Room {} — type '{}' returned {} event(s)",
-                    room_id, event_type_str, events.len());
-
-                for event in &events {
-                    let json: serde_json::Value = match serde_json::to_value(event) {
-                        Ok(v) => v,
-                        Err(_) => continue,
-                    };
-
-                    let sender = json.get("sender")
-                        .and_then(|s| s.as_str())
-                        .unwrap_or_default()
-                        .to_string();
-
-                    if sender.is_empty() {
-                        continue;
-                    }
-
-                    let content = json.get("content");
-
-                    // Newer MatrixRTC format (MSC4143): active = content has "application" field
-                    // When a user leaves, content is set to {}
-                    let has_active_new = content
-                        .and_then(|c| c.get("application"))
-                        .is_some();
-
-                    // Older MSC3401 format: active = non-empty "memberships" array
-                    let has_active_old = content
-                        .and_then(|c| c.get("memberships"))
-                        .and_then(|m| m.as_array())
-                        .map(|arr| !arr.is_empty())
-                        .unwrap_or(false);
-
-                    // Check expiry: origin_server_ts + expires < now means stale
-                    let expired = {
-                        let origin_ts = json.get("origin_server_ts")
-                            .and_then(|t| t.as_u64())
-                            .unwrap_or(0);
-                        let expires_ms = content
-                            .and_then(|c| c.get("expires"))
-                            .and_then(|e| e.as_u64())
-                            .unwrap_or(0);
-
-                        if origin_ts > 0 && expires_ms > 0 {
-                            let now_ms = std::time::SystemTime::now()
-                                .duration_since(std::time::UNIX_EPOCH)
-                                .unwrap_or_default()
-                                .as_millis() as u64;
-                            origin_ts + expires_ms < now_ms
-                        } else {
-                            false
-                        }
-                    };
-
-                    let has_active = (has_active_new || has_active_old) && !expired;
-
-                    eprintln!("[voice]   sender='{}' has_active={} (new={}, old={}, expired={})",
-                        sender, has_active, has_active_new, has_active_old, expired);
-
-                    // A user is active if ANY of their device events show active
-                    if has_active && !active_user_ids.contains(&sender) {
-                        active_user_ids.push(sender);
-                    }
-                }
-            }
-            Err(e) => {
-                eprintln!("[voice] Room {} — type '{}' error: {}",
-                    room_id, event_type_str, e);
-            }
-        }
-    }
-
-    // Now resolve display names and avatars for active users
+    // Resolve display names and avatars for active users
     let mut participants = Vec::new();
     for user_id in &active_user_ids {
         let (display_name, avatar_url) = if let Ok(uid) = matrix_sdk::ruma::UserId::parse(user_id) {
@@ -480,8 +510,171 @@ async fn get_voice_participants(
         });
     }
 
-    eprintln!("[voice] Room {} — returning {} participant(s)", room_id, participants.len());
     Ok(participants)
+}
+
+#[derive(Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct VoiceJoinResult {
+    jwt: String,
+    livekit_url: String,
+}
+
+#[tauri::command]
+async fn join_voice_room(
+    state: State<'_, Arc<AppState>>,
+    room_id: String,
+) -> Result<VoiceJoinResult, String> {
+    let guard = state.client.lock().await;
+    let client = guard.as_ref().ok_or("Not logged in")?;
+
+    let room_id_parsed = matrix_sdk::ruma::RoomId::parse(&room_id)
+        .map_err(|e| format!("Invalid room ID: {e}"))?;
+
+    let room = client
+        .get_room(&room_id_parsed)
+        .ok_or("Room not found")?;
+
+    let user_id = client.user_id().ok_or("No user ID")?;
+    let device_id = client.device_id().ok_or("No device ID")?;
+
+    // 1. Discover LiveKit service URL from existing call member events
+    let livekit_service_url = discover_livekit_service_url(&room).await?;
+
+    // 2. Build call.member state event content
+    let state_key = format!("_{}_{}_{}", user_id, device_id, "m.call");
+    let content = serde_json::json!({
+        "application": "m.call",
+        "call_id": "",
+        "device_id": device_id.as_str(),
+        "expires": 7200000,
+        "foci_preferred": [{
+            "livekit_alias": room_id,
+            "livekit_service_url": &livekit_service_url,
+            "type": "livekit"
+        }],
+        "focus_active": {
+            "focus_selection": "oldest_membership",
+            "type": "livekit"
+        },
+        "m.call.intent": "video",
+        "scope": "m.room"
+    });
+
+    // 3. Send state event via Matrix CS API
+    let homeserver = client.homeserver().to_string();
+    let access_token = client.access_token().ok_or("No access token")?;
+
+    let state_url = format!("{}/_matrix/client/v3/rooms/{}/state/{}/{}",
+        homeserver.trim_end_matches('/'),
+        urlencoding::encode(&room_id),
+        urlencoding::encode("org.matrix.msc3401.call.member"),
+        urlencoding::encode(&state_key),
+    );
+
+    let http = reqwest::Client::new();
+    let resp = http.put(&state_url)
+        .bearer_auth(access_token.to_string())
+        .json(&content)
+        .send()
+        .await
+        .map_err(|e| format!("Failed to send state event: {e}"))?;
+
+    {
+        let status = resp.status();
+        if !status.is_success() {
+            let body = resp.text().await.unwrap_or_default();
+            return Err(format!("Failed to send state event ({}): {}", status, body));
+        }
+    }
+
+    // 4. Get OpenID token for authenticating with lk-jwt-service
+    let openid_request = matrix_sdk::ruma::api::client::account::request_openid_token::v3::Request::new(
+        user_id.to_owned(),
+    );
+    let openid = client.send(openid_request).await
+        .map_err(|e| format!("Failed to get OpenID token: {e}"))?;
+
+    // 5. Exchange OpenID token for a LiveKit JWT
+    let jwt_body = serde_json::json!({
+        "room": room_id,
+        "openid_token": {
+            "access_token": openid.access_token,
+            "token_type": "Bearer",
+            "matrix_server_name": user_id.server_name().to_string(),
+            "expires_in": openid.expires_in.as_secs(),
+        }
+    });
+
+    let jwt_resp = http.post(&livekit_service_url)
+        .json(&jwt_body)
+        .send()
+        .await
+        .map_err(|e| format!("Failed to call lk-jwt-service: {e}"))?;
+
+    if !jwt_resp.status().is_success() {
+        let status = jwt_resp.status();
+        let body = jwt_resp.text().await.unwrap_or_default();
+        return Err(format!("lk-jwt-service error ({}): {}", status, body));
+    }
+
+    let jwt_data: serde_json::Value = jwt_resp.json().await
+        .map_err(|e| format!("Failed to parse lk-jwt-service response: {e}"))?;
+
+    let jwt = jwt_data.get("jwt")
+        .and_then(|j| j.as_str())
+        .ok_or("No 'jwt' field in lk-jwt-service response")?
+        .to_string();
+
+    let livekit_url = jwt_data.get("url")
+        .and_then(|u| u.as_str())
+        .ok_or("No 'url' field in lk-jwt-service response")?
+        .to_string();
+
+    Ok(VoiceJoinResult { jwt, livekit_url })
+}
+
+#[tauri::command]
+async fn leave_voice_room(
+    state: State<'_, Arc<AppState>>,
+    room_id: String,
+) -> Result<(), String> {
+    let guard = state.client.lock().await;
+    let client = guard.as_ref().ok_or("Not logged in")?;
+
+    let user_id = client.user_id().ok_or("No user ID")?;
+    let device_id = client.device_id().ok_or("No device ID")?;
+
+    let state_key = format!("_{}_{}_{}", user_id, device_id, "m.call");
+
+    // Send empty content to signal leave
+    let content = serde_json::json!({});
+
+    let homeserver = client.homeserver().to_string();
+    let access_token = client.access_token().ok_or("No access token")?;
+
+    let state_url = format!("{}/_matrix/client/v3/rooms/{}/state/{}/{}",
+        homeserver.trim_end_matches('/'),
+        urlencoding::encode(&room_id),
+        urlencoding::encode("org.matrix.msc3401.call.member"),
+        urlencoding::encode(&state_key),
+    );
+
+    let http = reqwest::Client::new();
+    let resp = http.put(&state_url)
+        .bearer_auth(access_token.to_string())
+        .json(&content)
+        .send()
+        .await
+        .map_err(|e| format!("Failed to send leave event: {e}"))?;
+
+    if !resp.status().is_success() {
+        let status = resp.status();
+        let body = resp.text().await.unwrap_or_default();
+        return Err(format!("Failed to send leave event ({}): {}", status, body));
+    }
+
+    Ok(())
 }
 
 #[tauri::command]
@@ -756,6 +949,8 @@ pub fn run() {
             get_messages,
             get_room_members,
             get_voice_participants,
+            join_voice_room,
+            leave_voice_room,
             send_message,
             start_sync,
             send_typing_notice,

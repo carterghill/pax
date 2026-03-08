@@ -1,4 +1,4 @@
-import { Hash, Volume2 } from "lucide-react";
+import { Hash, Volume2, PhoneOff } from "lucide-react";
 import { Room, VoiceParticipant } from "../types/matrix";
 import { useTheme } from "../theme/ThemeContext";
 import StatusDropdown from "./StatusDropdown";
@@ -12,6 +12,7 @@ interface RoomSidebarProps {
   spaceName: string;
   userId: string;
   voiceParticipants: Record<string, VoiceParticipant[]>;
+  connectedVoiceRoomId: string | null;
 }
 
 function VoiceParticipantRow({ participant }: { participant: VoiceParticipant }) {
@@ -74,6 +75,7 @@ export default function RoomSidebar({
   spaceName,
   userId,
   voiceParticipants,
+  connectedVoiceRoomId,
 }: RoomSidebarProps) {
   const { palette, spacing, typography } = useTheme();
 
@@ -120,6 +122,7 @@ export default function RoomSidebar({
         {rooms.map((room) => {
           const isVoice = room.roomType === VOICE_ROOM_TYPE;
           const participants = isVoice ? (voiceParticipants[room.id] ?? []) : [];
+          const isConnectedHere = connectedVoiceRoomId === room.id;
 
           return (
             <div key={room.id}>
@@ -140,12 +143,16 @@ export default function RoomSidebar({
               >
                 <span style={{ display: "flex", alignItems: "center", gap: spacing.unit }}>
                   {isVoice ? (
-                    <Volume2 size={16} color={activeRoomId === room.id ? palette.textHeading : palette.textSecondary} />
+                    <Volume2
+                      size={16}
+                      color={isConnectedHere ? "#23a55a" : (activeRoomId === room.id ? palette.textHeading : palette.textSecondary)}
+                    />
                   ) : (
                     <Hash size={16} color={activeRoomId === room.id ? palette.textHeading : palette.textSecondary} />
                   )}
                   <div style={{
                     marginLeft: spacing.unit,
+                    color: isConnectedHere ? "#23a55a" : undefined,
                   }}>
                     {room.name}
                   </div>
