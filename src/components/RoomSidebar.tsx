@@ -36,12 +36,16 @@ export default function RoomSidebar({
       height: "100vh",
     }}>
       <h2 style={{
-        padding: `${spacing.unit * 4}px ${spacing.unit * 4}px`,
+        padding: `0 ${spacing.unit * 4}px`,
+        height: spacing.unit * 12,
         fontSize: typography.fontSizeLarge,
         fontWeight: typography.fontWeightBold,
         color: palette.textHeading,
         borderBottom: `1px solid ${palette.border}`,
         margin: 0,
+        display: "flex",
+        alignItems: "center",
+        boxSizing: "border-box",
       }}>
         {spaceName}
       </h2>

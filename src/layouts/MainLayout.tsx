@@ -24,7 +24,7 @@ export default function MainLayout({ userId }: { userId: string }) {
     setActiveRoomBySpace((prev) => ({ ...prev, [spaceKey]: roomId }));
   }, [spaceKey]);
 
-  const { palette } = useTheme();
+  const { palette, spacing } = useTheme();
   const activeSpace = activeSpaceId ? getRoom(activeSpaceId) : null;
   const visibleRooms = roomsBySpace(activeSpaceId);
   const activeRoom = activeRoomId ? getRoom(activeRoomId) : null;
@@ -60,11 +60,13 @@ export default function MainLayout({ userId }: { userId: string }) {
               height: "100vh",
             }}>
               <div style={{
-                padding: `${16}px ${16}px`,
+                padding: `0 ${spacing.unit * 4}px`,
+                height: spacing.unit * 12,
                 borderBottom: `1px solid ${palette.border}`,
                 display: "flex",
                 alignItems: "center",
                 gap: 12,
+                boxSizing: "border-box",
               }}>
                 <Volume2 size={20} color={palette.textSecondary} />
                 <span style={{

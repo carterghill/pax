@@ -104,11 +104,13 @@ export default function ChatView({ room, userId }: ChatViewProps) {
     }}>
       {/* Channel header */}
       <div style={{
-        padding: `${spacing.unit * 4}px ${spacing.unit * 4}px`,
+        padding: `0 ${spacing.unit * 4}px`,
+        height: spacing.unit * 12,
         borderBottom: `1px solid ${palette.border}`,
         display: "flex",
         alignItems: "center",
         gap: spacing.unit * 3,
+        boxSizing: "border-box",
       }}>
         <Hash size={20} color={palette.textSecondary} />
         <span style={{
