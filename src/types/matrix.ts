@@ -20,3 +20,10 @@ export interface MessageBatch {
   messages: Message[];
   prevBatch: string | null;
 }
+
+export interface RoomMember {
+  userId: string;
+  displayName: string | null;
+  avatarUrl: string | null;
+  presence: string; // "online" | "offline" | "unavailable"
+}

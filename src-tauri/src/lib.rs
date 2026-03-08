@@ -16,6 +16,7 @@ use data_encoding::BASE64;
 
 pub struct AppState {
     pub client: Mutex<Option<Client>>,
+    pub presence_map: Arc<Mutex<HashMap<String, String>>>,
 }
 
 #[derive(Serialize)]
@@ -45,6 +46,22 @@ struct MessageInfo {
 struct MessageBatch {
     messages: Vec<MessageInfo>,
     prev_batch: Option<String>,
+}
+
+#[derive(Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct RoomMemberInfo {
+    user_id: String,
+    display_name: Option<String>,
+    avatar_url: Option<String>,
+    presence: String, // "online", "offline", "unavailable"
+}
+
+#[derive(Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct PresencePayload {
+    user_id: String,
+    presence: String,
 }
 
 #[derive(Clone, Serialize)]
@@ -278,6 +295,55 @@ async fn get_messages(
 }
 
 #[tauri::command]
+async fn get_room_members(
+    state: State<'_, Arc<AppState>>,
+    room_id: String,
+) -> Result<Vec<RoomMemberInfo>, String> {
+    let guard = state.client.lock().await;
+    let client = guard.as_ref().ok_or("Not logged in")?;
+
+    let room_id_parsed = matrix_sdk::ruma::RoomId::parse(&room_id)
+        .map_err(|e| format!("Invalid room ID: {e}"))?;
+
+    let room = client
+        .get_room(&room_id_parsed)
+        .ok_or("Room not found")?;
+
+    let members = room
+        .members(matrix_sdk::RoomMemberships::JOIN)
+        .await
+        .map_err(|e| format!("Failed to get members: {e}"))?;
+
+    let presence_map = state.presence_map.lock().await;
+
+    let mut result = Vec::new();
+    for member in members {
+        let avatar_url = match member.avatar(MediaFormat::File).await {
+            Ok(Some(bytes)) => {
+                let b64 = BASE64.encode(&bytes);
+                Some(format!("data:image/png;base64,{}", b64))
+            }
+            _ => None,
+        };
+
+        let user_id_str = member.user_id().to_string();
+        let presence = presence_map
+            .get(&user_id_str)
+            .cloned()
+            .unwrap_or_else(|| "offline".to_string());
+
+        result.push(RoomMemberInfo {
+            user_id: user_id_str,
+            display_name: member.display_name().map(|n| n.to_string()),
+            avatar_url,
+            presence,
+        });
+    }
+
+    Ok(result)
+}
+
+#[tauri::command]
 async fn send_message(
     state: State<'_, Arc<AppState>>,
     room_id: String,
@@ -400,12 +466,41 @@ async fn start_sync(
         }
     });
 
+    // Clone the presence map Arc for use inside the sync loop
+    let presence_map = state.presence_map.clone();
+
     // Spawn the continuous sync loop in the background
     tokio::spawn(async move {
         let result = client
-            .sync_with_callback(SyncSettings::default(), |_response| {
+            .sync_with_callback(SyncSettings::default(), |response| {
                 let app = app.clone();
+                let presence_map = presence_map.clone();
                 async move {
+                    // Extract presence updates from the sync response
+                    for raw_event in &response.presence {
+                        if let Ok(ev) = raw_event.deserialize() {
+                            let presence_str = match ev.content.presence {
+                                matrix_sdk::ruma::presence::PresenceState::Online => "online",
+                                matrix_sdk::ruma::presence::PresenceState::Unavailable => "unavailable",
+                                _ => "offline",
+                            };
+
+                            let user_id = ev.sender.to_string();
+
+                            // Update the shared presence map
+                            presence_map.lock().await.insert(
+                                user_id.clone(),
+                                presence_str.to_string(),
+                            );
+
+                            // Emit to frontend for live updates
+                            let _ = app.emit("presence", PresencePayload {
+                                user_id,
+                                presence: presence_str.to_string(),
+                            });
+                        }
+                    }
+
                     let _ = app.emit("rooms-changed", ());
                     matrix_sdk::LoopCtrl::Continue
                 }
@@ -447,6 +542,7 @@ async fn send_typing_notice(
 pub fn run() {
     let state = Arc::new(AppState {
         client: Mutex::new(None),
+        presence_map: Arc::new(Mutex::new(HashMap::new())),
     });
 
     tauri::Builder::default()
@@ -455,6 +551,7 @@ pub fn run() {
             login,
             get_rooms,
             get_messages,
+            get_room_members,
             send_message,
             start_sync,
             send_typing_notice,

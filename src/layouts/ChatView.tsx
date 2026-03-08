@@ -1,8 +1,9 @@
 import { useState, useEffect } from "react";
 import { listen } from "@tauri-apps/api/event";
-import { Hash } from "lucide-react";
+import { Hash, Users } from "lucide-react";
 import MessageList from "../components/MessageList";
 import MessageInput from "../components/MessageInput";
+import UserMenu from "../components/UserMenu";
 import { useMessages } from "../hooks/useMessages";
 import { useTheme } from "../theme/ThemeContext";
 import { Room } from "../types/matrix";
@@ -75,6 +76,7 @@ export default function ChatView({ room }: ChatViewProps) {
   const { messages, loadMore, hasMore, loading, initialLoading, refresh } = useMessages(room.id);
   const { palette, typography, spacing } = useTheme();
   const [typingNames, setTypingNames] = useState<string[]>([]);
+  const [showUsers, setShowUsers] = useState(true);
 
   // Listen for typing events in this room
   useEffect(() => {
@@ -112,34 +114,71 @@ export default function ChatView({ room }: ChatViewProps) {
           fontWeight: typography.fontWeightBold,
           color: palette.textHeading,
           fontSize: typography.fontSizeBase,
+          flex: 1,
         }}>
           {room.name}
         </span>
+        <button
+          onClick={() => setShowUsers((prev) => !prev)}
+          title="Toggle member list"
+          style={{
+            background: "none",
+            border: "none",
+            cursor: "pointer",
+            padding: spacing.unit,
+            borderRadius: spacing.unit,
+            display: "flex",
+            alignItems: "center",
+            justifyContent: "center",
+          }}
+        >
+          <Users
+            size={20}
+            color={showUsers ? palette.textHeading : palette.textSecondary}
+          />
+        </button>
       </div>
 
-      {/* Messages */}
-      <MessageList
-        messages={messages}
-        loading={loading}
-        initialLoading={initialLoading}
-        hasMore={hasMore}
-        onLoadMore={loadMore}
-      />
+      {/* Content area: messages + optional user menu */}
+      <div style={{
+        flex: 1,
+        display: "flex",
+        overflow: "hidden",
+      }}>
+        {/* Messages column */}
+        <div style={{
+          flex: 1,
+          display: "flex",
+          flexDirection: "column",
+          minWidth: 0,
+        }}>
+          <MessageList
+            messages={messages}
+            loading={loading}
+            initialLoading={initialLoading}
+            hasMore={hasMore}
+            onLoadMore={loadMore}
+          />
 
-      {/* Typing indicator */}
-      <TypingIndicator
-        names={typingNames}
-        palette={palette}
-        typography={typography}
-        spacing={spacing}
-      />
+          {/* Typing indicator */}
+          <TypingIndicator
+            names={typingNames}
+            palette={palette}
+            typography={typography}
+            spacing={spacing}
+          />
 
-      {/* Message input */}
-      <MessageInput
-        roomId={room.id}
-        roomName={room.name}
-        onMessageSent={refresh}
-      />
+          {/* Message input */}
+          <MessageInput
+            roomId={room.id}
+            roomName={room.name}
+            onMessageSent={refresh}
+          />
+        </div>
+
+        {/* User menu panel */}
+        {showUsers && <UserMenu roomId={room.id} />}
+      </div>
     </div>
   );
 }
