@@ -46,7 +46,7 @@ export default function ChatView({ room }: ChatViewProps) {
       />
 
       {/* Message input placeholder */}
-      <div style={{ padding: spacing.unit * 4 }}>
+      <div style={{ padding: spacing.unit * 2, paddingTop: 0, marginTop: 0 }}>
         <div style={{
           backgroundColor: palette.bgActive,
           borderRadius: spacing.unit * 2,

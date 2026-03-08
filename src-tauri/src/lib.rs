@@ -253,6 +253,31 @@ async fn get_messages(
     })
 }
 
+#[tauri::command]
+async fn send_message(
+    state: State<'_, Arc<AppState>>,
+    room_id: String,
+    body: String,
+) -> Result<(), String> {
+    let guard = state.client.lock().await;
+    let client = guard.as_ref().ok_or("Not logged in")?;
+
+    let room_id_parsed = matrix_sdk::ruma::RoomId::parse(&room_id)
+        .map_err(|e| format!("Invalid room ID: {e}"))?;
+
+    let room = client
+        .get_room(&room_id_parsed)
+        .ok_or("Room not found")?;
+
+    let content = matrix_sdk::ruma::events::room::message::RoomMessageEventContent::text_plain(&body);
+
+    room.send(content)
+        .await
+        .map_err(|e| format!("Failed to send message: {e}"))?;
+
+    Ok(())
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     let state = Arc::new(AppState {
@@ -261,7 +286,7 @@ pub fn run() {
 
     tauri::Builder::default()
         .manage(state)
-        .invoke_handler(tauri::generate_handler![login, get_rooms, get_messages])
+        .invoke_handler(tauri::generate_handler![login, get_rooms, get_messages, send_message])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
 }
