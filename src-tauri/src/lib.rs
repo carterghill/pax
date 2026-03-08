@@ -1,9 +1,14 @@
+#![recursion_limit = "256"]
+
 use std::sync::Arc;
 use std::collections::HashMap;
 use tauri::State;
+use tauri::Emitter;
 use tokio::sync::Mutex;
-use matrix_sdk::{Client, config::SyncSettings, media::MediaFormat};
+use matrix_sdk::{Client, Room, config::SyncSettings, media::MediaFormat};
 use matrix_sdk::ruma::events::StateEventType;
+use matrix_sdk::ruma::events::room::message::OriginalSyncRoomMessageEvent;
+use matrix_sdk::ruma::events::typing::SyncTypingEvent;
 use matrix_sdk::room::MessagesOptions;
 use matrix_sdk::ruma::UInt;
 use serde::Serialize;
@@ -23,7 +28,7 @@ struct RoomInfo {
     parent_space_ids: Vec<String>,
 }
 
-#[derive(Serialize)]
+#[derive(Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 struct MessageInfo {
     event_id: String,
@@ -39,6 +44,21 @@ struct MessageInfo {
 struct MessageBatch {
     messages: Vec<MessageInfo>,
     prev_batch: Option<String>,
+}
+
+#[derive(Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct RoomMessagePayload {
+    room_id: String,
+    message: MessageInfo,
+}
+
+#[derive(Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct TypingPayload {
+    room_id: String,
+    user_ids: Vec<String>,
+    display_names: Vec<String>,
 }
 
 #[tauri::command]
@@ -278,6 +298,137 @@ async fn send_message(
     Ok(())
 }
 
+/// Helper to extract body text from a message event's content
+fn extract_body(content: &matrix_sdk::ruma::events::room::message::RoomMessageEventContent) -> String {
+    use matrix_sdk::ruma::events::room::message::MessageType;
+    match &content.msgtype {
+        MessageType::Text(text) => text.body.clone(),
+        MessageType::Notice(notice) => notice.body.clone(),
+        MessageType::Emote(emote) => format!("* {}", emote.body),
+        MessageType::Image(_) => "[Image]".to_string(),
+        MessageType::File(_) => "[File]".to_string(),
+        MessageType::Video(_) => "[Video]".to_string(),
+        MessageType::Audio(_) => "[Audio]".to_string(),
+        _ => "[Unsupported message]".to_string(),
+    }
+}
+
+#[tauri::command]
+async fn start_sync(
+    state: State<'_, Arc<AppState>>,
+    app: tauri::AppHandle,
+) -> Result<(), String> {
+    let guard = state.client.lock().await;
+    let client = guard.as_ref().ok_or("Not logged in")?.clone();
+    drop(guard);
+
+    // Handler for incoming room messages
+    let app_handle = app.clone();
+    client.add_event_handler(move |ev: OriginalSyncRoomMessageEvent, room: Room| {
+        let app = app_handle.clone();
+        async move {
+            let room_id = room.room_id().to_string();
+            let body = extract_body(&ev.content);
+            let sender = ev.sender.to_string();
+
+            let (sender_name, avatar_url) = match room
+                .get_member_no_sync(&ev.sender)
+                .await
+            {
+                Ok(Some(member)) => {
+                    let name = member.display_name().map(|n| n.to_string());
+                    let avatar = match member.avatar(MediaFormat::File).await {
+                        Ok(Some(bytes)) => {
+                            let b64 = BASE64.encode(&bytes);
+                            Some(format!("data:image/png;base64,{}", b64))
+                        }
+                        _ => None,
+                    };
+                    (name, avatar)
+                }
+                _ => (None, None),
+            };
+
+            let timestamp: u64 = ev.origin_server_ts.0.into();
+
+            let payload = RoomMessagePayload {
+                room_id,
+                message: MessageInfo {
+                    event_id: ev.event_id.to_string(),
+                    sender,
+                    sender_name,
+                    body,
+                    timestamp,
+                    avatar_url,
+                },
+            };
+            let _ = app.emit("room-message", payload);
+        }
+    });
+
+    // Handler for typing notifications
+    let app_handle = app.clone();
+    client.add_event_handler(move |ev: SyncTypingEvent, room: Room| {
+        let app = app_handle.clone();
+        async move {
+            let room_id = room.room_id().to_string();
+
+            let mut user_ids = Vec::new();
+            let mut display_names = Vec::new();
+
+            for uid in &ev.content.user_ids {
+                user_ids.push(uid.to_string());
+                let name = match room.get_member_no_sync(uid).await {
+                    Ok(Some(member)) => member
+                        .display_name()
+                        .map(|n| n.to_string())
+                        .unwrap_or_else(|| uid.to_string()),
+                    _ => uid.to_string(),
+                };
+                display_names.push(name);
+            }
+
+            let _ = app.emit("typing", TypingPayload {
+                room_id,
+                user_ids,
+                display_names,
+            });
+        }
+    });
+
+    // Spawn the continuous sync loop in the background
+    tokio::spawn(async move {
+        if let Err(e) = client.sync(SyncSettings::default()).await {
+            eprintln!("Sync loop error: {e}");
+        }
+    });
+
+    Ok(())
+}
+
+#[tauri::command]
+async fn send_typing_notice(
+    state: State<'_, Arc<AppState>>,
+    room_id: String,
+    typing: bool,
+) -> Result<(), String> {
+    let guard = state.client.lock().await;
+    let client = guard.as_ref().ok_or("Not logged in")?;
+
+    let room_id_parsed = matrix_sdk::ruma::RoomId::parse(&room_id)
+        .map_err(|e| format!("Invalid room ID: {e}"))?;
+
+    let room = client
+        .get_room(&room_id_parsed)
+        .ok_or("Room not found")?;
+
+    room.typing_notice(typing)
+        .await
+        .map_err(|e| format!("Failed to send typing notice: {e}"))?;
+
+    Ok(())
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     let state = Arc::new(AppState {
@@ -286,7 +437,14 @@ pub fn run() {
 
     tauri::Builder::default()
         .manage(state)
-        .invoke_handler(tauri::generate_handler![login, get_rooms, get_messages, send_message])
+        .invoke_handler(tauri::generate_handler![
+            login,
+            get_rooms,
+            get_messages,
+            send_message,
+            start_sync,
+            send_typing_notice,
+        ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
 }

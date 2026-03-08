@@ -1,6 +1,12 @@
 import { useEffect, useState, useCallback } from "react";
 import { invoke } from "@tauri-apps/api/core";
+import { listen } from "@tauri-apps/api/event";
 import { Message, MessageBatch } from "../types/matrix";
+
+interface RoomMessagePayload {
+  roomId: string;
+  message: Message;
+}
 
 export function useMessages(roomId: string | null) {
   const [messages, setMessages] = useState<Message[]>([]);
@@ -24,6 +30,26 @@ export function useMessages(roomId: string | null) {
       })
       .catch((e) => console.error("Failed to load messages:", e))
       .finally(() => setInitialLoading(false));
+  }, [roomId]);
+
+  // Listen for live messages from the sync loop
+  useEffect(() => {
+    if (!roomId) return;
+
+    const unlisten = listen<RoomMessagePayload>("room-message", (event) => {
+      const { roomId: msgRoomId, message } = event.payload;
+      if (msgRoomId !== roomId) return;
+
+      setMessages((prev) => {
+        // Deduplicate by eventId (sent messages arrive via both refresh and sync)
+        if (prev.some((m) => m.eventId === message.eventId)) return prev;
+        return [...prev, message];
+      });
+    });
+
+    return () => {
+      unlisten.then((fn) => fn());
+    };
   }, [roomId]);
 
   const loadMore = useCallback(async () => {

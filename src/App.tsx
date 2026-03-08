@@ -18,6 +18,7 @@ function App() {
     setError(null);
     try {
       const id = await invoke<string>("login", { homeserver, username, password });
+      await invoke("start_sync");
       setUserId(id);
       // const roomList = await invoke<any[]>("get_rooms");
       // setRooms(roomList);
@@ -32,15 +33,6 @@ function App() {
       <ThemeProvider>
         <MainLayout userId={userId} />
       </ThemeProvider>
-      // <div style={{ padding: "20px" }}>
-      //   <h2>Logged in as {userId}</h2>
-      //   <h3>Rooms ({rooms.length})</h3>
-      //   <ul>
-      //     {rooms.map((room) => (
-      //       <li key={room.id}>{room.name} <small>({room.id})</small></li>
-      //     ))}
-      //   </ul>
-      // </div>
     );
   }
 

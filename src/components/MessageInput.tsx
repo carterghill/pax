@@ -1,4 +1,4 @@
-import { useState, useRef } from "react";
+import { useState, useRef, useCallback, useEffect } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { useTheme } from "../theme/ThemeContext";
 
@@ -12,11 +12,50 @@ export default function MessageInput({ roomId, roomName, onMessageSent }: Messag
   const [text, setText] = useState("");
   const [sending, setSending] = useState(false);
   const inputRef = useRef<HTMLTextAreaElement>(null);
+  const typingTimeout = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const isTyping = useRef(false);
   const { palette, typography, spacing } = useTheme();
+
+  // Send typing notice with a 3-second cooldown
+  const sendTyping = useCallback((typing: boolean) => {
+    if (typing === isTyping.current) return;
+    isTyping.current = typing;
+    invoke("send_typing_notice", { roomId, typing }).catch(() => {});
+  }, [roomId]);
+
+  function handleChange(e: React.ChangeEvent<HTMLTextAreaElement>) {
+    const val = e.target.value;
+    setText(val);
+
+    if (val.trim().length > 0) {
+      sendTyping(true);
+      // Reset the stop-typing timer
+      if (typingTimeout.current) clearTimeout(typingTimeout.current);
+      typingTimeout.current = setTimeout(() => sendTyping(false), 3000);
+    } else {
+      sendTyping(false);
+      if (typingTimeout.current) clearTimeout(typingTimeout.current);
+    }
+  }
+
+  // Clear typing state on room change or unmount
+  useEffect(() => {
+    return () => {
+      if (typingTimeout.current) clearTimeout(typingTimeout.current);
+      if (isTyping.current) {
+        invoke("send_typing_notice", { roomId, typing: false }).catch(() => {});
+        isTyping.current = false;
+      }
+    };
+  }, [roomId]);
 
   async function handleSend() {
     const trimmed = text.trim();
     if (!trimmed || sending) return;
+
+    // Stop typing indicator immediately on send
+    sendTyping(false);
+    if (typingTimeout.current) clearTimeout(typingTimeout.current);
 
     setSending(true);
     try {
@@ -48,7 +87,7 @@ export default function MessageInput({ roomId, roomName, onMessageSent }: Messag
         <textarea
           ref={inputRef}
           value={text}
-          onChange={(e) => setText(e.target.value)}
+          onChange={handleChange}
           onKeyDown={handleKeyDown}
           placeholder={`Message #${roomName}`}
           rows={1}
