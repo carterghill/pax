@@ -79,6 +79,14 @@ struct TypingPayload {
     display_names: Vec<String>,
 }
 
+#[derive(Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct VoiceParticipant {
+    user_id: String,
+    display_name: Option<String>,
+    avatar_url: Option<String>,
+}
+
 #[tauri::command]
 async fn login(
     state: State<'_, Arc<AppState>>,
@@ -344,6 +352,139 @@ async fn get_room_members(
 }
 
 #[tauri::command]
+async fn get_voice_participants(
+    state: State<'_, Arc<AppState>>,
+    room_id: String,
+) -> Result<Vec<VoiceParticipant>, String> {
+    let guard = state.client.lock().await;
+    let client = guard.as_ref().ok_or("Not logged in")?;
+
+    let room_id_parsed = matrix_sdk::ruma::RoomId::parse(&room_id)
+        .map_err(|e| format!("Invalid room ID: {e}"))?;
+
+    let room = client
+        .get_room(&room_id_parsed)
+        .ok_or("Room not found")?;
+
+    // Collect active user IDs across all call member events
+    let mut active_user_ids: Vec<String> = Vec::new();
+
+    let event_type_strings = [
+        "org.matrix.msc3401.call.member",
+        "m.call.member",
+    ];
+
+    for event_type_str in &event_type_strings {
+        let event_type: StateEventType = event_type_str.to_string().into();
+
+        match room.get_state_events(event_type).await {
+            Ok(events) => {
+                eprintln!("[voice] Room {} — type '{}' returned {} event(s)",
+                    room_id, event_type_str, events.len());
+
+                for event in &events {
+                    let json: serde_json::Value = match serde_json::to_value(event) {
+                        Ok(v) => v,
+                        Err(_) => continue,
+                    };
+
+                    let sender = json.get("sender")
+                        .and_then(|s| s.as_str())
+                        .unwrap_or_default()
+                        .to_string();
+
+                    if sender.is_empty() {
+                        continue;
+                    }
+
+                    let content = json.get("content");
+
+                    // Newer MatrixRTC format (MSC4143): active = content has "application" field
+                    // When a user leaves, content is set to {}
+                    let has_active_new = content
+                        .and_then(|c| c.get("application"))
+                        .is_some();
+
+                    // Older MSC3401 format: active = non-empty "memberships" array
+                    let has_active_old = content
+                        .and_then(|c| c.get("memberships"))
+                        .and_then(|m| m.as_array())
+                        .map(|arr| !arr.is_empty())
+                        .unwrap_or(false);
+
+                    // Check expiry: origin_server_ts + expires < now means stale
+                    let expired = {
+                        let origin_ts = json.get("origin_server_ts")
+                            .and_then(|t| t.as_u64())
+                            .unwrap_or(0);
+                        let expires_ms = content
+                            .and_then(|c| c.get("expires"))
+                            .and_then(|e| e.as_u64())
+                            .unwrap_or(0);
+
+                        if origin_ts > 0 && expires_ms > 0 {
+                            let now_ms = std::time::SystemTime::now()
+                                .duration_since(std::time::UNIX_EPOCH)
+                                .unwrap_or_default()
+                                .as_millis() as u64;
+                            origin_ts + expires_ms < now_ms
+                        } else {
+                            false
+                        }
+                    };
+
+                    let has_active = (has_active_new || has_active_old) && !expired;
+
+                    eprintln!("[voice]   sender='{}' has_active={} (new={}, old={}, expired={})",
+                        sender, has_active, has_active_new, has_active_old, expired);
+
+                    // A user is active if ANY of their device events show active
+                    if has_active && !active_user_ids.contains(&sender) {
+                        active_user_ids.push(sender);
+                    }
+                }
+            }
+            Err(e) => {
+                eprintln!("[voice] Room {} — type '{}' error: {}",
+                    room_id, event_type_str, e);
+            }
+        }
+    }
+
+    // Now resolve display names and avatars for active users
+    let mut participants = Vec::new();
+    for user_id in &active_user_ids {
+        let (display_name, avatar_url) = if let Ok(uid) = matrix_sdk::ruma::UserId::parse(user_id) {
+            match room.get_member_no_sync(&uid).await {
+                Ok(Some(member)) => {
+                    let name = member.display_name().map(|n| n.to_string());
+                    let avatar = match member.avatar(MediaFormat::File).await {
+                        Ok(Some(bytes)) => {
+                            let b64 = BASE64.encode(&bytes);
+                            Some(format!("data:image/png;base64,{}", b64))
+                        }
+                        _ => None,
+                    };
+                    (name, avatar)
+                }
+                _ => (None, None),
+            }
+        } else {
+            (None, None)
+        };
+
+        participants.push(VoiceParticipant {
+            user_id: user_id.clone(),
+            display_name,
+            avatar_url,
+        });
+    }
+
+    eprintln!("[voice] Room {} — returning {} participant(s)", room_id, participants.len());
+    Ok(participants)
+}
+
+#[tauri::command]
 async fn send_message(
     state: State<'_, Arc<AppState>>,
     room_id: String,
@@ -504,6 +645,11 @@ async fn start_sync(
                     }
 
                     let _ = app.emit("rooms-changed", ());
+
+                    // Signal voice participant refresh on every sync.
+                    // The frontend hook deduplicates unchanged data, so this is cheap.
+                    let _ = app.emit("voice-participants-changed", ());
+
                     matrix_sdk::LoopCtrl::Continue
                 }
             })
@@ -609,6 +755,7 @@ pub fn run() {
             get_rooms,
             get_messages,
             get_room_members,
+            get_voice_participants,
             send_message,
             start_sync,
             send_typing_notice,

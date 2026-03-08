@@ -1,5 +1,5 @@
 import { Hash, Volume2 } from "lucide-react";
-import { Room } from "../types/matrix";
+import { Room, VoiceParticipant } from "../types/matrix";
 import { useTheme } from "../theme/ThemeContext";
 import StatusDropdown from "./StatusDropdown";
 
@@ -11,6 +11,60 @@ interface RoomSidebarProps {
   onSelectRoom: (roomId: string) => void;
   spaceName: string;
   userId: string;
+  voiceParticipants: Record<string, VoiceParticipant[]>;
+}
+
+function VoiceParticipantRow({ participant }: { participant: VoiceParticipant }) {
+  const { palette, spacing, typography } = useTheme();
+  const name = participant.displayName ?? participant.userId;
+
+  return (
+    <div style={{
+      display: "flex",
+      alignItems: "center",
+      gap: spacing.unit * 2,
+      padding: `${spacing.unit}px ${spacing.unit * 3}px ${spacing.unit}px ${spacing.unit * 8}px`,
+      fontSize: typography.fontSizeSmall,
+      color: palette.textSecondary,
+    }}>
+      {participant.avatarUrl ? (
+        <img
+          src={participant.avatarUrl}
+          alt={name}
+          style={{
+            width: 20,
+            height: 20,
+            borderRadius: "50%",
+            objectFit: "cover",
+            flexShrink: 0,
+          }}
+        />
+      ) : (
+        <div style={{
+          width: 20,
+          height: 20,
+          borderRadius: "50%",
+          backgroundColor: palette.accent,
+          color: "#fff",
+          display: "flex",
+          alignItems: "center",
+          justifyContent: "center",
+          fontSize: 10,
+          fontWeight: typography.fontWeightBold,
+          flexShrink: 0,
+        }}>
+          {name.charAt(0).toUpperCase()}
+        </div>
+      )}
+      <span style={{
+        overflow: "hidden",
+        textOverflow: "ellipsis",
+        whiteSpace: "nowrap",
+      }}>
+        {name}
+      </span>
+    </div>
+  );
 }
 
 export default function RoomSidebar({
@@ -19,6 +73,7 @@ export default function RoomSidebar({
   onSelectRoom,
   spaceName,
   userId,
+  voiceParticipants,
 }: RoomSidebarProps) {
   const { palette, spacing, typography } = useTheme();
 
@@ -36,16 +91,12 @@ export default function RoomSidebar({
       height: "100vh",
     }}>
       <h2 style={{
-        padding: `0 ${spacing.unit * 4}px`,
-        height: spacing.unit * 13,
+        padding: `${spacing.unit * 4}px ${spacing.unit * 4}px`,
         fontSize: typography.fontSizeLarge,
         fontWeight: typography.fontWeightBold,
         color: palette.textHeading,
         borderBottom: `1px solid ${palette.border}`,
         margin: 0,
-        display: "flex",
-        alignItems: "center",
-        boxSizing: "border-box",
       }}>
         {spaceName}
       </h2>
@@ -66,36 +117,52 @@ export default function RoomSidebar({
         </div>
       }
       <div style={{ flex: 1, overflowY: "auto", padding: spacing.unit * 2 }}>
-        {rooms.map((room) => (
-          <div
-            key={room.id}
-            onClick={() => onSelectRoom(room.id)}
-            style={{
-              padding: `${spacing.unit * 2}px ${spacing.unit * 3}px`,
-              borderRadius: spacing.unit,
-              cursor: "pointer",
-              color: activeRoomId === room.id ? palette.textHeading : palette.textSecondary,
-              backgroundColor: activeRoomId === room.id ? palette.bgActive : "transparent",
-              fontSize: typography.fontSizeBase,
-              fontWeight: activeRoomId === room.id
-                ? typography.fontWeightMedium
-                : typography.fontWeightNormal,
-            }}
-          >
-            <span style={{ display: "flex", alignItems: "center", gap: spacing.unit }}>
-              {room.roomType === VOICE_ROOM_TYPE ? (
-                <Volume2 size={16} color={activeRoomId === room.id ? palette.textHeading : palette.textSecondary} />
-              ) : (
-                <Hash size={16} color={activeRoomId === room.id ? palette.textHeading : palette.textSecondary} />
-              )}
-              <div style={{
-                marginLeft: spacing.unit,
-              }}>
-                {room.name}
+        {rooms.map((room) => {
+          const isVoice = room.roomType === VOICE_ROOM_TYPE;
+          const participants = isVoice ? (voiceParticipants[room.id] ?? []) : [];
+
+          return (
+            <div key={room.id}>
+              {/* Room row */}
+              <div
+                onClick={() => onSelectRoom(room.id)}
+                style={{
+                  padding: `${spacing.unit * 2}px ${spacing.unit * 3}px`,
+                  borderRadius: spacing.unit,
+                  cursor: "pointer",
+                  color: activeRoomId === room.id ? palette.textHeading : palette.textSecondary,
+                  backgroundColor: activeRoomId === room.id ? palette.bgActive : "transparent",
+                  fontSize: typography.fontSizeBase,
+                  fontWeight: activeRoomId === room.id
+                    ? typography.fontWeightMedium
+                    : typography.fontWeightNormal,
+                }}
+              >
+                <span style={{ display: "flex", alignItems: "center", gap: spacing.unit }}>
+                  {isVoice ? (
+                    <Volume2 size={16} color={activeRoomId === room.id ? palette.textHeading : palette.textSecondary} />
+                  ) : (
+                    <Hash size={16} color={activeRoomId === room.id ? palette.textHeading : palette.textSecondary} />
+                  )}
+                  <div style={{
+                    marginLeft: spacing.unit,
+                  }}>
+                    {room.name}
+                  </div>
+                </span>
               </div>
-            </span>
-          </div>
-        ))}
+
+              {/* Voice participants listed under the voice room */}
+              {isVoice && participants.length > 0 && (
+                <div style={{ paddingBottom: spacing.unit }}>
+                  {participants.map((p) => (
+                    <VoiceParticipantRow key={p.userId} participant={p} />
+                  ))}
+                </div>
+              )}
+            </div>
+          );
+        })}
         {rooms.length === 0 && (
           <div style={{
             color: palette.textSecondary,

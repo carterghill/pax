@@ -3,8 +3,9 @@ import RoomSidebar from "../components/RoomSidebar";
 import ChatView from "../layouts/ChatView";
 import { useRooms } from "../hooks/useRooms";
 import { usePresence } from "../hooks/usePresence";
+import { useVoiceParticipants } from "../hooks/useVoiceParticipants";
 import { PresenceContext } from "../hooks/PresenceContext";
-import { useState, useCallback } from "react";
+import { useState, useCallback, useMemo } from "react";
 import { Volume2 } from "lucide-react";
 import { useTheme } from "../theme/ThemeContext";
 import SettingsMenu from "../components/SettingsMenu";
@@ -24,10 +25,17 @@ export default function MainLayout({ userId }: { userId: string }) {
     setActiveRoomBySpace((prev) => ({ ...prev, [spaceKey]: roomId }));
   }, [spaceKey]);
 
-  const { palette, spacing } = useTheme();
+  const { palette } = useTheme();
   const activeSpace = activeSpaceId ? getRoom(activeSpaceId) : null;
   const visibleRooms = roomsBySpace(activeSpaceId);
   const activeRoom = activeRoomId ? getRoom(activeRoomId) : null;
+
+  // Collect voice room IDs in the current space for participant tracking
+  const voiceRoomIds = useMemo(
+    () => visibleRooms.filter((r) => r.roomType === VOICE_ROOM_TYPE).map((r) => r.id),
+    [visibleRooms]
+  );
+  const voiceParticipants = useVoiceParticipants(voiceRoomIds);
 
   return (
     <PresenceContext.Provider value={{ manualStatus, setManualStatus, effectivePresence }}>
@@ -43,6 +51,7 @@ export default function MainLayout({ userId }: { userId: string }) {
           onSelectRoom={setActiveRoomId}
           spaceName={activeSpace?.name ?? "Home"}
           userId={userId}
+          voiceParticipants={voiceParticipants}
         />
         <main style={{
           flex: 1,
@@ -60,13 +69,11 @@ export default function MainLayout({ userId }: { userId: string }) {
               height: "100vh",
             }}>
               <div style={{
-                padding: `0 ${spacing.unit * 4}px`,
-                height: spacing.unit * 12,
+                padding: `${16}px ${16}px`,
                 borderBottom: `1px solid ${palette.border}`,
                 display: "flex",
                 alignItems: "center",
                 gap: 12,
-                boxSizing: "border-box",
               }}>
                 <Volume2 size={20} color={palette.textSecondary} />
                 <span style={{

@@ -27,3 +27,9 @@ export interface RoomMember {
   avatarUrl: string | null;
   presence: string; // "online" | "offline" | "unavailable"
 }
+
+export interface VoiceParticipant {
+  userId: string;
+  displayName: string | null;
+  avatarUrl: string | null;
+}
