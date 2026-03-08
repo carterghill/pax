@@ -26,6 +26,7 @@ struct RoomInfo {
     avatar_url: Option<String>,
     is_space: bool,
     parent_space_ids: Vec<String>,
+    room_type: Option<String>,
 }
 
 #[derive(Clone, Serialize)]
@@ -150,12 +151,15 @@ async fn get_rooms(
             .map(|(space_id, _)| space_id.clone())
             .collect();
 
+        let room_type_str = room.room_type().map(|rt| rt.to_string());
+
         room_list.push(RoomInfo {
             id: room_id_str,
             name: room.name().unwrap_or_else(|| "Unnamed".to_string()),
             avatar_url,
             is_space: room.is_space(),
             parent_space_ids,
+            room_type: room_type_str,
         });
     }
 

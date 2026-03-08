@@ -1,5 +1,8 @@
+import { Hash, Volume2 } from "lucide-react";
 import { Room } from "../types/matrix";
 import { useTheme } from "../theme/ThemeContext";
+
+const VOICE_ROOM_TYPE = "org.matrix.msc3417.call";
 
 interface RoomSidebarProps {
   rooms: Room[];
@@ -67,7 +70,18 @@ export default function RoomSidebar({
                 : typography.fontWeightNormal,
             }}
           >
-            # {room.name}
+            <span style={{ display: "flex", alignItems: "center", gap: spacing.unit }}>
+              {room.roomType === VOICE_ROOM_TYPE ? (
+                <Volume2 size={16} color={activeRoomId === room.id ? palette.textHeading : palette.textSecondary} />
+              ) : (
+                <Hash size={16} color={activeRoomId === room.id ? palette.textHeading : palette.textSecondary} />
+              )}
+              <div style={{
+                marginLeft: spacing.unit,
+              }}>
+                {room.name}
+              </div>
+            </span>
           </div>
         ))}
         {rooms.length === 0 && (

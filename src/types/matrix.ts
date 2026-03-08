@@ -4,6 +4,7 @@ export interface Room {
   avatarUrl: string | null;
   isSpace: boolean;
   parentSpaceIds: string[];
+  roomType: string | null;
 }
 
 export interface Message {

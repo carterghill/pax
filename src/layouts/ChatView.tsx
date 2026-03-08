@@ -1,5 +1,6 @@
 import { useState, useEffect } from "react";
 import { listen } from "@tauri-apps/api/event";
+import { Hash } from "lucide-react";
 import MessageList from "../components/MessageList";
 import MessageInput from "../components/MessageInput";
 import { useMessages } from "../hooks/useMessages";
@@ -106,7 +107,7 @@ export default function ChatView({ room }: ChatViewProps) {
         alignItems: "center",
         gap: spacing.unit * 3,
       }}>
-        <span style={{ color: palette.textSecondary, fontSize: typography.fontSizeLarge }}>#</span>
+        <Hash size={20} color={palette.textSecondary} />
         <span style={{
           fontWeight: typography.fontWeightBold,
           color: palette.textHeading,
