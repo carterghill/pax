@@ -25,7 +25,7 @@ export default function RoomSidebar({
       height: "100vh",
     }}>
       <h2 style={{
-        padding: `${spacing.unit * 4}px ${spacing.unit * 4}px ${spacing.unit * 3}px`,
+        padding: `${spacing.unit * 4}px ${spacing.unit * 4}px`,
         fontSize: typography.fontSizeLarge,
         fontWeight: typography.fontWeightBold,
         color: palette.textHeading,

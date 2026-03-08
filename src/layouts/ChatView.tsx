@@ -21,11 +21,11 @@ export default function ChatView({ room }: ChatViewProps) {
     }}>
       {/* Channel header */}
       <div style={{
-        padding: `${spacing.unit * 3}px ${spacing.unit * 4}px`,
+        padding: `${spacing.unit * 4}px ${spacing.unit * 4}px`,
         borderBottom: `1px solid ${palette.border}`,
         display: "flex",
         alignItems: "center",
-        gap: spacing.unit * 2,
+        gap: spacing.unit * 3,
       }}>
         <span style={{ color: palette.textSecondary, fontSize: typography.fontSizeLarge }}>#</span>
         <span style={{

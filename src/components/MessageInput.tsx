@@ -41,7 +41,7 @@ export default function MessageInput({ roomId, roomName, onMessageSent }: Messag
     <div style={{ padding: `0 ${spacing.unit * 3}px ${spacing.unit * 3}px` }}>
       <div style={{
         backgroundColor: palette.bgActive,
-        borderRadius: spacing.unit * 2,
+        borderRadius: spacing.unit * 1.5,
         display: "flex",
         alignItems: "flex-end",
       }}>
