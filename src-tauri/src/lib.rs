@@ -101,7 +101,7 @@ async fn login(
         .map_err(|e| format!("Login failed: {e}"))?;
 
     client
-        .sync_once(SyncSettings::default())
+        .sync_once(SyncSettings::default().set_presence(matrix_sdk::ruma::presence::PresenceState::Offline))
         .await
         .map_err(|e| format!("Initial sync failed: {e}"))?;
 
@@ -472,7 +472,7 @@ async fn start_sync(
     // Spawn the continuous sync loop in the background
     tokio::spawn(async move {
         let result = client
-            .sync_with_callback(SyncSettings::default(), |response| {
+            .sync_with_callback(SyncSettings::default().set_presence(matrix_sdk::ruma::presence::PresenceState::Offline), |response| {
                 let app = app.clone();
                 let presence_map = presence_map.clone();
                 async move {
@@ -566,6 +566,34 @@ async fn set_presence(
     Ok(())
 }
 
+#[tauri::command]
+async fn start_idle_monitor(
+    app: tauri::AppHandle,
+) -> Result<(), String> {
+    tokio::spawn(async move {
+        let idle_threshold_secs = 300u64; // 5 minutes
+        let mut was_idle = false;
+
+        loop {
+            tokio::time::sleep(std::time::Duration::from_secs(15)).await;
+
+            let idle_secs = match user_idle::UserIdle::get_time() {
+                Ok(idle) => idle.as_seconds() as u64,
+                Err(_) => continue,
+            };
+
+            let is_idle = idle_secs >= idle_threshold_secs;
+
+            if is_idle != was_idle {
+                was_idle = is_idle;
+                let _ = app.emit("idle-changed", is_idle);
+            }
+        }
+    });
+
+    Ok(())
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     let state = Arc::new(AppState {
@@ -584,6 +612,7 @@ pub fn run() {
             start_sync,
             send_typing_notice,
             set_presence,
+            start_idle_monitor,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

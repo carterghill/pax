@@ -1,67 +1,66 @@
-import { useEffect, useRef } from "react";
+import { useEffect, useRef, useState, useCallback } from "react";
 import { invoke } from "@tauri-apps/api/core";
-import { getCurrentWindow } from "@tauri-apps/api/window";
+import { listen } from "@tauri-apps/api/event";
 
-const IDLE_TIMEOUT_MS = 5 * 60 * 1000; // 5 minutes
+// Manual status options: "auto" means follow system idle detection
+export type ManualStatus = "auto" | "online" | "unavailable" | "dnd" | "offline";
+
+// What gets sent to the Matrix server (no "dnd" in Matrix, maps to "online" with a flag)
+function statusToPresence(status: ManualStatus, systemIdle: boolean): string {
+  switch (status) {
+    case "online": return "online";
+    case "unavailable": return "unavailable";
+    case "dnd": return "online"; // Matrix doesn't have DND; we stay "online"
+    case "offline": return "offline";
+    case "auto":
+    default:
+      return systemIdle ? "unavailable" : "online";
+  }
+}
 
 export function usePresence() {
-  const currentStatus = useRef<string>("online");
-  const idleTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
-  const focused = useRef(true);
+  const [manualStatus, setManualStatus] = useState<ManualStatus>("auto");
+  const [systemIdle, setSystemIdle] = useState(false);
+  const currentPresence = useRef<string>("");
 
-  function setPresence(status: string) {
-    if (status === currentStatus.current) return;
-    currentStatus.current = status;
-    invoke("set_presence", { presence: status }).catch((e) =>
+  const sendPresence = useCallback((presence: string) => {
+    if (presence === currentPresence.current) return;
+    currentPresence.current = presence;
+    invoke("set_presence", { presence }).catch((e) =>
       console.error("Failed to set presence:", e)
     );
-  }
+  }, []);
 
-  function resetIdleTimer() {
-    if (idleTimer.current) clearTimeout(idleTimer.current);
-    // Only set online + restart timer if window is focused
-    if (focused.current) {
-      setPresence("online");
-      idleTimer.current = setTimeout(() => {
-        setPresence("unavailable");
-      }, IDLE_TIMEOUT_MS);
-    }
-  }
-
+  // Start the system idle monitor on mount
   useEffect(() => {
-    // Set online on mount
-    setPresence("online");
-    resetIdleTimer();
+    invoke("start_idle_monitor").catch((e) =>
+      console.error("Failed to start idle monitor:", e)
+    );
+  }, []);
 
-    // Track activity within the window
-    const activityEvents = ["mousemove", "keydown", "mousedown", "scroll", "touchstart"];
-    const handleActivity = () => resetIdleTimer();
-
-    for (const event of activityEvents) {
-      window.addEventListener(event, handleActivity, { passive: true });
-    }
-
-    // Track window focus/blur via Tauri
-    const appWindow = getCurrentWindow();
-    const unlisten = appWindow.onFocusChanged(({ payload: isFocused }) => {
-      focused.current = isFocused;
-      if (isFocused) {
-        resetIdleTimer();
-      } else {
-        // Window lost focus — go away immediately
-        if (idleTimer.current) clearTimeout(idleTimer.current);
-        setPresence("unavailable");
-      }
+  // Listen for system idle changes from the Rust backend
+  useEffect(() => {
+    const unlisten = listen<boolean>("idle-changed", (event) => {
+      setSystemIdle(event.payload);
     });
-
-    // Set offline on unmount (logout / close)
     return () => {
-      for (const event of activityEvents) {
-        window.removeEventListener(event, handleActivity);
-      }
-      if (idleTimer.current) clearTimeout(idleTimer.current);
       unlisten.then((fn) => fn());
+    };
+  }, []);
+
+  // Send presence whenever manual status or system idle state changes
+  useEffect(() => {
+    const presence = statusToPresence(manualStatus, systemIdle);
+    sendPresence(presence);
+  }, [manualStatus, systemIdle, sendPresence]);
+
+  // Set online on mount
+  useEffect(() => {
+    sendPresence("online");
+    return () => {
       invoke("set_presence", { presence: "offline" }).catch(() => {});
     };
   }, []);
+
+  return { manualStatus, setManualStatus };
 }

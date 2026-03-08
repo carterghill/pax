@@ -46,7 +46,6 @@ export default function UserMenu({ roomId }: UserMenuProps) {
       ) : (
         groups.map((group) => (
           <div key={group.label}>
-            {/* Group heading */}
             <div style={{
               padding: `${spacing.unit * 4}px ${spacing.unit * 4}px ${spacing.unit * 2}px`,
               fontSize: typography.fontSizeSmall,
@@ -58,7 +57,6 @@ export default function UserMenu({ roomId }: UserMenuProps) {
               {group.label}
             </div>
 
-            {/* Member list */}
             {group.members.map((member) => (
               <div
                 key={member.userId}
@@ -79,7 +77,6 @@ export default function UserMenu({ roomId }: UserMenuProps) {
                   (e.currentTarget as HTMLDivElement).style.backgroundColor = "transparent";
                 }}
               >
-                {/* Avatar with presence indicator */}
                 <div style={{ position: "relative", flexShrink: 0 }}>
                   {member.avatarUrl ? (
                     <img
@@ -108,7 +105,6 @@ export default function UserMenu({ roomId }: UserMenuProps) {
                       {(member.displayName ?? member.userId).charAt(0).toUpperCase()}
                     </div>
                   )}
-                  {/* Presence dot */}
                   <div style={{
                     position: "absolute",
                     bottom: -1,
@@ -121,7 +117,6 @@ export default function UserMenu({ roomId }: UserMenuProps) {
                   }} />
                 </div>
 
-                {/* Name */}
                 <span style={{
                   fontSize: typography.fontSizeBase,
                   fontWeight: typography.fontWeightMedium,

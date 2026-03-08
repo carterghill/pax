@@ -1,6 +1,7 @@
 import { Hash, Volume2 } from "lucide-react";
 import { Room } from "../types/matrix";
 import { useTheme } from "../theme/ThemeContext";
+import StatusDropdown from "./StatusDropdown";
 
 const VOICE_ROOM_TYPE = "org.matrix.msc3417.call";
 
@@ -9,6 +10,7 @@ interface RoomSidebarProps {
   activeRoomId: string | null;
   onSelectRoom: (roomId: string) => void;
   spaceName: string;
+  userId: string;
 }
 
 export default function RoomSidebar({
@@ -16,8 +18,14 @@ export default function RoomSidebar({
   activeRoomId,
   onSelectRoom,
   spaceName,
+  userId,
 }: RoomSidebarProps) {
   const { palette, spacing, typography } = useTheme();
+
+  // Extract local part of userId for display (e.g. @carter:matrix.org → carter)
+  const displayName = userId.startsWith("@")
+    ? userId.slice(1).split(":")[0]
+    : userId;
 
   return (
     <div style={{
@@ -94,6 +102,9 @@ export default function RoomSidebar({
           </div>
         )}
       </div>
+
+      {/* User status at bottom */}
+      <StatusDropdown displayName={displayName} avatarUrl={null} />
     </div>
   );
 }

@@ -26,3 +26,4 @@ matrix-sdk = { version = "0.16", features = ["sqlite"] }
 tokio = { version = "1", features = ["full"] }
 libsqlite3-sys = { version = "0.35", features = ["bundled"] }
 data-encoding = "2"
+user-idle = "0.6"
