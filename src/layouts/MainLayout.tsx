@@ -2,6 +2,7 @@ import SpaceSidebar from "../components/SpaceSidebar";
 import RoomSidebar from "../components/RoomSidebar";
 import ChatView from "../layouts/ChatView";
 import { useRooms } from "../hooks/useRooms";
+import { usePresence } from "../hooks/usePresence";
 import { useState, useCallback } from "react";
 import { Volume2 } from "lucide-react";
 import { useTheme } from "../theme/ThemeContext";
@@ -11,6 +12,7 @@ const VOICE_ROOM_TYPE = "org.matrix.msc3417.call";
 
 export default function MainLayout({ userId }: { userId: string }) {
   const { spaces, roomsBySpace, getRoom } = useRooms(userId);
+  usePresence();
   const [activeSpaceId, setActiveSpaceId] = useState<string | null>(null);
   // Track active room per space — key is spaceId ("" for Home)
   const [activeRoomBySpace, setActiveRoomBySpace] = useState<Record<string, string | null>>({});
