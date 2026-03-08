@@ -1,24 +1,33 @@
 import { useTheme } from "../theme/ThemeContext";
 import { useRoomMembers } from "../hooks/useRoomMembers";
+import { usePresenceContext } from "../hooks/PresenceContext";
 
 interface UserMenuProps {
   roomId: string;
+  userId: string;
 }
 
 const presenceColor: Record<string, string> = {
   online: "#23a55a",
   unavailable: "#f0b232",
+  dnd: "#f23f43",
   offline: "#80848e",
 };
 
-export default function UserMenu({ roomId }: UserMenuProps) {
+export default function UserMenu({ roomId, userId }: UserMenuProps) {
   const { palette, typography, spacing } = useTheme();
   const { members, loading } = useRoomMembers(roomId);
+  const { effectivePresence } = usePresenceContext();
+
+  // Override the current user's presence with local intent (instant, no server round-trip)
+  const displayMembers = members.map((m) =>
+    m.userId === userId ? { ...m, presence: effectivePresence } : m
+  );
 
   // Group members by presence
-  const online = members.filter((m) => m.presence === "online");
-  const unavailable = members.filter((m) => m.presence === "unavailable");
-  const offline = members.filter((m) => m.presence !== "online" && m.presence !== "unavailable");
+  const online = displayMembers.filter((m) => m.presence === "online" || m.presence === "dnd");
+  const unavailable = displayMembers.filter((m) => m.presence === "unavailable");
+  const offline = displayMembers.filter((m) => m.presence === "offline");
 
   const groups = [
     { label: `Online — ${online.length}`, members: online },

@@ -17,7 +17,6 @@ use data_encoding::BASE64;
 pub struct AppState {
     pub client: Mutex<Option<Client>>,
     pub presence_map: Arc<Mutex<HashMap<String, String>>>,
-    pub desired_presence: Arc<Mutex<String>>,
 }
 
 #[derive(Serialize)]
@@ -102,7 +101,7 @@ async fn login(
         .map_err(|e| format!("Login failed: {e}"))?;
 
     client
-        .sync_once(SyncSettings::default())
+        .sync_once(SyncSettings::default().set_presence(matrix_sdk::ruma::presence::PresenceState::Offline))
         .await
         .map_err(|e| format!("Initial sync failed: {e}"))?;
 
@@ -467,19 +466,19 @@ async fn start_sync(
         }
     });
 
-    // Clone the presence map and desired_presence for use inside the sync loop
+    // Clone the presence map for use inside the sync loop
     let presence_map = state.presence_map.clone();
-    let desired_presence = state.desired_presence.clone();
-    let sync_client = client.clone();
 
     // Spawn the continuous sync loop in the background
+    // set_presence(Offline) tells the server: "do NOT auto-update my presence on sync"
+    // We manage presence explicitly via the set_presence command instead.
     tokio::spawn(async move {
         let result = client
-            .sync_with_callback(SyncSettings::default(), |response| {
+            .sync_with_callback(
+                SyncSettings::default().set_presence(matrix_sdk::ruma::presence::PresenceState::Offline),
+                |response| {
                 let app = app.clone();
                 let presence_map = presence_map.clone();
-                let desired_presence = desired_presence.clone();
-                let sync_client = sync_client.clone();
                 async move {
                     // Extract presence updates from the sync response
                     for raw_event in &response.presence {
@@ -501,23 +500,6 @@ async fn start_sync(
                                 user_id,
                                 presence: presence_str.to_string(),
                             });
-                        }
-                    }
-
-                    // The sync defaults to marking us "online". If we want something
-                    // else, immediately override with an explicit API call.
-                    let desired = desired_presence.lock().await.clone();
-                    if desired != "online" {
-                        let presence_state = match desired.as_str() {
-                            "unavailable" => matrix_sdk::ruma::presence::PresenceState::Unavailable,
-                            _ => matrix_sdk::ruma::presence::PresenceState::Offline,
-                        };
-                        if let Some(uid) = sync_client.user_id() {
-                            let req = matrix_sdk::ruma::api::client::presence::set_presence::v3::Request::new(
-                                uid.to_owned(),
-                                presence_state,
-                            );
-                            let _ = sync_client.send(req).await;
                         }
                     }
 
@@ -570,23 +552,17 @@ async fn set_presence(
         _ => return Err(format!("Invalid presence state: {presence}")),
     };
 
-    // Store desired state so the sync callback can re-assert it
-    {
-        *state.desired_presence.lock().await = presence;
-    }
-
-    // Make the explicit API call for immediate effect
     let guard = state.client.lock().await;
-    if let Some(client) = guard.as_ref() {
-        if let Some(uid) = client.user_id() {
-            let request = matrix_sdk::ruma::api::client::presence::set_presence::v3::Request::new(
-                uid.to_owned(),
-                presence_state,
-            );
-            client.send(request).await
-                .map_err(|e| format!("Failed to set presence: {e}"))?;
-        }
-    }
+    let client = guard.as_ref().ok_or("Not logged in")?;
+    let user_id = client.user_id().ok_or("No user ID")?.to_owned();
+
+    let request = matrix_sdk::ruma::api::client::presence::set_presence::v3::Request::new(
+        user_id,
+        presence_state,
+    );
+
+    client.send(request).await
+        .map_err(|e| format!("Failed to set presence: {e}"))?;
 
     Ok(())
 }
@@ -624,7 +600,6 @@ pub fn run() {
     let state = Arc::new(AppState {
         client: Mutex::new(None),
         presence_map: Arc::new(Mutex::new(HashMap::new())),
-        desired_presence: Arc::new(Mutex::new("online".to_string())),
     });
 
     tauri::Builder::default()

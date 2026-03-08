@@ -19,14 +19,18 @@ const statusOptions: { value: ManualStatus; label: string; color: string }[] = [
   { value: "offline", label: "Offline", color: presenceColor.offline },
 ];
 
-function getDisplayColor(status: ManualStatus): string {
-  if (status === "auto") return presenceColor.online;
-  return presenceColor[status] ?? presenceColor.offline;
+function getDisplayColor(presence: string): string {
+  return presenceColor[presence] ?? presenceColor.offline;
 }
 
-function getDisplayLabel(status: ManualStatus): string {
-  const opt = statusOptions.find((o) => o.value === status);
-  return opt?.label ?? "Online";
+function getDisplayLabel(presence: string): string {
+  const labels: Record<string, string> = {
+    online: "Online",
+    unavailable: "Away",
+    dnd: "Do Not Disturb",
+    offline: "Offline",
+  };
+  return labels[presence] ?? "Online";
 }
 
 interface StatusDropdownProps {
@@ -36,7 +40,7 @@ interface StatusDropdownProps {
 
 export default function StatusDropdown({ displayName, avatarUrl }: StatusDropdownProps) {
   const { palette, typography, spacing } = useTheme();
-  const { manualStatus, setManualStatus } = usePresenceContext();
+  const { manualStatus, setManualStatus, effectivePresence } = usePresenceContext();
   const [open, setOpen] = useState(false);
   const dropdownRef = useRef<HTMLDivElement>(null);
 
@@ -111,7 +115,7 @@ export default function StatusDropdown({ displayName, avatarUrl }: StatusDropdow
             width: 10,
             height: 10,
             borderRadius: "50%",
-            backgroundColor: getDisplayColor(manualStatus),
+            backgroundColor: getDisplayColor(effectivePresence),
             border: `2px solid ${palette.bgSecondary}`,
           }} />
         </div>
@@ -132,7 +136,7 @@ export default function StatusDropdown({ displayName, avatarUrl }: StatusDropdow
             fontSize: typography.fontSizeSmall,
             color: palette.textSecondary,
           }}>
-            {getDisplayLabel(manualStatus)}
+            {getDisplayLabel(effectivePresence)}
           </div>
         </div>
 

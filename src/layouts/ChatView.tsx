@@ -10,6 +10,7 @@ import { Room } from "../types/matrix";
 
 interface ChatViewProps {
   room: Room;
+  userId: string;
 }
 
 interface TypingPayload {
@@ -72,7 +73,7 @@ function TypingIndicator({ names, palette, typography, spacing }: {
   );
 }
 
-export default function ChatView({ room }: ChatViewProps) {
+export default function ChatView({ room, userId }: ChatViewProps) {
   const { messages, loadMore, hasMore, loading, initialLoading, refresh } = useMessages(room.id);
   const { palette, typography, spacing } = useTheme();
   const [typingNames, setTypingNames] = useState<string[]>([]);
@@ -177,7 +178,7 @@ export default function ChatView({ room }: ChatViewProps) {
         </div>
 
         {/* User menu panel */}
-        {showUsers && <UserMenu roomId={room.id} />}
+        {showUsers && <UserMenu roomId={room.id} userId={userId} />}
       </div>
     </div>
   );

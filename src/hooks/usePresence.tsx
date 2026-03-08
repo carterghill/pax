@@ -18,6 +18,19 @@ function statusToPresence(status: ManualStatus, systemIdle: boolean): string {
   }
 }
 
+// What to display locally for the current user (includes dnd which Matrix doesn't know about)
+function statusToDisplay(status: ManualStatus, systemIdle: boolean): string {
+  switch (status) {
+    case "online": return "online";
+    case "unavailable": return "unavailable";
+    case "dnd": return "dnd";
+    case "offline": return "offline";
+    case "auto":
+    default:
+      return systemIdle ? "unavailable" : "online";
+  }
+}
+
 export function usePresence() {
   const [manualStatus, setManualStatus] = useState<ManualStatus>("auto");
   const [systemIdle, setSystemIdle] = useState(false);
@@ -62,5 +75,8 @@ export function usePresence() {
     };
   }, []);
 
-  return { manualStatus, setManualStatus };
+  // The presence to display locally for the current user (instant, no server round-trip)
+  const effectivePresence = statusToDisplay(manualStatus, systemIdle);
+
+  return { manualStatus, setManualStatus, effectivePresence };
 }

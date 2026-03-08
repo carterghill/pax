@@ -13,7 +13,7 @@ const VOICE_ROOM_TYPE = "org.matrix.msc3417.call";
 
 export default function MainLayout({ userId }: { userId: string }) {
   const { spaces, roomsBySpace, getRoom } = useRooms(userId);
-  const { manualStatus, setManualStatus } = usePresence();
+  const { manualStatus, setManualStatus, effectivePresence } = usePresence();
   const [activeSpaceId, setActiveSpaceId] = useState<string | null>(null);
   const [activeRoomBySpace, setActiveRoomBySpace] = useState<Record<string, string | null>>({});
 
@@ -30,7 +30,7 @@ export default function MainLayout({ userId }: { userId: string }) {
   const activeRoom = activeRoomId ? getRoom(activeRoomId) : null;
 
   return (
-    <PresenceContext.Provider value={{ manualStatus, setManualStatus }}>
+    <PresenceContext.Provider value={{ manualStatus, setManualStatus, effectivePresence }}>
       <div style={{ display: "flex", height: "100vh" }}>
         <SpaceSidebar
           spaces={spaces}
@@ -89,7 +89,7 @@ export default function MainLayout({ userId }: { userId: string }) {
               </div>
             </div>
           ) : activeRoom ? (
-            <ChatView room={activeRoom} />
+            <ChatView room={activeRoom} userId={userId} />
           ) : (
             <div style={{
               flex: 1,
