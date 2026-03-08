@@ -398,7 +398,17 @@ async fn start_sync(
 
     // Spawn the continuous sync loop in the background
     tokio::spawn(async move {
-        if let Err(e) = client.sync(SyncSettings::default()).await {
+        let result = client
+            .sync_with_callback(SyncSettings::default(), |_response| {
+                let app = app.clone();
+                async move {
+                    let _ = app.emit("rooms-changed", ());
+                    matrix_sdk::LoopCtrl::Continue
+                }
+            })
+            .await;
+
+        if let Err(e) = result {
             eprintln!("Sync loop error: {e}");
         }
     });

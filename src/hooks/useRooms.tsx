@@ -1,13 +1,32 @@
-import { useEffect, useState } from "react";
+import { useEffect, useState, useCallback } from "react";
 import { invoke } from "@tauri-apps/api/core";
+import { listen } from "@tauri-apps/api/event";
 import { Room } from "../types/matrix";
 
 export function useRooms(userId: string) {
   const [rooms, setRooms] = useState<Room[]>([]);
 
+  const fetchRooms = useCallback(() => {
+    invoke<Room[]>("get_rooms").then(setRooms).catch((e) =>
+      console.error("Failed to fetch rooms:", e)
+    );
+  }, []);
+
+  // Initial fetch
   useEffect(() => {
-    invoke<Room[]>("get_rooms").then(setRooms);
-  }, [userId]);
+    fetchRooms();
+  }, [userId, fetchRooms]);
+
+  // Re-fetch whenever the sync loop signals a change
+  useEffect(() => {
+    const unlisten = listen("rooms-changed", () => {
+      fetchRooms();
+    });
+
+    return () => {
+      unlisten.then((fn) => fn());
+    };
+  }, [fetchRooms]);
 
   const spaces = rooms.filter((r) => r.isSpace);
 
