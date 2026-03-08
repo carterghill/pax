@@ -603,10 +603,12 @@ async fn join_voice_room(
             "token_type": "Bearer",
             "matrix_server_name": user_id.server_name().to_string(),
             "expires_in": openid.expires_in.as_secs(),
-        }
+        },
+        "device_id": device_id.as_str(),
     });
 
-    let jwt_resp = http.post(&livekit_service_url)
+    let jwt_url = format!("{}/sfu/get", livekit_service_url.trim_end_matches('/'));
+    let jwt_resp = http.post(&jwt_url)
         .json(&jwt_body)
         .send()
         .await

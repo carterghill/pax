@@ -60,8 +60,19 @@ export function useVoiceCall() {
       if (track.kind !== Track.Kind.Audio) return;
 
       const el = track.attach();
+      // Force mono tracks to play through both channels
       el.style.display = "none";
       document.body.appendChild(el);
+
+      // Use Web Audio to ensure mono is centered (plays in both ears)
+      try {
+        const audioCtx = new AudioContext();
+        const source = audioCtx.createMediaElementSource(el);
+        source.connect(audioCtx.destination);
+      } catch {
+        // Fallback: direct playback (may still be one-sided on some systems)
+      }
+
       audioElements.current.set(participant.identity + ":" + track.sid, el);
     },
     []
@@ -148,6 +159,9 @@ export function useVoiceCall() {
             autoGainControl: true,
             echoCancellation: true,
             noiseSuppression: true,
+          },
+          audioOutput: {
+            deviceId: "default",
           },
         });
 
