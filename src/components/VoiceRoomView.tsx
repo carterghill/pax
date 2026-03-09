@@ -1,4 +1,4 @@
-import { Volume2, Mic, MicOff, PhoneOff, Loader2 } from "lucide-react";
+import { Volume2, Mic, MicOff, PhoneOff, Loader2, AudioLines } from "lucide-react";
 import { useTheme } from "../theme/ThemeContext";
 import { Room } from "../types/matrix";
 import { VoiceCallState } from "../hooks/useVoiceCall";
@@ -8,6 +8,7 @@ interface VoiceRoomViewProps {
   callState: VoiceCallState;
   onDisconnect: () => void;
   onToggleMic: () => void;
+  onToggleNoiseSuppression: () => void;
 }
 
 export default function VoiceRoomView({
@@ -15,6 +16,7 @@ export default function VoiceRoomView({
   callState,
   onDisconnect,
   onToggleMic,
+  onToggleNoiseSuppression,
 }: VoiceRoomViewProps) {
   const { palette, spacing, typography } = useTheme();
 
@@ -220,6 +222,32 @@ export default function VoiceRoomView({
             }}
           >
             {callState.isMicEnabled ? <Mic size={20} /> : <MicOff size={20} />}
+          </button>
+
+          {/* Noise Suppression Toggle */}
+          <button
+            onClick={onToggleNoiseSuppression}
+            title={callState.isNoiseSuppressed ? "Disable noise suppression" : "Enable noise suppression"}
+            style={{
+              width: 48,
+              height: 48,
+              borderRadius: "50%",
+              border: "none",
+              cursor: "pointer",
+              display: "flex",
+              alignItems: "center",
+              justifyContent: "center",
+              backgroundColor: callState.isNoiseSuppressed
+                ? "#23a55a"
+                : palette.bgActive,
+              color: callState.isNoiseSuppressed
+                ? "#fff"
+                : palette.textSecondary,
+              transition: "background-color 0.15s ease",
+              opacity: callState.isNoiseSuppressed !== undefined ? 1 : 0.5,
+            }}
+          >
+            <AudioLines size={20} />
           </button>
 
           {/* Disconnect */}

@@ -81,6 +81,7 @@ export default function MainLayout({ userId }: { userId: string }) {
               callState={voiceCall}
               onDisconnect={voiceCall.disconnect}
               onToggleMic={voiceCall.toggleMic}
+              onToggleNoiseSuppression={voiceCall.toggleNoiseSuppression}
             />
           ) : activeRoom ? (
             <ChatView room={activeRoom} userId={userId} />
