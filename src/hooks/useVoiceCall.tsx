@@ -15,6 +15,7 @@ import {
   createNoiseSuppressor,
   NoiseSuppressorHandle,
 } from "../audio/noiseSuppression";
+import { useSound } from "react-sounds";
 
 export interface VoiceCallState {
   connectedRoomId: string | null;
@@ -43,6 +44,9 @@ export function useVoiceCall() {
 
   const connectedRoomIdRef = useRef<string | null>(null);
   connectedRoomIdRef.current = state.connectedRoomId;
+
+  const { play: playConnect } = useSound('notification/success'); // Or a specific 'connect' sound if available
+  const { play: playDisconnect } = useSound('notification/error'); // Or 'disconnect' equivalent
 
   const updateParticipants = useCallback(() => {
     const room = livekitRoom.current;
@@ -124,6 +128,8 @@ export function useVoiceCall() {
       }
     }
 
+    playDisconnect();
+    
     setState({
       connectedRoomId: null,
       isConnecting: false,
@@ -218,6 +224,7 @@ export function useVoiceCall() {
           remoteParticipants: Array.from(room.remoteParticipants.values()),
           localParticipant: room.localParticipant,
         });
+        playConnect();
       } catch (e) {
         console.error("Failed to join voice room:", e);
         cleanupAudio();
