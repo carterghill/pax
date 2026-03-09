@@ -66,7 +66,7 @@ export default function UserMenu({ roomId, userId }: UserMenuProps) {
               {group.label}
             </div>
 
-            {group.members.map((member) => (
+            {group.members.slice().sort((a, b) => (a.displayName || '').localeCompare(b.displayName || '')).map((member) => (
               <div
                 key={member.userId}
                 style={{
