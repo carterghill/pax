@@ -44,6 +44,7 @@ export function useVoiceCall() {
 
   const connectedRoomIdRef = useRef<string | null>(null);
   connectedRoomIdRef.current = state.connectedRoomId;
+  const isConnectingRef = useRef(false);
 
   const { play: playConnect } = useSound('notification/success'); // Or a specific 'connect' sound if available
   const { play: playDisconnect } = useSound('notification/error'); // Or 'disconnect' equivalent
@@ -119,6 +120,7 @@ export function useVoiceCall() {
     }
 
     cleanupAudio();
+    isConnectingRef.current = false;
 
     if (roomId) {
       try {
@@ -143,7 +145,11 @@ export function useVoiceCall() {
 
   const connect = useCallback(
     async (roomId: string) => {
-      if (state.connectedRoomId === roomId && livekitRoom.current) return;
+      // Use refs for guards to avoid stale closure issues
+      if (connectedRoomIdRef.current === roomId && livekitRoom.current) return;
+      if (isConnectingRef.current) return;
+      isConnectingRef.current = true;
+
       if (livekitRoom.current) await disconnect();
 
       setState((prev) => ({
@@ -154,6 +160,13 @@ export function useVoiceCall() {
       }));
 
       try {
+        // 0. Clear any stale call.member state from a previous crash
+        try {
+          await invoke("leave_voice_room", { roomId });
+        } catch {
+          // Ignore — may not have a stale session
+        }
+
         // 1. Get JWT from Rust backend
         const result = await invoke<VoiceJoinResult>("join_voice_room", { roomId });
 
@@ -194,6 +207,7 @@ export function useVoiceCall() {
           if (connState === ConnectionState.Disconnected) {
             cleanupAudio();
             livekitRoom.current = null;
+            isConnectingRef.current = false;
             setState({
               connectedRoomId: null,
               isConnecting: false,
@@ -215,6 +229,7 @@ export function useVoiceCall() {
           source: Track.Source.Microphone,
         });
 
+        isConnectingRef.current = false;
         setState({
           connectedRoomId: roomId,
           isConnecting: false,
@@ -228,6 +243,7 @@ export function useVoiceCall() {
       } catch (e) {
         console.error("Failed to join voice room:", e);
         cleanupAudio();
+        isConnectingRef.current = false;
         setState({
           connectedRoomId: null,
           isConnecting: false,
@@ -239,7 +255,7 @@ export function useVoiceCall() {
         });
       }
     },
-    [state.connectedRoomId, disconnect, attachAudioTrack, detachAudioTrack, updateParticipants, cleanupAudio]
+    [disconnect, attachAudioTrack, detachAudioTrack, updateParticipants, cleanupAudio]
   );
 
   const toggleMic = useCallback(async () => {

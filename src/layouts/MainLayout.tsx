@@ -44,8 +44,8 @@ export default function MainLayout({ userId }: { userId: string }) {
     setActiveRoomId(roomId);
 
     const room = getRoom(roomId);
-    if (room && room.roomType === VOICE_ROOM_TYPE) {
-      // Join voice room on click (useVoiceCall handles dedup if already connected)
+    if (room && room.roomType === VOICE_ROOM_TYPE && voiceCall.connectedRoomId !== roomId) {
+      // Join voice room on click (only if not already connected to this room)
       voiceCall.connect(roomId);
     }
   }, [setActiveRoomId, getRoom, voiceCall]);
