@@ -3,6 +3,9 @@
  * 
  * Takes a raw microphone MediaStreamTrack, pipes it through an AudioWorklet
  * running RNNoise WASM, and returns a cleaned MediaStreamTrack.
+ * 
+ * RNNoise outputs mono. We use a ChannelMergerNode to explicitly duplicate
+ * the mono output to both L and R channels so audio plays in both ears.
  */
 
 // @ts-ignore — Vite-specific import: ?worker&url bundles the worklet as a standalone script URL
@@ -27,58 +30,57 @@ export interface NoiseSuppressorHandle {
 export async function createNoiseSuppressor(
   inputTrack: MediaStreamTrack
 ): Promise<NoiseSuppressorHandle> {
-  // Create AudioContext at 48kHz (RNNoise's native sample rate)
   const audioCtx = new AudioContext({ sampleRate: 48000 });
 
-  // Load the RNNoise worklet
   await audioCtx.audioWorklet.addModule(NoiseSuppressorWorkletUrl);
 
-  // Create the worklet node
   const suppressorNode = new AudioWorkletNode(audioCtx, NoiseSuppressorWorklet_Name);
 
-  // Wire up: input track → suppressor → stereo splitter → destination
   const inputStream = new MediaStream([inputTrack]);
   const source = audioCtx.createMediaStreamSource(inputStream);
+
+  // ChannelMerger: explicitly duplicate mono (channel 0) to both L and R
+  const merger = audioCtx.createChannelMerger(2);
+
   const destination = audioCtx.createMediaStreamDestination();
 
-  // Force the destination to output stereo so mono doesn't end up in left ear only
-  destination.channelCount = 2;
-  destination.channelCountMode = "explicit";
-  destination.channelInterpretation = "speakers";
-
-  // Use a gain node as a stereo upmixer between suppressor and destination
-  const stereoUpMix = audioCtx.createGain();
-  stereoUpMix.channelCount = 2;
-  stereoUpMix.channelCountMode = "explicit";
-  stereoUpMix.channelInterpretation = "speakers";
-  stereoUpMix.gain.value = 1;
-
+  // Initial wiring: source -> suppressor -> merger(both channels) -> destination
   source.connect(suppressorNode);
-  suppressorNode.connect(stereoUpMix);
-  stereoUpMix.connect(destination);
+  suppressorNode.connect(merger, 0, 0); // mono output -> left
+  suppressorNode.connect(merger, 0, 1); // mono output -> right
+  merger.connect(destination);
 
-  // Get the denoised output track
   const outputTrack = destination.stream.getAudioTracks()[0];
+
+  let enabled = true;
 
   return {
     track: outputTrack,
     destroy: () => {
       source.disconnect();
       suppressorNode.disconnect();
-      stereoUpMix.disconnect();
+      merger.disconnect();
       audioCtx.close().catch(() => {});
     },
-    setEnabled: (enabled: boolean) => {
+    setEnabled: (newEnabled: boolean) => {
+      if (newEnabled === enabled) return;
+      enabled = newEnabled;
+
       source.disconnect();
       suppressorNode.disconnect();
-      stereoUpMix.disconnect();
+      merger.disconnect();
+
       if (enabled) {
+        // source -> suppressor -> merger -> destination
         source.connect(suppressorNode);
-        suppressorNode.connect(stereoUpMix);
+        suppressorNode.connect(merger, 0, 0);
+        suppressorNode.connect(merger, 0, 1);
       } else {
-        source.connect(stereoUpMix);
+        // Bypass: source -> merger -> destination
+        source.connect(merger, 0, 0);
+        source.connect(merger, 0, 1);
       }
-      stereoUpMix.connect(destination);
+      merger.connect(destination);
     },
   };
 }
