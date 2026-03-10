@@ -4,7 +4,7 @@
   "version": "0.1.0",
   "identifier": "com.carter.pax",
   "build": {
-    "beforeDevCommand": "npm run dev",
+    "beforeDevCommand": "",
     "devUrl": "http://localhost:1420",
     "beforeBuildCommand": "npm run build",
     "frontendDist": "../dist"
@@ -12,7 +12,7 @@
   "app": {
     "windows": [
       {
-        "title": "pax",
+        "title": "Pax",
         "width": 800,
         "height": 600
       }
