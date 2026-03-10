@@ -16,6 +16,7 @@ const spacing: ThemeSpacing = {
   unit: 4,
   sidebarWidth: 240,
   spaceSidebarWidth: 72,
+  headerHeight: 54,
 };
 
 export const darkTheme: Theme = {

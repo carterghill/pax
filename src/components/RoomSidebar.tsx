@@ -96,6 +96,7 @@ export default function RoomSidebar({
         padding: `${spacing.unit * 4}px ${spacing.unit * 4}px`,
         fontSize: typography.fontSizeLarge,
         fontWeight: typography.fontWeightBold,
+        height: spacing.headerHeight,
         color: palette.textHeading,
         borderBottom: `1px solid ${palette.border}`,
         margin: 0,

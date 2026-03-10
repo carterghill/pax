@@ -34,6 +34,7 @@ export interface ThemeSpacing {
   unit: number;  // base unit in px, e.g. 4
   sidebarWidth: number;
   spaceSidebarWidth: number;
+  headerHeight: number;
 }
 
 export interface Theme {

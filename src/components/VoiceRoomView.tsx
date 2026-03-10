@@ -55,6 +55,7 @@ export default function VoiceRoomView({
       <div style={{
         padding: `${spacing.unit * 4}px ${spacing.unit * 4}px`,
         borderBottom: `1px solid ${palette.border}`,
+        height: spacing.headerHeight,
         display: "flex",
         alignItems: "center",
         gap: spacing.unit * 3,
