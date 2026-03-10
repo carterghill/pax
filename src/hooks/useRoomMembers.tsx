@@ -8,6 +8,10 @@ interface PresencePayload {
   presence: string;
 }
 
+function cacheKey(roomId: string) {
+  return `room-members-${roomId}`;
+}
+
 export function useRoomMembers(roomId: string) {
   const [members, setMembers] = useState<RoomMember[]>([]);
   const [loading, setLoading] = useState(true);
@@ -16,9 +20,11 @@ export function useRoomMembers(roomId: string) {
 
   const fetchMembers = useCallback((showLoading: boolean) => {
     if (showLoading) setLoading(true);
+
     invoke<RoomMember[]>("get_room_members", { roomId })
       .then((result) => {
         setMembers(result);
+        sessionStorage.setItem(cacheKey(roomId), JSON.stringify(result));
         setLoading(false);
         hasFetched.current = true;
       })
@@ -28,31 +34,56 @@ export function useRoomMembers(roomId: string) {
       });
   }, [roomId]);
 
-  // Initial fetch (with loading indicator) when room changes
+  // Initial load (prefer cache)
   useEffect(() => {
     hasFetched.current = false;
-    fetchMembers(true);
-  }, [fetchMembers]);
 
-  // Silently re-fetch on rooms-changed, debounced to avoid spam
+    const cached = sessionStorage.getItem(cacheKey(roomId));
+
+    if (cached) {
+      try {
+        const parsed = JSON.parse(cached) as RoomMember[];
+        setMembers(parsed);
+        setLoading(false);
+        hasFetched.current = true;
+      } catch {
+        fetchMembers(true);
+      }
+    } else {
+      fetchMembers(true);
+    }
+  }, [roomId, fetchMembers]);
+
+  // Persist cache whenever members change
+  useEffect(() => {
+    if (members.length > 0) {
+      sessionStorage.setItem(cacheKey(roomId), JSON.stringify(members));
+    }
+  }, [members, roomId]);
+
+  // Silently re-fetch on rooms-changed, debounced
   useEffect(() => {
     const unlisten = listen("rooms-changed", () => {
       if (!hasFetched.current) return;
+
       if (debounceRef.current) clearTimeout(debounceRef.current);
+
       debounceRef.current = setTimeout(() => {
         fetchMembers(false);
       }, 2000);
     });
+
     return () => {
       unlisten.then((fn) => fn());
       if (debounceRef.current) clearTimeout(debounceRef.current);
     };
   }, [fetchMembers]);
 
-  // Live presence updates — patch in place, no re-fetch needed
+  // Live presence updates — patch in place
   useEffect(() => {
     const unlisten = listen<PresencePayload>("presence", (event) => {
       const { userId, presence } = event.payload;
+
       setMembers((prev) =>
         prev.map((m) =>
           m.userId === userId ? { ...m, presence } : m
@@ -65,14 +96,18 @@ export function useRoomMembers(roomId: string) {
     };
   }, []);
 
-  // Sort: online first, then unavailable, then offline; alphabetical within each group
+  // Sort members
   const sorted = [...members].sort((a, b) => {
     const order: Record<string, number> = { online: 0, unavailable: 1, offline: 2 };
+
     const aOrder = order[a.presence] ?? 2;
     const bOrder = order[b.presence] ?? 2;
+
     if (aOrder !== bOrder) return aOrder - bOrder;
+
     const aName = (a.displayName ?? a.userId).toLowerCase();
     const bName = (b.displayName ?? b.userId).toLowerCase();
+
     return aName.localeCompare(bName);
   });
 
