@@ -2,11 +2,13 @@
 
 pub mod platform;
 mod idle;
+mod voice;
 
 use std::sync::Arc;
 use std::collections::HashMap;
 use tauri::State;
 use tauri::Emitter;
+use tauri::Manager;
 use tokio::sync::Mutex;
 use matrix_sdk::{Client, Room, config::SyncSettings, media::MediaFormat};
 use matrix_sdk::ruma::events::StateEventType;
@@ -526,15 +528,13 @@ struct VoiceJoinResult {
     livekit_url: String,
 }
 
-#[tauri::command]
-async fn join_voice_room(
-    state: State<'_, Arc<AppState>>,
-    room_id: String,
+/// Internal helper: do the Matrix state event + JWT exchange.
+/// Returns (jwt, livekit_url).
+async fn matrix_voice_join(
+    client: &Client,
+    room_id: &str,
 ) -> Result<VoiceJoinResult, String> {
-    let guard = state.client.lock().await;
-    let client = guard.as_ref().ok_or("Not logged in")?;
-
-    let room_id_parsed = matrix_sdk::ruma::RoomId::parse(&room_id)
+    let room_id_parsed = matrix_sdk::ruma::RoomId::parse(room_id)
         .map_err(|e| format!("Invalid room ID: {e}"))?;
 
     let room = client
@@ -573,7 +573,7 @@ async fn join_voice_room(
 
     let state_url = format!("{}/_matrix/client/v3/rooms/{}/state/{}/{}",
         homeserver.trim_end_matches('/'),
-        urlencoding::encode(&room_id),
+        urlencoding::encode(room_id),
         urlencoding::encode("org.matrix.msc3401.call.member"),
         urlencoding::encode(&state_key),
     );
@@ -642,28 +642,19 @@ async fn join_voice_room(
     Ok(VoiceJoinResult { jwt, livekit_url })
 }
 
-#[tauri::command]
-async fn leave_voice_room(
-    state: State<'_, Arc<AppState>>,
-    room_id: String,
-) -> Result<(), String> {
-    let guard = state.client.lock().await;
-    let client = guard.as_ref().ok_or("Not logged in")?;
-
+/// Internal helper: send the Matrix leave state event.
+async fn matrix_voice_leave(client: &Client, room_id: &str) -> Result<(), String> {
     let user_id = client.user_id().ok_or("No user ID")?;
     let device_id = client.device_id().ok_or("No device ID")?;
-
     let state_key = format!("_{}_{}_{}", user_id, device_id, "m.call");
 
-    // Send empty content to signal leave
     let content = serde_json::json!({});
-
     let homeserver = client.homeserver().to_string();
     let access_token = client.access_token().ok_or("No access token")?;
 
     let state_url = format!("{}/_matrix/client/v3/rooms/{}/state/{}/{}",
         homeserver.trim_end_matches('/'),
-        urlencoding::encode(&room_id),
+        urlencoding::encode(room_id),
         urlencoding::encode("org.matrix.msc3401.call.member"),
         urlencoding::encode(&state_key),
     );
@@ -682,6 +673,73 @@ async fn leave_voice_room(
         return Err(format!("Failed to send leave event ({}): {}", status, body));
     }
 
+    Ok(())
+}
+
+#[tauri::command]
+async fn voice_connect(
+    state: State<'_, Arc<AppState>>,
+    voice_mgr: State<'_, voice::VoiceManager>,
+    app_handle: tauri::AppHandle,
+    room_id: String,
+) -> Result<(), String> {
+    // 0. Clear any stale call.member state
+    {
+        let guard = state.client.lock().await;
+        if let Some(client) = guard.as_ref() {
+            let _ = matrix_voice_leave(client, &room_id).await;
+        }
+    }
+
+    // 1. Do the Matrix join (state event + JWT)
+    let (jwt, livekit_url, local_identity) = {
+        let guard = state.client.lock().await;
+        let client = guard.as_ref().ok_or("Not logged in")?;
+        let result = matrix_voice_join(client, &room_id).await?;
+        let identity = client.user_id().ok_or("No user ID")?.to_string();
+        (result.jwt, result.livekit_url, identity)
+    };
+
+    // 2. Connect to LiveKit natively via the Rust SDK
+    voice_mgr
+        .connect(room_id.clone(), livekit_url, jwt, local_identity, app_handle)
+        .await?;
+
+    Ok(())
+}
+
+#[tauri::command]
+async fn voice_disconnect(
+    state: State<'_, Arc<AppState>>,
+    voice_mgr: State<'_, voice::VoiceManager>,
+    room_id: String,
+) -> Result<(), String> {
+    // 1. Disconnect from LiveKit
+    voice_mgr.disconnect().await;
+
+    // 2. Send Matrix leave event
+    let guard = state.client.lock().await;
+    if let Some(client) = guard.as_ref() {
+        let _ = matrix_voice_leave(client, &room_id).await;
+    }
+
+    Ok(())
+}
+
+#[tauri::command]
+async fn voice_toggle_mic(
+    voice_mgr: State<'_, voice::VoiceManager>,
+) -> Result<bool, String> {
+    voice_mgr.toggle_mic()
+}
+
+#[tauri::command]
+async fn voice_set_participant_volume(
+    voice_mgr: State<'_, voice::VoiceManager>,
+    identity: String,
+    volume: f32,
+) -> Result<(), String> {
+    voice_mgr.set_participant_volume(identity, volume);
     Ok(())
 }
 
@@ -940,20 +998,59 @@ pub fn run() {
 
     tauri::Builder::default()
         .manage(state)
+        .manage(voice::VoiceManager::new())
         .invoke_handler(tauri::generate_handler![
             login,
             get_rooms,
             get_messages,
             get_room_members,
             get_voice_participants,
-            join_voice_room,
-            leave_voice_room,
+            voice_connect,
+            voice_disconnect,
+            voice_toggle_mic,
+            voice_set_participant_volume,
             send_message,
             start_sync,
             send_typing_notice,
             set_presence,
             start_idle_monitor,
         ])
+        .setup(|app| {
+            // On Linux (WebKitGTK), auto-grant microphone/camera permission requests
+            // so getUserMedia() works for voice calls.
+            #[cfg(target_os = "linux")]
+            {
+                let main_window = app.get_webview_window("main")
+                    .expect("main window not found");
+
+                main_window.with_webview(|webview| {
+                    use webkit2gtk::WebViewExt;
+                    use webkit2gtk::PermissionRequestExt;
+                    use webkit2gtk::SettingsExt;
+                    let wv = webview.inner();
+
+                    // Enable WebRTC and media stream in WebKitGTK settings
+                    // (disabled by default since WebKitGTK 2.38)
+                    if let Some(settings) = wv.settings() {
+                        settings.set_enable_webrtc(true);
+                        settings.set_enable_media_stream(true);
+                        settings.set_enable_webaudio(true);
+                    }
+
+                    // Auto-grant microphone/camera permission requests
+                    wv.connect_permission_request(|_wv, request| {
+                        request.allow();
+                        true
+                    });
+                }).expect("Failed to configure webview permissions");
+            }
+
+            // Suppress unused variable warning on non-Linux
+            #[cfg(not(target_os = "linux"))]
+            let _ = app;
+
+            Ok(())
+        })
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
 }

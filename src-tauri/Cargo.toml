@@ -29,6 +29,15 @@ data-encoding = "2"
 user-idle = "0.6"
 reqwest = { version = "0.12", features = ["json"] }
 urlencoding = "2"
+# LiveKit native voice (replaces browser-based livekit-client JS SDK)
+livekit = { version = "0.7", features = ["rustls-tls-native-roots"] }
+# Disable the default glib-main-loop feature since Tauri/GTK already runs one
+libwebrtc = { version = "0.3", default-features = false }
+cpal = "0.15"
+futures-util = "0.3"
+parking_lot = "0.12"
+log = "0.4"
 
 [target.'cfg(target_os = "linux")'.dependencies]
 zbus = { version = "4", default-features = false, features = ["tokio"] }
+webkit2gtk = { version = "2.0", features = ["v2_38"] }

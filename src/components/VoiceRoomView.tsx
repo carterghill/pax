@@ -2,7 +2,7 @@ import { useState } from "react";
 import { Volume2, Mic, MicOff, PhoneOff, Loader2, AudioLines } from "lucide-react";
 import { useTheme } from "../theme/ThemeContext";
 import { Room } from "../types/matrix";
-import { VoiceCallState } from "../hooks/useVoiceCall";
+import { VoiceCallState, VoiceParticipant } from "../hooks/useVoiceCall";
 import { useUserVolume } from "../hooks/useUserVolume";
 import VolumeContextMenu from "./VolumeContextMenu";
 
@@ -35,26 +35,8 @@ export default function VoiceRoomView({
   const isConnected = callState.connectedRoomId === room.id && !callState.isConnecting;
   const isConnecting = callState.isConnecting && callState.connectedRoomId === room.id;
 
-  // Collect all participants: local + remote
-  const allParticipants: { identity: string; isSpeaking: boolean; isLocal: boolean }[] = [];
-
-  if (isConnected && callState.localParticipant) {
-    allParticipants.push({
-      identity: callState.localParticipant.identity,
-      isSpeaking: callState.localParticipant.isSpeaking,
-      isLocal: true,
-    });
-  }
-
-  if (isConnected) {
-    for (const p of callState.remoteParticipants) {
-      allParticipants.push({
-        identity: p.identity,
-        isSpeaking: p.isSpeaking,
-        isLocal: false,
-      });
-    }
-  }
+  // Collect all participants from the Rust backend state
+  const allParticipants: VoiceParticipant[] = isConnected ? callState.participants : [];
 
   return (
     <div style={{
