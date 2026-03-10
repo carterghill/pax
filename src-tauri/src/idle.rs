@@ -12,7 +12,10 @@ use tauri::Emitter;
 
 use crate::platform::DisplayServer;
 
+#[cfg(target_os = "linux")]
 use zbus::Proxy;
+
+#[cfg(target_os = "linux")]
 use zbus::proxy::Builder;
 
 // ---------------------------------------------------------------------------
@@ -190,7 +193,6 @@ async fn try_logind_idle() -> Option<u64> {
 
     let val: zbus::zvariant::OwnedValue = reply.body().deserialize().ok()?;
 
-    // FIXED for your exact zbus version: downcast_ref::<u64>() returns Result<u64, _>
     let idle_since_us: u64 = match val.downcast_ref::<u64>() {
         Ok(v) => v,
         Err(_) => 0,
