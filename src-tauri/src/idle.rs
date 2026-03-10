@@ -12,6 +12,9 @@ use tauri::Emitter;
 
 use crate::platform::DisplayServer;
 
+use zbus::Proxy;
+use zbus::proxy::Builder;
+
 // ---------------------------------------------------------------------------
 // Public entry-point
 // ---------------------------------------------------------------------------
@@ -110,7 +113,7 @@ async fn get_idle_ms_dbus(conn: &zbus::Connection) -> Option<u64> {
 /// Returns idle time in milliseconds directly.
 #[cfg(target_os = "linux")]
 async fn try_mutter_idle(conn: &zbus::Connection) -> Option<u64> {
-    let proxy = zbus::proxy::Builder::new(conn)
+    let proxy: Proxy = Builder::new(conn)
         .destination("org.gnome.Mutter.IdleMonitor").ok()?
         .path("/org/gnome/Mutter/IdleMonitor/Core").ok()?
         .interface("org.gnome.Mutter.IdleMonitor").ok()?
@@ -128,7 +131,7 @@ async fn try_mutter_idle(conn: &zbus::Connection) -> Option<u64> {
 /// Returns idle time in milliseconds.
 #[cfg(target_os = "linux")]
 async fn try_kde_idle(conn: &zbus::Connection) -> Option<u64> {
-    let proxy = zbus::proxy::Builder::new(conn)
+    let proxy: Proxy = Builder::new(conn)
         .destination("org.freedesktop.ScreenSaver").ok()?
         .path("/ScreenSaver").ok()?
         .interface("org.freedesktop.ScreenSaver").ok()?
@@ -153,7 +156,7 @@ async fn try_logind_idle() -> Option<u64> {
     let sys_conn = zbus::Connection::system().await.ok()?;
 
     // Resolve the current session's object path via GetSession("auto").
-    let manager_proxy = zbus::proxy::Builder::new(&sys_conn)
+    let manager_proxy: Proxy = Builder::new(&sys_conn)
         .destination("org.freedesktop.login1").ok()?
         .path("/org/freedesktop/login1").ok()?
         .interface("org.freedesktop.login1.Manager").ok()?
@@ -169,7 +172,7 @@ async fn try_logind_idle() -> Option<u64> {
         reply.body().deserialize().ok()?;
 
     // Read the IdleSinceHint property via org.freedesktop.DBus.Properties.
-    let props_proxy = zbus::proxy::Builder::new(&sys_conn)
+    let props_proxy: Proxy = Builder::new(&sys_conn)
         .destination("org.freedesktop.login1").ok()?
         .path(session_path).ok()?
         .interface("org.freedesktop.DBus.Properties").ok()?
@@ -186,7 +189,12 @@ async fn try_logind_idle() -> Option<u64> {
         .ok()?;
 
     let val: zbus::zvariant::OwnedValue = reply.body().deserialize().ok()?;
-    let idle_since_us: u64 = val.downcast_ref::<u64>().copied().unwrap_or(0);
+
+    // FIXED for your exact zbus version: downcast_ref::<u64>() returns Result<u64, _>
+    let idle_since_us: u64 = match val.downcast_ref::<u64>() {
+        Ok(v) => v,
+        Err(_) => 0,
+    };
 
     if idle_since_us == 0 {
         return Some(0); // session not marked idle
