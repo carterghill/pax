@@ -66,6 +66,7 @@ export default function MainLayout({ userId }: { userId: string }) {
           userId={userId}
           voiceParticipants={voiceParticipants}
           connectedVoiceRoomId={voiceCall.connectedRoomId}
+          onSetParticipantVolume={voiceCall.setParticipantVolume}
         />
         <main style={{
           flex: 1,
@@ -82,6 +83,7 @@ export default function MainLayout({ userId }: { userId: string }) {
               onDisconnect={voiceCall.disconnect}
               onToggleMic={voiceCall.toggleMic}
               onToggleNoiseSuppression={voiceCall.toggleNoiseSuppression}
+              onSetParticipantVolume={voiceCall.setParticipantVolume}
             />
           ) : activeRoom ? (
             <ChatView room={activeRoom} userId={userId} />

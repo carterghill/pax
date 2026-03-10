@@ -16,6 +16,7 @@ import {
   NoiseSuppressorHandle,
 } from "../audio/noiseSuppression";
 import { useSound } from "react-sounds";
+import { getStoredVolume } from "./useUserVolume";
 
 export interface VoiceCallState {
   connectedRoomId: string | null;
@@ -27,9 +28,17 @@ export interface VoiceCallState {
   localParticipant: LocalParticipant | null;
 }
 
+/** Audio routing nodes for a single remote track */
+interface ParticipantAudioNodes {
+  ctx: AudioContext;
+  gain: GainNode;
+  source: MediaElementAudioSourceNode;
+}
+
 export function useVoiceCall() {
   const livekitRoom = useRef<Room | null>(null);
   const audioElements = useRef<Map<string, HTMLAudioElement>>(new Map());
+  const audioNodes = useRef<Map<string, ParticipantAudioNodes>>(new Map());
   const noiseSuppressor = useRef<NoiseSuppressorHandle | null>(null);
   const rawMicStream = useRef<MediaStream | null>(null);
   const [state, setState] = useState<VoiceCallState>({
@@ -59,7 +68,7 @@ export function useVoiceCall() {
     }));
   }, []);
 
-  // Attach remote audio tracks for playback
+  // Attach remote audio tracks for playback, with per-user GainNode for volume control
   const attachAudioTrack = useCallback(
     (track: Track, _pub: RemoteTrackPublication, participant: RemoteParticipant) => {
       if (track.kind !== Track.Kind.Audio) return;
@@ -68,16 +77,26 @@ export function useVoiceCall() {
       el.style.display = "none";
       document.body.appendChild(el);
 
-      // Route through Web Audio to fix mono → stereo (both ears)
+      const key = participant.identity + ":" + track.sid;
+
+      // Route through Web Audio with a GainNode for volume control
       try {
         const ctx = new AudioContext();
         const source = ctx.createMediaElementSource(el);
-        source.connect(ctx.destination);
+        const gain = ctx.createGain();
+
+        // Apply stored volume for this user (defaults to 1.0 = 100%)
+        gain.gain.value = getStoredVolume(participant.identity);
+
+        source.connect(gain);
+        gain.connect(ctx.destination);
+
+        audioNodes.current.set(key, { ctx, gain, source });
       } catch {
-        // Fallback: direct playback
+        // Fallback: direct playback (no volume control)
       }
 
-      audioElements.current.set(participant.identity + ":" + track.sid, el);
+      audioElements.current.set(key, el);
     },
     []
   );
@@ -90,6 +109,12 @@ export function useVoiceCall() {
         el.remove();
         audioElements.current.delete(key);
       }
+      // Clean up Web Audio nodes
+      const nodes = audioNodes.current.get(key);
+      if (nodes) {
+        try { nodes.ctx.close(); } catch { /* ignore */ }
+        audioNodes.current.delete(key);
+      }
       track.detach();
     },
     []
@@ -98,6 +123,11 @@ export function useVoiceCall() {
   const cleanupAudio = useCallback(() => {
     audioElements.current.forEach((el) => el.remove());
     audioElements.current.clear();
+    // Close all Web Audio contexts
+    audioNodes.current.forEach((nodes) => {
+      try { nodes.ctx.close(); } catch { /* ignore */ }
+    });
+    audioNodes.current.clear();
     // Clean up noise suppressor
     if (noiseSuppressor.current) {
       noiseSuppressor.current.destroy();
@@ -284,6 +314,20 @@ export function useVoiceCall() {
     setState((prev) => ({ ...prev, isNoiseSuppressed: newEnabled }));
   }, [state.isNoiseSuppressed]);
 
+  /**
+   * Set the playback volume for a specific remote participant.
+   * Volume is 0–2 (0% to 200%). This updates all active audio tracks for that identity.
+   */
+  const setParticipantVolume = useCallback((identity: string, volume: number) => {
+    const clamped = Math.max(0, Math.min(2, volume));
+    // Update all GainNodes belonging to this participant
+    audioNodes.current.forEach((nodes, key) => {
+      if (key.startsWith(identity + ":")) {
+        nodes.gain.gain.value = clamped;
+      }
+    });
+  }, []);
+
   // Cleanup on unmount
   useEffect(() => {
     return () => {
@@ -306,5 +350,6 @@ export function useVoiceCall() {
     disconnect,
     toggleMic,
     toggleNoiseSuppression,
+    setParticipantVolume,
   };
 }

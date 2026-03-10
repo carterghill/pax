@@ -1,7 +1,10 @@
+import { useState } from "react";
 import { Volume2, Mic, MicOff, PhoneOff, Loader2, AudioLines } from "lucide-react";
 import { useTheme } from "../theme/ThemeContext";
 import { Room } from "../types/matrix";
 import { VoiceCallState } from "../hooks/useVoiceCall";
+import { useUserVolume } from "../hooks/useUserVolume";
+import VolumeContextMenu from "./VolumeContextMenu";
 
 interface VoiceRoomViewProps {
   room: Room;
@@ -9,6 +12,7 @@ interface VoiceRoomViewProps {
   onDisconnect: () => void;
   onToggleMic: () => void;
   onToggleNoiseSuppression: () => void;
+  onSetParticipantVolume: (identity: string, volume: number) => void;
 }
 
 export default function VoiceRoomView({
@@ -17,8 +21,16 @@ export default function VoiceRoomView({
   onDisconnect,
   onToggleMic,
   onToggleNoiseSuppression,
+  onSetParticipantVolume,
 }: VoiceRoomViewProps) {
   const { palette, spacing, typography } = useTheme();
+  const { getVolume, setVolume } = useUserVolume();
+  const [contextMenu, setContextMenu] = useState<{
+    x: number;
+    y: number;
+    identity: string;
+    displayName: string;
+  } | null>(null);
 
   const isConnected = callState.connectedRoomId === room.id && !callState.isConnecting;
   const isConnecting = callState.isConnecting && callState.connectedRoomId === room.id;
@@ -141,12 +153,23 @@ export default function VoiceRoomView({
           return (
             <div
               key={p.identity}
+              onContextMenu={(e) => {
+                if (p.isLocal) return; // No volume control for yourself
+                e.preventDefault();
+                setContextMenu({
+                  x: e.clientX,
+                  y: e.clientY,
+                  identity: p.identity,
+                  displayName,
+                });
+              }}
               style={{
                 display: "flex",
                 flexDirection: "column",
                 alignItems: "center",
                 gap: spacing.unit * 2,
                 width: 120,
+                cursor: p.isLocal ? "default" : "context-menu",
               }}
             >
               {/* Avatar circle with speaking ring */}
@@ -271,6 +294,21 @@ export default function VoiceRoomView({
             <PhoneOff size={20} />
           </button>
         </div>
+      )}
+
+      {/* Volume context menu */}
+      {contextMenu && (
+        <VolumeContextMenu
+          x={contextMenu.x}
+          y={contextMenu.y}
+          displayName={contextMenu.displayName}
+          volume={getVolume(contextMenu.identity)}
+          onVolumeChange={(vol) => {
+            setVolume(contextMenu.identity, vol);
+            onSetParticipantVolume(contextMenu.identity, vol);
+          }}
+          onClose={() => setContextMenu(null)}
+        />
       )}
     </div>
   );

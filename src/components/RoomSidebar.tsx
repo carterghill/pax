@@ -1,7 +1,10 @@
+import { useState } from "react";
 import { Hash, Volume2, PhoneOff } from "lucide-react";
 import { Room, VoiceParticipant } from "../types/matrix";
 import { useTheme } from "../theme/ThemeContext";
 import StatusDropdown from "./StatusDropdown";
+import VolumeContextMenu from "./VolumeContextMenu";
+import { useUserVolume } from "../hooks/useUserVolume";
 
 const VOICE_ROOM_TYPE = "org.matrix.msc3417.call";
 
@@ -13,20 +16,37 @@ interface RoomSidebarProps {
   userId: string;
   voiceParticipants: Record<string, VoiceParticipant[]>;
   connectedVoiceRoomId: string | null;
+  onSetParticipantVolume: (identity: string, volume: number) => void;
 }
 
-function VoiceParticipantRow({ participant }: { participant: VoiceParticipant }) {
+function VoiceParticipantRow({
+  participant,
+  isLocalUser,
+  onContextMenu,
+}: {
+  participant: VoiceParticipant;
+  isLocalUser: boolean;
+  onContextMenu: (e: React.MouseEvent) => void;
+}) {
   const { palette, spacing, typography } = useTheme();
   const name = participant.displayName ?? participant.userId;
 
   return (
-    <div style={{
+    <div
+      onContextMenu={(e) => {
+        if (!isLocalUser) {
+          e.preventDefault();
+          onContextMenu(e);
+        }
+      }}
+      style={{
       display: "flex",
       alignItems: "center",
       gap: spacing.unit * 2,
       padding: `${spacing.unit}px ${spacing.unit * 3}px ${spacing.unit}px ${spacing.unit * 8}px`,
       fontSize: typography.fontSizeSmall,
       color: palette.textSecondary,
+      cursor: isLocalUser ? "default" : "context-menu",
     }}>
       {participant.avatarUrl ? (
         <img
@@ -76,8 +96,16 @@ export default function RoomSidebar({
   userId,
   voiceParticipants,
   connectedVoiceRoomId,
+  onSetParticipantVolume,
 }: RoomSidebarProps) {
   const { palette, spacing, typography } = useTheme();
+  const { getVolume, setVolume } = useUserVolume();
+  const [contextMenu, setContextMenu] = useState<{
+    x: number;
+    y: number;
+    identity: string;
+    displayName: string;
+  } | null>(null);
 
   // Extract local part of userId for display (e.g. @carter:matrix.org → carter)
   const displayName = userId.startsWith("@")
@@ -164,7 +192,20 @@ export default function RoomSidebar({
               {isVoice && participants.length > 0 && (
                 <div style={{ paddingBottom: spacing.unit }}>
                   {participants.map((p) => (
-                    <VoiceParticipantRow key={p.userId} participant={p} />
+                    <VoiceParticipantRow
+                      key={p.userId}
+                      participant={p}
+                      isLocalUser={p.userId === userId}
+                      onContextMenu={(e) => {
+                        // Map userId to the identity format used by LiveKit
+                        setContextMenu({
+                          x: e.clientX,
+                          y: e.clientY,
+                          identity: p.userId,
+                          displayName: p.displayName ?? p.userId,
+                        });
+                      }}
+                    />
                   ))}
                 </div>
               )}
@@ -184,6 +225,21 @@ export default function RoomSidebar({
 
       {/* User status at bottom */}
       <StatusDropdown displayName={displayName} avatarUrl={null} />
+
+      {/* Volume context menu */}
+      {contextMenu && (
+        <VolumeContextMenu
+          x={contextMenu.x}
+          y={contextMenu.y}
+          displayName={contextMenu.displayName}
+          volume={getVolume(contextMenu.identity)}
+          onVolumeChange={(vol) => {
+            setVolume(contextMenu.identity, vol);
+            onSetParticipantVolume(contextMenu.identity, vol);
+          }}
+          onClose={() => setContextMenu(null)}
+        />
+      )}
     </div>
   );
 }
