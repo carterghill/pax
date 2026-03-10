@@ -1,5 +1,8 @@
 #![recursion_limit = "256"]
 
+pub mod platform;
+mod idle;
+
 use std::sync::Arc;
 use std::collections::HashMap;
 use tauri::State;
@@ -14,9 +17,12 @@ use matrix_sdk::ruma::UInt;
 use serde::Serialize;
 use data_encoding::BASE64;
 
+use platform::DisplayServer;
+
 pub struct AppState {
     pub client: Mutex<Option<Client>>,
     pub presence_map: Arc<Mutex<HashMap<String, String>>>,
+    pub display_server: DisplayServer,
 }
 
 #[derive(Serialize)]
@@ -910,27 +916,13 @@ async fn set_presence(
 
 #[tauri::command]
 async fn start_idle_monitor(
+    state: State<'_, Arc<AppState>>,
     app: tauri::AppHandle,
 ) -> Result<(), String> {
+    let display_server = state.display_server;
+
     tokio::spawn(async move {
-        let idle_threshold_secs = 300u64; // 5 minutes
-        let mut was_idle = false;
-
-        loop {
-            tokio::time::sleep(std::time::Duration::from_secs(15)).await;
-
-            let idle_secs = match user_idle::UserIdle::get_time() {
-                Ok(idle) => idle.as_seconds() as u64,
-                Err(_) => continue,
-            };
-
-            let is_idle = idle_secs >= idle_threshold_secs;
-
-            if is_idle != was_idle {
-                was_idle = is_idle;
-                let _ = app.emit("idle-changed", is_idle);
-            }
-        }
+        idle::run_idle_monitor(app, display_server).await;
     });
 
     Ok(())
@@ -938,9 +930,12 @@ async fn start_idle_monitor(
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
+    let display_server = platform::detect_display_server();
+
     let state = Arc::new(AppState {
         client: Mutex::new(None),
         presence_map: Arc::new(Mutex::new(HashMap::new())),
+        display_server,
     });
 
     tauri::Builder::default()

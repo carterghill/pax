@@ -29,3 +29,6 @@ data-encoding = "2"
 user-idle = "0.6"
 reqwest = { version = "0.12", features = ["json"] }
 urlencoding = "2"
+
+[target.'cfg(target_os = "linux")'.dependencies]
+zbus = { version = "4", default-features = false, features = ["tokio"] }
