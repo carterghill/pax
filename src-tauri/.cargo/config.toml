@@ -1,0 +1,7 @@
+# Required by the livekit crate (libwebrtc bindings)
+# On macOS, -ObjC linker flag is required for Objective-C runtime support
+[target.x86_64-apple-darwin]
+rustflags = ["-C", "link-args=-ObjC"]
+
+[target.aarch64-apple-darwin]
+rustflags = ["-C", "link-args=-ObjC"]
