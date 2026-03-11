@@ -520,11 +520,18 @@ fn setup_mic_input(audio_state: Arc<Mutex<AudioState>>) -> Result<cpal::Stream, 
 
     log::info!("[Pax] Using input device: {:?}", device.name());
 
+    // Use the device's preferred config to avoid unsupported format errors
+    let default_config = device.default_input_config()
+        .map_err(|e| format!("Failed to get default input config: {}", e))?;
+
+    let channels = default_config.channels();
     let config = cpal::StreamConfig {
-        channels: NUM_CHANNELS as u16,
-        sample_rate: cpal::SampleRate(SAMPLE_RATE),
+        channels,
+        sample_rate: default_config.sample_rate(),
         buffer_size: cpal::BufferSize::Default,
     };
+
+    log::info!("[Pax] Mic config: {}ch @ {}Hz", channels, default_config.sample_rate().0);
 
     let state = audio_state.clone();
     let stream = device
@@ -532,21 +539,24 @@ fn setup_mic_input(audio_state: Arc<Mutex<AudioState>>) -> Result<cpal::Stream, 
             &config,
             move |data: &[f32], _: &cpal::InputCallbackInfo| {
                 let mut st = state.lock();
-                // Convert f32 → i16 and push to mic buffer
-                for &sample in data {
+                let ch = channels as usize;
+                // Take only channel 0 (mono downmix) and convert f32 → i16
+                for frame in data.chunks(ch) {
+                    let sample = frame[0]; // first channel
                     let clamped = sample.clamp(-1.0, 1.0);
                     let i16_sample = (clamped * 32767.0) as i16;
                     st.mic_buffer.push_back(i16_sample);
                 }
-                // Cap buffer at ~1 second
-                while st.mic_buffer.len() > SAMPLE_RATE as usize {
+                // Cap buffer at ~1 second worth of mono samples
+                let max = SAMPLE_RATE as usize;
+                while st.mic_buffer.len() > max {
                     st.mic_buffer.pop_front();
                 }
             },
             move |err| {
                 log::error!("[Pax] Mic input error: {}", err);
             },
-            None, // no timeout
+            None,
         )
         .map_err(|e| format!("Failed to build input stream: {}", e))?;
 
@@ -561,11 +571,18 @@ fn setup_speaker_output(audio_state: Arc<Mutex<AudioState>>) -> Result<cpal::Str
 
     log::info!("[Pax] Using output device: {:?}", device.name());
 
+    // Use the device's preferred config (Windows typically requires stereo)
+    let default_config = device.default_output_config()
+        .map_err(|e| format!("Failed to get default output config: {}", e))?;
+
+    let channels = default_config.channels();
     let config = cpal::StreamConfig {
-        channels: NUM_CHANNELS as u16,
-        sample_rate: cpal::SampleRate(SAMPLE_RATE),
+        channels,
+        sample_rate: default_config.sample_rate(),
         buffer_size: cpal::BufferSize::Default,
     };
+
+    log::info!("[Pax] Speaker config: {}ch @ {}Hz", channels, default_config.sample_rate().0);
 
     let state = audio_state.clone();
     let stream = device
@@ -573,8 +590,13 @@ fn setup_speaker_output(audio_state: Arc<Mutex<AudioState>>) -> Result<cpal::Str
             &config,
             move |data: &mut [f32], _: &cpal::OutputCallbackInfo| {
                 let mut st = state.lock();
-                for sample in data.iter_mut() {
-                    *sample = st.playback_buffer.pop_front().unwrap_or(0.0);
+                let ch = channels as usize;
+                // Our playback buffer is mono — duplicate each sample to all output channels
+                for frame in data.chunks_mut(ch) {
+                    let sample = st.playback_buffer.pop_front().unwrap_or(0.0);
+                    for s in frame.iter_mut() {
+                        *s = sample;
+                    }
                 }
             },
             move |err| {

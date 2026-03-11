@@ -1,4 +1,11 @@
 # Required by the livekit crate (libwebrtc bindings)
+# libwebrtc is built with static CRT on Windows, must match
+[target.x86_64-pc-windows-msvc]
+rustflags = ["-C", "target-feature=+crt-static"]
+
+[target.aarch64-pc-windows-msvc]
+rustflags = ["-C", "target-feature=+crt-static"]
+
 # On macOS, -ObjC linker flag is required for Objective-C runtime support
 [target.x86_64-apple-darwin]
 rustflags = ["-C", "link-args=-ObjC"]
