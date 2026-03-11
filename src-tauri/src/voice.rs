@@ -63,9 +63,7 @@ pub struct VoiceStateEvent {
 // ─── Internal shared audio state ────────────────────────────────────────────
 
 struct AudioState {
-    /// Mic samples waiting to be sent to LiveKit (i16, 48kHz mono)
-    mic_buffer: VecDeque<i16>,
-    /// Mixed playback samples from all remote participants (f32, 48kHz mono)
+    /// Mixed playback samples from all remote participants (f32, mono)
     playback_buffer: VecDeque<f32>,
     /// Per-user volume multiplier (0.0 – 2.0, default 1.0)
     user_volumes: HashMap<String, f32>,
@@ -80,7 +78,6 @@ struct AudioState {
 impl Default for AudioState {
     fn default() -> Self {
         Self {
-            mic_buffer: VecDeque::with_capacity(SAMPLE_RATE as usize),
             playback_buffer: VecDeque::with_capacity(SAMPLE_RATE as usize),
             user_volumes: HashMap::new(),
             active_speakers: Vec::new(),
@@ -186,17 +183,19 @@ impl VoiceManager {
             .map_err(|e| format!("Failed to publish mic track: {}", e))?;
 
         // 4. Now set up cpal streams (no more .await after this point)
-        let input_stream = setup_mic_input(audio_state.clone())
+        // Create a channel for mic frames: cpal callback → pump task
+        let (mic_frame_tx, mic_frame_rx) = mpsc::channel::<Vec<i16>>(10); // small bounded buffer
+
+        let input_stream = setup_mic_input(audio_state.clone(), mic_frame_tx)
             .map_err(|e| format!("Failed to open microphone: {}", e))?;
 
         let output_stream = setup_speaker_output(audio_state.clone())
             .map_err(|e| format!("Failed to open speakers: {}", e))?;
 
-        // 5. Start mic capture pump (reads from cpal buffer → LiveKit)
+        // 5. Start mic capture pump (receives frames from cpal callback → LiveKit)
         let mic_source = audio_source.clone();
-        let mic_state = audio_state.clone();
         tokio::spawn(async move {
-            mic_capture_pump(mic_source, mic_state).await;
+            mic_capture_pump(mic_source, mic_frame_rx).await;
         });
 
         // 6. Start event loop
@@ -303,38 +302,24 @@ impl VoiceManager {
 
 // ─── Mic capture pump ───────────────────────────────────────────────────────
 
-/// Continuously reads mic samples from the ring buffer and sends them to LiveKit.
-async fn mic_capture_pump(source: NativeAudioSource, state: Arc<Mutex<AudioState>>) {
-    let frame_size = SAMPLES_PER_10MS as usize;
-
-    loop {
-        // Sleep ~10ms to accumulate a frame worth of samples
-        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
-
-        let samples: Vec<i16> = {
-            let mut st = state.lock();
-            if !st.mic_enabled {
-                // If muted, drain the buffer but send silence
-                st.mic_buffer.clear();
-                continue;
-            }
-            if st.mic_buffer.len() < frame_size {
-                continue;
-            }
-            st.mic_buffer.drain(..frame_size).collect()
-        };
-
+/// Receives completed mic frames from the cpal callback channel and sends to LiveKit.
+/// Zero latency added — frames arrive as soon as cpal has enough samples.
+async fn mic_capture_pump(
+    source: NativeAudioSource,
+    mut frame_rx: mpsc::Receiver<Vec<i16>>,
+) {
+    while let Some(samples) = frame_rx.recv().await {
         let frame = AudioFrame {
             data: samples.into(),
             sample_rate: SAMPLE_RATE,
             num_channels: NUM_CHANNELS,
             samples_per_channel: SAMPLES_PER_10MS,
         };
-
         if let Err(e) = source.capture_frame(&frame).await {
             log::error!("Failed to capture mic frame: {}", e);
         }
     }
+    log::info!("[Pax] Mic capture pump ended");
 }
 
 // ─── Remote audio handler ───────────────────────────────────────────────────
@@ -512,7 +497,10 @@ fn emit_state(
 
 // ─── cpal audio setup ───────────────────────────────────────────────────────
 
-fn setup_mic_input(audio_state: Arc<Mutex<AudioState>>) -> Result<cpal::Stream, String> {
+fn setup_mic_input(
+    audio_state: Arc<Mutex<AudioState>>,
+    frame_tx: mpsc::Sender<Vec<i16>>,
+) -> Result<cpal::Stream, String> {
     let host = cpal::default_host();
     let device = host
         .default_input_device()
@@ -520,7 +508,6 @@ fn setup_mic_input(audio_state: Arc<Mutex<AudioState>>) -> Result<cpal::Stream, 
 
     log::info!("[Pax] Using input device: {:?}", device.name());
 
-    // Use the device's preferred config to avoid unsupported format errors
     let default_config = device.default_input_config()
         .map_err(|e| format!("Failed to get default input config: {}", e))?;
 
@@ -533,24 +520,38 @@ fn setup_mic_input(audio_state: Arc<Mutex<AudioState>>) -> Result<cpal::Stream, 
 
     log::info!("[Pax] Mic config: {}ch @ {}Hz", channels, default_config.sample_rate().0);
 
-    let state = audio_state.clone();
+    // Local frame accumulator — shared with the cpal callback via Arc<Mutex>
+    let frame_buf: Arc<Mutex<Vec<i16>>> = Arc::new(Mutex::new(
+        Vec::with_capacity(SAMPLES_PER_10MS as usize * 2),
+    ));
+
     let stream = device
         .build_input_stream(
             &config,
             move |data: &[f32], _: &cpal::InputCallbackInfo| {
-                let mut st = state.lock();
+                // Check mute state
+                let is_muted = {
+                    let st = audio_state.lock();
+                    !st.mic_enabled
+                };
+
                 let ch = channels as usize;
-                // Take only channel 0 (mono downmix) and convert f32 → i16
+                let frame_size = SAMPLES_PER_10MS as usize;
+
+                let mut buf = frame_buf.lock();
+
+                // Extract mono (channel 0) and convert f32 → i16
                 for frame in data.chunks(ch) {
-                    let sample = frame[0]; // first channel
+                    let sample = if is_muted { 0.0 } else { frame[0] };
                     let clamped = sample.clamp(-1.0, 1.0);
-                    let i16_sample = (clamped * 32767.0) as i16;
-                    st.mic_buffer.push_back(i16_sample);
+                    buf.push((clamped * 32767.0) as i16);
                 }
-                // Cap buffer at ~1 second worth of mono samples
-                let max = SAMPLE_RATE as usize;
-                while st.mic_buffer.len() > max {
-                    st.mic_buffer.pop_front();
+
+                // Send completed frames immediately via channel
+                while buf.len() >= frame_size {
+                    let samples: Vec<i16> = buf.drain(..frame_size).collect();
+                    // try_send is non-blocking — drop frame if channel is full (backpressure)
+                    let _ = frame_tx.try_send(samples);
                 }
             },
             move |err| {
