@@ -56,7 +56,6 @@ export function useVoiceCall() {
   // Listen for voice state events from the Rust backend
   useEffect(() => {
     let unlisten: UnlistenFn | null = null;
-
     listen<VoiceStateEvent>("voice-state-changed", (event) => {
       const ev = event.payload;
       setState({
@@ -67,7 +66,6 @@ export function useVoiceCall() {
         error: ev.error,
         participants: ev.participants,
       });
-
       // Play connect/disconnect sounds
       const isNowConnected =
         ev.connectedRoomId !== null && !ev.isConnecting && !ev.error;
@@ -80,7 +78,6 @@ export function useVoiceCall() {
     }).then((fn) => {
       unlisten = fn;
     });
-
     return () => {
       if (unlisten) unlisten();
     };
@@ -90,14 +87,12 @@ export function useVoiceCall() {
     if (connectedRoomIdRef.current === roomId) return;
     if (isConnectingRef.current) return;
     isConnectingRef.current = true;
-
     setState((prev) => ({
       ...prev,
       isConnecting: true,
       error: null,
       connectedRoomId: roomId,
     }));
-
     try {
       await invoke("voice_connect", { roomId });
       isConnectingRef.current = false;
@@ -118,13 +113,11 @@ export function useVoiceCall() {
   const disconnect = useCallback(async () => {
     const roomId = connectedRoomIdRef.current;
     if (!roomId) return;
-
     try {
       await invoke("voice_disconnect", { roomId });
     } catch (e) {
       console.error("Failed to disconnect:", e);
     }
-
     setState({
       connectedRoomId: null,
       isConnecting: false,
@@ -151,8 +144,14 @@ export function useVoiceCall() {
   const setParticipantVolume = useCallback(
     (identity: string, volume: number) => {
       const clamped = Math.max(0, Math.min(2, volume));
+      
+      // ←←← DEBUG LOGS (you will see these in DevTools)
+      console.log(`[Pax TS] setParticipantVolume called → identity="${identity}" volume=${clamped}`);
+      
       invoke("voice_set_participant_volume", { identity, volume: clamped }).catch(
-        (e) => console.error("Failed to set volume:", e)
+        (e) => {
+          console.error("[Pax TS] Failed to set volume in Rust:", e);
+        }
       );
     },
     []
