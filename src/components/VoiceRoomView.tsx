@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useState, useCallback } from "react";
 import { Volume2, Mic, MicOff, PhoneOff, Loader2, AudioLines, Monitor, MonitorOff } from "lucide-react";
 import { useTheme } from "../theme/ThemeContext";
 import { Room } from "../types/matrix";
@@ -12,7 +12,8 @@ interface VoiceRoomViewProps {
   onDisconnect: () => void;
   onToggleMic: () => void;
   onToggleNoiseSuppression: () => void;
-  onStartScreenShare: (mode: "screen" | "window") => void;
+  onStartScreenShare: (mode: "screen" | "window", windowTitle?: string) => void;
+  onEnumerateScreenShareWindows: () => Promise<[string, string][]>;
   onStopScreenShare: () => void;
   onSetParticipantVolume: (identity: string, volume: number) => void;
 }
@@ -24,12 +25,30 @@ export default function VoiceRoomView({
   onToggleMic,
   onToggleNoiseSuppression,
   onStartScreenShare,
+  onEnumerateScreenShareWindows,
   onStopScreenShare,
   onSetParticipantVolume,
 }: VoiceRoomViewProps) {
   const { palette, spacing, typography } = useTheme();
   const { getVolume, setVolume } = useUserVolume();
   const [screenShareMenuOpen, setScreenShareMenuOpen] = useState(false);
+  const [windowPickerOpen, setWindowPickerOpen] = useState(false);
+  const [windowList, setWindowList] = useState<[string, string][]>([]);
+  const [windowListLoading, setWindowListLoading] = useState(false);
+
+  const openWindowPicker = useCallback(async () => {
+    setWindowListLoading(true);
+    setWindowPickerOpen(true);
+    try {
+      const list = await onEnumerateScreenShareWindows();
+      setWindowList(list);
+    } catch (e) {
+      console.error("Failed to enumerate windows:", e);
+      setWindowList([]);
+    } finally {
+      setWindowListLoading(false);
+    }
+  }, [onEnumerateScreenShareWindows]);
   const [contextMenu, setContextMenu] = useState<{
     x: number;
     y: number;
@@ -367,7 +386,7 @@ export default function VoiceRoomView({
                   Share entire screen
                 </button>
                 <button
-                  onClick={() => { onStartScreenShare("window"); setScreenShareMenuOpen(false); }}
+                  onClick={() => { setScreenShareMenuOpen(false); openWindowPicker(); }}
                   style={{
                     padding: `${spacing.unit}px ${spacing.unit * 2}px`,
                     border: "none",
@@ -381,6 +400,73 @@ export default function VoiceRoomView({
                 >
                   Share application window
                 </button>
+              </div>
+            )}
+            {windowPickerOpen && (
+              <div style={{
+                position: "fixed",
+                inset: 0,
+                backgroundColor: "rgba(0,0,0,0.5)",
+                display: "flex",
+                alignItems: "center",
+                justifyContent: "center",
+                zIndex: 1000,
+              }} onClick={() => setWindowPickerOpen(false)}>
+                <div style={{
+                  backgroundColor: palette.bgSecondary,
+                  border: `1px solid ${palette.border}`,
+                  borderRadius: spacing.unit * 2,
+                  padding: spacing.unit * 2,
+                  maxWidth: 400,
+                  maxHeight: 400,
+                  overflow: "auto",
+                }} onClick={(e) => e.stopPropagation()}>
+                  <div style={{ marginBottom: spacing.unit, fontWeight: 600 }}>Select window to share</div>
+                  {windowListLoading ? (
+                    <div style={{ padding: spacing.unit * 2 }}>Loading windows...</div>
+                  ) : windowList.length === 0 ? (
+                    <div style={{ padding: spacing.unit * 2, color: palette.textSecondary }}>No windows found</div>
+                  ) : (
+                    <div style={{ display: "flex", flexDirection: "column", gap: spacing.unit / 2 }}>
+                      {windowList.map(([title, process], i) => (
+                        <button
+                          key={i}
+                          onClick={() => {
+                            onStartScreenShare("window", title);
+                            setWindowPickerOpen(false);
+                          }}
+                          style={{
+                            padding: `${spacing.unit}px ${spacing.unit * 2}px`,
+                            border: `1px solid ${palette.border}`,
+                            borderRadius: spacing.unit,
+                            cursor: "pointer",
+                            backgroundColor: palette.bgActive,
+                            color: palette.textPrimary,
+                            fontSize: typography.fontSizeSmall,
+                            textAlign: "left",
+                          }}
+                        >
+                          {title || "(no title)"}
+                          {process && <span style={{ color: palette.textSecondary, fontSize: "0.85em" }}> — {process}</span>}
+                        </button>
+                      ))}
+                    </div>
+                  )}
+                  <button
+                    onClick={() => setWindowPickerOpen(false)}
+                    style={{
+                      marginTop: spacing.unit,
+                      padding: `${spacing.unit}px ${spacing.unit * 2}px`,
+                      border: "none",
+                      borderRadius: spacing.unit,
+                      cursor: "pointer",
+                      backgroundColor: palette.bgSecondary,
+                      color: palette.textSecondary,
+                    }}
+                  >
+                    Cancel
+                  </button>
+                </div>
               </div>
             )}
           </div>

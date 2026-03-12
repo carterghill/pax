@@ -85,6 +85,7 @@ export default function MainLayout({ userId }: { userId: string }) {
               onToggleMic={voiceCall.toggleMic}
               onToggleNoiseSuppression={voiceCall.toggleNoiseSuppression}
               onStartScreenShare={voiceCall.startScreenShare}
+              onEnumerateScreenShareWindows={voiceCall.enumerateScreenShareWindows}
               onStopScreenShare={voiceCall.stopScreenShare}
               onSetParticipantVolume={voiceCall.setParticipantVolume}
             />

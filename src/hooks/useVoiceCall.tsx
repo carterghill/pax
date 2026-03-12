@@ -213,14 +213,16 @@ export function useVoiceCall() {
           console.error("Failed to toggle noise suppression:", e);
         });
     },
-    startScreenShare: (mode: "screen" | "window") => {
+    startScreenShare: (mode: "screen" | "window", windowTitle?: string) => {
       setState((prev) => ({ ...prev, error: null })); // Clear previous error before retry
-      invoke("voice_start_screen_share", { mode })
+      invoke("voice_start_screen_share", { mode, windowTitle: windowTitle ?? null })
         .catch((e) => {
           console.error("Failed to start screen share:", e);
           setState((prev) => ({ ...prev, error: String(e) }));
         });
     },
+    enumerateScreenShareWindows: () =>
+      invoke<[string, string][]>("enumerate_screen_share_windows"),
     stopScreenShare: () => {
       invoke("voice_stop_screen_share").catch((e) => {
         console.error("Failed to stop screen share:", e);

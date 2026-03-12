@@ -299,9 +299,11 @@ impl VoiceManager {
     }
 
     /// Start sharing screen. Returns error if not in a call or capture fails.
+    /// For Window mode, window_title selects which window (None = foreground).
     pub async fn start_screen_share(
         &self,
         mode: crate::screen::ScreenShareMode,
+        window_title: Option<String>,
         app_handle: &AppHandle,
     ) -> Result<(), String> {
         let (room, audio_state, room_id, local_identity) = {
@@ -314,24 +316,16 @@ impl VoiceManager {
                 session.local_identity.clone(),
             )
         };
-        let handle = crate::screen::start_screen_capture(room.clone(), mode).await?;
-        let track = handle.track.clone();
-        room.local_participant()
-            .publish_track(
-                LocalTrack::Video(track),
-                TrackPublishOptions {
-                    source: TrackSource::Screenshare,
-                    ..Default::default()
-                },
-            )
-            .await
-            .map_err(|e| format!("Failed to publish screen track: {}", e))?;
+        eprintln!("[Pax] voice::start_screen_share: mode={:?} window_title={:?}", mode, window_title);
+        let handle = crate::screen::start_screen_capture(room.clone(), mode, window_title).await?;
+        // Video is published inside start_screen_capture (after capture is hot)
         if let Some(audio_track) = &handle.audio_track {
+            eprintln!("[Pax] Publishing screen share audio track (ScreenshareAudio)");
             room.local_participant()
                 .publish_track(
                     LocalTrack::Audio(audio_track.clone()),
                     TrackPublishOptions {
-                        source: TrackSource::Screenshare,
+                        source: TrackSource::ScreenshareAudio,
                         ..Default::default()
                     },
                 )
@@ -353,7 +347,8 @@ impl VoiceManager {
 
     /// Stop sharing screen.
     pub async fn stop_screen_share(&self, app_handle: &AppHandle) -> Result<(), String> {
-        let (room, audio_state, handle, room_id, local_identity) = {
+        eprintln!("[Pax] voice::stop_screen_share");
+        let (room, audio_state, mut handle, room_id, local_identity) = {
             let mut guard = self.session.lock();
             let session = guard.as_mut().ok_or("Not in a voice call")?;
             let handle = session._screen_handle.take();
@@ -365,16 +360,19 @@ impl VoiceManager {
                 session.local_identity.clone(),
             )
         };
-        if handle.is_some() {
-            drop(handle); // Stop capture thread and loopback stream
+        if let Some(mut h) = handle.take() {
+            h.stop();
             let lp = room.local_participant();
-            let screen_sids: Vec<_> = lp
+            let sids: Vec<_> = lp
                 .track_publications()
                 .iter()
-                .filter(|(_, pub_)| pub_.source() == TrackSource::Screenshare)
-                .map(|(s, _)| s.clone())
+                .filter(|(_, p)| {
+                    let s = p.source();
+                    s == TrackSource::Screenshare || s == TrackSource::ScreenshareAudio
+                })
+                .map(|(sid, _)| sid.clone())
                 .collect();
-            for sid in screen_sids {
+            for sid in sids {
                 let _ = lp.unpublish_track(&sid).await;
             }
         }

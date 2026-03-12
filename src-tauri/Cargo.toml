@@ -43,6 +43,7 @@ screenshots = "0.8"
 
 [target.'cfg(target_os = "windows")'.dependencies]
 wasapi = "0.22"
+windows-capture = "1.5"
 
 [target.'cfg(target_os = "linux")'.dependencies]
 zbus = { version = "4", default-features = false, features = ["tokio"] }

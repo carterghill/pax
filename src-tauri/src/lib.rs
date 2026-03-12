@@ -853,12 +853,19 @@ async fn voice_start_screen_share(
     voice_mgr: State<'_, voice::VoiceManager>,
     app: tauri::AppHandle,
     mode: String,
+    window_title: Option<String>,
 ) -> Result<(), String> {
+    eprintln!("[Pax] voice_start_screen_share: mode={} window_title={:?}", mode, window_title);
     let screen_mode = match mode.as_str() {
         "window" => screen::ScreenShareMode::Window,
         _ => screen::ScreenShareMode::Screen,
     };
-    voice_mgr.start_screen_share(screen_mode, &app).await
+    voice_mgr.start_screen_share(screen_mode, window_title, &app).await
+}
+
+#[tauri::command]
+fn enumerate_screen_share_windows() -> Result<Vec<(String, String)>, String> {
+    screen::enumerate_screen_share_windows()
 }
 
 #[tauri::command]
@@ -1147,6 +1154,7 @@ pub fn run() {
             voice_toggle_noise_suppression,
             voice_start_screen_share,
             voice_stop_screen_share,
+            enumerate_screen_share_windows,
             voice_set_participant_volume,
             send_message,
             start_sync,
