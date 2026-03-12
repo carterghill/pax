@@ -23,6 +23,7 @@ use livekit::webrtc::{
 };
 use futures_util::StreamExt;
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
+use nnnoiseless::DenoiseState;
 // cpal::Stream is !Send because of platform internals, but we only ever
 // create streams on one thread and drop them (possibly on another).
 // This is safe for our use case.
@@ -47,6 +48,7 @@ pub struct VoiceStateEvent {
     pub connected_room_id: Option<String>,
     pub is_connecting: bool,
     pub is_mic_enabled: bool,
+    pub is_noise_suppressed: bool,
     pub error: Option<String>,
     pub participants: Vec<VoiceParticipantInfo>,
 }
@@ -62,6 +64,8 @@ struct AudioState {
     remote_participants: Vec<String>,
     /// Whether mic is enabled
     mic_enabled: bool,
+    /// Whether mic noise suppression is enabled
+    noise_suppression_enabled: bool,
 }
 impl Default for AudioState {
     fn default() -> Self {
@@ -71,6 +75,7 @@ impl Default for AudioState {
             active_speakers: Vec::new(),
             remote_participants: Vec::new(),
             mic_enabled: true,
+            noise_suppression_enabled: true,
         }
     }
 }
@@ -119,6 +124,7 @@ impl VoiceManager {
             connected_room_id: Some(room_id.clone()),
             is_connecting: true,
             is_mic_enabled: false,
+            is_noise_suppressed: true,
             error: None,
             participants: vec![],
         });
@@ -242,6 +248,15 @@ impl VoiceManager {
             }
         }
         Ok(state.mic_enabled)
+    }
+
+    /// Toggle noise suppression on/off. Returns new enabled state.
+    pub fn toggle_noise_suppression(&self) -> Result<bool, String> {
+        let guard = self.session.lock();
+        let session = guard.as_ref().ok_or("Not in a voice call")?;
+        let mut state = session.audio_state.lock();
+        state.noise_suppression_enabled = !state.noise_suppression_enabled;
+        Ok(state.noise_suppression_enabled)
     }
     /// Set per-user volume (0.0 – 2.0).
     pub fn set_participant_volume(&self, identity: String, volume: f32) {
@@ -428,12 +443,77 @@ fn emit_state(
         connected_room_id: if is_connected || is_connecting { Some(room_id.to_string()) } else { None },
         is_connecting,
         is_mic_enabled: st.mic_enabled,
+        is_noise_suppressed: st.noise_suppression_enabled,
         error,
         participants,
     };
     let _ = app_handle.emit("voice-state-changed", event);
 }
 // ─── cpal audio setup ───────────────────────────────────────────────────────
+struct NoiseProcessor {
+    enabled: bool,
+    warmed_up: bool,
+    denoise: Option<Box<DenoiseState<'static>>>,
+    in_f32: Vec<f32>,
+    out_f32: Vec<f32>,
+}
+
+impl NoiseProcessor {
+    fn new() -> Self {
+        Self {
+            enabled: false,
+            warmed_up: false,
+            denoise: None,
+            in_f32: vec![0.0; SAMPLES_PER_10MS as usize],
+            out_f32: vec![0.0; SAMPLES_PER_10MS as usize],
+        }
+    }
+
+    fn set_enabled(&mut self, enabled: bool) {
+        if enabled == self.enabled {
+            return;
+        }
+        self.enabled = enabled;
+        if enabled {
+            self.denoise = Some(DenoiseState::new());
+            self.warmed_up = false;
+        } else {
+            self.denoise = None;
+            self.warmed_up = false;
+        }
+    }
+
+    fn process_i16_in_place(&mut self, samples: &mut [i16]) {
+        if !self.enabled {
+            return;
+        }
+        if samples.len() != SAMPLES_PER_10MS as usize {
+            return;
+        }
+        let Some(denoise) = self.denoise.as_mut() else {
+            return;
+        };
+
+        for (i, &s) in samples.iter().enumerate() {
+            self.in_f32[i] = s as f32;
+        }
+
+        denoise.process_frame(&mut self.out_f32[..], &self.in_f32[..]);
+
+        // nnnoiseless recommends discarding the first output frame. We instead
+        // pass through the first frame unchanged to avoid an audible artifact.
+        if !self.warmed_up {
+            self.warmed_up = true;
+            return;
+        }
+
+        for (i, out) in self.out_f32.iter().enumerate() {
+            let clamped = out.clamp(i16::MIN as f32, i16::MAX as f32);
+            samples[i] = clamped as i16;
+        }
+    }
+}
+
 fn setup_mic_input(
     audio_state: Arc<Mutex<AudioState>>,
     frame_tx: mpsc::Sender<Vec<i16>>,
@@ -456,14 +536,15 @@ fn setup_mic_input(
     let frame_buf: Arc<Mutex<Vec<i16>>> = Arc::new(Mutex::new(
         Vec::with_capacity(SAMPLES_PER_10MS as usize * 2),
     ));
+    let noise_proc: Arc<Mutex<NoiseProcessor>> = Arc::new(Mutex::new(NoiseProcessor::new()));
     let stream = device
         .build_input_stream(
             &config,
             move |data: &[f32], _: &cpal::InputCallbackInfo| {
                 // Check mute state
-                let is_muted = {
+                let (is_muted, noise_suppression_enabled) = {
                     let st = audio_state.lock();
-                    !st.mic_enabled
+                    (!st.mic_enabled, st.noise_suppression_enabled)
                 };
                 let ch = channels as usize;
                 let frame_size = SAMPLES_PER_10MS as usize;
@@ -476,7 +557,18 @@ fn setup_mic_input(
                 }
                 // Send completed frames immediately via channel
                 while buf.len() >= frame_size {
-                    let samples: Vec<i16> = buf.drain(..frame_size).collect();
+                    let mut samples: Vec<i16> = buf.drain(..frame_size).collect();
+
+                    // Apply noise suppression (RNNoise-style) only when enabled and not muted.
+                    if noise_suppression_enabled && !is_muted {
+                        let mut np = noise_proc.lock();
+                        np.set_enabled(true);
+                        np.process_i16_in_place(&mut samples[..]);
+                    } else {
+                        let mut np = noise_proc.lock();
+                        np.set_enabled(false);
+                    }
+
                     // try_send is non-blocking — drop frame if channel is full (backpressure)
                     let _ = frame_tx.try_send(samples);
                 }

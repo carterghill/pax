@@ -9,7 +9,6 @@ use std::time::Duration;
 use std::collections::HashMap;
 use tauri::State;
 use tauri::Emitter;
-use tauri::Manager;
 use tokio::sync::Mutex;
 use matrix_sdk::{Client, Room, config::SyncSettings, media::MediaFormat};
 use matrix_sdk::ruma::events::StateEventType;
@@ -842,6 +841,13 @@ async fn voice_toggle_mic(
 }
 
 #[tauri::command]
+async fn voice_toggle_noise_suppression(
+    voice_mgr: State<'_, voice::VoiceManager>,
+) -> Result<bool, String> {
+    voice_mgr.toggle_noise_suppression()
+}
+
+#[tauri::command]
 async fn voice_set_participant_volume(
     voice_mgr: State<'_, voice::VoiceManager>,
     identity: String,
@@ -1116,6 +1122,7 @@ pub fn run() {
             voice_connect,
             voice_disconnect,
             voice_toggle_mic,
+            voice_toggle_noise_suppression,
             voice_set_participant_volume,
             send_message,
             start_sync,

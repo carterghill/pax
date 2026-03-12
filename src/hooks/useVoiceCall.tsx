@@ -22,6 +22,7 @@ interface VoiceStateEvent {
   connectedRoomId: string | null;
   isConnecting: boolean;
   isMicEnabled: boolean;
+  isNoiseSuppressed: boolean;
   error: string | null;
   participants: VoiceParticipant[];
 }
@@ -40,7 +41,7 @@ export function useVoiceCall() {
     connectedRoomId: null,
     isConnecting: false,
     isMicEnabled: false,
-    isNoiseSuppressed: false,
+    isNoiseSuppressed: true,
     error: null,
     participants: [],
   });
@@ -62,7 +63,7 @@ export function useVoiceCall() {
         connectedRoomId: ev.connectedRoomId,
         isConnecting: ev.isConnecting,
         isMicEnabled: ev.isMicEnabled,
-        isNoiseSuppressed: false,
+        isNoiseSuppressed: ev.isNoiseSuppressed,
         error: ev.error,
         participants: ev.participants,
       });
@@ -192,10 +193,14 @@ export function useVoiceCall() {
     disconnect,
     toggleMic,
     toggleNoiseSuppression: () => {
-      // Noise suppression is not yet implemented in the Rust backend
-      // (RNNoise was JS-only). This is a no-op stub.
+      invoke<boolean>("voice_toggle_noise_suppression")
+        .then((enabled) => {
+          setState((prev) => ({ ...prev, isNoiseSuppressed: enabled }));
+        })
+        .catch((e) => {
+          console.error("Failed to toggle noise suppression:", e);
+        });
     },
-    isNoiseSuppressed: false,
     setParticipantVolume,
   };
 }
