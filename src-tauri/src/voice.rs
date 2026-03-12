@@ -458,6 +458,7 @@ struct NoiseProcessor {
     out_f32: Vec<f32>,
     gain: f32,
     voice_open: bool,
+    agc_gain: f32,
 }
 
 impl NoiseProcessor {
@@ -470,6 +471,7 @@ impl NoiseProcessor {
             out_f32: vec![0.0; SAMPLES_PER_10MS as usize],
             gain: 1.0,
             voice_open: true,
+            agc_gain: 1.0,
         }
     }
 
@@ -483,11 +485,13 @@ impl NoiseProcessor {
             self.warmed_up = false;
             self.gain = 1.0;
             self.voice_open = true;
+            self.agc_gain = 1.0;
         } else {
             self.denoise = None;
             self.warmed_up = false;
             self.gain = 1.0;
             self.voice_open = true;
+            self.agc_gain = 1.0;
         }
     }
 
@@ -538,9 +542,7 @@ impl NoiseProcessor {
             self.voice_open = true;
         }
 
-        let mut target_gain = if self.voice_open { 1.0 } else { NOISE_GAIN };
-        let coeff = if target_gain > self.gain { ATTACK } else { RELEASE };
-        self.gain += (target_gain - self.gain) * coeff;
+        let mut target_gate_gain = if self.voice_open { 1.0 } else { NOISE_GAIN };
 
         // Extra suppression for clicky transients while the gate is "closed".
         // Clicks tend to create a big instantaneous peak; this helps knock them down.
@@ -550,14 +552,54 @@ impl NoiseProcessor {
                 peak = peak.max(s.abs());
             }
             if peak > 14000.0 {
-                target_gain *= 0.35;
+                target_gate_gain *= 0.35;
             } else if peak > 9000.0 {
-                target_gain *= 0.55;
+                target_gate_gain *= 0.55;
             }
         }
 
+        // Smooth the gate gain to avoid pumping.
+        let coeff = if target_gate_gain > self.gain { ATTACK } else { RELEASE };
+        self.gain += (target_gate_gain - self.gain) * coeff;
+
+        // DAGC (digital automatic gain control) / noise leveling.
+        //
+        // We compute RMS on the RNNoise-denoised signal and move `agc_gain` toward a target level.
+        // To avoid boosting background noise, we only *adapt* the AGC when voice is open.
+        // When voice is closed, we slowly return agc_gain back toward 1.0.
+        const AGC_TARGET_RMS: f32 = 7000.0; // ~ -13 dBFS for i16-ish units
+        const AGC_MIN_GAIN: f32 = 0.25;
+        const AGC_MAX_GAIN: f32 = 6.0;
+        const AGC_ATTACK: f32 = 0.30;  // faster when needing to reduce loud audio
+        const AGC_RELEASE: f32 = 0.06; // slower when boosting quiet audio
+
+        if self.voice_open {
+            let mut sum_sq = 0.0f32;
+            for &s in &self.out_f32 {
+                sum_sq += s * s;
+            }
+            let rms = (sum_sq / self.out_f32.len() as f32).sqrt().max(1.0);
+            let desired = (AGC_TARGET_RMS / rms).clamp(AGC_MIN_GAIN, AGC_MAX_GAIN);
+            let a = if desired < self.agc_gain { AGC_ATTACK } else { AGC_RELEASE };
+            self.agc_gain += (desired - self.agc_gain) * a;
+        } else {
+            // Don't let AGC "remember" a big boost and apply it right as the gate re-opens.
+            self.agc_gain += (1.0 - self.agc_gain) * 0.10;
+        }
+
+        let mut combined_gain = (self.gain.clamp(0.0, 1.0)) * self.agc_gain;
+
+        // Limiter: ensure we don't clip after applying combined gain.
+        let mut peak_after = 0.0f32;
+        for &s in &self.out_f32 {
+            peak_after = peak_after.max((s * combined_gain).abs());
+        }
+        if peak_after > i16::MAX as f32 {
+            combined_gain *= (i16::MAX as f32) / peak_after;
+        }
+
         for (i, out) in self.out_f32.iter().enumerate() {
-            let scaled = out * (self.gain.min(1.0)) * target_gain;
+            let scaled = out * combined_gain;
             let clamped = scaled.clamp(i16::MIN as f32, i16::MAX as f32);
             samples[i] = clamped as i16;
         }
