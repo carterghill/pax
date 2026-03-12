@@ -66,6 +66,7 @@ export default function MainLayout({ userId }: { userId: string }) {
           userId={userId}
           voiceParticipants={voiceParticipants}
           connectedVoiceRoomId={voiceCall.connectedRoomId}
+          screenSharingOwner={voiceCall.screenSharingOwner}
           onSetParticipantVolume={voiceCall.setParticipantVolume}
         />
         <main style={{
@@ -83,6 +84,8 @@ export default function MainLayout({ userId }: { userId: string }) {
               onDisconnect={voiceCall.disconnect}
               onToggleMic={voiceCall.toggleMic}
               onToggleNoiseSuppression={voiceCall.toggleNoiseSuppression}
+              onStartScreenShare={voiceCall.startScreenShare}
+              onStopScreenShare={voiceCall.stopScreenShare}
               onSetParticipantVolume={voiceCall.setParticipantVolume}
             />
           ) : activeRoom ? (

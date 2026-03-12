@@ -2,6 +2,7 @@
 
 pub mod platform;
 mod idle;
+mod screen;
 mod voice;
 
 use std::sync::Arc;
@@ -848,6 +849,27 @@ async fn voice_toggle_noise_suppression(
 }
 
 #[tauri::command]
+async fn voice_start_screen_share(
+    voice_mgr: State<'_, voice::VoiceManager>,
+    app: tauri::AppHandle,
+    mode: String,
+) -> Result<(), String> {
+    let screen_mode = match mode.as_str() {
+        "window" => screen::ScreenShareMode::Window,
+        _ => screen::ScreenShareMode::Screen,
+    };
+    voice_mgr.start_screen_share(screen_mode, &app).await
+}
+
+#[tauri::command]
+async fn voice_stop_screen_share(
+    voice_mgr: State<'_, voice::VoiceManager>,
+    app: tauri::AppHandle,
+) -> Result<(), String> {
+    voice_mgr.stop_screen_share(&app).await
+}
+
+#[tauri::command]
 async fn voice_set_participant_volume(
     voice_mgr: State<'_, voice::VoiceManager>,
     identity: String,
@@ -1123,6 +1145,8 @@ pub fn run() {
             voice_disconnect,
             voice_toggle_mic,
             voice_toggle_noise_suppression,
+            voice_start_screen_share,
+            voice_stop_screen_share,
             voice_set_participant_volume,
             send_message,
             start_sync,

@@ -49,6 +49,10 @@ pub struct VoiceStateEvent {
     pub is_connecting: bool,
     pub is_mic_enabled: bool,
     pub is_noise_suppressed: bool,
+    /// Identity of the participant currently sharing their screen (if any)
+    pub screen_sharing_owner: Option<String>,
+    /// Whether this client is currently sharing its own screen
+    pub is_local_screen_sharing: bool,
     pub error: Option<String>,
     pub participants: Vec<VoiceParticipantInfo>,
 }
@@ -66,6 +70,10 @@ struct AudioState {
     mic_enabled: bool,
     /// Whether mic noise suppression is enabled
     noise_suppression_enabled: bool,
+    /// Identity of the participant currently sharing their screen, if any
+    screen_sharing_owner: Option<String>,
+    /// Whether this client is currently sharing its own screen
+    is_local_screen_sharing: bool,
 }
 impl Default for AudioState {
     fn default() -> Self {
@@ -76,6 +84,8 @@ impl Default for AudioState {
             remote_participants: Vec::new(),
             mic_enabled: true,
             noise_suppression_enabled: true,
+            screen_sharing_owner: None,
+            is_local_screen_sharing: false,
         }
     }
 }
@@ -91,10 +101,16 @@ pub struct VoiceSession {
     _output_stream: Option<SendStream>,
     /// Cancellation handle for the event loop
     shutdown_tx: mpsc::Sender<()>,
+    /// Screen share handle (track + capture shutdown); dropped on stop
+    _screen_handle: Option<crate::screen::ScreenShareHandle>,
 }
 impl VoiceSession {
     pub fn room_id(&self) -> &str {
         &self.room_id
+    }
+
+    pub fn local_identity(&self) -> &str {
+        &self.local_identity
     }
 }
 /// Global singleton for the current voice session.
@@ -125,6 +141,8 @@ impl VoiceManager {
             is_connecting: true,
             is_mic_enabled: false,
             is_noise_suppressed: true,
+            screen_sharing_owner: None,
+            is_local_screen_sharing: false,
             error: None,
             participants: vec![],
         });
@@ -209,6 +227,7 @@ impl VoiceManager {
                 _input_stream: Some(input_stream),
                 _output_stream: Some(output_stream),
                 shutdown_tx,
+                _screen_handle: None,
             });
         }
         Ok(())
@@ -277,6 +296,81 @@ impl VoiceManager {
     pub fn connected_room_id(&self) -> Option<String> {
         let guard = self.session.lock();
         guard.as_ref().map(|s| s.room_id.clone())
+    }
+
+    /// Start sharing screen. Returns error if not in a call or capture fails.
+    pub async fn start_screen_share(
+        &self,
+        mode: crate::screen::ScreenShareMode,
+        app_handle: &AppHandle,
+    ) -> Result<(), String> {
+        let (room, audio_state, room_id, local_identity) = {
+            let guard = self.session.lock();
+            let session = guard.as_ref().ok_or("Not in a voice call")?;
+            (
+                session.room.clone(),
+                session.audio_state.clone(),
+                session.room_id.clone(),
+                session.local_identity.clone(),
+            )
+        };
+        let handle = crate::screen::start_screen_capture(room.clone(), mode).await?;
+        let track = handle.track.clone();
+        room.local_participant()
+            .publish_track(
+                LocalTrack::Video(track),
+                TrackPublishOptions {
+                    source: TrackSource::Screenshare,
+                    ..Default::default()
+                },
+            )
+            .await
+            .map_err(|e| format!("Failed to publish screen track: {}", e))?;
+        {
+            let mut guard = self.session.lock();
+            let session = guard.as_mut().ok_or("Not in a voice call")?;
+            session._screen_handle = Some(handle);
+        }
+        {
+            let mut st = audio_state.lock();
+            st.is_local_screen_sharing = true;
+        }
+        emit_state(app_handle, &room_id, &local_identity, &audio_state, false, true, None);
+        Ok(())
+    }
+
+    /// Stop sharing screen.
+    pub async fn stop_screen_share(&self, app_handle: &AppHandle) -> Result<(), String> {
+        let (room, audio_state, handle, room_id, local_identity) = {
+            let mut guard = self.session.lock();
+            let session = guard.as_mut().ok_or("Not in a voice call")?;
+            let handle = session._screen_handle.take();
+            (
+                session.room.clone(),
+                session.audio_state.clone(),
+                handle,
+                session.room_id.clone(),
+                session.local_identity.clone(),
+            )
+        };
+        if handle.is_some() {
+            drop(handle); // Stop capture thread
+            let lp = room.local_participant();
+            let sid = lp.track_publications()
+                .iter()
+                .find(|(_, pub_)| pub_.source() == TrackSource::Screenshare)
+                .map(|(s, _)| s.clone())
+                .ok_or("Screen track publication not found")?;
+            lp.unpublish_track(&sid)
+                .await
+                .map_err(|e| format!("Failed to unpublish screen track: {}", e))?;
+        }
+        {
+            let mut st = audio_state.lock();
+            st.is_local_screen_sharing = false;
+        }
+        emit_state(app_handle, &room_id, &local_identity, &audio_state, false, true, None);
+        Ok(())
     }
 }
 // ─── Mic capture pump ───────────────────────────────────────────────────────
@@ -347,9 +441,10 @@ async fn run_event_loop(
             }
             event = events.recv() => {
                 match event {
-                    Some(RoomEvent::TrackSubscribed { track, publication: _, participant }) => {
+                    Some(RoomEvent::TrackSubscribed { track, publication, participant }) => {
+                        let identity = participant.identity().to_string();
+                        let source = publication.source();
                         if let RemoteTrack::Audio(audio_track) = track {
-                            let identity = participant.identity().to_string();
                             {
                                 let mut st = audio_state.lock();
                                 if !st.remote_participants.contains(&identity) {
@@ -361,10 +456,25 @@ async fn run_event_loop(
                                 handle_remote_audio(audio_track, identity, state_clone).await;
                             });
                             emit_state(&app_handle, &room_id, &local_identity, &audio_state, false, true, None);
+                        } else if let RemoteTrack::Video(_video_track) = track {
+                            if source == TrackSource::Screenshare {
+                                let mut st = audio_state.lock();
+                                st.screen_sharing_owner = Some(identity);
+                                drop(st);
+                                emit_state(&app_handle, &room_id, &local_identity, &audio_state, false, true, None);
+                            }
                         }
                     }
-                    Some(RoomEvent::TrackUnsubscribed { track: _, participant, .. }) => {
-                        println!("[Pax] Track unsubscribed from {}", participant.identity());
+                    Some(RoomEvent::TrackUnsubscribed { publication, participant, .. }) => {
+                        let identity = participant.identity().to_string();
+                        if publication.source() == TrackSource::Screenshare {
+                            let mut st = audio_state.lock();
+                            if st.screen_sharing_owner.as_deref() == Some(&identity) {
+                                st.screen_sharing_owner = None;
+                            }
+                            drop(st);
+                            emit_state(&app_handle, &room_id, &local_identity, &audio_state, false, true, None);
+                        }
                     }
                     Some(RoomEvent::ParticipantConnected(participant)) => {
                         let identity = participant.identity().to_string();
@@ -383,6 +493,9 @@ async fn run_event_loop(
                         {
                             let mut st = audio_state.lock();
                             st.remote_participants.retain(|id| id != &identity);
+                            if st.screen_sharing_owner.as_deref() == Some(&identity) {
+                                st.screen_sharing_owner = None;
+                            }
                         }
                         emit_state(&app_handle, &room_id, &local_identity, &audio_state, false, true, None);
                     }
@@ -444,6 +557,8 @@ fn emit_state(
         is_connecting,
         is_mic_enabled: st.mic_enabled,
         is_noise_suppressed: st.noise_suppression_enabled,
+        screen_sharing_owner: st.screen_sharing_owner.clone(),
+        is_local_screen_sharing: st.is_local_screen_sharing,
         error,
         participants,
     };

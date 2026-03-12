@@ -1,5 +1,5 @@
 import { useState } from "react";
-import { Hash, Volume2, PhoneOff } from "lucide-react";
+import { Hash, Volume2, PhoneOff, Monitor } from "lucide-react";
 import { Room, VoiceParticipant } from "../types/matrix";
 import { useTheme } from "../theme/ThemeContext";
 import StatusDropdown from "./StatusDropdown";
@@ -16,16 +16,19 @@ interface RoomSidebarProps {
   userId: string;
   voiceParticipants: Record<string, VoiceParticipant[]>;
   connectedVoiceRoomId: string | null;
+  screenSharingOwner: string | null;
   onSetParticipantVolume: (identity: string, volume: number) => void;
 }
 
 function VoiceParticipantRow({
   participant,
   isLocalUser,
+  isSharingScreen,
   onContextMenu,
 }: {
   participant: VoiceParticipant;
   isLocalUser: boolean;
+  isSharingScreen: boolean;
   onContextMenu: (e: React.MouseEvent) => void;
 }) {
   const { palette, spacing, typography } = useTheme();
@@ -81,7 +84,11 @@ function VoiceParticipantRow({
         overflow: "hidden",
         textOverflow: "ellipsis",
         whiteSpace: "nowrap",
+        display: "flex",
+        alignItems: "center",
+        gap: spacing.unit,
       }}>
+        {isSharingScreen && <Monitor size={12} color="#23a55a" />}
         {name}
       </span>
     </div>
@@ -96,6 +103,7 @@ export default function RoomSidebar({
   userId,
   voiceParticipants,
   connectedVoiceRoomId,
+  screenSharingOwner,
   onSetParticipantVolume,
 }: RoomSidebarProps) {
   const { palette, spacing, typography } = useTheme();
@@ -196,6 +204,7 @@ export default function RoomSidebar({
                       key={p.userId}
                       participant={p}
                       isLocalUser={p.userId === userId}
+                      isSharingScreen={screenSharingOwner === p.userId}
                       onContextMenu={(e) => {
                         // Map userId to the identity format used by LiveKit
                         setContextMenu({

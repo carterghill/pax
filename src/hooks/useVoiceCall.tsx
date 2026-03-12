@@ -23,6 +23,8 @@ interface VoiceStateEvent {
   isConnecting: boolean;
   isMicEnabled: boolean;
   isNoiseSuppressed: boolean;
+  screenSharingOwner: string | null;
+  isLocalScreenSharing: boolean;
   error: string | null;
   participants: VoiceParticipant[];
 }
@@ -33,6 +35,8 @@ export interface VoiceCallState {
   isMicEnabled: boolean;
   error: string | null;
   isNoiseSuppressed: boolean;
+  screenSharingOwner: string | null;
+  isLocalScreenSharing: boolean;
   participants: VoiceParticipant[];
 }
 
@@ -42,6 +46,8 @@ export function useVoiceCall() {
     isConnecting: false,
     isMicEnabled: false,
     isNoiseSuppressed: true,
+    screenSharingOwner: null,
+    isLocalScreenSharing: false,
     error: null,
     participants: [],
   });
@@ -64,6 +70,8 @@ export function useVoiceCall() {
         isConnecting: ev.isConnecting,
         isMicEnabled: ev.isMicEnabled,
         isNoiseSuppressed: ev.isNoiseSuppressed,
+        screenSharingOwner: ev.screenSharingOwner ?? null,
+        isLocalScreenSharing: ev.isLocalScreenSharing ?? false,
         error: ev.error,
         participants: ev.participants,
       });
@@ -105,6 +113,8 @@ export function useVoiceCall() {
         isConnecting: false,
         isMicEnabled: false,
         isNoiseSuppressed: false,
+        screenSharingOwner: null,
+        isLocalScreenSharing: false,
         error: String(e),
         participants: [],
       });
@@ -124,6 +134,8 @@ export function useVoiceCall() {
       isConnecting: false,
       isMicEnabled: false,
       isNoiseSuppressed: false,
+      screenSharingOwner: null,
+      isLocalScreenSharing: false,
       error: null,
       participants: [],
     });
@@ -200,6 +212,18 @@ export function useVoiceCall() {
         .catch((e) => {
           console.error("Failed to toggle noise suppression:", e);
         });
+    },
+    startScreenShare: (mode: "screen" | "window") => {
+      invoke("voice_start_screen_share", { mode })
+        .catch((e) => {
+          console.error("Failed to start screen share:", e);
+          setState((prev) => ({ ...prev, error: String(e) }));
+        });
+    },
+    stopScreenShare: () => {
+      invoke("voice_stop_screen_share").catch((e) => {
+        console.error("Failed to stop screen share:", e);
+      });
     },
     setParticipantVolume,
   };
