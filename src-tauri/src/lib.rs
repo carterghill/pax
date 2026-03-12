@@ -5,6 +5,7 @@ mod idle;
 mod voice;
 
 use std::sync::Arc;
+use std::time::Duration;
 use std::collections::HashMap;
 use tauri::State;
 use tauri::Emitter;
@@ -120,6 +121,10 @@ async fn login(
         .sync_once(SyncSettings::default().set_presence(matrix_sdk::ruma::presence::PresenceState::Offline))
         .await
         .map_err(|e| format!("Initial sync failed: {e}"))?;
+
+    // Crash recovery: clear any stale voice call state this device might have left behind.
+    // This helps prevent "phantom" participants persisting in Element.
+    let _ = matrix_voice_leave_all_joined_rooms(&client, None).await;
 
     let user_id = client
         .user_id()
@@ -578,13 +583,16 @@ async fn matrix_voice_join(
         urlencoding::encode(&state_key),
     );
 
-    let http = reqwest::Client::new();
+    let http = reqwest::Client::builder()
+        .timeout(Duration::from_secs(30))
+        .build()
+        .unwrap_or_else(|_| reqwest::Client::new());
     let resp = http.put(&state_url)
         .bearer_auth(access_token.to_string())
         .json(&content)
         .send()
         .await
-        .map_err(|e| format!("Failed to send state event: {e}"))?;
+        .map_err(|e| format!("Failed to send state event (join): {e}"))?;
 
     {
         let status = resp.status();
@@ -642,37 +650,112 @@ async fn matrix_voice_join(
     Ok(VoiceJoinResult { jwt, livekit_url })
 }
 
-/// Internal helper: send the Matrix leave state event.
-async fn matrix_voice_leave(client: &Client, room_id: &str) -> Result<(), String> {
-    let user_id = client.user_id().ok_or("No user ID")?;
-    let device_id = client.device_id().ok_or("No device ID")?;
-    let state_key = format!("_{}_{}_{}", user_id, device_id, "m.call");
-
+/// Send a single leave (empty content) for one (event_type, state_key) in a room.
+/// 404 is treated as success (already no state).
+async fn matrix_voice_leave_state_key(
+    client: &Client,
+    room_id: &str,
+    event_type: &str,
+    state_key: &str,
+) -> Result<(), String> {
     let content = serde_json::json!({});
     let homeserver = client.homeserver().to_string();
     let access_token = client.access_token().ok_or("No access token")?;
 
-    let state_url = format!("{}/_matrix/client/v3/rooms/{}/state/{}/{}",
+    let state_url = format!(
+        "{}/_matrix/client/v3/rooms/{}/state/{}/{}",
         homeserver.trim_end_matches('/'),
         urlencoding::encode(room_id),
-        urlencoding::encode("org.matrix.msc3401.call.member"),
-        urlencoding::encode(&state_key),
+        urlencoding::encode(event_type),
+        urlencoding::encode(state_key),
     );
 
-    let http = reqwest::Client::new();
-    let resp = http.put(&state_url)
+    let resp = reqwest::Client::new()
+        .put(&state_url)
         .bearer_auth(access_token.to_string())
         .json(&content)
         .send()
         .await
         .map_err(|e| format!("Failed to send leave event: {e}"))?;
 
+    if resp.status().as_u16() == 404 {
+        return Ok(());
+    }
     if !resp.status().is_success() {
         let status = resp.status();
         let body = resp.text().await.unwrap_or_default();
-        return Err(format!("Failed to send leave event ({}): {}", status, body));
+        return Err(format!(
+            "Failed to send leave event for {} ({}): {}",
+            event_type, status, body
+        ));
     }
+    Ok(())
+}
 
+/// Clear all of this user's call.member state in one room (any device).
+/// Reads room state and sends leave for every call.member event whose sender is us.
+/// If `skip_state_key` is Some(key), we do not send leave for that state_key (used when
+/// we're about to join so we don't leave-then-immediately-join the same key).
+async fn matrix_voice_clear_my_memberships_in_room(
+    client: &Client,
+    room_id: &str,
+    skip_state_key: Option<&str>,
+) -> Result<(), String> {
+    let user_id_str = client.user_id().ok_or("No user ID")?.to_string();
+
+    let room_id_parsed = matrix_sdk::ruma::RoomId::parse(room_id)
+        .map_err(|e| format!("Invalid room ID: {e}"))?;
+    let room = match client.get_room(&room_id_parsed) {
+        Some(r) => r,
+        None => return Ok(()),
+    };
+
+    for event_type_str in &["org.matrix.msc3401.call.member", "m.call.member"] {
+        let event_type: StateEventType = event_type_str.to_string().into();
+        let events = match room.get_state_events(event_type).await {
+            Ok(evs) => evs,
+            Err(_) => continue,
+        };
+        for event in &events {
+            let json = match serde_json::to_value(event) {
+                Ok(v) => v,
+                Err(_) => continue,
+            };
+            let sender = json
+                .get("sender")
+                .and_then(|s| s.as_str())
+                .unwrap_or_default();
+            let state_key = json
+                .get("state_key")
+                .and_then(|s| s.as_str())
+                .unwrap_or_default();
+            if sender != user_id_str || state_key.is_empty() {
+                continue;
+            }
+            if skip_state_key.map_or(false, |skip| skip == state_key) {
+                continue;
+            }
+            let _ = matrix_voice_leave_state_key(client, room_id, event_type_str, state_key).await;
+        }
+    }
+    Ok(())
+}
+
+/// Clear this device's call.member state in every joined room.
+/// If `join_room_state_key` is Some((room_id, state_key)), we skip sending leave for that
+/// state_key in that room (avoids leave-then-join for same key, which can fail on some servers).
+async fn matrix_voice_leave_all_joined_rooms(
+    client: &Client,
+    join_room_state_key: Option<(&str, &str)>,
+) -> Result<(), String> {
+    let rooms = client.joined_rooms();
+    for room in rooms {
+        let room_id = room.room_id().to_string();
+        let skip = join_room_state_key
+            .filter(|(r, _)| *r == room_id)
+            .map(|(_, sk)| sk);
+        let _ = matrix_voice_clear_my_memberships_in_room(client, &room_id, skip).await;
+    }
     Ok(())
 }
 
@@ -683,11 +766,17 @@ async fn voice_connect(
     app_handle: tauri::AppHandle,
     room_id: String,
 ) -> Result<(), String> {
-    // 0. Clear any stale call.member state
+    // 0. Clear phantoms in all rooms, but skip our own state_key in this room (we're about to join it).
     {
         let guard = state.client.lock().await;
         if let Some(client) = guard.as_ref() {
-            let _ = matrix_voice_leave(client, &room_id).await;
+            let state_key = format!(
+                "_{}_{}_{}",
+                client.user_id().ok_or("No user ID")?,
+                client.device_id().ok_or("No device ID")?,
+                "m.call"
+            );
+            let _ = matrix_voice_leave_all_joined_rooms(client, Some((&room_id, &state_key))).await;
         }
     }
 
@@ -717,10 +806,10 @@ async fn voice_disconnect(
     // 1. Disconnect from LiveKit
     voice_mgr.disconnect().await;
 
-    // 2. Send Matrix leave event
+    // 2. Clear all of our call.member state in this room (any device, removes phantoms)
     let guard = state.client.lock().await;
     if let Some(client) = guard.as_ref() {
-        let _ = matrix_voice_leave(client, &room_id).await;
+        let _ = matrix_voice_clear_my_memberships_in_room(client, &room_id, None).await;
     }
 
     Ok(())
