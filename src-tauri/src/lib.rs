@@ -19,6 +19,7 @@ use matrix_sdk::room::MessagesOptions;
 use matrix_sdk::ruma::UInt;
 use serde::Serialize;
 use data_encoding::BASE64;
+use futures_util::future::join_all;
 
 use platform::DisplayServer;
 
@@ -122,9 +123,11 @@ async fn login(
         .await
         .map_err(|e| format!("Initial sync failed: {e}"))?;
 
-    // Crash recovery: clear any stale voice call state this device might have left behind.
-    // This helps prevent "phantom" participants persisting in Element.
-    let _ = matrix_voice_leave_all_joined_rooms(&client, None).await;
+    // Crash recovery: clear stale voice call state in the background so login returns immediately.
+    let client_cleanup = client.clone();
+    tokio::spawn(async move {
+        let _ = matrix_voice_leave_all_joined_rooms(&client_cleanup, None).await;
+    });
 
     let user_id = client
         .user_id()
@@ -651,9 +654,10 @@ async fn matrix_voice_join(
 }
 
 /// Send a single leave (empty content) for one (event_type, state_key) in a room.
-/// 404 is treated as success (already no state).
+/// 404 is treated as success (already no state). Reuses `http` to avoid creating a client per PUT.
 async fn matrix_voice_leave_state_key(
     client: &Client,
+    http: &reqwest::Client,
     room_id: &str,
     event_type: &str,
     state_key: &str,
@@ -670,7 +674,7 @@ async fn matrix_voice_leave_state_key(
         urlencoding::encode(state_key),
     );
 
-    let resp = reqwest::Client::new()
+    let resp = http
         .put(&state_url)
         .bearer_auth(access_token.to_string())
         .json(&content)
@@ -710,6 +714,11 @@ async fn matrix_voice_clear_my_memberships_in_room(
         None => return Ok(()),
     };
 
+    let http = reqwest::Client::builder()
+        .timeout(Duration::from_secs(15))
+        .build()
+        .unwrap_or_else(|_| reqwest::Client::new());
+
     for event_type_str in &["org.matrix.msc3401.call.member", "m.call.member"] {
         let event_type: StateEventType = event_type_str.to_string().into();
         let events = match room.get_state_events(event_type).await {
@@ -735,7 +744,7 @@ async fn matrix_voice_clear_my_memberships_in_room(
             if skip_state_key.map_or(false, |skip| skip == state_key) {
                 continue;
             }
-            let _ = matrix_voice_leave_state_key(client, room_id, event_type_str, state_key).await;
+            let _ = matrix_voice_leave_state_key(client, &http, room_id, event_type_str, state_key).await;
         }
     }
     Ok(())
@@ -744,18 +753,28 @@ async fn matrix_voice_clear_my_memberships_in_room(
 /// Clear this device's call.member state in every joined room.
 /// If `join_room_state_key` is Some((room_id, state_key)), we skip sending leave for that
 /// state_key in that room (avoids leave-then-join for same key, which can fail on some servers).
+/// Runs room cleanups in parallel to reduce total time.
 async fn matrix_voice_leave_all_joined_rooms(
     client: &Client,
     join_room_state_key: Option<(&str, &str)>,
 ) -> Result<(), String> {
-    let rooms = client.joined_rooms();
-    for room in rooms {
-        let room_id = room.room_id().to_string();
-        let skip = join_room_state_key
-            .filter(|(r, _)| *r == room_id)
-            .map(|(_, sk)| sk);
-        let _ = matrix_voice_clear_my_memberships_in_room(client, &room_id, skip).await;
-    }
+    let room_ids: Vec<String> = client
+        .joined_rooms()
+        .iter()
+        .map(|r| r.room_id().to_string())
+        .collect();
+    let tasks: Vec<_> = room_ids
+        .into_iter()
+        .map(|room_id| {
+            let client = client.clone();
+            let skip = join_room_state_key
+                .and_then(|(r, sk)| if r == room_id { Some(sk.to_string()) } else { None });
+            async move {
+                matrix_voice_clear_my_memberships_in_room(&client, &room_id, skip.as_deref()).await
+            }
+        })
+        .collect();
+    let _ = join_all(tasks).await;
     Ok(())
 }
 
