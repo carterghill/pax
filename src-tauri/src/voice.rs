@@ -456,6 +456,8 @@ struct NoiseProcessor {
     denoise: Option<Box<DenoiseState<'static>>>,
     in_f32: Vec<f32>,
     out_f32: Vec<f32>,
+    gain: f32,
+    voice_open: bool,
 }
 
 impl NoiseProcessor {
@@ -466,6 +468,8 @@ impl NoiseProcessor {
             denoise: None,
             in_f32: vec![0.0; SAMPLES_PER_10MS as usize],
             out_f32: vec![0.0; SAMPLES_PER_10MS as usize],
+            gain: 1.0,
+            voice_open: true,
         }
     }
 
@@ -477,9 +481,13 @@ impl NoiseProcessor {
         if enabled {
             self.denoise = Some(DenoiseState::new());
             self.warmed_up = false;
+            self.gain = 1.0;
+            self.voice_open = true;
         } else {
             self.denoise = None;
             self.warmed_up = false;
+            self.gain = 1.0;
+            self.voice_open = true;
         }
     }
 
@@ -498,7 +506,7 @@ impl NoiseProcessor {
             self.in_f32[i] = s as f32;
         }
 
-        denoise.process_frame(&mut self.out_f32[..], &self.in_f32[..]);
+        let vad_prob = denoise.process_frame(&mut self.out_f32[..], &self.in_f32[..]);
 
         // nnnoiseless recommends discarding the first output frame. We instead
         // pass through the first frame unchanged to avoid an audible artifact.
@@ -507,8 +515,50 @@ impl NoiseProcessor {
             return;
         }
 
+        // Add a light VAD-driven expander/gate.
+        // This mimics the "harder cut" feel you likely had in the frontend worklet
+        // by attenuating frames that RNNoise believes are non-voice.
+        //
+        // Tuning notes:
+        // - Higher threshold = more aggressive suppression (can clip quiet speech).
+        // - Lower noise_gain = quieter background when not speaking (can sound gated).
+        // Use hysteresis so short non-voice transients don't "open" the gate as easily.
+        const VAD_OPEN: f32 = 0.88;
+        const VAD_CLOSE: f32 = 0.72;
+        const NOISE_GAIN: f32 = 0.008;
+        // Per-10ms smoothing coefficients
+        const ATTACK: f32 = 0.55;  // rise quickly when voice appears
+        const RELEASE: f32 = 0.10; // fall more slowly when voice disappears
+
+        if self.voice_open {
+            if vad_prob < VAD_CLOSE {
+                self.voice_open = false;
+            }
+        } else if vad_prob > VAD_OPEN {
+            self.voice_open = true;
+        }
+
+        let mut target_gain = if self.voice_open { 1.0 } else { NOISE_GAIN };
+        let coeff = if target_gain > self.gain { ATTACK } else { RELEASE };
+        self.gain += (target_gain - self.gain) * coeff;
+
+        // Extra suppression for clicky transients while the gate is "closed".
+        // Clicks tend to create a big instantaneous peak; this helps knock them down.
+        if !self.voice_open {
+            let mut peak = 0.0f32;
+            for &s in &self.out_f32 {
+                peak = peak.max(s.abs());
+            }
+            if peak > 14000.0 {
+                target_gain *= 0.35;
+            } else if peak > 9000.0 {
+                target_gain *= 0.55;
+            }
+        }
+
         for (i, out) in self.out_f32.iter().enumerate() {
-            let clamped = out.clamp(i16::MIN as f32, i16::MAX as f32);
+            let scaled = out * (self.gain.min(1.0)) * target_gain;
+            let clamped = scaled.clamp(i16::MIN as f32, i16::MAX as f32);
             samples[i] = clamped as i16;
         }
     }
