@@ -214,6 +214,7 @@ export function useVoiceCall() {
         });
     },
     startScreenShare: (mode: "screen" | "window") => {
+      setState((prev) => ({ ...prev, error: null })); // Clear previous error before retry
       invoke("voice_start_screen_share", { mode })
         .catch((e) => {
           console.error("Failed to start screen share:", e);

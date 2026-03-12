@@ -39,12 +39,14 @@ export default function VoiceRoomView({
 
   const isConnected = callState.connectedRoomId === room.id && !callState.isConnecting;
   const isConnecting = callState.isConnecting && callState.connectedRoomId === room.id;
-  const hasScreenShare = !!callState.screenSharingOwner;
+  const hasScreenShare = !!callState.screenSharingOwner || callState.isLocalScreenSharing;
 
   // Collect all participants from the Rust backend state
   const allParticipants: VoiceParticipant[] = isConnected ? callState.participants : [];
 
-  const sharerDisplayName = callState.screenSharingOwner
+  const sharerDisplayName = callState.isLocalScreenSharing
+    ? "You"
+    : callState.screenSharingOwner
     ? (callState.screenSharingOwner.startsWith("@")
         ? callState.screenSharingOwner.slice(1).split(":")[0]
         : callState.screenSharingOwner)
@@ -116,7 +118,9 @@ export default function VoiceRoomView({
               fontSize: typography.fontSizeSmall,
               color: palette.textSecondary,
             }}>
-              {sharerDisplayName} is sharing their screen
+              {callState.isLocalScreenSharing
+                ? "You are sharing your screen"
+                : `${sharerDisplayName} is sharing their screen`}
             </div>
             <div style={{
               flex: 1,
@@ -173,6 +177,20 @@ export default function VoiceRoomView({
             <span style={{ fontSize: typography.fontSizeBase, color: "#f23f43" }}>
               {callState.error}
             </span>
+          </div>
+        )}
+
+        {/* Show errors (e.g. screen share failure) even when connected */}
+        {callState.error && isConnected && (
+          <div style={{
+            padding: spacing.unit * 2,
+            margin: spacing.unit * 2,
+            backgroundColor: "rgba(242, 63, 67, 0.15)",
+            borderRadius: 8,
+            color: "#f23f43",
+            fontSize: typography.fontSizeSmall,
+          }}>
+            {callState.error}
           </div>
         )}
 

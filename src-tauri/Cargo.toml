@@ -37,7 +37,12 @@ cpal = "0.15"
 futures-util = "0.3"
 parking_lot = "0.12"
 log = "0.4"
+tauri-plugin-log = "2"
 nnnoiseless = "0.5.2"
+screenshots = "0.8"
+
+[target.'cfg(target_os = "windows")'.dependencies]
+wasapi = "0.22"
 
 [target.'cfg(target_os = "linux")'.dependencies]
 zbus = { version = "4", default-features = false, features = ["tokio"] }

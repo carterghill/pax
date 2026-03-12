@@ -326,6 +326,18 @@ impl VoiceManager {
             )
             .await
             .map_err(|e| format!("Failed to publish screen track: {}", e))?;
+        if let Some(audio_track) = &handle.audio_track {
+            room.local_participant()
+                .publish_track(
+                    LocalTrack::Audio(audio_track.clone()),
+                    TrackPublishOptions {
+                        source: TrackSource::Screenshare,
+                        ..Default::default()
+                    },
+                )
+                .await
+                .map_err(|e| format!("Failed to publish screen audio track: {}", e))?;
+        }
         {
             let mut guard = self.session.lock();
             let session = guard.as_mut().ok_or("Not in a voice call")?;
@@ -354,16 +366,17 @@ impl VoiceManager {
             )
         };
         if handle.is_some() {
-            drop(handle); // Stop capture thread
+            drop(handle); // Stop capture thread and loopback stream
             let lp = room.local_participant();
-            let sid = lp.track_publications()
+            let screen_sids: Vec<_> = lp
+                .track_publications()
                 .iter()
-                .find(|(_, pub_)| pub_.source() == TrackSource::Screenshare)
+                .filter(|(_, pub_)| pub_.source() == TrackSource::Screenshare)
                 .map(|(s, _)| s.clone())
-                .ok_or("Screen track publication not found")?;
-            lp.unpublish_track(&sid)
-                .await
-                .map_err(|e| format!("Failed to unpublish screen track: {}", e))?;
+                .collect();
+            for sid in screen_sids {
+                let _ = lp.unpublish_track(&sid).await;
+            }
         }
         {
             let mut st = audio_state.lock();
