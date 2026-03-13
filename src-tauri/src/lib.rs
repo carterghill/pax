@@ -869,6 +869,26 @@ fn enumerate_screen_share_windows() -> Result<Vec<(String, String)>, String> {
 }
 
 #[tauri::command]
+fn get_screen_share_config() -> screen::ScreenShareConfig {
+    screen::get_screen_share_config()
+}
+
+#[tauri::command]
+fn set_screen_share_config(config: screen::ScreenShareConfig) {
+    screen::set_screen_share_config(config);
+}
+
+#[tauri::command]
+fn get_noise_suppression_config(voice_mgr: State<'_, voice::VoiceManager>) -> Result<voice::NoiseSuppressionConfig, String> {
+    voice_mgr.get_noise_suppression_config()
+}
+
+#[tauri::command]
+fn set_noise_suppression_config(voice_mgr: State<'_, voice::VoiceManager>, config: voice::NoiseSuppressionConfig) -> Result<(), String> {
+    voice_mgr.set_noise_suppression_config(config)
+}
+
+#[tauri::command]
 async fn voice_stop_screen_share(
     voice_mgr: State<'_, voice::VoiceManager>,
     app: tauri::AppHandle,
@@ -1155,6 +1175,10 @@ pub fn run() {
             voice_start_screen_share,
             voice_stop_screen_share,
             enumerate_screen_share_windows,
+            get_screen_share_config,
+            set_screen_share_config,
+            get_noise_suppression_config,
+            set_noise_suppression_config,
             voice_set_participant_volume,
             send_message,
             start_sync,

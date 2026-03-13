@@ -87,6 +87,10 @@ export default function MainLayout({ userId }: { userId: string }) {
               onStartScreenShare={voiceCall.startScreenShare}
               onEnumerateScreenShareWindows={voiceCall.enumerateScreenShareWindows}
               onStopScreenShare={voiceCall.stopScreenShare}
+              onGetScreenShareConfig={voiceCall.getScreenShareConfig}
+              onSetScreenShareConfig={voiceCall.setScreenShareConfig}
+              onGetNoiseSuppressionConfig={voiceCall.getNoiseSuppressionConfig}
+              onSetNoiseSuppressionConfig={voiceCall.setNoiseSuppressionConfig}
               onSetParticipantVolume={voiceCall.setParticipantVolume}
             />
           ) : activeRoom ? (

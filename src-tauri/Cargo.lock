@@ -5000,6 +5000,7 @@ dependencies = [
  "log",
  "matrix-sdk",
  "nnnoiseless",
+ "once_cell",
  "parking_lot",
  "reqwest 0.12.28",
  "screenshots",

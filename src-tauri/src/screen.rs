@@ -8,6 +8,7 @@
 //! On Windows, also captures system audio (WASAPI process loopback) for screen-share audio.
 
 use std::sync::atomic::{AtomicBool, Ordering};
+use once_cell::sync::Lazy;
 use std::sync::Arc;
 use std::thread;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
@@ -62,6 +63,31 @@ impl Drop for ScreenShareHandle {
 /// Target resolution for screen share (scaled down for bandwidth).
 const TARGET_WIDTH: u32 = 1280;
 const TARGET_HEIGHT: u32 = 720;
+
+/// Configurable screen share settings (bitrate, fps). Applied when starting a new share.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ScreenShareConfig {
+    pub bitrate_kbps: u32,
+    pub fps: u32,
+}
+
+impl Default for ScreenShareConfig {
+    fn default() -> Self {
+        Self { bitrate_kbps: 1500, fps: 10 }
+    }
+}
+
+static SCREEN_SHARE_CONFIG: Lazy<parking_lot::RwLock<ScreenShareConfig>> =
+    Lazy::new(|| parking_lot::RwLock::new(ScreenShareConfig::default()));
+
+pub fn get_screen_share_config() -> ScreenShareConfig {
+    SCREEN_SHARE_CONFIG.read().clone()
+}
+
+pub fn set_screen_share_config(config: ScreenShareConfig) {
+    *SCREEN_SHARE_CONFIG.write() = config;
+}
 
 /// Start screen sharing and return a handle containing the track.
 /// Publishes the video track immediately after capture is running (avoids SDP race).
@@ -119,7 +145,9 @@ async fn start_screen_capture_windows_graphics(
     let first_frame = Arc::new(AtomicBool::new(false));
     let flags = (video_source.clone(), shutdown.clone(), first_frame.clone());
 
-    eprintln!("[Pax] start_screen_capture_windows_graphics: mode={:?} window_title={:?}", mode, window_title);
+    let config = get_screen_share_config();
+    let capture_interval_ms = (1000.0 / config.fps.max(1) as f64).round() as u64;
+    eprintln!("[Pax] start_screen_capture_windows_graphics: mode={:?} bitrate={}kbps fps={}", mode, config.bitrate_kbps, config.fps);
 
     let (capture_control, target_audio_pid) = match mode {
         ScreenShareMode::Screen => {
@@ -130,7 +158,7 @@ async fn start_screen_capture_windows_graphics(
                 CursorCaptureSettings::Default,
                 DrawBorderSettings::Default,
                 SecondaryWindowSettings::Default,
-                MinimumUpdateIntervalSettings::Custom(Duration::from_millis(100)), // ~10 fps
+                MinimumUpdateIntervalSettings::Custom(Duration::from_millis(capture_interval_ms)),
                 DirtyRegionSettings::Default,
                 ColorFormat::Rgba8,
                 flags,
@@ -155,7 +183,7 @@ async fn start_screen_capture_windows_graphics(
                 CursorCaptureSettings::Default,
                 DrawBorderSettings::Default,
                 SecondaryWindowSettings::Default,
-                MinimumUpdateIntervalSettings::Custom(Duration::from_millis(100)),
+                MinimumUpdateIntervalSettings::Custom(Duration::from_millis(capture_interval_ms)),
                 DirtyRegionSettings::Default,
                 ColorFormat::Rgba8,
                 flags,
@@ -185,7 +213,9 @@ async fn start_screen_capture_windows_graphics(
         RtcVideoSource::Native(video_source),
     );
 
-    eprintln!("[Pax] Publishing screen track to LiveKit (VP8, no simulcast)");
+    let bitrate = (config.bitrate_kbps as u64) * 1000;
+    let framerate = config.fps as f64;
+    eprintln!("[Pax] Publishing screen track to LiveKit (VP8, {}kbps, {}fps)", config.bitrate_kbps, config.fps);
     room.local_participant()
         .publish_track(
             LocalTrack::Video(track.clone()),
@@ -194,8 +224,8 @@ async fn start_screen_capture_windows_graphics(
                 video_codec: VideoCodec::VP8,
                 simulcast: false,
                 video_encoding: Some(VideoEncoding {
-                    max_bitrate: 1_500_000,
-                    max_framerate: 10.0,
+                    max_bitrate: bitrate,
+                    max_framerate: framerate,
                 }),
                 ..Default::default()
             },
@@ -305,6 +335,9 @@ async fn start_screen_capture_libwebrtc_or_fallback(
     mode: ScreenShareMode,
     _window_title: Option<String>,
 ) -> Result<ScreenShareHandle, String> {
+    let config = get_screen_share_config();
+    let bitrate = (config.bitrate_kbps as u64) * 1000;
+    let capture_interval_ms = (1000.0 / config.fps.max(1) as f64).round() as u64;
     use libwebrtc::desktop_capturer::{
         CaptureSource, DesktopCaptureSourceType, DesktopCapturer, DesktopCapturerOptions,
         DesktopFrame,
@@ -424,7 +457,7 @@ async fn start_screen_capture_libwebrtc_or_fallback(
         let mut cap = capturer;
         while !shutdown_thread.load(Ordering::Relaxed) {
             cap.capture_frame();
-            thread::sleep(Duration::from_millis(100));
+            thread::sleep(Duration::from_millis(capture_interval_ms));
         }
     });
 
@@ -441,8 +474,8 @@ async fn start_screen_capture_libwebrtc_or_fallback(
                 video_codec: VideoCodec::VP8,
                 simulcast: false,
                 video_encoding: Some(VideoEncoding {
-                    max_bitrate: 1_500_000,
-                    max_framerate: 10.0,
+                    max_bitrate: bitrate,
+                    max_framerate: config.fps as f64,
                 }),
                 ..Default::default()
             },
@@ -472,6 +505,9 @@ async fn start_screen_capture_screenshots_fallback(
 ) -> Result<ScreenShareHandle, String> {
     use livekit::webrtc::video_source::native::NativeVideoSource;
 
+    let config = get_screen_share_config();
+    let bitrate = (config.bitrate_kbps as u64) * 1000;
+    let capture_interval_ms = (1000.0 / config.fps.max(1) as f64).round() as u64;
     eprintln!("[Pax] start_screen_capture_screenshots_fallback");
     let screens = screenshots::Screen::all()
         .map_err(|e| format!("screenshots: failed to enumerate screens: {}", e))?;
@@ -526,7 +562,7 @@ async fn start_screen_capture_screenshots_fallback(
                     eprintln!("[Pax] screenshots capture: {}", e);
                 }
             }
-            thread::sleep(Duration::from_millis(100));
+            thread::sleep(Duration::from_millis(capture_interval_ms));
         }
     });
 
@@ -544,8 +580,8 @@ async fn start_screen_capture_screenshots_fallback(
                 video_codec: VideoCodec::VP8,
                 simulcast: false,
                 video_encoding: Some(VideoEncoding {
-                    max_bitrate: 1_500_000,
-                    max_framerate: 10.0,
+                    max_bitrate: bitrate,
+                    max_framerate: config.fps as f64,
                 }),
                 ..Default::default()
             },

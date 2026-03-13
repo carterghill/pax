@@ -228,6 +228,13 @@ export function useVoiceCall() {
         console.error("Failed to stop screen share:", e);
       });
     },
+    getScreenShareConfig: () => invoke<{ bitrateKbps: number; fps: number }>("get_screen_share_config"),
+    setScreenShareConfig: (config: { bitrateKbps: number; fps: number }) =>
+      invoke("set_screen_share_config", { config }),
+    getNoiseSuppressionConfig: () =>
+      invoke<{ extraAttenuation: number; agcTargetRms: number }>("get_noise_suppression_config"),
+    setNoiseSuppressionConfig: (config: { extraAttenuation: number; agcTargetRms: number }) =>
+      invoke("set_noise_suppression_config", { config }),
     setParticipantVolume,
   };
 }

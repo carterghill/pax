@@ -24,6 +24,7 @@ use livekit::webrtc::{
 use futures_util::StreamExt;
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
 use nnnoiseless::DenoiseState;
+use once_cell::sync::Lazy;
 // cpal::Stream is !Send because of platform internals, but we only ever
 // create streams on one thread and drop them (possibly on another).
 // This is safe for our use case.
@@ -103,6 +104,8 @@ pub struct VoiceSession {
     shutdown_tx: mpsc::Sender<()>,
     /// Screen share handle (track + capture shutdown); dropped on stop
     _screen_handle: Option<crate::screen::ScreenShareHandle>,
+    /// Noise processor for tunable suppression (shared with mic callback)
+    noise_proc: Arc<Mutex<NoiseProcessor>>,
 }
 impl VoiceSession {
     pub fn room_id(&self) -> &str {
@@ -183,7 +186,9 @@ impl VoiceManager {
         // 4. Now set up cpal streams (no more .await after this point)
         // Create a channel for mic frames: cpal callback → pump task
         let (mic_frame_tx, mic_frame_rx) = mpsc::channel::<Vec<i16>>(10); // small bounded buffer
-        let input_stream = setup_mic_input(audio_state.clone(), mic_frame_tx)
+        let noise_proc = Arc::new(Mutex::new(NoiseProcessor::new()));
+        noise_proc.lock().set_enabled(audio_state.lock().noise_suppression_enabled);
+        let input_stream = setup_mic_input(audio_state.clone(), noise_proc.clone(), mic_frame_tx)
             .map_err(|e| format!("Failed to open microphone: {}", e))?;
         let output_stream = setup_speaker_output(audio_state.clone())
             .map_err(|e| format!("Failed to open speakers: {}", e))?;
@@ -228,6 +233,7 @@ impl VoiceManager {
                 _output_stream: Some(output_stream),
                 shutdown_tx,
                 _screen_handle: None,
+                noise_proc,
             });
         }
         Ok(())
@@ -273,10 +279,33 @@ impl VoiceManager {
     pub fn toggle_noise_suppression(&self) -> Result<bool, String> {
         let guard = self.session.lock();
         let session = guard.as_ref().ok_or("Not in a voice call")?;
-        let mut state = session.audio_state.lock();
-        state.noise_suppression_enabled = !state.noise_suppression_enabled;
-        Ok(state.noise_suppression_enabled)
+        let mut st = session.audio_state.lock();
+        st.noise_suppression_enabled = !st.noise_suppression_enabled;
+        let enabled = st.noise_suppression_enabled;
+        drop(st);
+        session.noise_proc.lock().set_enabled(enabled);
+        Ok(enabled)
     }
+
+    /// Update noise suppression parameters (takes effect immediately when in a call).
+    pub fn set_noise_suppression_config(&self, config: NoiseSuppressionConfig) -> Result<(), String> {
+        *NOISE_SUPPRESSION_CONFIG.write() = config.clone();
+        let guard = self.session.lock();
+        if let Some(session) = guard.as_ref() {
+            session.noise_proc.lock().set_config(config);
+        }
+        Ok(())
+    }
+
+    /// Get current noise suppression config (from session if in call, else stored default).
+    pub fn get_noise_suppression_config(&self) -> Result<NoiseSuppressionConfig, String> {
+        let guard = self.session.lock();
+        Ok(guard
+            .as_ref()
+            .map(|s| s.noise_proc.lock().config.clone())
+            .unwrap_or_else(|| NOISE_SUPPRESSION_CONFIG.read().clone()))
+    }
+
     /// Set per-user volume (0.0 – 2.0).
     pub fn set_participant_volume(&self, identity: String, volume: f32) {
         let guard = self.session.lock();
@@ -576,15 +605,48 @@ fn emit_state(
     let _ = app_handle.emit("voice-state-changed", event);
 }
 // ─── cpal audio setup ───────────────────────────────────────────────────────
+/// Tunable noise suppression parameters.
+///
+/// RNNoise already performs spectral noise suppression via its neural network.
+/// These parameters control *optional* post-processing on top of the denoised
+/// output.  With `extra_attenuation = 0.0` and `agc_target_rms = 0`, the
+/// behaviour matches the original frontend WASM worklet (pure RNNoise).
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct NoiseSuppressionConfig {
+    /// Additional soft gating strength applied on top of RNNoise.
+    /// 0.0 = pure RNNoise output (recommended default).
+    /// Higher values apply a VAD-probability-weighted gain curve that further
+    /// attenuates non-voice frames.  Range 0.0 – 1.0.
+    pub extra_attenuation: f32,
+    /// AGC target RMS level.  0 = AGC disabled (recommended default).
+    /// When >0, a gentle automatic gain control normalises voice loudness.
+    pub agc_target_rms: f32,
+}
+
+impl Default for NoiseSuppressionConfig {
+    fn default() -> Self {
+        Self {
+            extra_attenuation: 0.0,
+            agc_target_rms: 0.0,
+        }
+    }
+}
+
+static NOISE_SUPPRESSION_CONFIG: Lazy<parking_lot::RwLock<NoiseSuppressionConfig>> =
+    Lazy::new(|| parking_lot::RwLock::new(NoiseSuppressionConfig::default()));
+
 struct NoiseProcessor {
     enabled: bool,
     warmed_up: bool,
     denoise: Option<Box<DenoiseState<'static>>>,
     in_f32: Vec<f32>,
     out_f32: Vec<f32>,
-    gain: f32,
-    voice_open: bool,
+    /// Smoothed soft-gate gain (only used when extra_attenuation > 0)
+    gate_gain: f32,
+    /// Smoothed AGC gain (only used when agc_target_rms > 0)
     agc_gain: f32,
+    config: NoiseSuppressionConfig,
 }
 
 impl NoiseProcessor {
@@ -595,10 +657,14 @@ impl NoiseProcessor {
             denoise: None,
             in_f32: vec![0.0; SAMPLES_PER_10MS as usize],
             out_f32: vec![0.0; SAMPLES_PER_10MS as usize],
-            gain: 1.0,
-            voice_open: true,
+            gate_gain: 1.0,
             agc_gain: 1.0,
+            config: NOISE_SUPPRESSION_CONFIG.read().clone(),
         }
+    }
+
+    fn set_config(&mut self, config: NoiseSuppressionConfig) {
+        self.config = config;
     }
 
     fn set_enabled(&mut self, enabled: bool) {
@@ -609,14 +675,12 @@ impl NoiseProcessor {
         if enabled {
             self.denoise = Some(DenoiseState::new());
             self.warmed_up = false;
-            self.gain = 1.0;
-            self.voice_open = true;
+            self.gate_gain = 1.0;
             self.agc_gain = 1.0;
         } else {
             self.denoise = None;
             self.warmed_up = false;
-            self.gain = 1.0;
-            self.voice_open = true;
+            self.gate_gain = 1.0;
             self.agc_gain = 1.0;
         }
     }
@@ -632,108 +696,82 @@ impl NoiseProcessor {
             return;
         };
 
+        // nnnoiseless expects f32 samples in i16-scale (not normalised to -1..1)
         for (i, &s) in samples.iter().enumerate() {
             self.in_f32[i] = s as f32;
         }
 
         let vad_prob = denoise.process_frame(&mut self.out_f32[..], &self.in_f32[..]);
 
-        // nnnoiseless recommends discarding the first output frame. We instead
-        // pass through the first frame unchanged to avoid an audible artifact.
         if !self.warmed_up {
             self.warmed_up = true;
             return;
         }
 
-        // Add a light VAD-driven expander/gate.
-        // This mimics the "harder cut" feel you likely had in the frontend worklet
-        // by attenuating frames that RNNoise believes are non-voice.
-        //
-        // Tuning notes:
-        // - Higher threshold = more aggressive suppression (can clip quiet speech).
-        // - Lower noise_gain = quieter background when not speaking (can sound gated).
-        // Use hysteresis so short non-voice transients don't "open" the gate as easily.
-        const VAD_OPEN: f32 = 0.88;
-        const VAD_CLOSE: f32 = 0.72;
-        const NOISE_GAIN: f32 = 0.008;
-        // Per-10ms smoothing coefficients
-        const ATTACK: f32 = 0.55;  // rise quickly when voice appears
-        const RELEASE: f32 = 0.10; // fall more slowly when voice disappears
+        // ── Core: use RNNoise denoised output directly ──────────────────
+        // This matches the original frontend WASM worklet behaviour.
+        // The neural network has already performed spectral noise suppression;
+        // the output in self.out_f32 is the clean signal.
 
-        if self.voice_open {
-            if vad_prob < VAD_CLOSE {
-                self.voice_open = false;
-            }
-        } else if vad_prob > VAD_OPEN {
-            self.voice_open = true;
+        let mut combined_gain: f32 = 1.0;
+
+        // ── Optional soft VAD gate ──────────────────────────────────────
+        // When extra_attenuation > 0, use the continuous VAD probability to
+        // gently reduce gain during non-voice frames.  This is a smooth
+        // probability-weighted curve — NOT a binary open/close gate.
+        let atten = self.config.extra_attenuation.clamp(0.0, 1.0);
+        if atten > 0.0 {
+            // Map extra_attenuation 0..1 → exponent 1..4 for the VAD curve.
+            // Higher exponent = more aggressive suppression of low-probability frames.
+            let curve = 1.0 + atten * 3.0;
+            let vad_factor = vad_prob.powf(curve);
+            let floor = 0.01_f32;
+            let target = floor + (1.0 - floor) * vad_factor;
+
+            let coeff = if target > self.gate_gain { 0.6 } else { 0.15 };
+            self.gate_gain += (target - self.gate_gain) * coeff;
+            combined_gain *= self.gate_gain;
         }
 
-        let mut target_gate_gain = if self.voice_open { 1.0 } else { NOISE_GAIN };
+        // ── Optional gentle AGC ─────────────────────────────────────────
+        let agc_target = self.config.agc_target_rms;
+        if agc_target > 0.0 && vad_prob > 0.5 {
+            const AGC_MIN: f32 = 0.5;
+            const AGC_MAX: f32 = 3.0;
+            const AGC_SPEED: f32 = 0.05;
 
-        // Extra suppression for clicky transients while the gate is "closed".
-        // Clicks tend to create a big instantaneous peak; this helps knock them down.
-        if !self.voice_open {
-            let mut peak = 0.0f32;
-            for &s in &self.out_f32 {
-                peak = peak.max(s.abs());
-            }
-            if peak > 14000.0 {
-                target_gate_gain *= 0.35;
-            } else if peak > 9000.0 {
-                target_gate_gain *= 0.55;
-            }
-        }
-
-        // Smooth the gate gain to avoid pumping.
-        let coeff = if target_gate_gain > self.gain { ATTACK } else { RELEASE };
-        self.gain += (target_gate_gain - self.gain) * coeff;
-
-        // DAGC (digital automatic gain control) / noise leveling.
-        //
-        // We compute RMS on the RNNoise-denoised signal and move `agc_gain` toward a target level.
-        // To avoid boosting background noise, we only *adapt* the AGC when voice is open.
-        // When voice is closed, we slowly return agc_gain back toward 1.0.
-        const AGC_TARGET_RMS: f32 = 7000.0; // ~ -13 dBFS for i16-ish units
-        const AGC_MIN_GAIN: f32 = 0.25;
-        const AGC_MAX_GAIN: f32 = 6.0;
-        const AGC_ATTACK: f32 = 0.30;  // faster when needing to reduce loud audio
-        const AGC_RELEASE: f32 = 0.06; // slower when boosting quiet audio
-
-        if self.voice_open {
             let mut sum_sq = 0.0f32;
             for &s in &self.out_f32 {
                 sum_sq += s * s;
             }
             let rms = (sum_sq / self.out_f32.len() as f32).sqrt().max(1.0);
-            let desired = (AGC_TARGET_RMS / rms).clamp(AGC_MIN_GAIN, AGC_MAX_GAIN);
-            let a = if desired < self.agc_gain { AGC_ATTACK } else { AGC_RELEASE };
-            self.agc_gain += (desired - self.agc_gain) * a;
-        } else {
-            // Don't let AGC "remember" a big boost and apply it right as the gate re-opens.
-            self.agc_gain += (1.0 - self.agc_gain) * 0.10;
+            let desired = (agc_target / rms).clamp(AGC_MIN, AGC_MAX);
+            self.agc_gain += (desired - self.agc_gain) * AGC_SPEED;
+            combined_gain *= self.agc_gain;
         }
 
-        let mut combined_gain = (self.gain.clamp(0.0, 1.0)) * self.agc_gain;
-
-        // Limiter: ensure we don't clip after applying combined gain.
-        let mut peak_after = 0.0f32;
-        for &s in &self.out_f32 {
-            peak_after = peak_after.max((s * combined_gain).abs());
+        // ── Limiter ─────────────────────────────────────────────────────
+        if combined_gain != 1.0 {
+            let mut peak = 0.0f32;
+            for &s in &self.out_f32 {
+                peak = peak.max((s * combined_gain).abs());
+            }
+            if peak > i16::MAX as f32 {
+                combined_gain *= (i16::MAX as f32) / peak;
+            }
         }
-        if peak_after > i16::MAX as f32 {
-            combined_gain *= (i16::MAX as f32) / peak_after;
-        }
 
+        // ── Write output ────────────────────────────────────────────────
         for (i, out) in self.out_f32.iter().enumerate() {
             let scaled = out * combined_gain;
-            let clamped = scaled.clamp(i16::MIN as f32, i16::MAX as f32);
-            samples[i] = clamped as i16;
+            samples[i] = scaled.clamp(i16::MIN as f32, i16::MAX as f32) as i16;
         }
     }
 }
 
 fn setup_mic_input(
     audio_state: Arc<Mutex<AudioState>>,
+    noise_proc: Arc<Mutex<NoiseProcessor>>,
     frame_tx: mpsc::Sender<Vec<i16>>,
 ) -> Result<cpal::Stream, String> {
     let host = cpal::default_host();
@@ -754,7 +792,6 @@ fn setup_mic_input(
     let frame_buf: Arc<Mutex<Vec<i16>>> = Arc::new(Mutex::new(
         Vec::with_capacity(SAMPLES_PER_10MS as usize * 2),
     ));
-    let noise_proc: Arc<Mutex<NoiseProcessor>> = Arc::new(Mutex::new(NoiseProcessor::new()));
     let stream = device
         .build_input_stream(
             &config,
