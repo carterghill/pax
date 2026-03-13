@@ -12,6 +12,22 @@ import { useTheme } from "../theme/ThemeContext";
 import SettingsMenu from "../components/SettingsMenu";
 
 const VOICE_ROOM_TYPE = "org.matrix.msc3417.call";
+const normalizeUserId = (id: string) => id.trim().toLowerCase();
+const extractMatrixUserId = (identity: string) => {
+  const trimmed = identity.trim();
+  if (!trimmed.startsWith("@")) return trimmed;
+  // LiveKit identities can include transport/device suffixes (e.g. "|device"),
+  // while the room sidebar list uses plain Matrix user IDs.
+  const match = trimmed.match(/^@[^|/\s]+/);
+  return match ? match[0] : trimmed;
+};
+const localpartFromUserId = (id: string) => {
+  const trimmed = id.trim();
+  if (!trimmed.startsWith("@")) return trimmed;
+  const withoutAt = trimmed.slice(1);
+  const idx = withoutAt.indexOf(":");
+  return idx === -1 ? withoutAt : withoutAt.slice(0, idx);
+};
 
 export default function MainLayout({ userId }: { userId: string }) {
   const { spaces, roomsBySpace, getRoom } = useRooms(userId);
@@ -38,6 +54,27 @@ export default function MainLayout({ userId }: { userId: string }) {
     [visibleRooms]
   );
   const voiceParticipants = useVoiceParticipants(voiceRoomIds);
+  const voiceCallParticipantStates = useMemo(
+    () => {
+      const stateMap: Record<string, { isMuted: boolean; isDeafened: boolean }> = {};
+      for (const p of voiceCall.participants) {
+        const state = { isMuted: p.isMuted, isDeafened: p.isDeafened };
+        const mxid = extractMatrixUserId(p.identity);
+        const keys = [
+          p.identity,
+          mxid,
+          localpartFromUserId(mxid),
+        ]
+          .map(normalizeUserId)
+          .filter(Boolean);
+        for (const key of keys) {
+          stateMap[key] = state;
+        }
+      }
+      return stateMap;
+    },
+    [voiceCall.participants]
+  );
 
   // Handle room selection — clicking a voice room joins the call
   const handleSelectRoom = useCallback((roomId: string) => {
@@ -67,6 +104,7 @@ export default function MainLayout({ userId }: { userId: string }) {
           voiceParticipants={voiceParticipants}
           connectedVoiceRoomId={voiceCall.connectedRoomId}
           screenSharingOwner={voiceCall.screenSharingOwner}
+          voiceCallParticipantStates={voiceCallParticipantStates}
           onSetParticipantVolume={voiceCall.setParticipantVolume}
         />
         <main style={{

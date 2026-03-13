@@ -1,5 +1,5 @@
 import { useState } from "react";
-import { Hash, Volume2, PhoneOff, Monitor } from "lucide-react";
+import { Hash, Volume2, Monitor, MicOff, Headphones } from "lucide-react";
 import { Room, VoiceParticipant } from "../types/matrix";
 import { useTheme } from "../theme/ThemeContext";
 import StatusDropdown from "./StatusDropdown";
@@ -7,6 +7,32 @@ import VolumeContextMenu from "./VolumeContextMenu";
 import { useUserVolume } from "../hooks/useUserVolume";
 
 const VOICE_ROOM_TYPE = "org.matrix.msc3417.call";
+const normalizeUserId = (id: string) => id.trim().toLowerCase();
+const localpartFromUserId = (id: string) => {
+  const trimmed = id.trim();
+  if (!trimmed.startsWith("@")) return trimmed;
+  const withoutAt = trimmed.slice(1);
+  const idx = withoutAt.indexOf(":");
+  return idx === -1 ? withoutAt : withoutAt.slice(0, idx);
+};
+const resolveVoiceState = (
+  participant: VoiceParticipant,
+  voiceCallParticipantStates: Record<string, { isMuted: boolean; isDeafened: boolean }>
+) => {
+  const candidates = [
+    participant.userId,
+    localpartFromUserId(participant.userId),
+    participant.displayName ?? "",
+  ]
+    .map(normalizeUserId)
+    .filter(Boolean);
+
+  for (const key of candidates) {
+    const state = voiceCallParticipantStates[key];
+    if (state) return state;
+  }
+  return undefined;
+};
 
 interface RoomSidebarProps {
   rooms: Room[];
@@ -17,6 +43,7 @@ interface RoomSidebarProps {
   voiceParticipants: Record<string, VoiceParticipant[]>;
   connectedVoiceRoomId: string | null;
   screenSharingOwner: string | null;
+  voiceCallParticipantStates: Record<string, { isMuted: boolean; isDeafened: boolean }>;
   onSetParticipantVolume: (identity: string, volume: number) => void;
 }
 
@@ -24,11 +51,15 @@ function VoiceParticipantRow({
   participant,
   isLocalUser,
   isSharingScreen,
+  isMuted,
+  isDeafened,
   onContextMenu,
 }: {
   participant: VoiceParticipant;
   isLocalUser: boolean;
   isSharingScreen: boolean;
+  isMuted: boolean;
+  isDeafened: boolean;
   onContextMenu: (e: React.MouseEvent) => void;
 }) {
   const { palette, spacing, typography } = useTheme();
@@ -86,10 +117,21 @@ function VoiceParticipantRow({
         whiteSpace: "nowrap",
         display: "flex",
         alignItems: "center",
+        minWidth: 0,
+        flex: 1,
+      }}>
+        {name}
+      </span>
+      <span style={{
+        marginLeft: "auto",
+        display: "flex",
+        alignItems: "center",
         gap: spacing.unit,
+        flexShrink: 0,
       }}>
         {isSharingScreen && <Monitor size={12} color="#23a55a" />}
-        {name}
+        {isMuted && <MicOff size={12} color="#f23f43" />}
+        {isDeafened && <Headphones size={12} color="#f23f43" />}
       </span>
     </div>
   );
@@ -104,6 +146,7 @@ export default function RoomSidebar({
   voiceParticipants,
   connectedVoiceRoomId,
   screenSharingOwner,
+  voiceCallParticipantStates,
   onSetParticipantVolume,
 }: RoomSidebarProps) {
   const { palette, spacing, typography } = useTheme();
@@ -199,12 +242,16 @@ export default function RoomSidebar({
               {/* Voice participants listed under the voice room */}
               {isVoice && participants.length > 0 && (
                 <div style={{ paddingBottom: spacing.unit }}>
-                  {participants.map((p) => (
+                  {participants.map((p) => {
+                    const state = resolveVoiceState(p, voiceCallParticipantStates);
+                    return (
                     <VoiceParticipantRow
                       key={p.userId}
                       participant={p}
                       isLocalUser={p.userId === userId}
                       isSharingScreen={screenSharingOwner === p.userId}
+                      isMuted={isConnectedHere ? !!state?.isMuted : false}
+                      isDeafened={isConnectedHere ? !!state?.isDeafened : false}
                       onContextMenu={(e) => {
                         // Map userId to the identity format used by LiveKit
                         setContextMenu({
@@ -215,7 +262,8 @@ export default function RoomSidebar({
                         });
                       }}
                     />
-                  ))}
+                    );
+                  })}
                 </div>
               )}
             </div>
