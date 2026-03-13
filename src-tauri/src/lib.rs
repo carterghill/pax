@@ -8,6 +8,7 @@ mod voice;
 use std::sync::Arc;
 use std::time::Duration;
 use std::collections::HashMap;
+use tauri::Manager;
 use tauri::State;
 use tauri::Emitter;
 use tokio::sync::Mutex;
@@ -22,6 +23,18 @@ use data_encoding::BASE64;
 use futures_util::future::join_all;
 
 use platform::DisplayServer;
+
+/// Format an error with its full source chain so we see the real cause (e.g. TLS, timeout).
+fn fmt_error_chain(e: &dyn std::error::Error) -> String {
+    let mut s = e.to_string();
+    let mut current: &dyn std::error::Error = e;
+    while let Some(source) = current.source() {
+        s.push_str(" | ");
+        s.push_str(&source.to_string());
+        current = source;
+    }
+    s
+}
 
 pub struct AppState {
     pub client: Mutex<Option<Client>>,
@@ -108,7 +121,7 @@ async fn login(
         .homeserver_url(&homeserver)
         .build()
         .await
-        .map_err(|e| format!("Failed to create client: {e}"))?;
+        .map_err(|e| format!("Failed to create client: {}", fmt_error_chain(&e)))?;
 
     client
         .matrix_auth()
@@ -116,12 +129,12 @@ async fn login(
         .initial_device_display_name("Pax")
         .send()
         .await
-        .map_err(|e| format!("Login failed: {e}"))?;
+        .map_err(|e| format!("Login failed: {}", fmt_error_chain(&e)))?;
 
     client
         .sync_once(SyncSettings::default().set_presence(matrix_sdk::ruma::presence::PresenceState::Offline))
         .await
-        .map_err(|e| format!("Initial sync failed: {e}"))?;
+        .map_err(|e| format!("Initial sync failed: {}", fmt_error_chain(&e)))?;
 
     // Crash recovery: clear stale voice call state in the background so login returns immediately.
     let client_cleanup = client.clone();
@@ -595,7 +608,7 @@ async fn matrix_voice_join(
         .json(&content)
         .send()
         .await
-        .map_err(|e| format!("Failed to send state event (join): {e}"))?;
+        .map_err(|e| format!("Failed to send state event (join): {}", fmt_error_chain(&e)))?;
 
     {
         let status = resp.status();
@@ -629,7 +642,7 @@ async fn matrix_voice_join(
         .json(&jwt_body)
         .send()
         .await
-        .map_err(|e| format!("Failed to call lk-jwt-service: {e}"))?;
+        .map_err(|e| format!("Failed to call lk-jwt-service: {}", fmt_error_chain(&e)))?;
 
     if !jwt_resp.status().is_success() {
         let status = jwt_resp.status();
@@ -680,7 +693,7 @@ async fn matrix_voice_leave_state_key(
         .json(&content)
         .send()
         .await
-        .map_err(|e| format!("Failed to send leave event: {e}"))?;
+        .map_err(|e| format!("Failed to send leave event: {}", fmt_error_chain(&e)))?;
 
     if resp.status().as_u16() == 404 {
         return Ok(());
@@ -1156,8 +1169,33 @@ async fn start_idle_monitor(
     Ok(())
 }
 
+/// Ensure the system CA certificate store is used for TLS on Linux.
+/// When launched from a desktop environment, SSL_CERT_FILE may be unset and rustls
+/// can fail to find certs. Setting it to the system bundle fixes connection errors.
+#[cfg(target_os = "linux")]
+fn ensure_system_certs() {
+    if std::env::var("SSL_CERT_FILE").is_ok() || std::env::var("SSL_CERT_DIR").is_ok() {
+        return;
+    }
+    for path in [
+        "/etc/ssl/certs/ca-certificates.crt",
+        "/etc/ssl/certs/ca-bundle.crt",
+        "/etc/pki/tls/certs/ca-bundle.crt",
+        "/etc/ssl/ca-bundle.pem",
+    ] {
+        if std::path::Path::new(path).exists() {
+            std::env::set_var("SSL_CERT_FILE", path);
+            break;
+        }
+    }
+}
+
+#[cfg(not(target_os = "linux"))]
+fn ensure_system_certs() {}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
+    ensure_system_certs();
     let display_server = platform::detect_display_server();
 
     let state = Arc::new(AppState {
