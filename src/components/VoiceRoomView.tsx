@@ -46,7 +46,7 @@ export default function VoiceRoomView({
   const [screenShareConfig, setScreenShareConfig] = useState({ bitrateKbps: 1500, fps: 10 });
   const [windowPickerOpen, setWindowPickerOpen] = useState(false);
   const [noiseSuppressionSettingsOpen, setNoiseSuppressionSettingsOpen] = useState(false);
-  const [noiseConfig, setNoiseConfig] = useState({ extraAttenuation: 0, agcTargetRms: 0 });
+  const [noiseConfig, setNoiseConfig] = useState({ extraAttenuation: 0, agcTargetRms: 6000 });
   const screenShareSettingsRef = useRef<HTMLDivElement>(null);
   const noiseSuppressionSettingsRef = useRef<HTMLDivElement>(null);
   const [windowList, setWindowList] = useState<[string, string][]>([]);

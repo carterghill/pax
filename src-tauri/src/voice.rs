@@ -740,7 +740,9 @@ impl Default for NoiseSuppressionConfig {
     fn default() -> Self {
         Self {
             extra_attenuation: 0.0,
-            agc_target_rms: 0.0,
+            // Keep a moderate default to level quieter microphones while
+            // still leaving headroom for the limiter.
+            agc_target_rms: 6000.0,
         }
     }
 }
@@ -820,7 +822,7 @@ impl NoiseProcessor {
             return;
         }
 
-        // ── Core: use RNNoise denoised output directly ──────────────────
+        // ── Core: RNNoise denoise first ─────────────────────────────────
         // This matches the original frontend WASM worklet behaviour.
         // The neural network has already performed spectral noise suppression;
         // the output in self.out_f32 is the clean signal.
@@ -845,7 +847,7 @@ impl NoiseProcessor {
             combined_gain *= self.gate_gain;
         }
 
-        // ── Optional gentle AGC ─────────────────────────────────────────
+        // ── Sound leveling (AGC) after RNNoise ──────────────────────────
         let agc_target = self.config.agc_target_rms;
         if agc_target > 0.0 && vad_prob > 0.5 {
             const AGC_MIN: f32 = 0.5;
