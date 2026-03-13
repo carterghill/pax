@@ -1,5 +1,5 @@
 import { useState, useCallback, useEffect, useRef } from "react";
-import { Volume2, Mic, MicOff, PhoneOff, Loader2, AudioLines, Monitor, MonitorOff, ChevronDown } from "lucide-react";
+import { Volume2, Mic, MicOff, PhoneOff, Loader2, AudioLines, Monitor, MonitorOff, ChevronDown, Headphones } from "lucide-react";
 import { useTheme } from "../theme/ThemeContext";
 import { Room } from "../types/matrix";
 import { VoiceCallState, VoiceParticipant } from "../hooks/useVoiceCall";
@@ -11,6 +11,7 @@ interface VoiceRoomViewProps {
   callState: VoiceCallState;
   onDisconnect: () => void;
   onToggleMic: () => void;
+  onToggleDeafen: () => void;
   onToggleNoiseSuppression: () => void;
   onStartScreenShare: (mode: "screen" | "window", windowTitle?: string) => void;
   onEnumerateScreenShareWindows: () => Promise<[string, string][]>;
@@ -27,6 +28,7 @@ export default function VoiceRoomView({
   callState,
   onDisconnect,
   onToggleMic,
+  onToggleDeafen,
   onToggleNoiseSuppression,
   onStartScreenShare,
   onEnumerateScreenShareWindows,
@@ -309,6 +311,8 @@ export default function VoiceRoomView({
                 {callState.screenSharingOwner === p.identity && (
                   <Monitor size={12} color="#23a55a" />
                 )}
+                {p.isMuted && <MicOff size={12} color="#f23f43" />}
+                {p.isDeafened && <Headphones size={12} color="#f23f43" />}
                 {displayName}{p.isLocal ? " (you)" : ""}
               </span>
             </div>
@@ -366,6 +370,31 @@ export default function VoiceRoomView({
             }}
           >
             {callState.isMicEnabled ? <Mic size={20} /> : <MicOff size={20} />}
+          </button>
+
+          {/* Deafen/Undeafen (local playback mute) */}
+          <button
+            onClick={onToggleDeafen}
+            title={callState.isDeafened ? "Undeafen" : "Deafen"}
+            style={{
+              width: 48,
+              height: 48,
+              borderRadius: "50%",
+              border: "none",
+              cursor: "pointer",
+              display: "flex",
+              alignItems: "center",
+              justifyContent: "center",
+              backgroundColor: callState.isDeafened
+                ? "#f23f43"
+                : palette.bgActive,
+              color: callState.isDeafened
+                ? "#fff"
+                : palette.textHeading,
+              transition: "background-color 0.15s ease",
+            }}
+          >
+            <Headphones size={20} />
           </button>
 
           {/* Screen Share */}

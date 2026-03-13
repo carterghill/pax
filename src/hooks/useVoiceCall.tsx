@@ -12,6 +12,8 @@ export interface VoiceParticipant {
   identity: string;
   isSpeaking: boolean;
   isLocal: boolean;
+  isMuted: boolean;
+  isDeafened: boolean;
 }
 
 /**
@@ -22,6 +24,7 @@ interface VoiceStateEvent {
   connectedRoomId: string | null;
   isConnecting: boolean;
   isMicEnabled: boolean;
+  isDeafened: boolean;
   isNoiseSuppressed: boolean;
   screenSharingOwner: string | null;
   isLocalScreenSharing: boolean;
@@ -33,6 +36,7 @@ export interface VoiceCallState {
   connectedRoomId: string | null;
   isConnecting: boolean;
   isMicEnabled: boolean;
+  isDeafened: boolean;
   error: string | null;
   isNoiseSuppressed: boolean;
   screenSharingOwner: string | null;
@@ -45,6 +49,7 @@ export function useVoiceCall() {
     connectedRoomId: null,
     isConnecting: false,
     isMicEnabled: false,
+    isDeafened: false,
     isNoiseSuppressed: true,
     screenSharingOwner: null,
     isLocalScreenSharing: false,
@@ -69,6 +74,7 @@ export function useVoiceCall() {
         connectedRoomId: ev.connectedRoomId,
         isConnecting: ev.isConnecting,
         isMicEnabled: ev.isMicEnabled,
+        isDeafened: ev.isDeafened ?? false,
         isNoiseSuppressed: ev.isNoiseSuppressed,
         screenSharingOwner: ev.screenSharingOwner ?? null,
         isLocalScreenSharing: ev.isLocalScreenSharing ?? false,
@@ -112,6 +118,7 @@ export function useVoiceCall() {
         connectedRoomId: null,
         isConnecting: false,
         isMicEnabled: false,
+        isDeafened: false,
         isNoiseSuppressed: false,
         screenSharingOwner: null,
         isLocalScreenSharing: false,
@@ -133,6 +140,7 @@ export function useVoiceCall() {
       connectedRoomId: null,
       isConnecting: false,
       isMicEnabled: false,
+      isDeafened: false,
       isNoiseSuppressed: false,
       screenSharingOwner: null,
       isLocalScreenSharing: false,
@@ -144,9 +152,30 @@ export function useVoiceCall() {
   const toggleMic = useCallback(async () => {
     try {
       const newEnabled = await invoke<boolean>("voice_toggle_mic");
-      setState((prev) => ({ ...prev, isMicEnabled: newEnabled }));
+      setState((prev) => ({
+        ...prev,
+        isMicEnabled: newEnabled,
+        participants: prev.participants.map((p) =>
+          p.isLocal ? { ...p, isMuted: !newEnabled } : p
+        ),
+      }));
     } catch (e) {
       console.error("Failed to toggle mic:", e);
+    }
+  }, []);
+
+  const toggleDeafen = useCallback(async () => {
+    try {
+      const newDeafened = await invoke<boolean>("voice_toggle_deafen");
+      setState((prev) => ({
+        ...prev,
+        isDeafened: newDeafened,
+        participants: prev.participants.map((p) =>
+          p.isLocal ? { ...p, isDeafened: newDeafened } : p
+        ),
+      }));
+    } catch (e) {
+      console.error("Failed to toggle deafen:", e);
     }
   }, []);
 
@@ -204,6 +233,7 @@ export function useVoiceCall() {
     connect,
     disconnect,
     toggleMic,
+    toggleDeafen,
     toggleNoiseSuppression: () => {
       invoke<boolean>("voice_toggle_noise_suppression")
         .then((enabled) => {
@@ -230,11 +260,11 @@ export function useVoiceCall() {
     },
     getScreenShareConfig: () => invoke<{ bitrateKbps: number; fps: number }>("get_screen_share_config"),
     setScreenShareConfig: (config: { bitrateKbps: number; fps: number }) =>
-      invoke("set_screen_share_config", { config }),
+      invoke<void>("set_screen_share_config", { config }),
     getNoiseSuppressionConfig: () =>
       invoke<{ extraAttenuation: number; agcTargetRms: number }>("get_noise_suppression_config"),
     setNoiseSuppressionConfig: (config: { extraAttenuation: number; agcTargetRms: number }) =>
-      invoke("set_noise_suppression_config", { config }),
+      invoke<void>("set_noise_suppression_config", { config }),
     setParticipantVolume,
   };
 }

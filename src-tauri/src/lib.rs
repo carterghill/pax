@@ -842,6 +842,13 @@ async fn voice_toggle_mic(
 }
 
 #[tauri::command]
+async fn voice_toggle_deafen(
+    voice_mgr: State<'_, voice::VoiceManager>,
+) -> Result<bool, String> {
+    voice_mgr.toggle_deafen()
+}
+
+#[tauri::command]
 async fn voice_toggle_noise_suppression(
     voice_mgr: State<'_, voice::VoiceManager>,
 ) -> Result<bool, String> {
@@ -1171,6 +1178,7 @@ pub fn run() {
             voice_connect,
             voice_disconnect,
             voice_toggle_mic,
+            voice_toggle_deafen,
             voice_toggle_noise_suppression,
             voice_start_screen_share,
             voice_stop_screen_share,

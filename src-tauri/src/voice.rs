@@ -42,6 +42,8 @@ pub struct VoiceParticipantInfo {
     pub identity: String,
     pub is_speaking: bool,
     pub is_local: bool,
+    pub is_muted: bool,
+    pub is_deafened: bool,
 }
 #[derive(Clone, Serialize, Debug)]
 #[serde(rename_all = "camelCase")]
@@ -49,6 +51,7 @@ pub struct VoiceStateEvent {
     pub connected_room_id: Option<String>,
     pub is_connecting: bool,
     pub is_mic_enabled: bool,
+    pub is_deafened: bool,
     pub is_noise_suppressed: bool,
     /// Identity of the participant currently sharing their screen (if any)
     pub screen_sharing_owner: Option<String>,
@@ -67,8 +70,14 @@ struct AudioState {
     active_speakers: Vec<String>,
     /// All remote participant identities we know about
     remote_participants: Vec<String>,
+    /// Per-remote participant mic mute state (true = muted)
+    remote_mic_muted: HashMap<String, bool>,
+    /// Per-remote participant deafen state (Pax attribute-based)
+    remote_deafened: HashMap<String, bool>,
     /// Whether mic is enabled
     mic_enabled: bool,
+    /// Whether local playback is deafened
+    deafened: bool,
     /// Whether mic noise suppression is enabled
     noise_suppression_enabled: bool,
     /// Identity of the participant currently sharing their screen, if any
@@ -83,7 +92,10 @@ impl Default for AudioState {
             user_volumes: HashMap::new(),
             active_speakers: Vec::new(),
             remote_participants: Vec::new(),
+            remote_mic_muted: HashMap::new(),
+            remote_deafened: HashMap::new(),
             mic_enabled: true,
+            deafened: false,
             noise_suppression_enabled: true,
             screen_sharing_owner: None,
             is_local_screen_sharing: false,
@@ -143,6 +155,7 @@ impl VoiceManager {
             connected_room_id: Some(room_id.clone()),
             is_connecting: true,
             is_mic_enabled: false,
+            is_deafened: false,
             is_noise_suppressed: true,
             screen_sharing_owner: None,
             is_local_screen_sharing: false,
@@ -263,16 +276,21 @@ impl VoiceManager {
         let session = guard.as_ref().ok_or("Not in a voice call")?;
         let mut state = session.audio_state.lock();
         state.mic_enabled = !state.mic_enabled;
+        let mic_enabled = state.mic_enabled;
+        let deafened = state.deafened;
+        let room = session.room.clone();
+        drop(state);
         // Mute/unmute the published track
         let publications = session.room.local_participant().track_publications();
         for (_sid, pub_) in publications.iter() {
-            if state.mic_enabled {
+            if mic_enabled {
                 pub_.unmute();
             } else {
                 pub_.mute();
             }
         }
-        Ok(state.mic_enabled)
+        update_local_status_attributes(room, mic_enabled, deafened);
+        Ok(mic_enabled)
     }
 
     /// Toggle noise suppression on/off. Returns new enabled state.
@@ -285,6 +303,20 @@ impl VoiceManager {
         drop(st);
         session.noise_proc.lock().set_enabled(enabled);
         Ok(enabled)
+    }
+
+    /// Toggle local deafen on/off. Returns new deafened state.
+    pub fn toggle_deafen(&self) -> Result<bool, String> {
+        let guard = self.session.lock();
+        let session = guard.as_ref().ok_or("Not in a voice call")?;
+        let mut st = session.audio_state.lock();
+        st.deafened = !st.deafened;
+        let deafened = st.deafened;
+        let mic_enabled = st.mic_enabled;
+        let room = session.room.clone();
+        drop(st);
+        update_local_status_attributes(room, mic_enabled, deafened);
+        Ok(deafened)
     }
 
     /// Update noise suppression parameters (takes effect immediately when in a call).
@@ -490,6 +522,18 @@ async fn run_event_loop(
                                 if !st.remote_participants.contains(&identity) {
                                     st.remote_participants.push(identity.clone());
                                 }
+                                if source == TrackSource::Microphone {
+                                    st.remote_mic_muted.insert(identity.clone(), publication.is_muted());
+                                }
+                                if let Some(raw) = participant.attributes().get("pax.muted") {
+                                    st.remote_mic_muted.insert(identity.clone(), raw == "true");
+                                }
+                                let deafened = participant
+                                    .attributes()
+                                    .get("pax.deafened")
+                                    .map(|v| v == "true")
+                                    .unwrap_or(false);
+                                st.remote_deafened.insert(identity.clone(), deafened);
                             }
                             let state_clone = audio_state.clone();
                             tokio::spawn(async move {
@@ -514,6 +558,29 @@ async fn run_event_loop(
                             }
                             drop(st);
                             emit_state(&app_handle, &room_id, &local_identity, &audio_state, false, true, None);
+                        } else if publication.source() == TrackSource::Microphone {
+                            let mut st = audio_state.lock();
+                            st.remote_mic_muted.remove(&identity);
+                            drop(st);
+                            emit_state(&app_handle, &room_id, &local_identity, &audio_state, false, true, None);
+                        }
+                    }
+                    Some(RoomEvent::TrackMuted { participant, publication }) => {
+                        if publication.source() == TrackSource::Microphone {
+                            let identity = participant.identity().to_string();
+                            let mut st = audio_state.lock();
+                            st.remote_mic_muted.insert(identity, true);
+                            drop(st);
+                            emit_state(&app_handle, &room_id, &local_identity, &audio_state, false, true, None);
+                        }
+                    }
+                    Some(RoomEvent::TrackUnmuted { participant, publication }) => {
+                        if publication.source() == TrackSource::Microphone {
+                            let identity = participant.identity().to_string();
+                            let mut st = audio_state.lock();
+                            st.remote_mic_muted.insert(identity, false);
+                            drop(st);
+                            emit_state(&app_handle, &room_id, &local_identity, &audio_state, false, true, None);
                         }
                     }
                     Some(RoomEvent::ParticipantConnected(participant)) => {
@@ -522,10 +589,36 @@ async fn run_event_loop(
                         {
                             let mut st = audio_state.lock();
                             if !st.remote_participants.contains(&identity) {
-                                st.remote_participants.push(identity);
+                                st.remote_participants.push(identity.clone());
+                            }
+                            let deafened = participant
+                                .attributes()
+                                .get("pax.deafened")
+                                .map(|v| v == "true")
+                                .unwrap_or(false);
+                            st.remote_deafened.insert(identity, deafened);
+                            if let Some(raw) = participant.attributes().get("pax.muted") {
+                                st.remote_mic_muted.insert(participant.identity().to_string(), raw == "true");
                             }
                         }
                         emit_state(&app_handle, &room_id, &local_identity, &audio_state, false, true, None);
+                    }
+                    Some(RoomEvent::ParticipantAttributesChanged { participant, changed_attributes }) => {
+                        let mut changed = false;
+                        let identity = participant.identity().to_string();
+                        let mut st = audio_state.lock();
+                        if let Some(raw) = changed_attributes.get("pax.deafened") {
+                            st.remote_deafened.insert(identity.clone(), raw == "true");
+                            changed = true;
+                        }
+                        if let Some(raw) = changed_attributes.get("pax.muted") {
+                            st.remote_mic_muted.insert(identity.clone(), raw == "true");
+                            changed = true;
+                        }
+                        drop(st);
+                        if changed {
+                            emit_state(&app_handle, &room_id, &local_identity, &audio_state, false, true, None);
+                        }
                     }
                     Some(RoomEvent::ParticipantDisconnected(participant)) => {
                         let identity = participant.identity().to_string();
@@ -533,6 +626,8 @@ async fn run_event_loop(
                         {
                             let mut st = audio_state.lock();
                             st.remote_participants.retain(|id| id != &identity);
+                            st.remote_mic_muted.remove(&identity);
+                            st.remote_deafened.remove(&identity);
                             if st.screen_sharing_owner.as_deref() == Some(&identity) {
                                 st.screen_sharing_owner = None;
                             }
@@ -582,6 +677,8 @@ fn emit_state(
             identity: local_identity.to_string(),
             is_speaking: st.active_speakers.contains(&local_identity.to_string()),
             is_local: true,
+            is_muted: !st.mic_enabled,
+            is_deafened: st.deafened,
         });
     }
     // Remote participants
@@ -590,12 +687,15 @@ fn emit_state(
             identity: id.clone(),
             is_speaking: st.active_speakers.contains(id),
             is_local: false,
+            is_muted: *st.remote_mic_muted.get(id).unwrap_or(&false),
+            is_deafened: *st.remote_deafened.get(id).unwrap_or(&false),
         });
     }
     let event = VoiceStateEvent {
         connected_room_id: if is_connected || is_connecting { Some(room_id.to_string()) } else { None },
         is_connecting,
         is_mic_enabled: st.mic_enabled,
+        is_deafened: st.deafened,
         is_noise_suppressed: st.noise_suppression_enabled,
         screen_sharing_owner: st.screen_sharing_owner.clone(),
         is_local_screen_sharing: st.is_local_screen_sharing,
@@ -603,6 +703,18 @@ fn emit_state(
         participants,
     };
     let _ = app_handle.emit("voice-state-changed", event);
+}
+
+fn update_local_status_attributes(room: Arc<livekit::Room>, mic_enabled: bool, deafened: bool) {
+    tokio::spawn(async move {
+        let lp = room.local_participant();
+        let mut attrs = lp.attributes();
+        attrs.insert("pax.muted".to_string(), (!mic_enabled).to_string());
+        attrs.insert("pax.deafened".to_string(), deafened.to_string());
+        if let Err(e) = lp.set_attributes(attrs).await {
+            log::warn!("[Pax] Failed to set participant attributes: {}", e);
+        }
+    });
 }
 // ─── cpal audio setup ───────────────────────────────────────────────────────
 /// Tunable noise suppression parameters.
@@ -861,7 +973,13 @@ fn setup_speaker_output(audio_state: Arc<Mutex<AudioState>>) -> Result<cpal::Str
                 let ch = channels as usize;
                 // Our playback buffer is mono — duplicate each sample to all output channels
                 for frame in data.chunks_mut(ch) {
-                    let sample = st.playback_buffer.pop_front().unwrap_or(0.0);
+                    let sample = if st.deafened {
+                        // Consume the buffer while deafened to avoid delayed playback after undeafen.
+                        let _ = st.playback_buffer.pop_front();
+                        0.0
+                    } else {
+                        st.playback_buffer.pop_front().unwrap_or(0.0)
+                    };
                     for s in frame.iter_mut() {
                         *s = sample;
                     }
