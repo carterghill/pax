@@ -1,5 +1,5 @@
 import { useState } from "react";
-import { Hash, Volume2, Monitor, MicOff, Headphones } from "lucide-react";
+import { Hash, Volume2, Monitor, MicOff, Headphones, Slash } from "lucide-react";
 import { Room, VoiceParticipant } from "../types/matrix";
 import { useTheme } from "../theme/ThemeContext";
 import StatusDropdown from "./StatusDropdown";
@@ -121,8 +121,13 @@ function VoiceParticipantRow({
         flexShrink: 0,
       }}>
         {isSharingScreen && <Monitor size={12} color="#23a55a" />}
-        {isMuted && <MicOff size={12} color="#f23f43" />}
-        {isDeafened && <Headphones size={12} color="#f23f43" />}
+        {isMuted && <MicOff size={12} color={palette.textSecondary} />}
+        {isDeafened && (
+          <span style={{ position: "relative", width: 12, height: 12, display: "inline-flex", alignItems: "center", justifyContent: "center" }}>
+            <Headphones size={12} color={palette.textSecondary} />
+            <Slash size={10} color={palette.textSecondary} style={{ position: "absolute" }} />
+          </span>
+        )}
       </span>
     </div>
   );

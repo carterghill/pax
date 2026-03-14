@@ -104,7 +104,7 @@ impl ScreenSharePreset {
 
 impl Default for ScreenSharePreset {
     fn default() -> Self {
-        Self::H720
+        Self::H1080
     }
 }
 

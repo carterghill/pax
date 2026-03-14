@@ -747,7 +747,7 @@ fn update_local_status_attributes(room: Arc<livekit::Room>, mic_enabled: bool, d
 #[serde(rename_all = "camelCase")]
 pub struct NoiseSuppressionConfig {
     /// Additional soft gating strength applied on top of RNNoise.
-    /// 0.0 = pure RNNoise output (recommended default).
+    /// 0.0 = pure RNNoise output.
     /// Higher values apply a VAD-probability-weighted gain curve that further
     /// attenuates non-voice frames.  Range 0.0 – 1.0.
     pub extra_attenuation: f32,
@@ -759,7 +759,8 @@ pub struct NoiseSuppressionConfig {
 impl Default for NoiseSuppressionConfig {
     fn default() -> Self {
         Self {
-            extra_attenuation: 0.0,
+            // Slightly above pure RNNoise for a cleaner default in noisier rooms.
+            extra_attenuation: 0.1,
             // Keep a moderate default to level quieter microphones while
             // still leaving headroom for the limiter.
             agc_target_rms: 6000.0,

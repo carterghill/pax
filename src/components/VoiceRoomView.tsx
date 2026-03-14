@@ -1,5 +1,5 @@
 import { useState, useCallback, useEffect, useRef } from "react";
-import { Volume2, Mic, MicOff, PhoneOff, Loader2, AudioLines, Monitor, MonitorOff, ChevronDown, Headphones } from "lucide-react";
+import { Volume2, Mic, MicOff, PhoneOff, Loader2, AudioLines, Monitor, MonitorOff, Headphones, Settings, Slash } from "lucide-react";
 import { useTheme } from "../theme/ThemeContext";
 import { Room } from "../types/matrix";
 import { VoiceCallState, VoiceParticipant } from "../hooks/useVoiceCall";
@@ -42,13 +42,13 @@ export default function VoiceRoomView({
   const { palette, spacing, typography } = useTheme();
   const { getVolume, setVolume } = useUserVolume();
   const [screenShareMenuOpen, setScreenShareMenuOpen] = useState(false);
-  const [screenShareSettingsOpen, setScreenShareSettingsOpen] = useState(false);
-  const [screenSharePreset, setScreenSharePreset] = useState<"720p" | "1080p">("720p");
+  const [generalSettingsOpen, setGeneralSettingsOpen] = useState(false);
+  const [screenSharePreset, setScreenSharePreset] = useState<"720p" | "1080p">("1080p");
+  const [isStartingScreenShare, setIsStartingScreenShare] = useState(false);
   const [windowPickerOpen, setWindowPickerOpen] = useState(false);
-  const [noiseSuppressionSettingsOpen, setNoiseSuppressionSettingsOpen] = useState(false);
-  const [noiseConfig, setNoiseConfig] = useState({ extraAttenuation: 0, agcTargetRms: 6000 });
-  const screenShareSettingsRef = useRef<HTMLDivElement>(null);
-  const noiseSuppressionSettingsRef = useRef<HTMLDivElement>(null);
+  const [noiseConfig, setNoiseConfig] = useState({ extraAttenuation: 0.1, agcTargetRms: 6000 });
+  const screenShareMenuRef = useRef<HTMLDivElement>(null);
+  const generalSettingsRef = useRef<HTMLDivElement>(null);
   const activeShareRef = useRef<{ mode: "screen" | "window"; windowTitle?: string } | null>(null);
   const [windowList, setWindowList] = useState<[string, string][]>([]);
   const [windowListLoading, setWindowListLoading] = useState(false);
@@ -60,10 +60,12 @@ export default function VoiceRoomView({
 
   const startShare = useCallback(
     async (mode: "screen" | "window", windowTitle?: string) => {
+      setIsStartingScreenShare(true);
       activeShareRef.current = { mode, windowTitle };
       try {
         await onStartScreenShare(mode, windowTitle);
       } catch (e) {
+        setIsStartingScreenShare(false);
         console.error("Failed to start screen share:", e);
       }
     },
@@ -71,6 +73,7 @@ export default function VoiceRoomView({
   );
 
   const stopShare = useCallback(async () => {
+    setIsStartingScreenShare(false);
     activeShareRef.current = null;
     try {
       await onStopScreenShare();
@@ -85,6 +88,7 @@ export default function VoiceRoomView({
       try {
         await onSetScreenSharePreset(preset);
         if (!callState.isLocalScreenSharing) return;
+        setIsStartingScreenShare(true);
         const activeShare = activeShareRef.current;
         if (!activeShare) return;
         await onStopScreenShare();
@@ -97,21 +101,35 @@ export default function VoiceRoomView({
     [callState.isLocalScreenSharing, onSetScreenSharePreset, onStartScreenShare, onStopScreenShare]
   );
 
-  // Close settings menus on outside click
   useEffect(() => {
-    if (!screenShareSettingsOpen && !noiseSuppressionSettingsOpen) return;
+    if (callState.isLocalScreenSharing) {
+      setIsStartingScreenShare(false);
+    }
+  }, [callState.isLocalScreenSharing]);
+
+  // Close context menus on outside click.
+  useEffect(() => {
+    if (!generalSettingsOpen && !screenShareMenuOpen) return;
     function handleClick(e: MouseEvent) {
       const target = e.target as Node;
-      if (screenShareSettingsOpen && screenShareSettingsRef.current && !screenShareSettingsRef.current.contains(target)) {
-        setScreenShareSettingsOpen(false);
+      if (
+        generalSettingsOpen &&
+        generalSettingsRef.current &&
+        !generalSettingsRef.current.contains(target)
+      ) {
+        setGeneralSettingsOpen(false);
       }
-      if (noiseSuppressionSettingsOpen && noiseSuppressionSettingsRef.current && !noiseSuppressionSettingsRef.current.contains(target)) {
-        setNoiseSuppressionSettingsOpen(false);
+      if (
+        screenShareMenuOpen &&
+        screenShareMenuRef.current &&
+        !screenShareMenuRef.current.contains(target)
+      ) {
+        setScreenShareMenuOpen(false);
       }
     }
     document.addEventListener("mousedown", handleClick);
     return () => document.removeEventListener("mousedown", handleClick);
-  }, [screenShareSettingsOpen, noiseSuppressionSettingsOpen]);
+  }, [generalSettingsOpen, screenShareMenuOpen]);
 
   const openWindowPicker = useCallback(async () => {
     setWindowListLoading(true);
@@ -348,12 +366,19 @@ export default function VoiceRoomView({
                 justifyContent: "center",
                 gap: spacing.unit,
               }}>
-                {callState.screenSharingOwner === p.identity && (
-                  <Monitor size={12} color="#23a55a" />
-                )}
-                {p.isMuted && <MicOff size={12} color="#f23f43" />}
-                {p.isDeafened && <Headphones size={12} color="#f23f43" />}
                 {displayName}{p.isLocal ? " (you)" : ""}
+                <span style={{ marginLeft: spacing.unit, display: "inline-flex", alignItems: "center", gap: spacing.unit }}>
+                  {callState.screenSharingOwner === p.identity && (
+                    <Monitor size={12} color="#23a55a" />
+                  )}
+                  {p.isMuted && <MicOff size={12} color={palette.textSecondary} />}
+                  {p.isDeafened && (
+                    <span style={{ position: "relative", width: 12, height: 12, display: "inline-flex", alignItems: "center", justifyContent: "center" }}>
+                      <Headphones size={12} color={palette.textSecondary} />
+                      <Slash size={10} color={palette.textSecondary} style={{ position: "absolute" }} />
+                    </span>
+                  )}
+                </span>
               </span>
             </div>
           );
@@ -402,10 +427,8 @@ export default function VoiceRoomView({
               justifyContent: "center",
               backgroundColor: callState.isMicEnabled
                 ? palette.bgActive
-                : "#f23f43",
-              color: callState.isMicEnabled
-                ? palette.textHeading
-                : "#fff",
+                : palette.textPrimary,
+              color: callState.isMicEnabled ? palette.textPrimary : palette.bgPrimary,
               transition: "background-color 0.15s ease",
             }}
           >
@@ -426,19 +449,24 @@ export default function VoiceRoomView({
               alignItems: "center",
               justifyContent: "center",
               backgroundColor: callState.isDeafened
-                ? "#f23f43"
+                ? palette.textPrimary
                 : palette.bgActive,
-              color: callState.isDeafened
-                ? "#fff"
-                : palette.textHeading,
+              color: callState.isDeafened ? palette.bgPrimary : palette.textPrimary,
               transition: "background-color 0.15s ease",
             }}
           >
-            <Headphones size={20} />
+            {callState.isDeafened ? (
+              <span style={{ position: "relative", width: 20, height: 20, display: "inline-flex", alignItems: "center", justifyContent: "center" }}>
+                <Headphones size={20} />
+                <Slash size={14} style={{ position: "absolute" }} />
+              </span>
+            ) : (
+              <Headphones size={20} />
+            )}
           </button>
 
           {/* Screen Share */}
-          <div ref={screenShareSettingsRef} style={{ position: "relative", display: "flex", alignItems: "center", gap: 2 }}>
+          <div ref={screenShareMenuRef} style={{ position: "relative", display: "flex", alignItems: "center", gap: 2 }}>
             <button
               onClick={() => {
                 if (callState.isLocalScreenSharing) {
@@ -457,75 +485,13 @@ export default function VoiceRoomView({
                 display: "flex",
                 alignItems: "center",
                 justifyContent: "center",
-                backgroundColor: callState.isLocalScreenSharing ? "#23a55a" : palette.bgActive,
-                color: callState.isLocalScreenSharing ? "#fff" : palette.textPrimary,
+                backgroundColor: (callState.isLocalScreenSharing || isStartingScreenShare) ? palette.textPrimary : palette.bgActive,
+                color: (callState.isLocalScreenSharing || isStartingScreenShare) ? palette.bgPrimary : palette.textPrimary,
                 transition: "background-color 0.15s ease",
               }}
             >
               {callState.isLocalScreenSharing ? <MonitorOff size={20} /> : <Monitor size={20} />}
             </button>
-            <button
-              onClick={() => { setScreenShareSettingsOpen((v) => !v); setScreenShareMenuOpen(false); }}
-              title="Screen share settings"
-              style={{
-                width: 24,
-                height: 48,
-                border: "none",
-                borderRadius: 4,
-                cursor: "pointer",
-                display: "flex",
-                alignItems: "center",
-                justifyContent: "center",
-                backgroundColor: "transparent",
-                color: palette.textSecondary,
-              }}
-            >
-              <ChevronDown size={16} style={{ transform: screenShareSettingsOpen ? "rotate(180deg)" : undefined }} />
-            </button>
-            {screenShareSettingsOpen && (
-              <div style={{
-                position: "absolute",
-                bottom: "100%",
-                left: 0,
-                marginBottom: spacing.unit,
-                backgroundColor: palette.bgSecondary,
-                border: `1px solid ${palette.border}`,
-                borderRadius: spacing.unit,
-                padding: spacing.unit * 2,
-                minWidth: 200,
-                zIndex: 10,
-              }}>
-                <div style={{ marginBottom: spacing.unit, fontWeight: 600, fontSize: typography.fontSizeSmall }}>
-                  Screen share quality
-                </div>
-                <div style={{ display: "flex", gap: spacing.unit }}>
-                  {(["720p", "1080p"] as const).map((p) => (
-                    <button
-                      key={p}
-                      onClick={() => { void setPresetAndRestartIfNeeded(p); }}
-                      style={{
-                        flex: 1,
-                        padding: `${spacing.unit}px ${spacing.unit * 2}px`,
-                        backgroundColor: screenSharePreset === p ? palette.accent : palette.bgTertiary,
-                        color: screenSharePreset === p ? "#fff" : palette.textPrimary,
-                        border: `1px solid ${screenSharePreset === p ? palette.accent : palette.border}`,
-                        borderRadius: spacing.unit,
-                        cursor: "pointer",
-                        fontSize: typography.fontSizeSmall,
-                        fontWeight: screenSharePreset === p ? 600 : 400,
-                      }}
-                    >
-                      {p}
-                    </button>
-                  ))}
-                </div>
-                <div style={{ fontSize: typography.fontSizeSmall, color: palette.textSecondary, marginTop: spacing.unit }}>
-                  {screenSharePreset === "720p"
-                    ? "1280x720 • 30fps • 2 Mbps max"
-                    : "1920x1080 • 30fps • 3.5 Mbps max"}
-                </div>
-              </div>
-            )}
             {screenShareMenuOpen && !callState.isLocalScreenSharing && (
               <div style={{
                 position: "absolute",
@@ -646,11 +612,11 @@ export default function VoiceRoomView({
             )}
           </div>
 
-          {/* Noise Suppression Toggle */}
-          <div ref={noiseSuppressionSettingsRef} style={{ position: "relative", display: "flex", alignItems: "center", gap: 2 }}>
+          {/* General settings */}
+          <div ref={generalSettingsRef} style={{ position: "relative", display: "flex", alignItems: "center" }}>
             <button
-              onClick={onToggleNoiseSuppression}
-              title={callState.isNoiseSuppressed ? "Disable noise suppression" : "Enable noise suppression"}
+              onClick={() => { setGeneralSettingsOpen((v) => !v); setScreenShareMenuOpen(false); }}
+              title="Voice settings"
               style={{
                 width: 48,
                 height: 48,
@@ -660,37 +626,14 @@ export default function VoiceRoomView({
                 display: "flex",
                 alignItems: "center",
                 justifyContent: "center",
-                backgroundColor: callState.isNoiseSuppressed
-                  ? "#23a55a"
-                  : palette.bgActive,
-                color: callState.isNoiseSuppressed
-                  ? "#fff"
-                  : palette.textSecondary,
+                backgroundColor: generalSettingsOpen ? palette.textPrimary : palette.bgActive,
+                color: generalSettingsOpen ? palette.bgPrimary : palette.textPrimary,
                 transition: "background-color 0.15s ease",
-                opacity: callState.isNoiseSuppressed !== undefined ? 1 : 0.5,
               }}
             >
-              <AudioLines size={20} />
+              <Settings size={20} />
             </button>
-            <button
-              onClick={() => setNoiseSuppressionSettingsOpen((v) => !v)}
-              title="Noise suppression settings"
-              style={{
-                width: 24,
-                height: 48,
-                border: "none",
-                borderRadius: 4,
-                cursor: "pointer",
-                display: "flex",
-                alignItems: "center",
-                justifyContent: "center",
-                backgroundColor: "transparent",
-                color: palette.textSecondary,
-              }}
-            >
-              <ChevronDown size={16} style={{ transform: noiseSuppressionSettingsOpen ? "rotate(180deg)" : undefined }} />
-            </button>
-            {noiseSuppressionSettingsOpen && (
+            {generalSettingsOpen && (
               <div style={{
                 position: "absolute",
                 bottom: "100%",
@@ -700,11 +643,74 @@ export default function VoiceRoomView({
                 border: `1px solid ${palette.border}`,
                 borderRadius: spacing.unit,
                 padding: spacing.unit * 2,
-                minWidth: 220,
+                minWidth: 260,
                 zIndex: 10,
               }}>
-                <div style={{ marginBottom: spacing.unit, fontWeight: 600, fontSize: typography.fontSizeSmall }}>Noise suppression</div>
-                <div style={{ display: "flex", flexDirection: "column", gap: spacing.unit }}>
+                <div style={{ marginBottom: spacing.unit, fontWeight: 600, fontSize: typography.fontSizeSmall }}>
+                  Screen share quality
+                </div>
+                <div style={{ display: "flex", gap: spacing.unit }}>
+                  {(["720p", "1080p"] as const).map((p) => (
+                    <button
+                      key={p}
+                      onClick={() => { void setPresetAndRestartIfNeeded(p); }}
+                      style={{
+                        flex: 1,
+                        padding: `${spacing.unit}px ${spacing.unit * 2}px`,
+                        backgroundColor: screenSharePreset === p ? palette.accent : palette.bgTertiary,
+                        color: screenSharePreset === p ? "#fff" : palette.textPrimary,
+                        border: `1px solid ${screenSharePreset === p ? palette.accent : palette.border}`,
+                        borderRadius: spacing.unit,
+                        cursor: "pointer",
+                        fontSize: typography.fontSizeSmall,
+                        fontWeight: screenSharePreset === p ? 600 : 400,
+                      }}
+                    >
+                      {p}
+                    </button>
+                  ))}
+                </div>
+                <div style={{ fontSize: typography.fontSizeSmall, color: palette.textSecondary, marginTop: spacing.unit * 0.75 }}>
+                  {screenSharePreset === "720p"
+                    ? "1280x720 • 30fps • 2 Mbps max"
+                    : "1920x1080 • 30fps • 3.5 Mbps max"}
+                </div>
+
+                <div style={{ marginTop: spacing.unit * 2, marginBottom: spacing.unit, fontWeight: 600, fontSize: typography.fontSizeSmall }}>
+                  Noise suppression
+                </div>
+                <button
+                  onClick={onToggleNoiseSuppression}
+                  style={{
+                    width: "100%",
+                    padding: `${spacing.unit}px ${spacing.unit * 1.5}px`,
+                    borderRadius: spacing.unit,
+                    border: `1px solid ${palette.border}`,
+                    cursor: "pointer",
+                    backgroundColor: callState.isNoiseSuppressed ? palette.accent : palette.bgTertiary,
+                    color: callState.isNoiseSuppressed ? "#fff" : palette.textPrimary,
+                    fontSize: typography.fontSizeSmall,
+                    fontWeight: 600,
+                    display: "flex",
+                    alignItems: "center",
+                    justifyContent: "center",
+                    gap: spacing.unit,
+                  }}
+                >
+                  <AudioLines size={16} />
+                  {callState.isNoiseSuppressed ? "Enabled" : "Disabled"}
+                </button>
+
+                <div
+                  style={{
+                    display: "flex",
+                    flexDirection: "column",
+                    gap: spacing.unit,
+                    marginTop: spacing.unit,
+                    opacity: callState.isNoiseSuppressed ? 1 : 0.45,
+                    pointerEvents: callState.isNoiseSuppressed ? "auto" : "none",
+                  }}
+                >
                   <label style={{ fontSize: typography.fontSizeSmall }}>
                     Extra attenuation: {noiseConfig.extraAttenuation.toFixed(2)}
                     <input type="range" min="0" max="1" step="0.05" value={noiseConfig.extraAttenuation}
@@ -739,7 +745,7 @@ export default function VoiceRoomView({
                   </label>
                 </div>
                 <div style={{ fontSize: typography.fontSizeSmall, color: palette.textSecondary, marginTop: spacing.unit }}>
-                  Takes effect immediately
+                  Noise suppression settings apply immediately
                 </div>
               </div>
             )}
