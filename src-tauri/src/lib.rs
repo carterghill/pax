@@ -192,8 +192,10 @@ async fn login(
 async fn get_rooms(
     state: State<'_, Arc<AppState>>,
 ) -> Result<Vec<RoomInfo>, String> {
-    let guard = state.client.lock().await;
-    let client = guard.as_ref().ok_or("Not logged in")?;
+    let client = {
+        let guard = state.client.lock().await;
+        guard.as_ref().ok_or("Not logged in")?.clone()
+    };
 
     let all_rooms = client.joined_rooms();
     let avatar_cache = state.avatar_cache.clone();
@@ -259,8 +261,10 @@ async fn get_messages(
     from: Option<String>,
     limit: u32,
 ) -> Result<MessageBatch, String> {
-    let guard = state.client.lock().await;
-    let client = guard.as_ref().ok_or("Not logged in")?;
+    let client = {
+        let guard = state.client.lock().await;
+        guard.as_ref().ok_or("Not logged in")?.clone()
+    };
 
     let room_id_parsed = matrix_sdk::ruma::RoomId::parse(&room_id)
         .map_err(|e| format!("Invalid room ID: {e}"))?;
@@ -363,8 +367,10 @@ async fn get_room_members(
     state: State<'_, Arc<AppState>>,
     room_id: String,
 ) -> Result<Vec<RoomMemberInfo>, String> {
-    let guard = state.client.lock().await;
-    let client = guard.as_ref().ok_or("Not logged in")?;
+    let client = {
+        let guard = state.client.lock().await;
+        guard.as_ref().ok_or("Not logged in")?.clone()
+    };
 
     let room_id_parsed = matrix_sdk::ruma::RoomId::parse(&room_id)
         .map_err(|e| format!("Invalid room ID: {e}"))?;
@@ -520,8 +526,10 @@ async fn get_voice_participants(
     state: State<'_, Arc<AppState>>,
     room_id: String,
 ) -> Result<Vec<VoiceParticipant>, String> {
-    let guard = state.client.lock().await;
-    let client = guard.as_ref().ok_or("Not logged in")?;
+    let client = {
+        let guard = state.client.lock().await;
+        guard.as_ref().ok_or("Not logged in")?.clone()
+    };
 
     let room_id_parsed = matrix_sdk::ruma::RoomId::parse(&room_id)
         .map_err(|e| format!("Invalid room ID: {e}"))?;
