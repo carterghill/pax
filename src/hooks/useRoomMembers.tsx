@@ -16,6 +16,7 @@ export function useRoomMembers(roomId: string) {
   const [members, setMembers] = useState<RoomMember[]>([]);
   const [loading, setLoading] = useState(true);
   const hasFetched = useRef(false);
+  const fetchingRef = useRef<string | null>(null);
   const debounceRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   const fetchMembers = useCallback((showLoading: boolean) => {
@@ -31,12 +32,18 @@ export function useRoomMembers(roomId: string) {
       .catch((e) => {
         console.error("Failed to fetch room members:", e);
         setLoading(false);
+      })
+      .finally(() => {
+        fetchingRef.current = null;
       });
   }, [roomId]);
 
   // Initial load (prefer cache)
   useEffect(() => {
     hasFetched.current = false;
+
+    // Prevent StrictMode double-invoke
+    if (fetchingRef.current === roomId) return;
 
     const cached = sessionStorage.getItem(cacheKey(roomId));
 
@@ -47,9 +54,11 @@ export function useRoomMembers(roomId: string) {
         setLoading(false);
         hasFetched.current = true;
       } catch {
+        fetchingRef.current = roomId;
         fetchMembers(true);
       }
     } else {
+      fetchingRef.current = roomId;
       fetchMembers(true);
     }
   }, [roomId, fetchMembers]);

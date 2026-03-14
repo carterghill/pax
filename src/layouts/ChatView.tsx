@@ -74,7 +74,7 @@ function TypingIndicator({ names, palette, typography, spacing }: {
 }
 
 export default function ChatView({ room, userId }: ChatViewProps) {
-  const { messages, loadMore, hasMore, loading, initialLoading, refresh } = useMessages(room.id);
+  const { messages, loadMore, hasMore, loading, initialLoading, refreshing, refresh } = useMessages(room.id);
   const { palette, typography, spacing } = useTheme();
   const [typingNames, setTypingNames] = useState<string[]>([]);
   const [showUsers, setShowUsers] = useState(true);
@@ -160,6 +160,7 @@ export default function ChatView({ room, userId }: ChatViewProps) {
             messages={messages}
             loading={loading}
             initialLoading={initialLoading}
+            refreshing={refreshing}
             hasMore={hasMore}
             onLoadMore={loadMore}
           />

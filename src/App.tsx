@@ -13,6 +13,7 @@ function App() {
   const [error, setError] = useState<string | null>(null);
   const [loading, setLoading] = useState(false);
   const autoLoginAttemptedRef = useRef(false);
+  const syncStartedRef = useRef(false);
   const [autoLoggingIn, setAutoLoggingIn] = useState(true);
 
   async function handleLogin(remember: boolean = rememberMe) {
@@ -20,7 +21,10 @@ function App() {
     setError(null);
     try {
       const id = await invoke<string>("login", { homeserver, username, password });
-      await invoke("start_sync");
+      if (!syncStartedRef.current) {
+        syncStartedRef.current = true;
+        await invoke("start_sync");
+      }
       setUserId(id);
       if (remember) {
         await invoke("save_credentials", { homeserver, username, password });
@@ -38,6 +42,7 @@ function App() {
     } catch {
       // Ignore errors during sign out
     }
+    syncStartedRef.current = false;
     setUserId(null);
   }
 
@@ -49,7 +54,10 @@ function App() {
       // Fast path: restore a previous session from SQLite store (no auth, no full sync)
       try {
         const id = await invoke<string>("restore_session");
-        invoke("start_sync");
+        if (!syncStartedRef.current) {
+          syncStartedRef.current = true;
+          invoke("start_sync");
+        }
         setUserId(id);
         return;
       } catch {
@@ -69,7 +77,10 @@ function App() {
             username: creds.username,
             password: creds.password,
           });
-          invoke("start_sync");
+          if (!syncStartedRef.current) {
+            syncStartedRef.current = true;
+            invoke("start_sync");
+          }
           setUserId(id);
         }
       } catch {

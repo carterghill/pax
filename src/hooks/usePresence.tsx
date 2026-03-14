@@ -35,6 +35,7 @@ export function usePresence() {
   const [manualStatus, setManualStatus] = useState<ManualStatus>("auto");
   const [systemIdle, setSystemIdle] = useState(false);
   const currentPresence = useRef<string>("");
+  const idleMonitorStartedRef = useRef(false);
 
   const sendPresence = useCallback((presence: string) => {
     if (presence === currentPresence.current) return;
@@ -46,6 +47,9 @@ export function usePresence() {
 
   // Start the system idle monitor on mount
   useEffect(() => {
+    if (idleMonitorStartedRef.current) return;
+    idleMonitorStartedRef.current = true;
+
     invoke("start_idle_monitor").catch((e) =>
       console.error("Failed to start idle monitor:", e)
     );

@@ -6,6 +6,7 @@ interface MessageListProps {
   messages: Message[];
   loading: boolean;
   initialLoading: boolean;
+  refreshing?: boolean;
   hasMore: boolean;
   onLoadMore: () => void;
 }
@@ -38,6 +39,7 @@ export default function MessageList({
   messages,
   loading,
   initialLoading,
+  refreshing = false,
   hasMore,
   onLoadMore,
 }: MessageListProps) {
@@ -112,7 +114,6 @@ export default function MessageList({
 
       {messages.map((msg, i) => {
         const showHeader = shouldShowHeader(msg, messages[i - 1] ?? null);
-
         return (
           <div
             key={msg.eventId}
@@ -189,6 +190,29 @@ export default function MessageList({
           </div>
         );
       })}
+
+      {refreshing && (
+        <div style={{
+          display: "flex",
+          justifyContent: "center",
+          padding: spacing.unit * 3,
+        }}>
+          <div style={{
+            width: 20,
+            height: 20,
+            border: `2px solid ${palette.border}`,
+            borderTopColor: palette.accent,
+            borderRadius: "50%",
+            animation: "messageListSpinner 0.8s linear infinite",
+          }} />
+        </div>
+      )}
+
+      <style>{`
+        @keyframes messageListSpinner {
+          to { transform: rotate(360deg); }
+        }
+      `}</style>
 
       <div ref={bottomRef} />
     </div>

@@ -13,14 +13,22 @@ export function useVoiceParticipants(voiceRoomIds: string[]) {
   // Never filtered down -- space switching just projects from this.
   const [allParticipants, setAllParticipants] = useState<ParticipantMap>({});
   const mountedRef = useRef(true);
+  const fetchingRef = useRef(false);
 
   // Initial snapshot -- mirrors how useRooms does invoke("get_rooms") on mount.
   useEffect(() => {
+    mountedRef.current = true;
+    if (fetchingRef.current) return;
+    fetchingRef.current = true;
+
     invoke<ParticipantMap>("get_all_voice_participants")
       .then((data) => {
         if (mountedRef.current) setAllParticipants(data);
       })
-      .catch((e) => console.error("Failed to fetch voice participants:", e));
+      .catch((e) => console.error("Failed to fetch voice participants:", e))
+      .finally(() => {
+        fetchingRef.current = false;
+      });
 
     return () => {
       mountedRef.current = false;

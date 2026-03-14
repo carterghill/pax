@@ -1,15 +1,21 @@
-import { useEffect, useState, useCallback, useMemo } from "react";
+import { useEffect, useState, useCallback, useMemo, useRef } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { Room } from "../types/matrix";
 
 export function useRooms(userId: string) {
   const [rooms, setRooms] = useState<Room[]>([]);
+  const fetchingRef = useRef(false);
 
   const fetchRooms = useCallback(() => {
+    if (fetchingRef.current) return;
+    fetchingRef.current = true;
+
     invoke<Room[]>("get_rooms").then(setRooms).catch((e) =>
       console.error("Failed to fetch rooms:", e)
-    );
+    ).finally(() => {
+      fetchingRef.current = false;
+    });
   }, []);
 
   // Initial fetch

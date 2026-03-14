@@ -37,6 +37,7 @@ pub async fn logout(state: State<'_, Arc<AppState>>, app: tauri::AppHandle) -> R
     *state.client.lock().await = None;
     state.avatar_cache.lock().await.clear();
     state.presence_map.lock().await.clear();
+    *state.sync_running.lock().await = false;
 
     // Clear the SQLite store so the next login starts fresh.
     if let Ok(dir) = app.path().app_data_dir() {

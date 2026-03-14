@@ -32,6 +32,13 @@ pub async fn login(
 ) -> Result<String, String> {
     let sp = store_path(&app)?;
 
+    // Clear any existing store before password login. A new login creates a new device ID,
+    // but the crypto store may still have data from a previous device — that causes
+    // "account in the store doesn't match" errors.
+    if sp.exists() {
+        let _ = std::fs::remove_dir_all(&sp);
+    }
+
     eprintln!("[Pax] login: building client for {}", homeserver);
     let client = Client::builder()
         .homeserver_url(&homeserver)
@@ -82,6 +89,7 @@ pub async fn login(
         .to_string();
 
     *state.client.lock().await = Some(client);
+    *state.sync_running.lock().await = false;
     state.avatar_cache.lock().await.clear();
     eprintln!("[Pax] login: done — user_id={}", user_id);
     Ok(user_id)
@@ -141,6 +149,7 @@ pub async fn restore_session(
     });
 
     *state.client.lock().await = Some(client);
+    *state.sync_running.lock().await = false;
     Ok(user_id.to_string())
 }
 

@@ -34,8 +34,12 @@ pub(crate) async fn get_or_fetch_room_avatar(
     avatar_cache: &Arc<Mutex<HashMap<String, String>>>,
 ) -> Option<String> {
     let mxc = room.avatar_url().map(|uri| uri.to_string())?;
-    if let Some(cached) = avatar_cache.lock().await.get(&mxc).cloned() {
-        return Some(cached);
+
+    {
+        let cache = avatar_cache.lock().await;
+        if let Some(cached) = cache.get(&mxc) {
+            return Some(cached.clone());
+        }
     }
 
     let bytes = room.avatar(MediaFormat::File).await.ok().flatten()?;
@@ -49,12 +53,19 @@ pub(crate) async fn get_or_fetch_member_avatar(
     avatar_cache: &Arc<Mutex<HashMap<String, String>>>,
 ) -> Option<String> {
     let mxc = member.avatar_url().map(|uri| uri.to_string())?;
-    if let Some(cached) = avatar_cache.lock().await.get(&mxc).cloned() {
-        return Some(cached);
+
+    // Fast path: check cache without holding the lock during the fetch
+    {
+        let cache = avatar_cache.lock().await;
+        if let Some(cached) = cache.get(&mxc) {
+            return Some(cached.clone());
+        }
     }
 
     let bytes = member.avatar(MediaFormat::File).await.ok().flatten()?;
     let data_url = encode_avatar_data_url(&bytes);
+
+    // Insert (another task may have raced, but that's fine — same data)
     avatar_cache.lock().await.insert(mxc, data_url.clone());
     Some(data_url)
 }

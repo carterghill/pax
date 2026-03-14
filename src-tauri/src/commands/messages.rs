@@ -1,3 +1,4 @@
+use std::collections::HashMap;
 use std::sync::Arc;
 
 use matrix_sdk::room::MessagesOptions;
@@ -44,8 +45,18 @@ pub async fn get_messages(
         .await
         .map_err(|e| format!("Failed to fetch messages: {e}"))?;
 
-    let mut messages = Vec::new();
     let avatar_cache = state.avatar_cache.clone();
+
+    // First pass: extract message data and collect unique senders
+    struct RawMsg {
+        event_id: String,
+        sender: String,
+        body: String,
+        timestamp: u64,
+    }
+    let mut raw_msgs = Vec::new();
+    let mut unique_senders = Vec::new();
+    let mut seen_senders = std::collections::HashSet::new();
 
     for event in response.chunk {
         let raw = match event.raw().deserialize() {
@@ -53,7 +64,6 @@ pub async fn get_messages(
             Err(_) => continue,
         };
 
-        // Only handle regular message events
         if let matrix_sdk::ruma::events::AnySyncTimelineEvent::MessageLike(
             matrix_sdk::ruma::events::AnySyncMessageLikeEvent::RoomMessage(msg),
         ) = raw
@@ -63,31 +73,52 @@ pub async fn get_messages(
                 _ => continue,
             };
 
-            let body = extract_body(&original.content);
-            let sender = original.sender.to_string();
+            let sender_str = original.sender.to_string();
+            if seen_senders.insert(sender_str.clone()) {
+                unique_senders.push(original.sender.clone());
+            }
 
-            // Try to get the sender's display name and avatar
-            let (sender_name, avatar_url) = match room.get_member_no_sync(&original.sender).await {
-                Ok(Some(member)) => {
-                    let name = member.display_name().map(|n| n.to_string());
-                    let avatar = get_or_fetch_member_avatar(&member, &avatar_cache).await;
-                    (name, avatar)
-                }
-                _ => (None, None),
-            };
-
-            let timestamp = original.origin_server_ts.0.into();
-
-            messages.push(MessageInfo {
+            raw_msgs.push(RawMsg {
                 event_id: original.event_id.to_string(),
-                sender,
-                sender_name,
-                body,
-                timestamp,
-                avatar_url,
+                sender: sender_str,
+                body: extract_body(&original.content),
+                timestamp: original.origin_server_ts.0.into(),
             });
         }
     }
+
+    // Second pass: resolve display name + avatar once per unique sender
+    let mut sender_meta: HashMap<String, (Option<String>, Option<String>)> = HashMap::new();
+    for uid in &unique_senders {
+        let meta = match room.get_member_no_sync(uid).await {
+            Ok(Some(member)) => {
+                let name = member.display_name().map(|n| n.to_string());
+                let avatar = get_or_fetch_member_avatar(&member, &avatar_cache).await;
+                (name, avatar)
+            }
+            _ => (None, None),
+        };
+        sender_meta.insert(uid.to_string(), meta);
+    }
+
+    // Third pass: build final messages using the cached sender metadata
+    let messages = raw_msgs
+        .into_iter()
+        .map(|m| {
+            let (sender_name, avatar_url) = sender_meta
+                .get(&m.sender)
+                .cloned()
+                .unwrap_or((None, None));
+            MessageInfo {
+                event_id: m.event_id,
+                sender: m.sender,
+                sender_name,
+                body: m.body,
+                timestamp: m.timestamp,
+                avatar_url,
+            }
+        })
+        .collect();
 
     Ok(MessageBatch {
         messages,
@@ -125,6 +156,15 @@ pub async fn start_sync(state: State<'_, Arc<AppState>>, app: tauri::AppHandle) 
     let guard = state.client.lock().await;
     let client = guard.as_ref().ok_or("Not logged in")?.clone();
     drop(guard);
+
+    {
+        let mut sync_running = state.sync_running.lock().await;
+        if *sync_running {
+            eprintln!("[Pax] start_sync: sync loop already running, skipping");
+            return Ok(());
+        }
+        *sync_running = true;
+    }
 
     // Handler for incoming room messages
     let app_handle = app.clone();
@@ -200,6 +240,7 @@ pub async fn start_sync(state: State<'_, Arc<AppState>>, app: tauri::AppHandle) 
     let presence_map = state.presence_map.clone();
     let avatar_cache = state.avatar_cache.clone();
     let voice_client = client.clone();
+    let sync_running = state.sync_running.clone();
 
     // Spawn the continuous sync loop in the background
     // set_presence(Offline) tells the server: "do NOT auto-update my presence on sync"
@@ -268,6 +309,8 @@ pub async fn start_sync(state: State<'_, Arc<AppState>>, app: tauri::AppHandle) 
         if let Err(e) = result {
             eprintln!("Sync loop error: {e}");
         }
+
+        *sync_running.lock().await = false;
     });
 
     Ok(())

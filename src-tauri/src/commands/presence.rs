@@ -16,9 +16,12 @@ pub async fn set_presence(
         _ => return Err(format!("Invalid presence state: {presence}")),
     };
 
-    let guard = state.client.lock().await;
-    let client = guard.as_ref().ok_or("Not logged in")?;
-    let user_id = client.user_id().ok_or("No user ID")?.to_owned();
+    let (client, user_id) = {
+        let guard = state.client.lock().await;
+        let c = guard.as_ref().ok_or("Not logged in")?.clone();
+        let uid = c.user_id().ok_or("No user ID")?.to_owned();
+        (c, uid)
+    };
 
     let request = matrix_sdk::ruma::api::client::presence::set_presence::v3::Request::new(
         user_id,
