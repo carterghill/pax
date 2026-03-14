@@ -97,8 +97,10 @@ pub async fn send_message(
     room_id: String,
     body: String,
 ) -> Result<(), String> {
-    let guard = state.client.lock().await;
-    let client = guard.as_ref().ok_or("Not logged in")?;
+    let client = {
+        let guard = state.client.lock().await;
+        guard.as_ref().ok_or("Not logged in")?.clone()
+    };
 
     let room_id_parsed =
         matrix_sdk::ruma::RoomId::parse(&room_id).map_err(|e| format!("Invalid room ID: {e}"))?;
@@ -259,8 +261,10 @@ pub async fn send_typing_notice(
     room_id: String,
     typing: bool,
 ) -> Result<(), String> {
-    let guard = state.client.lock().await;
-    let client = guard.as_ref().ok_or("Not logged in")?;
+    let client = {
+        let guard = state.client.lock().await;
+        guard.as_ref().ok_or("Not logged in")?.clone()
+    };
 
     let room_id_parsed =
         matrix_sdk::ruma::RoomId::parse(&room_id).map_err(|e| format!("Invalid room ID: {e}"))?;
