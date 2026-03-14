@@ -91,7 +91,7 @@ export function useVoiceCall() {
 
       // Local user just finished connecting
       if (isNowConnected && !wasConnectedRef.current) {
-        playSound("ui/success_bling");
+        playSound("ui/pop_open");
       }
 
       // Detect remote participant joins/leaves by diffing identities
@@ -99,10 +99,10 @@ export function useVoiceCall() {
         const currentIds = new Set(ev.participants.filter(p => !p.isLocal).map(p => p.identity));
         const prevIds = prevParticipantIdsRef.current;
         for (const id of currentIds) {
-          if (!prevIds.has(id)) playSound("ui/success_bling");
+          if (!prevIds.has(id)) playSound("ui/pop_open");
         }
         for (const id of prevIds) {
-          if (!currentIds.has(id)) playSound("notification/popup");
+          if (!currentIds.has(id)) playSound("ui/pop_close");
         }
         prevParticipantIdsRef.current = currentIds;
       } else {
@@ -152,7 +152,7 @@ export function useVoiceCall() {
   const disconnect = useCallback(async () => {
     const roomId = connectedRoomIdRef.current;
     if (!roomId) return;
-    playSound("notification/popup");
+    playSound("ui/pop_close");
     // Optimistic update: clear UI immediately so disconnect feels instant
     setState((prev) => ({
       ...prev,
