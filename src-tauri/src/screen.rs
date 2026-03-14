@@ -158,7 +158,7 @@ async fn start_screen_capture_windows_graphics(
                 SecondaryWindowSettings::Default,
                 MinimumUpdateIntervalSettings::Custom(Duration::from_millis(capture_interval_ms)),
                 DirtyRegionSettings::Default,
-                ColorFormat::Rgba8,
+                ColorFormat::Bgra8,
                 flags,
             );
             (ScreenCaptureHandler::start_free_threaded(settings), None)
@@ -183,7 +183,7 @@ async fn start_screen_capture_windows_graphics(
                 SecondaryWindowSettings::Default,
                 MinimumUpdateIntervalSettings::Custom(Duration::from_millis(capture_interval_ms)),
                 DirtyRegionSettings::Default,
-                ColorFormat::Rgba8,
+                ColorFormat::Bgra8,
                 flags,
             );
             (ScreenCaptureHandler::start_free_threaded(settings), target_audio_pid)
@@ -297,7 +297,19 @@ impl windows_capture::capture::GraphicsCaptureApiHandler for ScreenCaptureHandle
 
         let mut i420 = I420Buffer::new(w as u32, h as u32);
         let (dst_y, dst_u, dst_v) = i420.data_mut();
-        rgba_to_i420(raw, stride as u32, w, h, dst_y, dst_u, dst_v);
+        let src_stride = stride as u32;
+        libwebrtc::native::yuv_helper::argb_to_i420(
+            raw,
+            src_stride,
+            dst_y,
+            w as u32,
+            dst_u,
+            ((w + 1) / 2) as u32,
+            dst_v,
+            ((w + 1) / 2) as u32,
+            w,
+            h,
+        );
 
         let (out_w, out_h) = (TARGET_WIDTH as i32, TARGET_HEIGHT as i32);
         let buffer = if w != out_w || h != out_h {
@@ -503,6 +515,7 @@ async fn start_screen_capture_libwebrtc_or_fallback(
 async fn start_screen_capture_screenshots_fallback(
     room: Arc<livekit::Room>,
 ) -> Result<ScreenShareHandle, String> {
+    use libwebrtc::native::yuv_helper;
     use livekit::webrtc::video_source::native::NativeVideoSource;
 
     let config = get_screen_share_config();
@@ -538,7 +551,19 @@ async fn start_screen_capture_screenshots_fallback(
 
                     let mut i420 = I420Buffer::new(w as u32, h as u32);
                     let (dst_y, dst_u, dst_v) = i420.data_mut();
-                    rgba_to_i420(raw, stride as u32, w, h, dst_y, dst_u, dst_v);
+                    let src_stride = stride as u32;
+                    yuv_helper::abgr_to_i420(
+                        raw,
+                        src_stride,
+                        dst_y,
+                        w as u32,
+                        dst_u,
+                        ((w + 1) / 2) as u32,
+                        dst_v,
+                        ((w + 1) / 2) as u32,
+                        w,
+                        h,
+                    );
 
                     let (out_w, out_h) = (TARGET_WIDTH as i32, TARGET_HEIGHT as i32);
                     let buffer = if w != out_w || h != out_h {
@@ -603,48 +628,6 @@ async fn start_screen_capture_screenshots_fallback(
         _capturer_thread: Some(capturer_thread),
         _audio_capture_thread: audio_capture_thread,
     })
-}
-
-/// Convert RGBA (R,G,B,A per pixel) to I420. Strides for dst are standard I420.
-fn rgba_to_i420(
-    src: &[u8],
-    src_stride: u32,
-    width: i32,
-    height: i32,
-    dst_y: &mut [u8],
-    dst_u: &mut [u8],
-    dst_v: &mut [u8],
-) {
-    let w = width as usize;
-    let h = height as usize;
-    let stride = src_stride as usize;
-    let chroma_w = (w + 1) / 2;
-    let chroma_h = (h + 1) / 2;
-
-    for y in 0..h {
-        for x in 0..w {
-            let i = y * stride + x * 4;
-            let r = src[i] as f32;
-            let g = src[i + 1] as f32;
-            let b = src[i + 2] as f32;
-            let y_val = (0.299 * r + 0.587 * g + 0.114 * b).clamp(0.0, 255.0) as u8;
-            dst_y[y * w + x] = y_val;
-        }
-    }
-    for y in 0..chroma_h {
-        for x in 0..chroma_w {
-            let sx = x * 2;
-            let sy = y * 2;
-            let i = (sy * stride + sx * 4).min(src.len().saturating_sub(4));
-            let r = src.get(i).copied().unwrap_or(0) as f32;
-            let g = src.get(i + 1).copied().unwrap_or(0) as f32;
-            let b = src.get(i + 2).copied().unwrap_or(0) as f32;
-            let u_val = (-0.169 * r - 0.331 * g + 0.5 * b + 128.0).clamp(0.0, 255.0) as u8;
-            let v_val = (0.5 * r - 0.419 * g - 0.081 * b + 128.0).clamp(0.0, 255.0) as u8;
-            dst_u[y * chroma_w + x] = u_val;
-            dst_v[y * chroma_w + x] = v_val;
-        }
-    }
 }
 
 /// Set up system audio capture via Windows process loopback (WASAPI).
