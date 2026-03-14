@@ -39,9 +39,7 @@ export function useVoiceParticipants(voiceRoomIds: string[]) {
     const roomIds = roomIdsRef.current;
     if (roomIds.length === 0) return;
 
-    for (const roomId of roomIds) {
-      await fetchForRoom(roomId);
-    }
+    await Promise.all(roomIds.map((roomId) => fetchForRoom(roomId)));
   }, [fetchForRoom]);
 
   // Initial fetch when voice room IDs change (e.g. user navigates into a space).

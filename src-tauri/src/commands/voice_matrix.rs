@@ -448,6 +448,9 @@ pub async fn voice_connect(
     // Run leave-all-rooms cleanup in parallel as fire-and-forget so the user
     // sees the new room almost instantly. Stale memberships get cleaned up
     // a moment later; briefly appearing in two rooms is cosmetic and resolves quickly.
+    // Note: cleanup and join hit the homeserver concurrently. skip_state_key avoids
+    // clearing our new membership, but stale keys from other devices could race
+    // with the join PUT — harmless flicker possible, no functional impact.
     let client_cleanup = client.clone();
     let http_cleanup = http_client.clone();
     let room_id_cleanup = room_id.clone();
