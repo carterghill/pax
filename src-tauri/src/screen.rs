@@ -26,19 +26,12 @@ pub enum ScreenShareMode {
     Window,
 }
 
-/// Wrapper so cpal::Stream can be stored in ScreenShareHandle (which must be Send).
-struct SendStream(cpal::Stream);
-unsafe impl Send for SendStream {}
-unsafe impl Sync for SendStream {}
-
 /// Handle for an active screen share. Holds video and optional audio tracks.
 /// Dropping stops the capture thread and loopback stream.
 pub struct ScreenShareHandle {
     pub track: LocalVideoTrack,
     /// Screen share audio track (system audio), if loopback capture succeeded.
     pub audio_track: Option<LocalAudioTrack>,
-    /// Keeps loopback stream alive; dropped when handle is dropped.
-    _loopback_stream: Option<SendStream>,
     _shutdown: Arc<AtomicBool>,
     /// Capture thread handle; kept alive so the thread doesn't die silently.
     pub(crate) _capturer_thread: Option<std::thread::JoinHandle<()>>,
@@ -241,6 +234,7 @@ async fn start_screen_capture_windows_graphics(
 
     let (audio_track, loopback_stream, audio_capture_thread) =
         setup_screen_share_audio_process_loopback(mode, target_audio_pid, shutdown.clone());
+    let _ = loopback_stream;
 
     // Wrap the capture thread so we can join it when stopping
     let wrapper_thread = thread::spawn(move || {
@@ -250,7 +244,6 @@ async fn start_screen_capture_windows_graphics(
     Ok(ScreenShareHandle {
         track,
         audio_track,
-        _loopback_stream: loopback_stream.map(SendStream),
         _shutdown: shutdown,
         _capturer_thread: Some(wrapper_thread),
         _audio_capture_thread: audio_capture_thread,
@@ -494,11 +487,11 @@ async fn start_screen_capture_libwebrtc_or_fallback(
         setup_screen_share_audio_process_loopback(mode, None, shutdown.clone());
     #[cfg(not(target_os = "windows"))]
     let (audio_track, loopback_stream, audio_capture_thread) = (None, None, None);
+    let _ = loopback_stream;
 
     Ok(ScreenShareHandle {
         track,
         audio_track,
-        _loopback_stream: loopback_stream.map(SendStream),
         _shutdown: shutdown,
         _capturer_thread: Some(capturer_thread),
         _audio_capture_thread: audio_capture_thread,
@@ -601,11 +594,11 @@ async fn start_screen_capture_screenshots_fallback(
         setup_screen_share_audio_process_loopback(ScreenShareMode::Screen, None, shutdown.clone());
     #[cfg(not(target_os = "windows"))]
     let (audio_track, loopback_stream, audio_capture_thread) = (None, None, None);
+    let _ = loopback_stream;
 
     Ok(ScreenShareHandle {
         track,
         audio_track,
-        _loopback_stream: loopback_stream.map(SendStream),
         _shutdown: shutdown,
         _capturer_thread: Some(capturer_thread),
         _audio_capture_thread: audio_capture_thread,
