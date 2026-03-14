@@ -34,6 +34,7 @@ interface RoomSidebarProps {
   voiceParticipants: Record<string, VoiceParticipant[]>;
   connectedVoiceRoomId: string | null;
   isVoiceConnecting: boolean;
+  disconnectingFromRoomId: string | null;
   screenSharingOwner: string | null;
   voiceCallParticipantStates: Record<string, { isMuted: boolean; isDeafened: boolean }>;
   onSetParticipantVolume: (identity: string, volume: number) => void;
@@ -155,6 +156,7 @@ export default function RoomSidebar({
   voiceParticipants,
   connectedVoiceRoomId,
   isVoiceConnecting,
+  disconnectingFromRoomId,
   screenSharingOwner,
   voiceCallParticipantStates,
   onSetParticipantVolume,
@@ -255,10 +257,11 @@ export default function RoomSidebar({
                   <style>{`@keyframes spin { from { transform: rotate(0deg); } to { transform: rotate(360deg); } }`}</style>
                   {participants.map((p) => {
                     const state = resolveVoiceState(p, voiceCallParticipantStates);
-                    // Only local user shows connecting when we're connecting; remote "connecting" only when we're connected and they're not in LiveKit yet
+                    // Local user: connecting (joining) or disconnecting (left LiveKit but still in Matrix list)
                     const isLocalConnecting = isConnectedHere && p.userId === userId && isVoiceConnecting;
+                    const isLocalDisconnecting = room.id === disconnectingFromRoomId && p.userId === userId;
                     const isRemoteConnecting = isConnectedHere && !isVoiceConnecting && p.userId !== userId && !state;
-                    const isParticipantConnecting = isLocalConnecting || isRemoteConnecting;
+                    const isParticipantConnecting = isLocalConnecting || isLocalDisconnecting || isRemoteConnecting;
                     return (
                     <VoiceParticipantRow
                       key={p.userId}

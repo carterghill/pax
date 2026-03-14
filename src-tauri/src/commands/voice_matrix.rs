@@ -534,16 +534,19 @@ pub async fn voice_disconnect(
     voice_mgr: State<'_, voice::VoiceManager>,
     room_id: String,
 ) -> Result<(), String> {
-    // 1. Disconnect from LiveKit
+    // 1. Disconnect from LiveKit (blocks until room is closed)
     voice_mgr.disconnect().await;
 
-    // 2. Clear all of our call.member state in this room (any device, removes phantoms)
-    let guard = state.client.lock().await;
-    if let Some(client) = guard.as_ref() {
-        let _ =
-            matrix_voice_clear_my_memberships_in_room(client, &state.http_client, &room_id, None)
-                .await;
-    }
+    // 2. Clear Matrix call.member state in background so we return quickly
+    let state_clone = state.inner().clone();
+    tauri::async_runtime::spawn(async move {
+        let guard = state_clone.client.lock().await;
+        if let Some(client) = guard.as_ref() {
+            let _ =
+                matrix_voice_clear_my_memberships_in_room(client, &state_clone.http_client, &room_id, None)
+                    .await;
+        }
+    });
 
     Ok(())
 }

@@ -616,7 +616,7 @@ async fn run_event_loop(
                                 .get("pax.deafened")
                                 .map(|v| v == "true")
                                 .unwrap_or(false);
-                            st.remote_deafened.insert(identity, deafened);
+                            st.remote_deafened.insert(identity.clone(), deafened);
                             if let Some(raw) = participant.attributes().get("pax.muted") {
                                 st.remote_mic_muted.insert(participant.identity().to_string(), raw == "true");
                             }

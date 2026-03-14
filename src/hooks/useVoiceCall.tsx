@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { listen, UnlistenFn } from "@tauri-apps/api/event";
-import { useSound } from "react-sounds";
+import { playSound } from "react-sounds";
 import { getStoredVolume } from "./useUserVolume";
 
 /**
@@ -42,6 +42,8 @@ export interface VoiceCallState {
   screenSharingOwner: string | null;
   isLocalScreenSharing: boolean;
   participants: VoiceParticipant[];
+  /** Room we're disconnecting from; our name may still appear in the list until Matrix syncs */
+  disconnectingFromRoomId: string | null;
 }
 
 export function useVoiceCall() {
@@ -55,22 +57,22 @@ export function useVoiceCall() {
     isLocalScreenSharing: false,
     error: null,
     participants: [],
+    disconnectingFromRoomId: null,
   });
 
   const connectedRoomIdRef = useRef<string | null>(null);
   connectedRoomIdRef.current = state.connectedRoomId;
   const isConnectingRef = useRef(false);
 
-  const { play: playConnect } = useSound("notification/success");
-  const { play: playDisconnect } = useSound("notification/error");
   const wasConnectedRef = useRef(false);
+  const prevParticipantIdsRef = useRef<Set<string>>(new Set());
 
   // Listen for voice state events from the Rust backend
   useEffect(() => {
     let unlisten: UnlistenFn | null = null;
     listen<VoiceStateEvent>("voice-state-changed", (event) => {
       const ev = event.payload;
-      setState({
+      setState((prev) => ({
         connectedRoomId: ev.connectedRoomId,
         isConnecting: ev.isConnecting,
         isMicEnabled: ev.isMicEnabled,
@@ -80,15 +82,33 @@ export function useVoiceCall() {
         isLocalScreenSharing: ev.isLocalScreenSharing ?? false,
         error: ev.error,
         participants: ev.participants,
-      });
-      // Play connect/disconnect sounds
+        // Clear disconnecting when we connect to a room; otherwise preserve
+        disconnectingFromRoomId: ev.connectedRoomId ? null : prev.disconnectingFromRoomId,
+      }));
+
       const isNowConnected =
         ev.connectedRoomId !== null && !ev.isConnecting && !ev.error;
+
+      // Local user just finished connecting
       if (isNowConnected && !wasConnectedRef.current) {
-        playConnect();
-      } else if (!isNowConnected && wasConnectedRef.current) {
-        playDisconnect();
+        playSound("ui/success_bling");
       }
+
+      // Detect remote participant joins/leaves by diffing identities
+      if (isNowConnected) {
+        const currentIds = new Set(ev.participants.filter(p => !p.isLocal).map(p => p.identity));
+        const prevIds = prevParticipantIdsRef.current;
+        for (const id of currentIds) {
+          if (!prevIds.has(id)) playSound("ui/success_bling");
+        }
+        for (const id of prevIds) {
+          if (!currentIds.has(id)) playSound("notification/popup");
+        }
+        prevParticipantIdsRef.current = currentIds;
+      } else {
+        prevParticipantIdsRef.current = new Set();
+      }
+
       wasConnectedRef.current = isNowConnected;
     }).then((fn) => {
       unlisten = fn;
@@ -96,7 +116,7 @@ export function useVoiceCall() {
     return () => {
       if (unlisten) unlisten();
     };
-  }, [playConnect, playDisconnect]);
+  }, []);
 
   const connect = useCallback(async (roomId: string) => {
     if (connectedRoomIdRef.current === roomId) return;
@@ -114,7 +134,8 @@ export function useVoiceCall() {
       // State will be updated via the event listener
     } catch (e) {
       isConnectingRef.current = false;
-      setState({
+      setState((prev) => ({
+        ...prev,
         connectedRoomId: null,
         isConnecting: false,
         isMicEnabled: false,
@@ -124,19 +145,17 @@ export function useVoiceCall() {
         isLocalScreenSharing: false,
         error: String(e),
         participants: [],
-      });
+      }));
     }
   }, []);
 
   const disconnect = useCallback(async () => {
     const roomId = connectedRoomIdRef.current;
     if (!roomId) return;
-    try {
-      await invoke("voice_disconnect", { roomId });
-    } catch (e) {
-      console.error("Failed to disconnect:", e);
-    }
-    setState({
+    playSound("notification/popup");
+    // Optimistic update: clear UI immediately so disconnect feels instant
+    setState((prev) => ({
+      ...prev,
       connectedRoomId: null,
       isConnecting: false,
       isMicEnabled: false,
@@ -146,7 +165,19 @@ export function useVoiceCall() {
       isLocalScreenSharing: false,
       error: null,
       participants: [],
+      disconnectingFromRoomId: roomId,
+    }));
+    invoke("voice_disconnect", { roomId }).catch((e) => {
+      console.error("Failed to disconnect:", e);
     });
+    // Clear disconnecting state after Matrix has had time to sync
+    setTimeout(() => {
+      setState((prev) =>
+        prev.disconnectingFromRoomId === roomId
+          ? { ...prev, disconnectingFromRoomId: null }
+          : prev
+      );
+    }, 4000);
   }, []);
 
   const toggleMic = useCallback(async () => {
