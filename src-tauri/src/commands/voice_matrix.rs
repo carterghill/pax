@@ -430,37 +430,50 @@ pub async fn voice_connect(
     app_handle: tauri::AppHandle,
     room_id: String,
 ) -> Result<(), String> {
-    // 0. Clear phantoms in all rooms, but skip our own state_key in this room (we're about to join it).
-    {
+    let (client, http_client) = {
         let guard = state.client.lock().await;
-        if let Some(client) = guard.as_ref() {
-            let state_key = format!(
-                "_{}_{}_{}",
-                client.user_id().ok_or("No user ID")?,
-                client.device_id().ok_or("No device ID")?,
-                "m.call"
-            );
-            let _ = matrix_voice_leave_all_joined_rooms(
-                client,
-                &state.http_client,
-                Some((&room_id, &state_key)),
-            )
-            .await;
-        }
-    }
+        let client = guard.as_ref().ok_or("Not logged in")?.clone();
+        let http = state.http_client.clone();
+        (client, http)
+    };
+
+    let state_key = format!(
+        "_{}_{}_{}",
+        client.user_id().ok_or("No user ID")?,
+        client.device_id().ok_or("No device ID")?,
+        "m.call"
+    );
+
+    // Optimistic join: start the Matrix join + LiveKit connect immediately.
+    // Run leave-all-rooms cleanup in parallel as fire-and-forget so the user
+    // sees the new room almost instantly. Stale memberships get cleaned up
+    // a moment later; briefly appearing in two rooms is cosmetic and resolves quickly.
+    let client_cleanup = client.clone();
+    let http_cleanup = http_client.clone();
+    let room_id_cleanup = room_id.clone();
+    let state_key_cleanup = state_key.clone();
+    tokio::spawn(async move {
+        let _ = matrix_voice_leave_all_joined_rooms(
+            &client_cleanup,
+            &http_cleanup,
+            Some((&room_id_cleanup, &state_key_cleanup)),
+        )
+        .await;
+    });
 
     // 1. Do the Matrix join (state event + JWT)
-    let (jwt, livekit_url, local_identity) = {
-        let guard = state.client.lock().await;
-        let client = guard.as_ref().ok_or("Not logged in")?;
-        let result = matrix_voice_join(client, &state.http_client, &room_id).await?;
-        let identity = client.user_id().ok_or("No user ID")?.to_string();
-        (result.jwt, result.livekit_url, identity)
-    };
+    let result = matrix_voice_join(&client, &http_client, &room_id).await?;
+    let identity = client.user_id().ok_or("No user ID")?.to_string();
 
     // 2. Connect to LiveKit natively via the Rust SDK
     voice_mgr
-        .connect(room_id.clone(), livekit_url, jwt, local_identity, app_handle)
+        .connect(
+            room_id.clone(),
+            result.livekit_url,
+            result.jwt,
+            identity,
+            app_handle,
+        )
         .await?;
 
     Ok(())

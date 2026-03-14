@@ -5,6 +5,8 @@ import { VoiceParticipant } from "../types/matrix";
 
 type ParticipantMap = Record<string, VoiceParticipant[]>;
 
+const RETRY_DELAY_MS = 2000;
+
 export function useVoiceParticipants(voiceRoomIds: string[]) {
   const [participants, setParticipants] = useState<ParticipantMap>({});
   const roomIdsRef = useRef<string[]>(voiceRoomIds);
@@ -26,20 +28,31 @@ export function useVoiceParticipants(voiceRoomIds: string[]) {
         if (!changed) return prev;
         return { ...prev, [roomId]: result };
       });
+      return result.length;
     } catch (e) {
       console.error(`Failed to fetch voice participants for ${roomId}:`, e);
+      return 0;
     }
   }, []);
 
-  const fetchAll = useCallback(() => {
-    for (const roomId of roomIdsRef.current) {
-      fetchForRoom(roomId);
+  const fetchAll = useCallback(async () => {
+    const roomIds = roomIdsRef.current;
+    if (roomIds.length === 0) return;
+
+    for (const roomId of roomIds) {
+      await fetchForRoom(roomId);
     }
   }, [fetchForRoom]);
 
-  // Initial fetch when voice room IDs change
+  // Initial fetch when voice room IDs change (e.g. user navigates into a space).
+  // Also schedule a single retry after RETRY_DELAY_MS to cover the sync timing gap:
+  // room state may not be hydrated yet on first space entry.
   useEffect(() => {
     fetchAll();
+
+    const timer = setTimeout(() => {
+      fetchAll();
+    }, RETRY_DELAY_MS);
 
     // Clean up stale room entries
     setParticipants((prev) => {
@@ -49,9 +62,11 @@ export function useVoiceParticipants(voiceRoomIds: string[]) {
       }
       return next;
     });
+
+    return () => clearTimeout(timer);
   }, [voiceRoomIds.join(","), fetchAll]);
 
-  // Re-fetch all voice rooms on every sync cycle
+  // Re-fetch all voice rooms on every sync cycle (voice-participants-changed)
   // The dedup in fetchForRoom prevents unnecessary re-renders
   useEffect(() => {
     const unlisten = listen("voice-participants-changed", () => {
