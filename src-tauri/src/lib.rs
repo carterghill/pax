@@ -39,6 +39,7 @@ fn fmt_error_chain(e: &dyn std::error::Error) -> String {
 pub struct AppState {
     pub client: Mutex<Option<Client>>,
     pub presence_map: Arc<Mutex<HashMap<String, String>>>,
+    pub avatar_cache: Arc<Mutex<HashMap<String, String>>>,
     pub display_server: DisplayServer,
 }
 
@@ -110,6 +111,41 @@ struct VoiceParticipant {
     avatar_url: Option<String>,
 }
 
+fn encode_avatar_data_url(bytes: &[u8]) -> String {
+    let b64 = BASE64.encode(bytes);
+    format!("data:image/png;base64,{}", b64)
+}
+
+async fn get_or_fetch_room_avatar(
+    room: &Room,
+    avatar_cache: &Arc<Mutex<HashMap<String, String>>>,
+) -> Option<String> {
+    let mxc = room.avatar_url().map(|uri| uri.to_string())?;
+    if let Some(cached) = avatar_cache.lock().await.get(&mxc).cloned() {
+        return Some(cached);
+    }
+
+    let bytes = room.avatar(MediaFormat::File).await.ok().flatten()?;
+    let data_url = encode_avatar_data_url(&bytes);
+    avatar_cache.lock().await.insert(mxc, data_url.clone());
+    Some(data_url)
+}
+
+async fn get_or_fetch_member_avatar(
+    member: &matrix_sdk::room::RoomMember,
+    avatar_cache: &Arc<Mutex<HashMap<String, String>>>,
+) -> Option<String> {
+    let mxc = member.avatar_url().map(|uri| uri.to_string())?;
+    if let Some(cached) = avatar_cache.lock().await.get(&mxc).cloned() {
+        return Some(cached);
+    }
+
+    let bytes = member.avatar(MediaFormat::File).await.ok().flatten()?;
+    let data_url = encode_avatar_data_url(&bytes);
+    avatar_cache.lock().await.insert(mxc, data_url.clone());
+    Some(data_url)
+}
+
 #[tauri::command]
 async fn login(
     state: State<'_, Arc<AppState>>,
@@ -148,6 +184,7 @@ async fn login(
         .to_string();
 
     *state.client.lock().await = Some(client);
+    state.avatar_cache.lock().await.clear();
     Ok(user_id)
 }
 
@@ -159,6 +196,7 @@ async fn get_rooms(
     let client = guard.as_ref().ok_or("Not logged in")?;
 
     let all_rooms = client.joined_rooms();
+    let avatar_cache = state.avatar_cache.clone();
 
     // First pass: collect space IDs and their children via m.space.child state events
     let mut space_children: HashMap<String, Vec<String>> = HashMap::new();
@@ -188,13 +226,7 @@ async fn get_rooms(
     let mut room_list = Vec::new();
 
     for room in &all_rooms {
-        let avatar_url = match room.avatar(MediaFormat::File).await {
-            Ok(Some(bytes)) => {
-                let b64 = BASE64.encode(&bytes);
-                Some(format!("data:image/png;base64,{}", b64))
-            }
-            _ => None,
-        };
+        let avatar_url = get_or_fetch_room_avatar(room, &avatar_cache).await;
 
         let room_id_str = room.room_id().to_string();
 
@@ -249,6 +281,7 @@ async fn get_messages(
         .map_err(|e| format!("Failed to fetch messages: {e}"))?;
 
     let mut messages = Vec::new();
+    let avatar_cache = state.avatar_cache.clone();
 
     for event in response.chunk {
         let raw = match event.raw().deserialize() {
@@ -300,13 +333,7 @@ async fn get_messages(
             {
                 Ok(Some(member)) => {
                     let name = member.display_name().map(|n| n.to_string());
-                    let avatar = match member.avatar(MediaFormat::File).await {
-                        Ok(Some(bytes)) => {
-                            let b64 = BASE64.encode(&bytes);
-                            Some(format!("data:image/png;base64,{}", b64))
-                        }
-                        _ => None,
-                    };
+                    let avatar = get_or_fetch_member_avatar(&member, &avatar_cache).await;
                     (name, avatar)
                 }
                 _ => (None, None),
@@ -351,17 +378,12 @@ async fn get_room_members(
         .await
         .map_err(|e| format!("Failed to get members: {e}"))?;
 
-    let presence_map = state.presence_map.lock().await;
+    let avatar_cache = state.avatar_cache.clone();
+    let presence_map = state.presence_map.lock().await.clone();
 
     let mut result = Vec::new();
     for member in members {
-        let avatar_url = match member.avatar(MediaFormat::File).await {
-            Ok(Some(bytes)) => {
-                let b64 = BASE64.encode(&bytes);
-                Some(format!("data:image/png;base64,{}", b64))
-            }
-            _ => None,
-        };
+        let avatar_url = get_or_fetch_member_avatar(&member, &avatar_cache).await;
 
         let user_id_str = member.user_id().to_string();
         let presence = presence_map
@@ -509,6 +531,7 @@ async fn get_voice_participants(
         .ok_or("Room not found")?;
 
     let active_user_ids = collect_active_call_users(&room).await;
+    let avatar_cache = state.avatar_cache.clone();
 
     // Resolve display names and avatars for active users
     let mut participants = Vec::new();
@@ -517,13 +540,7 @@ async fn get_voice_participants(
             match room.get_member_no_sync(&uid).await {
                 Ok(Some(member)) => {
                     let name = member.display_name().map(|n| n.to_string());
-                    let avatar = match member.avatar(MediaFormat::File).await {
-                        Ok(Some(bytes)) => {
-                            let b64 = BASE64.encode(&bytes);
-                            Some(format!("data:image/png;base64,{}", b64))
-                        }
-                        _ => None,
-                    };
+                    let avatar = get_or_fetch_member_avatar(&member, &avatar_cache).await;
                     (name, avatar)
                 }
                 _ => (None, None),
@@ -977,8 +994,10 @@ async fn start_sync(
 
     // Handler for incoming room messages
     let app_handle = app.clone();
+    let avatar_cache = state.avatar_cache.clone();
     client.add_event_handler(move |ev: OriginalSyncRoomMessageEvent, room: Room| {
         let app = app_handle.clone();
+        let avatar_cache = avatar_cache.clone();
         async move {
             let room_id = room.room_id().to_string();
             let body = extract_body(&ev.content);
@@ -990,13 +1009,7 @@ async fn start_sync(
             {
                 Ok(Some(member)) => {
                     let name = member.display_name().map(|n| n.to_string());
-                    let avatar = match member.avatar(MediaFormat::File).await {
-                        Ok(Some(bytes)) => {
-                            let b64 = BASE64.encode(&bytes);
-                            Some(format!("data:image/png;base64,{}", b64))
-                        }
-                        _ => None,
-                    };
+                    let avatar = get_or_fetch_member_avatar(&member, &avatar_cache).await;
                     (name, avatar)
                 }
                 _ => (None, None),
@@ -1201,6 +1214,7 @@ pub fn run() {
     let state = Arc::new(AppState {
         client: Mutex::new(None),
         presence_map: Arc::new(Mutex::new(HashMap::new())),
+        avatar_cache: Arc::new(Mutex::new(HashMap::new())),
         display_server,
     });
 
