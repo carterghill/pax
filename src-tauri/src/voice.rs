@@ -409,7 +409,7 @@ impl VoiceManager {
     /// Stop sharing screen.
     pub async fn stop_screen_share(&self, app_handle: &AppHandle) -> Result<(), String> {
         eprintln!("[Pax] voice::stop_screen_share");
-        let (room, audio_state, mut handle, room_id, local_identity) = {
+        let (room, audio_state, handle, room_id, local_identity) = {
             let mut guard = self.session.lock();
             let session = guard.as_mut().ok_or("Not in a voice call")?;
             let handle = session._screen_handle.take();
@@ -421,7 +421,7 @@ impl VoiceManager {
                 session.local_identity.clone(),
             )
         };
-        if let Some(mut h) = handle.take() {
+        if let Some(mut h) = handle {
             h.stop();
             let lp = room.local_participant();
             let sids: Vec<_> = lp
