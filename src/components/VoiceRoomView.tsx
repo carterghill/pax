@@ -1,14 +1,17 @@
-import { useState, useCallback, useEffect, useRef } from "react";
+import { useState, useCallback, useEffect, useMemo, useRef } from "react";
 import { Volume2, Mic, MicOff, PhoneOff, Loader2, AudioLines, Monitor, MonitorUp, Headphones, Settings, Slash } from "lucide-react";
 import { useTheme } from "../theme/ThemeContext";
-import { Room } from "../types/matrix";
-import { VoiceCallState, VoiceParticipant } from "../hooks/useVoiceCall";
+import { Room, VoiceParticipant as MatrixVoiceParticipant } from "../types/matrix";
+import { VoiceCallState } from "../hooks/useVoiceCall";
+import { normalizeUserId } from "../utils/matrix";
 import { useUserVolume } from "../hooks/useUserVolume";
 import VolumeContextMenu from "./VolumeContextMenu";
 
 interface VoiceRoomViewProps {
   room: Room;
   callState: VoiceCallState;
+  voiceParticipants: MatrixVoiceParticipant[];
+  userId: string;
   onDisconnect: () => void;
   onToggleMic: () => void;
   onToggleDeafen: () => void;
@@ -26,6 +29,8 @@ interface VoiceRoomViewProps {
 export default function VoiceRoomView({
   room,
   callState,
+  voiceParticipants,
+  userId,
   onDisconnect,
   onToggleMic,
   onToggleDeafen,
@@ -155,8 +160,69 @@ export default function VoiceRoomView({
   const isConnecting = callState.isConnecting && callState.connectedRoomId === room.id;
   const hasScreenShare = !!callState.screenSharingOwner || callState.isLocalScreenSharing;
 
-  // Collect all participants from the Rust backend state
-  const allParticipants: VoiceParticipant[] = isConnected ? callState.participants : [];
+  // Build set of LiveKit participant identities (normalized) for matching
+  const liveKitIdentitySet = useMemo(() => {
+    const set = new Set<string>();
+    for (const p of callState.participants) {
+      set.add(normalizeUserId(p.identity));
+      if (p.identity.startsWith("@")) {
+        set.add(normalizeUserId(p.identity.slice(1).split(":")[0]));
+      }
+    }
+    return set;
+  }, [callState.participants]);
+
+  // Merged participants: LiveKit-connected + room participants who are still connecting
+  const allParticipants = useMemo(() => {
+    const result: Array<{
+      identity: string;
+      displayName: string;
+      isLocal: boolean;
+      isConnecting: boolean;
+      isSpeaking?: boolean;
+      isMuted?: boolean;
+      isDeafened?: boolean;
+    }> = [];
+
+    // Add connected LiveKit participants
+    for (const p of callState.participants) {
+      const displayName = p.identity.startsWith("@")
+        ? p.identity.slice(1).split(":")[0]
+        : p.identity;
+      result.push({
+        identity: p.identity,
+        displayName,
+        isLocal: p.isLocal,
+        isConnecting: false,
+        isSpeaking: p.isSpeaking,
+        isMuted: p.isMuted,
+        isDeafened: p.isDeafened,
+      });
+    }
+
+    // When we're connected (not just connecting), add room participants not yet in LiveKit
+    const isConnectedToThisRoom = callState.connectedRoomId === room.id && !callState.isConnecting;
+    if (isConnectedToThisRoom && voiceParticipants) {
+      for (const p of voiceParticipants) {
+        const normalized = normalizeUserId(p.userId);
+        const localpart = p.userId.startsWith("@") ? p.userId.slice(1).split(":")[0] : p.userId;
+        const inLiveKit = liveKitIdentitySet.has(normalized) || liveKitIdentitySet.has(normalizeUserId(localpart));
+        if (inLiveKit) continue;
+
+        const displayName = p.displayName ?? p.userId;
+        const localDisplayName = displayName.startsWith("@") ? displayName.slice(1).split(":")[0] : displayName;
+        const isLocal = p.userId === userId;
+        result.push({
+          identity: p.userId,
+          displayName: localDisplayName,
+          isLocal,
+          isConnecting: true,
+        });
+      }
+    }
+
+    return result;
+  }, [callState.participants, callState.connectedRoomId, callState.isConnecting, room.id, voiceParticipants, userId, liveKitIdentitySet]);
 
   const sharerDisplayName = callState.isLocalScreenSharing
     ? "You"
@@ -259,6 +325,7 @@ export default function VoiceRoomView({
           overflowY: "auto",
           width: hasScreenShare ? 180 : undefined,
         }}>
+        <style>{`@keyframes spin { from { transform: rotate(0deg); } to { transform: rotate(360deg); } }`}</style>
         {isConnecting && (
           <div style={{
             display: "flex",
@@ -273,7 +340,6 @@ export default function VoiceRoomView({
               style={{ animation: "spin 1s linear infinite" }}
             />
             <span style={{ fontSize: typography.fontSizeLarge }}>Connecting...</span>
-            <style>{`@keyframes spin { from { transform: rotate(0deg); } to { transform: rotate(360deg); } }`}</style>
           </div>
         )}
 
@@ -308,81 +374,89 @@ export default function VoiceRoomView({
           </div>
         )}
 
-        {isConnected && allParticipants.map((p) => {
-          // Extract display name from identity (e.g. @user:server → user)
-          const displayName = p.identity.startsWith("@")
-            ? p.identity.slice(1).split(":")[0]
-            : p.identity;
-
-          return (
-            <div
-              key={p.identity}
-              onContextMenu={(e) => {
-                if (p.isLocal) return; // No volume control for yourself
-                e.preventDefault();
-                setContextMenu({
-                  x: e.clientX,
-                  y: e.clientY,
-                  identity: p.identity,
-                  displayName,
-                });
-              }}
-              style={{
-                display: "flex",
-                flexDirection: "column",
-                alignItems: "center",
-                gap: spacing.unit * 2,
-                width: 120,
-                cursor: p.isLocal ? "default" : "context-menu",
-              }}
-            >
-              {/* Avatar circle with speaking ring */}
-              <div style={{
-                width: 80,
-                height: 80,
-                borderRadius: "50%",
-                backgroundColor: palette.bgActive,
-                display: "flex",
-                alignItems: "center",
-                justifyContent: "center",
-                fontSize: 28,
-                fontWeight: typography.fontWeightBold,
-                color: palette.textHeading,
-                border: `3px solid ${p.isSpeaking ? "#23a55a" : "transparent"}`,
-                transition: "border-color 0.15s ease",
-              }}>
-                {displayName.charAt(0).toUpperCase()}
-              </div>
-              <span style={{
-                fontSize: typography.fontSizeSmall,
-                color: palette.textPrimary,
-                textAlign: "center",
-                overflow: "hidden",
-                textOverflow: "ellipsis",
-                whiteSpace: "nowrap",
-                maxWidth: "100%",
-                display: "flex",
-                alignItems: "center",
-                justifyContent: "center",
-                gap: spacing.unit,
-              }}>
-                {displayName}{p.isLocal ? " (you)" : ""}
-                <span style={{ marginLeft: spacing.unit, display: "inline-flex", alignItems: "center", gap: spacing.unit }}>
-                  {callState.screenSharingOwner === p.identity && (
-                    <Monitor size={12} color="#23a55a" />
-                  )}
-                  {p.isMuted && <MicOff size={12} color={palette.textSecondary} />}
-                  {p.isDeafened && (
-                    <span style={{ position: "relative", width: 12, height: 12, display: "inline-flex", alignItems: "center", justifyContent: "center" }}>
-                      <Headphones size={12} color={palette.textSecondary} />
-                      <Slash size={10} color={palette.textSecondary} style={{ position: "absolute" }} />
-                    </span>
-                  )}
-                </span>
-              </span>
+        {isConnected && allParticipants.map((p) => (
+          <div
+            key={p.identity}
+            onContextMenu={(e) => {
+              if (p.isLocal || p.isConnecting) return; // No volume control for yourself or connecting users
+              e.preventDefault();
+              setContextMenu({
+                x: e.clientX,
+                y: e.clientY,
+                identity: p.identity,
+                displayName: p.displayName,
+              });
+            }}
+            style={{
+              display: "flex",
+              flexDirection: "column",
+              alignItems: "center",
+              gap: spacing.unit * 2,
+              width: 120,
+              cursor: p.isLocal ? "default" : "context-menu",
+            }}
+          >
+            {/* Avatar circle - circular progress when connecting */}
+            <div style={{
+              width: 80,
+              height: 80,
+              borderRadius: "50%",
+              backgroundColor: palette.bgActive,
+              display: "flex",
+              alignItems: "center",
+              justifyContent: "center",
+              fontSize: p.isConnecting ? 0 : 28,
+              fontWeight: typography.fontWeightBold,
+              color: palette.textHeading,
+              border: `3px solid ${p.isSpeaking ? "#23a55a" : "transparent"}`,
+              transition: "border-color 0.15s ease",
+            }}>
+              {p.isConnecting ? (
+                <Loader2
+                  size={32}
+                  color={palette.textSecondary}
+                  style={{ animation: "spin 1s linear infinite" }}
+                />
+              ) : (
+                p.displayName.charAt(0).toUpperCase()
+              )}
             </div>
-          );
-        })}
+            <span style={{
+              fontSize: typography.fontSizeSmall,
+              color: palette.textPrimary,
+              textAlign: "center",
+              overflow: "hidden",
+              textOverflow: "ellipsis",
+              whiteSpace: "nowrap",
+              maxWidth: "100%",
+              display: "flex",
+              alignItems: "center",
+              justifyContent: "center",
+              gap: spacing.unit,
+            }}>
+              {p.displayName}{p.isLocal ? " (you)" : ""}
+              <span style={{ marginLeft: spacing.unit, display: "inline-flex", alignItems: "center", gap: spacing.unit }}>
+                {!p.isConnecting && callState.screenSharingOwner === p.identity && (
+                  <Monitor size={12} color="#23a55a" />
+                )}
+                {!p.isConnecting && p.isMuted && <MicOff size={12} color={palette.textSecondary} />}
+                {!p.isConnecting && p.isDeafened && (
+                  <span style={{ position: "relative", width: 12, height: 12, display: "inline-flex", alignItems: "center", justifyContent: "center" }}>
+                    <Headphones size={12} color={palette.textSecondary} />
+                    <Slash size={10} color={palette.textSecondary} style={{ position: "absolute" }} />
+                  </span>
+                )}
+                {p.isConnecting && (
+                  <Loader2
+                    size={12}
+                    color={palette.textSecondary}
+                    style={{ animation: "spin 1s linear infinite" }}
+                  />
+                )}
+              </span>
+            </span>
+          </div>
+        ))}
 
         {isConnected && allParticipants.length === 0 && !hasScreenShare && (
           <div style={{

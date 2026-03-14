@@ -101,6 +101,7 @@ export default function MainLayout({ userId, onSignOut }: MainLayoutProps) {
           userId={userId}
           voiceParticipants={voiceParticipants}
           connectedVoiceRoomId={voiceCall.connectedRoomId}
+          isVoiceConnecting={voiceCall.isConnecting}
           screenSharingOwner={voiceCall.screenSharingOwner}
           voiceCallParticipantStates={voiceCallParticipantStates}
           onSetParticipantVolume={voiceCall.setParticipantVolume}
@@ -117,6 +118,8 @@ export default function MainLayout({ userId, onSignOut }: MainLayoutProps) {
             <VoiceRoomView
               room={activeRoom}
               callState={voiceCall}
+              voiceParticipants={voiceParticipants[activeRoom.id] ?? []}
+              userId={userId}
               onDisconnect={voiceCall.disconnect}
               onToggleMic={voiceCall.toggleMic}
               onToggleDeafen={voiceCall.toggleDeafen}

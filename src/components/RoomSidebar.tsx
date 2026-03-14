@@ -1,5 +1,5 @@
 import { useState } from "react";
-import { Hash, Volume2, Monitor, MicOff, Headphones, Slash } from "lucide-react";
+import { Hash, Volume2, Monitor, MicOff, Headphones, Slash, Loader2 } from "lucide-react";
 import { Room, VoiceParticipant } from "../types/matrix";
 import { useTheme } from "../theme/ThemeContext";
 import StatusDropdown from "./StatusDropdown";
@@ -33,6 +33,7 @@ interface RoomSidebarProps {
   userId: string;
   voiceParticipants: Record<string, VoiceParticipant[]>;
   connectedVoiceRoomId: string | null;
+  isVoiceConnecting: boolean;
   screenSharingOwner: string | null;
   voiceCallParticipantStates: Record<string, { isMuted: boolean; isDeafened: boolean }>;
   onSetParticipantVolume: (identity: string, volume: number) => void;
@@ -44,6 +45,7 @@ function VoiceParticipantRow({
   isSharingScreen,
   isMuted,
   isDeafened,
+  isConnecting,
   onContextMenu,
 }: {
   participant: VoiceParticipant;
@@ -51,6 +53,7 @@ function VoiceParticipantRow({
   isSharingScreen: boolean;
   isMuted: boolean;
   isDeafened: boolean;
+  isConnecting: boolean;
   onContextMenu: (e: React.MouseEvent) => void;
 }) {
   const { palette, spacing, typography } = useTheme();
@@ -120,13 +123,23 @@ function VoiceParticipantRow({
         gap: spacing.unit,
         flexShrink: 0,
       }}>
-        {isSharingScreen && <Monitor size={12} color="#23a55a" />}
-        {isMuted && <MicOff size={12} color={palette.textSecondary} />}
-        {isDeafened && (
-          <span style={{ position: "relative", width: 12, height: 12, display: "inline-flex", alignItems: "center", justifyContent: "center" }}>
-            <Headphones size={12} color={palette.textSecondary} />
-            <Slash size={10} color={palette.textSecondary} style={{ position: "absolute" }} />
-          </span>
+        {isConnecting ? (
+          <Loader2
+            size={12}
+            color={palette.textSecondary}
+            style={{ animation: "spin 1s linear infinite" }}
+          />
+        ) : (
+          <>
+            {isSharingScreen && <Monitor size={12} color="#23a55a" />}
+            {isMuted && <MicOff size={12} color={palette.textSecondary} />}
+            {isDeafened && (
+              <span style={{ position: "relative", width: 12, height: 12, display: "inline-flex", alignItems: "center", justifyContent: "center" }}>
+                <Headphones size={12} color={palette.textSecondary} />
+                <Slash size={10} color={palette.textSecondary} style={{ position: "absolute" }} />
+              </span>
+            )}
+          </>
         )}
       </span>
     </div>
@@ -141,6 +154,7 @@ export default function RoomSidebar({
   userId,
   voiceParticipants,
   connectedVoiceRoomId,
+  isVoiceConnecting,
   screenSharingOwner,
   voiceCallParticipantStates,
   onSetParticipantVolume,
@@ -238,8 +252,13 @@ export default function RoomSidebar({
               {/* Voice participants listed under the voice room */}
               {isVoice && participants.length > 0 && (
                 <div style={{ paddingBottom: spacing.unit }}>
+                  <style>{`@keyframes spin { from { transform: rotate(0deg); } to { transform: rotate(360deg); } }`}</style>
                   {participants.map((p) => {
                     const state = resolveVoiceState(p, voiceCallParticipantStates);
+                    // Only local user shows connecting when we're connecting; remote "connecting" only when we're connected and they're not in LiveKit yet
+                    const isLocalConnecting = isConnectedHere && p.userId === userId && isVoiceConnecting;
+                    const isRemoteConnecting = isConnectedHere && !isVoiceConnecting && p.userId !== userId && !state;
+                    const isParticipantConnecting = isLocalConnecting || isRemoteConnecting;
                     return (
                     <VoiceParticipantRow
                       key={p.userId}
@@ -248,6 +267,7 @@ export default function RoomSidebar({
                       isSharingScreen={screenSharingOwner === p.userId}
                       isMuted={isConnectedHere ? !!state?.isMuted : false}
                       isDeafened={isConnectedHere ? !!state?.isDeafened : false}
+                      isConnecting={isParticipantConnecting}
                       onContextMenu={(e) => {
                         // Map userId to the identity format used by LiveKit
                         setContextMenu({
