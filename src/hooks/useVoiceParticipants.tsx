@@ -1,4 +1,5 @@
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
+import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { VoiceParticipant } from "../types/matrix";
 
@@ -7,67 +8,49 @@ interface VoiceParticipantsChangedPayload {
   participantsByRoom: ParticipantMap;
 }
 
-const sameParticipants = (a: VoiceParticipant[], b: VoiceParticipant[]) => {
-  if (a.length !== b.length) return false;
-  for (let i = 0; i < a.length; i += 1) {
-    if (
-      a[i].userId !== b[i]?.userId ||
-      a[i].displayName !== b[i]?.displayName ||
-      a[i].avatarUrl !== b[i]?.avatarUrl
-    ) {
-      return false;
-    }
-  }
-  return true;
-};
-
 export function useVoiceParticipants(voiceRoomIds: string[]) {
-  const [participants, setParticipants] = useState<ParticipantMap>({});
-  const roomIdsRef = useRef<string[]>(voiceRoomIds);
+  // Full map of ALL voice rooms across ALL spaces, keyed by room ID.
+  // Never filtered down -- space switching just projects from this.
+  const [allParticipants, setAllParticipants] = useState<ParticipantMap>({});
+  const mountedRef = useRef(true);
 
-  // Keep ref in sync so event listeners see the latest room IDs
+  // Initial snapshot -- mirrors how useRooms does invoke("get_rooms") on mount.
   useEffect(() => {
-    roomIdsRef.current = voiceRoomIds;
-  }, [voiceRoomIds]);
+    invoke<ParticipantMap>("get_all_voice_participants")
+      .then((data) => {
+        if (mountedRef.current) setAllParticipants(data);
+      })
+      .catch((e) => console.error("Failed to fetch voice participants:", e));
 
-  // Keep only currently visible voice rooms in local state.
+    return () => {
+      mountedRef.current = false;
+    };
+  }, []);
+
+  // Ongoing updates pushed from Rust on each sync response.
   useEffect(() => {
-    setParticipants((prev) => {
-      const next: ParticipantMap = {};
-      for (const id of voiceRoomIds) {
-        next[id] = prev[id] ?? [];
+    const unlisten = listen<VoiceParticipantsChangedPayload>(
+      "voice-participants-changed",
+      (event) => {
+        const incoming = event.payload?.participantsByRoom;
+        if (incoming) setAllParticipants(incoming);
       }
-      const unchanged =
-        Object.keys(prev).length === Object.keys(next).length &&
-        voiceRoomIds.every((id) => sameParticipants(prev[id] ?? [], next[id]));
-      return unchanged ? prev : next;
-    });
-  }, [voiceRoomIds.join(",")]);
-
-  // Rust pushes a full participants map each sync; no frontend polling.
-  useEffect(() => {
-    const unlisten = listen<VoiceParticipantsChangedPayload>("voice-participants-changed", (event) => {
-      const incoming = event.payload?.participantsByRoom ?? {};
-      const activeRoomIds = roomIdsRef.current;
-
-      setParticipants((prev) => {
-        const next: ParticipantMap = {};
-        for (const roomId of activeRoomIds) {
-          next[roomId] = incoming[roomId] ?? [];
-        }
-
-        const changed =
-          Object.keys(prev).length !== Object.keys(next).length ||
-          activeRoomIds.some((roomId) => !sameParticipants(prev[roomId] ?? [], next[roomId]));
-
-        return changed ? next : prev;
-      });
-    });
+    );
 
     return () => {
       unlisten.then((fn) => fn());
     };
   }, []);
 
-  return participants;
+  // Derive the filtered view for only the current space's voice rooms.
+  // Switching spaces just re-projects from the full map -- no fetch needed.
+  const filtered = useMemo(() => {
+    const result: ParticipantMap = {};
+    for (const id of voiceRoomIds) {
+      result[id] = allParticipants[id] ?? [];
+    }
+    return result;
+  }, [voiceRoomIds, allParticipants]);
+
+  return filtered;
 }

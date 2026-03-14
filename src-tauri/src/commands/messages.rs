@@ -245,14 +245,19 @@ pub async fn start_sync(state: State<'_, Arc<AppState>>, app: tauri::AppHandle) 
 
                         let _ = app.emit("rooms-changed", ());
 
-                        // Push voice participants directly from Rust so the
-                        // frontend doesn't need to poll room-by-room.
-                        let participants_by_room =
-                            collect_voice_participants_for_joined_voice_rooms(&voice_client, &avatar_cache).await;
-                        let _ = app.emit(
-                            "voice-participants-changed",
-                            VoiceParticipantsChangedPayload { participants_by_room },
-                        );
+                        // Push voice participants from a spawned task so we
+                        // don't block the sync loop with avatar fetches.
+                        let vc = voice_client.clone();
+                        let ac = avatar_cache.clone();
+                        let ap = app.clone();
+                        tokio::spawn(async move {
+                            let participants_by_room =
+                                collect_voice_participants_for_joined_voice_rooms(&vc, &ac).await;
+                            let _ = ap.emit(
+                                "voice-participants-changed",
+                                VoiceParticipantsChangedPayload { participants_by_room },
+                            );
+                        });
 
                         matrix_sdk::LoopCtrl::Continue
                     }

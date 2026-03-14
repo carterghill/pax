@@ -141,6 +141,18 @@ pub(crate) async fn collect_voice_participants_for_joined_voice_rooms(
     participants_by_room
 }
 
+#[tauri::command]
+pub async fn get_all_voice_participants(
+    state: State<'_, Arc<AppState>>,
+) -> Result<HashMap<String, Vec<VoiceParticipant>>, String> {
+    let client = {
+        let guard = state.client.lock().await;
+        guard.as_ref().ok_or("Not logged in")?.clone()
+    };
+
+    Ok(collect_voice_participants_for_joined_voice_rooms(&client, &state.avatar_cache).await)
+}
+
 /// Discover the LiveKit JWT service URL by scanning existing call.member events in the room.
 pub(crate) async fn discover_livekit_service_url(room: &Room) -> Result<String, String> {
     for event_type_str in &["org.matrix.msc3401.call.member", "m.call.member"] {

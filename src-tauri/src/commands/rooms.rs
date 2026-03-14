@@ -1,28 +1,46 @@
 use std::sync::Arc;
+use std::time::Duration;
 
+use matrix_sdk::authentication::matrix::MatrixSession;
+use matrix_sdk::authentication::SessionTokens;
 use matrix_sdk::ruma::events::StateEventType;
-use matrix_sdk::{config::SyncSettings, Client};
-use tauri::State;
+use matrix_sdk::{config::SyncSettings, Client, SessionMeta};
+use tauri::{Manager, State};
 
 use crate::types::RoomInfo;
 use crate::AppState;
 
+use super::auth::{save_session_to_credentials, SavedSession};
 use super::{fmt_error_chain, get_or_fetch_room_avatar};
 use crate::commands::voice_matrix::matrix_voice_leave_all_joined_rooms;
+
+fn store_path(app: &tauri::AppHandle) -> Result<std::path::PathBuf, String> {
+    Ok(app
+        .path()
+        .app_data_dir()
+        .map_err(|e| format!("Failed to get app data dir: {e}"))?
+        .join("matrix_store"))
+}
 
 #[tauri::command]
 pub async fn login(
     state: State<'_, Arc<AppState>>,
+    app: tauri::AppHandle,
     homeserver: String,
     username: String,
     password: String,
 ) -> Result<String, String> {
+    let sp = store_path(&app)?;
+
+    eprintln!("[Pax] login: building client for {}", homeserver);
     let client = Client::builder()
         .homeserver_url(&homeserver)
+        .sqlite_store(&sp, None)
         .build()
         .await
         .map_err(|e| format!("Failed to create client: {}", fmt_error_chain(&e)))?;
 
+    eprintln!("[Pax] login: authenticating...");
     client
         .matrix_auth()
         .login_username(&username, &password)
@@ -31,12 +49,27 @@ pub async fn login(
         .await
         .map_err(|e| format!("Login failed: {}", fmt_error_chain(&e)))?;
 
-    client
-        .sync_once(SyncSettings::default().set_presence(matrix_sdk::ruma::presence::PresenceState::Offline))
-        .await
-        .map_err(|e| format!("Initial sync failed: {}", fmt_error_chain(&e)))?;
+    eprintln!("[Pax] login: running initial sync...");
+    tokio::time::timeout(
+        Duration::from_secs(30),
+        client.sync_once(SyncSettings::default().set_presence(matrix_sdk::ruma::presence::PresenceState::Offline)),
+    )
+    .await
+    .map_err(|_| "Initial sync timed out (30s) — is the homeserver responsive?".to_string())?
+    .map_err(|e| format!("Initial sync failed: {}", fmt_error_chain(&e)))?;
 
-    // Crash recovery: clear stale voice call state in the background so login returns immediately.
+    eprintln!("[Pax] login: sync complete, saving session...");
+    if let Some(session) = client.matrix_auth().session() {
+        let _ = save_session_to_credentials(
+            &app,
+            SavedSession {
+                user_id: session.meta.user_id.to_string(),
+                device_id: session.meta.device_id.to_string(),
+                access_token: session.tokens.access_token,
+            },
+        );
+    }
+
     let client_cleanup = client.clone();
     let http_client = state.http_client.clone();
     tokio::spawn(async move {
@@ -50,7 +83,65 @@ pub async fn login(
 
     *state.client.lock().await = Some(client);
     state.avatar_cache.lock().await.clear();
+    eprintln!("[Pax] login: done — user_id={}", user_id);
     Ok(user_id)
+}
+
+/// Fast-path boot: restore a previously saved session from the SQLite store.
+/// Skips authentication and sync_once entirely -- rooms are available from the
+/// persisted store, and start_sync picks up incrementally.
+#[tauri::command]
+pub async fn restore_session(
+    state: State<'_, Arc<AppState>>,
+    app: tauri::AppHandle,
+) -> Result<String, String> {
+    let creds = super::auth::load_credentials(app.clone())?
+        .ok_or("No saved credentials")?;
+    let sd = creds.session.ok_or("No saved session")?;
+    let sp = store_path(&app)?;
+
+    eprintln!("[Pax] restore_session: building client for {}", creds.homeserver);
+    let client = Client::builder()
+        .homeserver_url(&creds.homeserver)
+        .sqlite_store(&sp, None)
+        .build()
+        .await
+        .map_err(|e| format!("Failed to create client: {}", fmt_error_chain(&e)))?;
+
+    let user_id = matrix_sdk::ruma::UserId::parse(&sd.user_id)
+        .map_err(|e| format!("Invalid user ID: {e}"))?;
+
+    eprintln!("[Pax] restore_session: restoring session...");
+    client
+        .restore_session(MatrixSession {
+            meta: SessionMeta {
+                user_id: user_id.clone(),
+                device_id: sd.device_id.into(),
+            },
+            tokens: SessionTokens {
+                access_token: sd.access_token,
+                refresh_token: None,
+            },
+        })
+        .await
+        .map_err(|e| format!("Failed to restore session: {e}"))?;
+
+    // Quick token validity check (lightweight /account/whoami call)
+    tokio::time::timeout(Duration::from_secs(5), client.whoami())
+        .await
+        .map_err(|_| "Token check timed out".to_string())?
+        .map_err(|e| format!("Session expired: {e}"))?;
+
+    eprintln!("[Pax] restore_session: valid — user_id={}", user_id);
+
+    let client_cleanup = client.clone();
+    let http_client = state.http_client.clone();
+    tokio::spawn(async move {
+        let _ = matrix_voice_leave_all_joined_rooms(&client_cleanup, &http_client, None).await;
+    });
+
+    *state.client.lock().await = Some(client);
+    Ok(user_id.to_string())
 }
 
 #[tauri::command]

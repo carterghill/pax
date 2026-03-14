@@ -1,5 +1,5 @@
 import "./App.css";
-import { useState, useEffect } from "react";
+import { useState, useEffect, useRef } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import MainLayout from "./layouts/MainLayout";
 import { ThemeProvider } from "./theme/ThemeContext";
@@ -12,7 +12,7 @@ function App() {
   const [rememberMe, setRememberMe] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [loading, setLoading] = useState(false);
-  const [autoLoginAttempted, setAutoLoginAttempted] = useState(false);
+  const autoLoginAttemptedRef = useRef(false);
   const [autoLoggingIn, setAutoLoggingIn] = useState(true);
 
   async function handleLogin(remember: boolean = rememberMe) {
@@ -42,36 +42,43 @@ function App() {
   }
 
   useEffect(() => {
-    if (autoLoginAttempted || userId) return;
-    setAutoLoginAttempted(true);
-    invoke<{ homeserver: string; username: string; password: string } | null>("load_credentials")
-      .then((creds) => {
+    if (autoLoginAttemptedRef.current || userId) return;
+    autoLoginAttemptedRef.current = true;
+
+    (async () => {
+      // Fast path: restore a previous session from SQLite store (no auth, no full sync)
+      try {
+        const id = await invoke<string>("restore_session");
+        invoke("start_sync");
+        setUserId(id);
+        return;
+      } catch {
+        // No saved session or token expired — fall through to password login
+      }
+
+      // Slow path: load saved credentials and do a full login + sync_once
+      try {
+        const creds = await invoke<{ homeserver: string; username: string; password: string } | null>("load_credentials");
         if (creds) {
           setHomeserver(creds.homeserver);
           setUsername(creds.username);
           setPassword(creds.password);
           setRememberMe(true);
-          return invoke<string>("login", {
+          const id = await invoke<string>("login", {
             homeserver: creds.homeserver,
             username: creds.username,
             password: creds.password,
           });
-        }
-        return null;
-      })
-      .then((id) => {
-        if (id) {
           invoke("start_sync");
           setUserId(id);
         }
-      })
-      .catch(() => {
+      } catch {
         // No saved credentials or login failed
-      })
-      .finally(() => {
-        setAutoLoggingIn(false);
-      });
-  }, [autoLoginAttempted, userId]);
+      }
+    })().finally(() => {
+      setAutoLoggingIn(false);
+    });
+  }, [userId]);
 
   if (userId) {
     return (
