@@ -42,12 +42,17 @@ pub struct ScreenShareHandle {
     _shutdown: Arc<AtomicBool>,
     /// Capture thread handle; kept alive so the thread doesn't die silently.
     pub(crate) _capturer_thread: Option<std::thread::JoinHandle<()>>,
+    /// Process loopback audio capture thread handle (Windows).
+    pub(crate) _audio_capture_thread: Option<std::thread::JoinHandle<()>>,
 }
 
 impl ScreenShareHandle {
     /// Signal shutdown and wait for capture thread. Call before unpublishing.
     pub fn stop(&mut self) {
         self._shutdown.store(true, Ordering::Relaxed);
+        if let Some(thread) = self._audio_capture_thread.take() {
+            let _ = thread.join();
+        }
         if let Some(thread) = self._capturer_thread.take() {
             let _ = thread.join();
         }
@@ -56,7 +61,7 @@ impl ScreenShareHandle {
 
 impl Drop for ScreenShareHandle {
     fn drop(&mut self) {
-        self._shutdown.store(true, Ordering::Relaxed);
+        self.stop();
     }
 }
 
@@ -234,7 +239,7 @@ async fn start_screen_capture_windows_graphics(
         .map_err(|e| format!("Failed to publish screen track: {}", e))?;
     eprintln!("[Pax] Screen track published successfully");
 
-    let (audio_track, loopback_stream) =
+    let (audio_track, loopback_stream, audio_capture_thread) =
         setup_screen_share_audio_process_loopback(mode, target_audio_pid, shutdown.clone());
 
     // Wrap the capture thread so we can join it when stopping
@@ -248,6 +253,7 @@ async fn start_screen_capture_windows_graphics(
         _loopback_stream: loopback_stream.map(SendStream),
         _shutdown: shutdown,
         _capturer_thread: Some(wrapper_thread),
+        _audio_capture_thread: audio_capture_thread,
     })
 }
 
@@ -484,10 +490,10 @@ async fn start_screen_capture_libwebrtc_or_fallback(
         .map_err(|e| format!("Failed to publish screen track: {}", e))?;
 
     #[cfg(target_os = "windows")]
-    let (audio_track, loopback_stream) =
+    let (audio_track, loopback_stream, audio_capture_thread) =
         setup_screen_share_audio_process_loopback(mode, None, shutdown.clone());
     #[cfg(not(target_os = "windows"))]
-    let (audio_track, loopback_stream) = (None, None);
+    let (audio_track, loopback_stream, audio_capture_thread) = (None, None, None);
 
     Ok(ScreenShareHandle {
         track,
@@ -495,6 +501,7 @@ async fn start_screen_capture_libwebrtc_or_fallback(
         _loopback_stream: loopback_stream.map(SendStream),
         _shutdown: shutdown,
         _capturer_thread: Some(capturer_thread),
+        _audio_capture_thread: audio_capture_thread,
     })
 }
 
@@ -590,10 +597,10 @@ async fn start_screen_capture_screenshots_fallback(
         .map_err(|e| format!("Failed to publish screen track (fallback): {}", e))?;
 
     #[cfg(target_os = "windows")]
-    let (audio_track, loopback_stream) =
+    let (audio_track, loopback_stream, audio_capture_thread) =
         setup_screen_share_audio_process_loopback(ScreenShareMode::Screen, None, shutdown.clone());
     #[cfg(not(target_os = "windows"))]
-    let (audio_track, loopback_stream) = (None, None);
+    let (audio_track, loopback_stream, audio_capture_thread) = (None, None, None);
 
     Ok(ScreenShareHandle {
         track,
@@ -601,6 +608,7 @@ async fn start_screen_capture_screenshots_fallback(
         _loopback_stream: loopback_stream.map(SendStream),
         _shutdown: shutdown,
         _capturer_thread: Some(capturer_thread),
+        _audio_capture_thread: audio_capture_thread,
     })
 }
 
@@ -654,7 +662,11 @@ fn setup_screen_share_audio_process_loopback(
     _mode: ScreenShareMode,
     target_audio_pid: Option<u32>,
     shutdown: Arc<AtomicBool>,
-) -> (Option<LocalAudioTrack>, Option<cpal::Stream>) {
+) -> (
+    Option<LocalAudioTrack>,
+    Option<cpal::Stream>,
+    Option<std::thread::JoinHandle<()>>,
+) {
     use livekit::webrtc::{
         audio_frame::AudioFrame,
         audio_source::native::NativeAudioSource,
@@ -790,7 +802,12 @@ fn setup_screen_share_audio_process_loopback(
                 }
             }
             let _ = audio_client.stop_stream();
-        });
+        })
+        .map_err(|e| {
+            eprintln!("[Pax] Screen share process loopback thread spawn failed: {}", e);
+            e
+        })
+        .ok();
 
     let audio_source_clone = audio_source.clone();
     tokio::spawn(async move {
@@ -807,16 +824,13 @@ fn setup_screen_share_audio_process_loopback(
         }
     });
 
-    // Keep capture thread alive (it will exit when shutdown is set)
-    std::mem::forget(capture_thread);
-
     let track = LocalAudioTrack::create_audio_track(
         "screenshare-audio",
         RtcAudioSource::Native(audio_source),
     );
 
     eprintln!("[Pax] Screen share audio (process loopback) enabled");
-    (Some(track), None)
+    (Some(track), None, capture_thread)
 }
 
 /// Set up system audio capture (WASAPI device loopback on Windows) for screen share.
