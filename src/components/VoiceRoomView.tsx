@@ -13,11 +13,11 @@ interface VoiceRoomViewProps {
   onToggleMic: () => void;
   onToggleDeafen: () => void;
   onToggleNoiseSuppression: () => void;
-  onStartScreenShare: (mode: "screen" | "window", windowTitle?: string) => void;
+  onStartScreenShare: (mode: "screen" | "window", windowTitle?: string) => Promise<void>;
   onEnumerateScreenShareWindows: () => Promise<[string, string][]>;
-  onStopScreenShare: () => void;
-  onGetScreenShareConfig: () => Promise<{ bitrateKbps: number; fps: number }>;
-  onSetScreenShareConfig: (config: { bitrateKbps: number; fps: number }) => Promise<void>;
+  onStopScreenShare: () => Promise<void>;
+  onGetScreenSharePreset: () => Promise<"720p" | "1080p">;
+  onSetScreenSharePreset: (preset: "720p" | "1080p") => Promise<void>;
   onGetNoiseSuppressionConfig: () => Promise<{ extraAttenuation: number; agcTargetRms: number }>;
   onSetNoiseSuppressionConfig: (config: { extraAttenuation: number; agcTargetRms: number }) => Promise<void>;
   onSetParticipantVolume: (identity: string, volume: number) => void;
@@ -33,8 +33,8 @@ export default function VoiceRoomView({
   onStartScreenShare,
   onEnumerateScreenShareWindows,
   onStopScreenShare,
-  onGetScreenShareConfig,
-  onSetScreenShareConfig,
+  onGetScreenSharePreset,
+  onSetScreenSharePreset,
   onGetNoiseSuppressionConfig,
   onSetNoiseSuppressionConfig,
   onSetParticipantVolume,
@@ -43,19 +43,59 @@ export default function VoiceRoomView({
   const { getVolume, setVolume } = useUserVolume();
   const [screenShareMenuOpen, setScreenShareMenuOpen] = useState(false);
   const [screenShareSettingsOpen, setScreenShareSettingsOpen] = useState(false);
-  const [screenShareConfig, setScreenShareConfig] = useState({ bitrateKbps: 1500, fps: 10 });
+  const [screenSharePreset, setScreenSharePreset] = useState<"720p" | "1080p">("720p");
   const [windowPickerOpen, setWindowPickerOpen] = useState(false);
   const [noiseSuppressionSettingsOpen, setNoiseSuppressionSettingsOpen] = useState(false);
   const [noiseConfig, setNoiseConfig] = useState({ extraAttenuation: 0, agcTargetRms: 6000 });
   const screenShareSettingsRef = useRef<HTMLDivElement>(null);
   const noiseSuppressionSettingsRef = useRef<HTMLDivElement>(null);
+  const activeShareRef = useRef<{ mode: "screen" | "window"; windowTitle?: string } | null>(null);
   const [windowList, setWindowList] = useState<[string, string][]>([]);
   const [windowListLoading, setWindowListLoading] = useState(false);
 
   useEffect(() => {
-    onGetScreenShareConfig().then(setScreenShareConfig).catch(() => {});
+    onGetScreenSharePreset().then(setScreenSharePreset).catch(() => {});
     onGetNoiseSuppressionConfig().then(setNoiseConfig).catch(() => {});
-  }, [onGetScreenShareConfig, onGetNoiseSuppressionConfig]);
+  }, [onGetScreenSharePreset, onGetNoiseSuppressionConfig]);
+
+  const startShare = useCallback(
+    async (mode: "screen" | "window", windowTitle?: string) => {
+      activeShareRef.current = { mode, windowTitle };
+      try {
+        await onStartScreenShare(mode, windowTitle);
+      } catch (e) {
+        console.error("Failed to start screen share:", e);
+      }
+    },
+    [onStartScreenShare]
+  );
+
+  const stopShare = useCallback(async () => {
+    activeShareRef.current = null;
+    try {
+      await onStopScreenShare();
+    } catch (e) {
+      console.error("Failed to stop screen share:", e);
+    }
+  }, [onStopScreenShare]);
+
+  const setPresetAndRestartIfNeeded = useCallback(
+    async (preset: "720p" | "1080p") => {
+      setScreenSharePreset(preset);
+      try {
+        await onSetScreenSharePreset(preset);
+        if (!callState.isLocalScreenSharing) return;
+        const activeShare = activeShareRef.current;
+        if (!activeShare) return;
+        await onStopScreenShare();
+        await new Promise((resolve) => setTimeout(resolve, 200));
+        await onStartScreenShare(activeShare.mode, activeShare.windowTitle);
+      } catch (e) {
+        console.error("Failed to apply screen share preset:", e);
+      }
+    },
+    [callState.isLocalScreenSharing, onSetScreenSharePreset, onStartScreenShare, onStopScreenShare]
+  );
 
   // Close settings menus on outside click
   useEffect(() => {
@@ -400,7 +440,13 @@ export default function VoiceRoomView({
           {/* Screen Share */}
           <div ref={screenShareSettingsRef} style={{ position: "relative", display: "flex", alignItems: "center", gap: 2 }}>
             <button
-              onClick={() => callState.isLocalScreenSharing ? onStopScreenShare() : setScreenShareMenuOpen((v) => !v)}
+              onClick={() => {
+                if (callState.isLocalScreenSharing) {
+                  void stopShare();
+                } else {
+                  setScreenShareMenuOpen((v) => !v);
+                }
+              }}
               title={callState.isLocalScreenSharing ? "Stop sharing screen" : "Share screen"}
               style={{
                 width: 48,
@@ -449,37 +495,34 @@ export default function VoiceRoomView({
                 minWidth: 200,
                 zIndex: 10,
               }}>
-                <div style={{ marginBottom: spacing.unit, fontWeight: 600, fontSize: typography.fontSizeSmall }}>Screen share settings</div>
-                <div style={{ display: "flex", flexDirection: "column", gap: spacing.unit }}>
-                  <label style={{ fontSize: typography.fontSizeSmall }}>
-                    Bitrate (kbps): {screenShareConfig.bitrateKbps}
-                    <input type="range" min="500" max="5000" step="100" value={screenShareConfig.bitrateKbps}
-                      onChange={(e) => {
-                        const v = parseInt(e.target.value, 10);
-                        setScreenShareConfig((c) => {
-                          const next = { ...c, bitrateKbps: v };
-                          onSetScreenShareConfig(next);
-                          return next;
-                        });
+                <div style={{ marginBottom: spacing.unit, fontWeight: 600, fontSize: typography.fontSizeSmall }}>
+                  Screen share quality
+                </div>
+                <div style={{ display: "flex", gap: spacing.unit }}>
+                  {(["720p", "1080p"] as const).map((p) => (
+                    <button
+                      key={p}
+                      onClick={() => { void setPresetAndRestartIfNeeded(p); }}
+                      style={{
+                        flex: 1,
+                        padding: `${spacing.unit}px ${spacing.unit * 2}px`,
+                        backgroundColor: screenSharePreset === p ? palette.accent : palette.bgTertiary,
+                        color: screenSharePreset === p ? "#fff" : palette.textPrimary,
+                        border: `1px solid ${screenSharePreset === p ? palette.accent : palette.border}`,
+                        borderRadius: spacing.unit,
+                        cursor: "pointer",
+                        fontSize: typography.fontSizeSmall,
+                        fontWeight: screenSharePreset === p ? 600 : 400,
                       }}
-                      style={{ display: "block", width: "100%", marginTop: 4 }} />
-                  </label>
-                  <label style={{ fontSize: typography.fontSizeSmall }}>
-                    FPS: {screenShareConfig.fps}
-                    <input type="range" min="3" max="30" step="1" value={screenShareConfig.fps}
-                      onChange={(e) => {
-                        const v = parseInt(e.target.value, 10);
-                        setScreenShareConfig((c) => {
-                          const next = { ...c, fps: v };
-                          onSetScreenShareConfig(next);
-                          return next;
-                        });
-                      }}
-                      style={{ display: "block", width: "100%", marginTop: 4 }} />
-                  </label>
+                    >
+                      {p}
+                    </button>
+                  ))}
                 </div>
                 <div style={{ fontSize: typography.fontSizeSmall, color: palette.textSecondary, marginTop: spacing.unit }}>
-                  Applies when you start sharing
+                  {screenSharePreset === "720p"
+                    ? "1280x720 • 30fps • 2 Mbps max"
+                    : "1920x1080 • 30fps • 3.5 Mbps max"}
                 </div>
               </div>
             )}
@@ -500,7 +543,10 @@ export default function VoiceRoomView({
                 zIndex: 10,
               }}>
                 <button
-                  onClick={() => { onStartScreenShare("screen"); setScreenShareMenuOpen(false); }}
+                  onClick={() => {
+                    void startShare("screen");
+                    setScreenShareMenuOpen(false);
+                  }}
                   style={{
                     padding: `${spacing.unit}px ${spacing.unit * 2}px`,
                     border: "none",
@@ -561,7 +607,7 @@ export default function VoiceRoomView({
                         <button
                           key={i}
                           onClick={() => {
-                            onStartScreenShare("window", title);
+                            void startShare("window", title);
                             setWindowPickerOpen(false);
                           }}
                           style={{

@@ -367,7 +367,7 @@ impl VoiceManager {
         window_title: Option<String>,
         app_handle: &AppHandle,
     ) -> Result<(), String> {
-        let (room, audio_state, room_id, local_identity) = {
+        let (room, audio_state, room_id, local_identity, existing_handle) = {
             let guard = self.session.lock();
             let session = guard.as_ref().ok_or("Not in a voice call")?;
             (
@@ -375,8 +375,28 @@ impl VoiceManager {
                 session.audio_state.clone(),
                 session.room_id.clone(),
                 session.local_identity.clone(),
+                session._screen_handle.as_ref().map(|_| ()),
             )
         };
+        if existing_handle.is_some() {
+            // Ensure replacement semantics: never leave a stale screenshare publication active.
+            self.stop_screen_share(app_handle).await?;
+        } else {
+            // Also clean up any orphaned screen-share publications (e.g. handle lost after an error).
+            let lp = room.local_participant();
+            let stale_sids: Vec<_> = lp
+                .track_publications()
+                .iter()
+                .filter(|(_, p)| {
+                    let s = p.source();
+                    s == TrackSource::Screenshare || s == TrackSource::ScreenshareAudio
+                })
+                .map(|(sid, _)| sid.clone())
+                .collect();
+            for sid in stale_sids {
+                let _ = lp.unpublish_track(&sid).await;
+            }
+        }
         eprintln!("[Pax] voice::start_screen_share: mode={:?} window_title={:?}", mode, window_title);
         let handle = crate::screen::start_screen_capture(room.clone(), mode, window_title).await?;
         // Video is published inside start_screen_capture (after capture is hot)

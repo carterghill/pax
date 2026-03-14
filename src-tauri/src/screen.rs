@@ -58,33 +58,65 @@ impl Drop for ScreenShareHandle {
     }
 }
 
-/// Target resolution for screen share (scaled down for bandwidth).
-const TARGET_WIDTH: u32 = 1280;
-const TARGET_HEIGHT: u32 = 720;
-
-/// Configurable screen share settings (bitrate, fps). Applied when starting a new share.
-#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct ScreenShareConfig {
-    pub bitrate_kbps: u32,
-    pub fps: u32,
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum ScreenSharePreset {
+    #[serde(rename = "720p")]
+    H720,
+    #[serde(rename = "1080p")]
+    H1080,
 }
 
-impl Default for ScreenShareConfig {
-    fn default() -> Self {
-        Self { bitrate_kbps: 1500, fps: 10 }
+impl ScreenSharePreset {
+    pub fn width(self) -> u32 {
+        match self {
+            Self::H720 => 1280,
+            Self::H1080 => 1920,
+        }
+    }
+
+    pub fn height(self) -> u32 {
+        match self {
+            Self::H720 => 720,
+            Self::H1080 => 1080,
+        }
+    }
+
+    pub fn fps(self) -> u32 {
+        30
+    }
+
+    /// Max bitrate in bits per second.
+    pub fn max_bitrate(self) -> u64 {
+        match self {
+            Self::H720 => 2_000_000,
+            Self::H1080 => 3_500_000,
+        }
+    }
+
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::H720 => "720p",
+            Self::H1080 => "1080p",
+        }
     }
 }
 
-static SCREEN_SHARE_CONFIG: Lazy<parking_lot::RwLock<ScreenShareConfig>> =
-    Lazy::new(|| parking_lot::RwLock::new(ScreenShareConfig::default()));
-
-pub fn get_screen_share_config() -> ScreenShareConfig {
-    SCREEN_SHARE_CONFIG.read().clone()
+impl Default for ScreenSharePreset {
+    fn default() -> Self {
+        Self::H720
+    }
 }
 
-pub fn set_screen_share_config(config: ScreenShareConfig) {
-    *SCREEN_SHARE_CONFIG.write() = config;
+static SCREEN_SHARE_PRESET: Lazy<parking_lot::RwLock<ScreenSharePreset>> =
+    Lazy::new(|| parking_lot::RwLock::new(ScreenSharePreset::default()));
+
+pub fn get_screen_share_preset() -> ScreenSharePreset {
+    *SCREEN_SHARE_PRESET.read()
+}
+
+pub fn set_screen_share_preset(preset: ScreenSharePreset) {
+    *SCREEN_SHARE_PRESET.write() = preset;
 }
 
 /// Start screen sharing and return a handle containing the track.
@@ -134,18 +166,24 @@ async fn start_screen_capture_windows_graphics(
     };
     use windows_capture::window::Window;
 
+    let preset = get_screen_share_preset();
     let resolution = VideoResolution {
-        width: TARGET_WIDTH,
-        height: TARGET_HEIGHT,
+        width: preset.width(),
+        height: preset.height(),
     };
     let video_source = NativeVideoSource::new(resolution, true);
     let shutdown = Arc::new(AtomicBool::new(false));
     let first_frame = Arc::new(AtomicBool::new(false));
-    let flags = (video_source.clone(), shutdown.clone(), first_frame.clone());
+    let flags = (video_source.clone(), shutdown.clone(), first_frame.clone(), preset);
 
-    let config = get_screen_share_config();
-    let capture_interval_ms = (1000.0 / config.fps.max(1) as f64).round() as u64;
-    eprintln!("[Pax] start_screen_capture_windows_graphics: mode={:?} bitrate={}kbps fps={}", mode, config.bitrate_kbps, config.fps);
+    let bitrate = preset.max_bitrate();
+    let capture_interval_ms = (1000.0 / preset.fps() as f64).round() as u64;
+    eprintln!(
+        "[Pax] start_screen_capture_windows_graphics: mode={:?} preset={} fps={}",
+        mode,
+        preset.label(),
+        preset.fps()
+    );
 
     let (capture_control, target_audio_pid) = match mode {
         ScreenShareMode::Screen => {
@@ -211,9 +249,12 @@ async fn start_screen_capture_windows_graphics(
         RtcVideoSource::Native(video_source),
     );
 
-    let bitrate = (config.bitrate_kbps as u64) * 1000;
-    let framerate = config.fps as f64;
-    eprintln!("[Pax] Publishing screen track to LiveKit (VP8, {}kbps, {}fps)", config.bitrate_kbps, config.fps);
+    let framerate = preset.fps() as f64;
+    eprintln!(
+        "[Pax] Publishing screen track to LiveKit (VP8, {}, {}fps)",
+        preset.label(),
+        preset.fps()
+    );
     room.local_participant()
         .publish_track(
             LocalTrack::Video(track.clone()),
@@ -256,18 +297,24 @@ struct ScreenCaptureHandler {
     video_source: livekit::webrtc::video_source::native::NativeVideoSource,
     shutdown: Arc<AtomicBool>,
     first_frame: Arc<AtomicBool>,
+    preset: ScreenSharePreset,
     frame_count: u64,
 }
 
 #[cfg(target_os = "windows")]
 impl windows_capture::capture::GraphicsCaptureApiHandler for ScreenCaptureHandler {
-    type Flags = (livekit::webrtc::video_source::native::NativeVideoSource, Arc<AtomicBool>, Arc<AtomicBool>);
+    type Flags = (
+        livekit::webrtc::video_source::native::NativeVideoSource,
+        Arc<AtomicBool>,
+        Arc<AtomicBool>,
+        ScreenSharePreset,
+    );
     type Error = Box<dyn std::error::Error + Send + Sync>;
 
     fn new(ctx: windows_capture::capture::Context<Self::Flags>) -> Result<Self, Self::Error> {
-        let (video_source, shutdown, first_frame) = ctx.flags;
+        let (video_source, shutdown, first_frame, preset) = ctx.flags;
         eprintln!("[Pax] ScreenCaptureHandler::new - capture starting");
-        Ok(Self { video_source, shutdown, first_frame, frame_count: 0 })
+        Ok(Self { video_source, shutdown, first_frame, preset, frame_count: 0 })
     }
 
     fn on_frame_arrived(
@@ -311,7 +358,7 @@ impl windows_capture::capture::GraphicsCaptureApiHandler for ScreenCaptureHandle
             h,
         );
 
-        let (out_w, out_h) = (TARGET_WIDTH as i32, TARGET_HEIGHT as i32);
+        let (out_w, out_h) = (self.preset.width() as i32, self.preset.height() as i32);
         let buffer = if w != out_w || h != out_h {
             i420.scale(out_w, out_h)
         } else {
@@ -346,9 +393,9 @@ async fn start_screen_capture_libwebrtc_or_fallback(
     mode: ScreenShareMode,
     _window_title: Option<String>,
 ) -> Result<ScreenShareHandle, String> {
-    let config = get_screen_share_config();
-    let bitrate = (config.bitrate_kbps as u64) * 1000;
-    let capture_interval_ms = (1000.0 / config.fps.max(1) as f64).round() as u64;
+    let preset = get_screen_share_preset();
+    let bitrate = preset.max_bitrate();
+    let capture_interval_ms = (1000.0 / preset.fps() as f64).round() as u64;
     use libwebrtc::desktop_capturer::{
         CaptureSource, DesktopCaptureSourceType, DesktopCapturer, DesktopCapturerOptions,
         DesktopFrame,
@@ -397,8 +444,8 @@ async fn start_screen_capture_libwebrtc_or_fallback(
     }
 
     let resolution = VideoResolution {
-        width: TARGET_WIDTH,
-        height: TARGET_HEIGHT,
+        width: preset.width(),
+        height: preset.height(),
     };
     let video_source = NativeVideoSource::new(resolution, true);
     let video_source_clone = video_source.clone();
@@ -407,6 +454,7 @@ async fn start_screen_capture_libwebrtc_or_fallback(
     let shutdown_cap = shutdown.clone();
     let shutdown_thread = shutdown.clone();
 
+    let preset = preset;
     capturer.start_capture(source, move |result: Result<DesktopFrame, libwebrtc::desktop_capturer::CaptureError>| {
         if shutdown_cap.load(Ordering::Relaxed) {
             return;
@@ -445,7 +493,7 @@ async fn start_screen_capture_libwebrtc_or_fallback(
             h,
         );
 
-        let (out_w, out_h) = (TARGET_WIDTH as i32, TARGET_HEIGHT as i32);
+        let (out_w, out_h) = (preset.width() as i32, preset.height() as i32);
         let buffer = if w != out_w || h != out_h {
             i420.scale(out_w, out_h)
         } else {
@@ -486,7 +534,7 @@ async fn start_screen_capture_libwebrtc_or_fallback(
                 simulcast: false,
                 video_encoding: Some(VideoEncoding {
                     max_bitrate: bitrate,
-                    max_framerate: config.fps as f64,
+                    max_framerate: preset.fps() as f64,
                 }),
                 ..Default::default()
             },
@@ -518,18 +566,22 @@ async fn start_screen_capture_screenshots_fallback(
     use libwebrtc::native::yuv_helper;
     use livekit::webrtc::video_source::native::NativeVideoSource;
 
-    let config = get_screen_share_config();
-    let bitrate = (config.bitrate_kbps as u64) * 1000;
-    let capture_interval_ms = (1000.0 / config.fps.max(1) as f64).round() as u64;
-    eprintln!("[Pax] start_screen_capture_screenshots_fallback");
+    let preset = get_screen_share_preset();
+    let bitrate = preset.max_bitrate();
+    let capture_interval_ms = (1000.0 / preset.fps() as f64).round() as u64;
+    eprintln!(
+        "[Pax] start_screen_capture_screenshots_fallback: preset={} fps={}",
+        preset.label(),
+        preset.fps()
+    );
     let screens = screenshots::Screen::all()
         .map_err(|e| format!("screenshots: failed to enumerate screens: {}", e))?;
     let screen = screens.into_iter().next()
         .ok_or("screenshots: no screens found")?;
 
     let resolution = VideoResolution {
-        width: TARGET_WIDTH,
-        height: TARGET_HEIGHT,
+        width: preset.width(),
+        height: preset.height(),
     };
     let video_source = NativeVideoSource::new(resolution, true);
     let video_source_clone = video_source.clone();
@@ -537,6 +589,7 @@ async fn start_screen_capture_screenshots_fallback(
     let shutdown = Arc::new(AtomicBool::new(false));
     let shutdown_thread = shutdown.clone();
 
+    let preset = preset;
     let capturer_thread = thread::spawn(move || {
         while !shutdown_thread.load(Ordering::Relaxed) {
             match screen.capture() {
@@ -565,7 +618,7 @@ async fn start_screen_capture_screenshots_fallback(
                         h,
                     );
 
-                    let (out_w, out_h) = (TARGET_WIDTH as i32, TARGET_HEIGHT as i32);
+                    let (out_w, out_h) = (preset.width() as i32, preset.height() as i32);
                     let buffer = if w != out_w || h != out_h {
                         i420.scale(out_w, out_h)
                     } else {
@@ -606,7 +659,7 @@ async fn start_screen_capture_screenshots_fallback(
                 simulcast: false,
                 video_encoding: Some(VideoEncoding {
                     max_bitrate: bitrate,
-                    max_framerate: config.fps as f64,
+                    max_framerate: preset.fps() as f64,
                 }),
                 ..Default::default()
             },

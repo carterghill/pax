@@ -529,13 +529,13 @@ pub fn enumerate_screen_share_windows() -> Result<Vec<(String, String)>, String>
 }
 
 #[tauri::command]
-pub fn get_screen_share_config() -> screen::ScreenShareConfig {
-    screen::get_screen_share_config()
+pub fn get_screen_share_preset() -> screen::ScreenSharePreset {
+    screen::get_screen_share_preset()
 }
 
 #[tauri::command]
-pub fn set_screen_share_config(config: screen::ScreenShareConfig) {
-    screen::set_screen_share_config(config);
+pub fn set_screen_share_preset(preset: screen::ScreenSharePreset) {
+    screen::set_screen_share_preset(preset);
 }
 
 #[tauri::command]

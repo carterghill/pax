@@ -243,24 +243,29 @@ export function useVoiceCall() {
           console.error("Failed to toggle noise suppression:", e);
         });
     },
-    startScreenShare: (mode: "screen" | "window", windowTitle?: string) => {
+    startScreenShare: async (mode: "screen" | "window", windowTitle?: string): Promise<void> => {
       setState((prev) => ({ ...prev, error: null })); // Clear previous error before retry
-      invoke("voice_start_screen_share", { mode, windowTitle: windowTitle ?? null })
-        .catch((e) => {
-          console.error("Failed to start screen share:", e);
-          setState((prev) => ({ ...prev, error: String(e) }));
-        });
+      try {
+        await invoke("voice_start_screen_share", { mode, windowTitle: windowTitle ?? null });
+      } catch (e) {
+        console.error("Failed to start screen share:", e);
+        setState((prev) => ({ ...prev, error: String(e) }));
+        throw e;
+      }
     },
     enumerateScreenShareWindows: () =>
       invoke<[string, string][]>("enumerate_screen_share_windows"),
-    stopScreenShare: () => {
-      invoke("voice_stop_screen_share").catch((e) => {
+    stopScreenShare: async (): Promise<void> => {
+      try {
+        await invoke("voice_stop_screen_share");
+      } catch (e) {
         console.error("Failed to stop screen share:", e);
-      });
+        throw e;
+      }
     },
-    getScreenShareConfig: () => invoke<{ bitrateKbps: number; fps: number }>("get_screen_share_config"),
-    setScreenShareConfig: (config: { bitrateKbps: number; fps: number }) =>
-      invoke<void>("set_screen_share_config", { config }),
+    getScreenSharePreset: () => invoke<"720p" | "1080p">("get_screen_share_preset"),
+    setScreenSharePreset: (preset: "720p" | "1080p") =>
+      invoke<void>("set_screen_share_preset", { preset }),
     getNoiseSuppressionConfig: () =>
       invoke<{ extraAttenuation: number; agcTargetRms: number }>("get_noise_suppression_config"),
     setNoiseSuppressionConfig: (config: { extraAttenuation: number; agcTargetRms: number }) =>
