@@ -42,17 +42,34 @@ export default function MessageList({
   onLoadMore,
 }: MessageListProps) {
   const { palette, typography, spacing } = useTheme();
+  const AUTO_SCROLL_THRESHOLD_PX = 120;
   const bottomRef = useRef<HTMLDivElement>(null);
   const containerRef = useRef<HTMLDivElement>(null);
+  const shouldAutoScrollRef = useRef(true);
 
-  // Scroll to bottom on initial load or when new messages arrive
+  function isNearBottom(): boolean {
+    const container = containerRef.current;
+    if (!container) return true;
+    const distanceFromBottom =
+      container.scrollHeight - container.scrollTop - container.clientHeight;
+    return distanceFromBottom < AUTO_SCROLL_THRESHOLD_PX;
+  }
+
+  // Scroll to bottom on initial load or if the user was already near bottom.
   useEffect(() => {
-    bottomRef.current?.scrollIntoView();
+    if (!containerRef.current) return;
+    if (initialLoading || shouldAutoScrollRef.current) {
+      bottomRef.current?.scrollIntoView();
+    }
   }, [messages.length, initialLoading]);
 
   // Handle scroll to top for loading more
   function handleScroll() {
-    if (!containerRef.current || loading || !hasMore) return;
+    if (!containerRef.current) return;
+
+    shouldAutoScrollRef.current = isNearBottom();
+
+    if (loading || !hasMore) return;
     if (containerRef.current.scrollTop < 100) {
       onLoadMore();
     }

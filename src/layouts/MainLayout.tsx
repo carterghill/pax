@@ -76,16 +76,18 @@ export default function MainLayout({ userId }: { userId: string }) {
     [voiceCall.participants]
   );
 
+  const { connect: connectVoiceCall, connectedRoomId: connectedVoiceRoomId } = voiceCall;
+
   // Handle room selection — clicking a voice room joins the call
   const handleSelectRoom = useCallback((roomId: string) => {
     setActiveRoomId(roomId);
 
     const room = getRoom(roomId);
-    if (room && room.roomType === VOICE_ROOM_TYPE && voiceCall.connectedRoomId !== roomId) {
+    if (room && room.roomType === VOICE_ROOM_TYPE && connectedVoiceRoomId !== roomId) {
       // Join voice room on click (only if not already connected to this room)
-      voiceCall.connect(roomId);
+      connectVoiceCall(roomId);
     }
-  }, [setActiveRoomId, getRoom, voiceCall]);
+  }, [setActiveRoomId, getRoom, connectedVoiceRoomId, connectVoiceCall]);
 
   return (
     <PresenceContext.Provider value={{ manualStatus, setManualStatus, effectivePresence }}>
