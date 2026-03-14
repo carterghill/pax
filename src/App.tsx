@@ -3,6 +3,7 @@ import { useState, useEffect, useRef } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import MainLayout from "./layouts/MainLayout";
 import { ThemeProvider } from "./theme/ThemeContext";
+import { clearMessageCache } from "./hooks/useMessages";
 
 function App() {
   const [homeserver, setHomeserver] = useState("https://matrix.currdurr.duckdns.org");
@@ -43,6 +44,7 @@ function App() {
       // Ignore errors during sign out
     }
     syncStartedRef.current = false;
+    clearMessageCache();
     setUserId(null);
   }
 

@@ -27,6 +27,10 @@ function mergeMessages(prev: Message[], fetched: Message[]): Message[] {
 
 const globalCache = new Map<string, CachedRoom>();
 
+export function clearMessageCache() {
+  globalCache.clear();
+}
+
 export function useMessages(roomId: string | null) {
   const cached = roomId ? globalCache.get(roomId) : undefined;
   const [messages, setMessages] = useState<Message[]>(cached?.messages ?? []);
@@ -48,11 +52,7 @@ export function useMessages(roomId: string | null) {
     }
 
     // Prevent StrictMode double-invoke serialization
-    if (fetchingRef.current === roomId) {
-      console.log(`[useMessages] SKIPPED duplicate fetch for ${roomId}`);
-      return;
-    }
-    console.log(`[useMessages] starting fetch for ${roomId}, fetchingRef=${fetchingRef.current}`);
+    if (fetchingRef.current === roomId) return;
 
     const cached = cacheRef.current.get(roomId);
 
