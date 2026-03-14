@@ -1,4 +1,4 @@
-import { useState, useCallback } from "react";
+import { useState, useRef, useCallback } from "react";
 
 const STORAGE_KEY_PREFIX = "pax-user-volume:";
 
@@ -36,21 +36,24 @@ function storeVolume(userId: string, volume: number) {
  */
 export function useUserVolume() {
   // In-memory cache of volumes we've loaded this session
-  const [volumes, setVolumes] = useState<Record<string, number>>({});
+  const volumesRef = useRef<Record<string, number>>({});
+  // Re-render trigger for controlled UI consumers (e.g. volume slider).
+  const [, setVersion] = useState(0);
 
   const getVolume = useCallback((userId: string): number => {
-    if (userId in volumes) return volumes[userId];
+    if (userId in volumesRef.current) return volumesRef.current[userId];
     const stored = getStoredVolume(userId);
-    // Lazy-load into state
-    setVolumes((prev) => ({ ...prev, [userId]: stored }));
+    // Lazy-load into in-memory cache without changing function identity.
+    volumesRef.current[userId] = stored;
     return stored;
-  }, [volumes]);
+  }, []);
 
   const setVolume = useCallback((userId: string, volume: number) => {
     const clamped = Math.max(0, Math.min(2, volume));
     storeVolume(userId, clamped);
-    setVolumes((prev) => ({ ...prev, [userId]: clamped }));
+    volumesRef.current[userId] = clamped;
+    setVersion((v) => v + 1);
   }, []);
 
-  return { getVolume, setVolume, volumes };
+  return { getVolume, setVolume, volumes: volumesRef.current };
 }

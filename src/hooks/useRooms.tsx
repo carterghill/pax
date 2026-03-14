@@ -1,4 +1,4 @@
-import { useEffect, useState, useCallback } from "react";
+import { useEffect, useState, useCallback, useMemo } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { Room } from "../types/matrix";
@@ -28,15 +28,38 @@ export function useRooms(userId: string) {
     };
   }, [fetchRooms]);
 
-  const spaces = rooms.filter((r) => r.isSpace);
+  const spaces = useMemo(() => rooms.filter((r) => r.isSpace), [rooms]);
 
-  const roomsBySpace = (spaceId: string | null) => {
-    if (!spaceId) {
-      // "Home" — show rooms that aren't in any space
-      return rooms.filter((r) => !r.isSpace && r.parentSpaceIds.length === 0);
+  const roomsBySpaceMap = useMemo(() => {
+    const map = new Map<string, Room[]>();
+    const homeRooms: Room[] = [];
+
+    for (const room of rooms) {
+      if (room.isSpace) continue;
+
+      if (room.parentSpaceIds.length === 0) {
+        homeRooms.push(room);
+        continue;
+      }
+
+      for (const parentSpaceId of room.parentSpaceIds) {
+        const current = map.get(parentSpaceId);
+        if (current) {
+          current.push(room);
+        } else {
+          map.set(parentSpaceId, [room]);
+        }
+      }
     }
-    return rooms.filter((r) => !r.isSpace && r.parentSpaceIds.includes(spaceId));
-  };
+
+    map.set("", homeRooms);
+    return map;
+  }, [rooms]);
+
+  const roomsBySpace = useCallback(
+    (spaceId: string | null) => roomsBySpaceMap.get(spaceId ?? "") ?? [],
+    [roomsBySpaceMap]
+  );
 
   const getRoom = (roomId: string) => rooms.find((r) => r.id === roomId) ?? null;
 
