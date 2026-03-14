@@ -5,16 +5,7 @@ import { useTheme } from "../theme/ThemeContext";
 import StatusDropdown from "./StatusDropdown";
 import VolumeContextMenu from "./VolumeContextMenu";
 import { useUserVolume } from "../hooks/useUserVolume";
-
-const VOICE_ROOM_TYPE = "org.matrix.msc3417.call";
-const normalizeUserId = (id: string) => id.trim().toLowerCase();
-const localpartFromUserId = (id: string) => {
-  const trimmed = id.trim();
-  if (!trimmed.startsWith("@")) return trimmed;
-  const withoutAt = trimmed.slice(1);
-  const idx = withoutAt.indexOf(":");
-  return idx === -1 ? withoutAt : withoutAt.slice(0, idx);
-};
+import { VOICE_ROOM_TYPE, localpartFromUserId, normalizeUserId } from "../utils/matrix";
 const resolveVoiceState = (
   participant: VoiceParticipant,
   voiceCallParticipantStates: Record<string, { isMuted: boolean; isDeafened: boolean }>

@@ -10,9 +10,7 @@ import { PresenceContext } from "../hooks/PresenceContext";
 import { useState, useCallback, useMemo } from "react";
 import { useTheme } from "../theme/ThemeContext";
 import SettingsMenu from "../components/SettingsMenu";
-
-const VOICE_ROOM_TYPE = "org.matrix.msc3417.call";
-const normalizeUserId = (id: string) => id.trim().toLowerCase();
+import { VOICE_ROOM_TYPE, localpartFromUserId, normalizeUserId } from "../utils/matrix";
 const extractMatrixUserId = (identity: string) => {
   const trimmed = identity.trim();
   if (!trimmed.startsWith("@")) return trimmed;
@@ -20,13 +18,6 @@ const extractMatrixUserId = (identity: string) => {
   // while the room sidebar list uses plain Matrix user IDs.
   const match = trimmed.match(/^@[^|/\s]+/);
   return match ? match[0] : trimmed;
-};
-const localpartFromUserId = (id: string) => {
-  const trimmed = id.trim();
-  if (!trimmed.startsWith("@")) return trimmed;
-  const withoutAt = trimmed.slice(1);
-  const idx = withoutAt.indexOf(":");
-  return idx === -1 ? withoutAt : withoutAt.slice(0, idx);
 };
 
 export default function MainLayout({ userId }: { userId: string }) {
