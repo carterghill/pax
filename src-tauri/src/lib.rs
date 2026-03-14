@@ -12,6 +12,7 @@ use std::sync::Arc;
 
 use matrix_sdk::Client;
 use tokio::sync::Mutex;
+use tauri::Manager;
 
 use platform::DisplayServer;
 
@@ -97,13 +98,15 @@ pub fn run() {
             commands::presence::start_idle_monitor,
         ])
         .setup(|app| {
+            // Set window icon (taskbar + title bar) from our bundled icons
+            let main_window = app.get_webview_window("main").expect("main window not found");
+            let icon = tauri::include_image!("icons/32x32.png");
+            let _ = main_window.set_icon(icon);
+
             // On Linux (WebKitGTK), auto-grant microphone/camera permission requests
             // so getUserMedia() works for voice calls.
             #[cfg(target_os = "linux")]
             {
-                let main_window = app.get_webview_window("main")
-                    .expect("main window not found");
-
                 main_window.with_webview(|webview| {
                     use webkit2gtk::WebViewExt;
                     use webkit2gtk::PermissionRequestExt;
@@ -125,10 +128,6 @@ pub fn run() {
                     });
                 }).expect("Failed to configure webview permissions");
             }
-
-            // Suppress unused variable warning on non-Linux
-            #[cfg(not(target_os = "linux"))]
-            let _ = app;
 
             Ok(())
         })
