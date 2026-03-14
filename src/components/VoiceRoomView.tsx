@@ -1,5 +1,5 @@
 import { useState, useCallback, useEffect, useRef } from "react";
-import { Volume2, Mic, MicOff, PhoneOff, Loader2, AudioLines, Monitor, MonitorOff, Headphones, Settings, Slash } from "lucide-react";
+import { Volume2, Mic, MicOff, PhoneOff, Loader2, AudioLines, Monitor, MonitorUp, Headphones, Settings, Slash } from "lucide-react";
 import { useTheme } from "../theme/ThemeContext";
 import { Room } from "../types/matrix";
 import { VoiceCallState, VoiceParticipant } from "../hooks/useVoiceCall";
@@ -485,24 +485,23 @@ export default function VoiceRoomView({
                 display: "flex",
                 alignItems: "center",
                 justifyContent: "center",
-                backgroundColor: (callState.isLocalScreenSharing || isStartingScreenShare) ? palette.textPrimary : palette.bgActive,
-                color: (callState.isLocalScreenSharing || isStartingScreenShare) ? palette.bgPrimary : palette.textPrimary,
+                backgroundColor: (callState.isLocalScreenSharing || isStartingScreenShare || screenShareMenuOpen) ? palette.textPrimary : palette.bgActive,
+                color: (callState.isLocalScreenSharing || isStartingScreenShare || screenShareMenuOpen) ? palette.bgPrimary : palette.textPrimary,
                 transition: "background-color 0.15s ease",
               }}
             >
-              {callState.isLocalScreenSharing ? <MonitorOff size={20} /> : <Monitor size={20} />}
+              {callState.isLocalScreenSharing ? <MonitorUp size={20} /> : <Monitor size={20} />}
             </button>
             {screenShareMenuOpen && !callState.isLocalScreenSharing && (
               <div style={{
                 position: "absolute",
-                bottom: "100%",
+                bottom: `calc(100% + ${spacing.unit * 4}px)`,
                 left: "50%",
                 transform: "translateX(-50%)",
-                marginBottom: spacing.unit,
                 backgroundColor: palette.bgSecondary,
                 border: `1px solid ${palette.border}`,
-                borderRadius: spacing.unit,
-                padding: spacing.unit,
+                borderRadius: spacing.unit * 2,
+                padding: spacing.unit * 4,
                 display: "flex",
                 flexDirection: "column",
                 gap: spacing.unit,
@@ -636,17 +635,17 @@ export default function VoiceRoomView({
             {generalSettingsOpen && (
               <div style={{
                 position: "absolute",
-                bottom: "100%",
-                right: 0,
-                marginBottom: spacing.unit,
+                bottom: `calc(100% + ${spacing.unit * 4}px)`,
+                left: "50%",
+                transform: "translateX(-50%)",
                 backgroundColor: palette.bgSecondary,
                 border: `1px solid ${palette.border}`,
-                borderRadius: spacing.unit,
-                padding: spacing.unit * 2,
+                borderRadius: spacing.unit * 2,
+                padding: spacing.unit * 4,
                 minWidth: 260,
                 zIndex: 10,
               }}>
-                <div style={{ marginBottom: spacing.unit, fontWeight: 600, fontSize: typography.fontSizeSmall }}>
+                <div style={{ marginBottom: spacing.unit * 2, fontWeight: 600, fontSize: typography.fontSizeSmall }}>
                   Screen share quality
                 </div>
                 <div style={{ display: "flex", gap: spacing.unit }}>
@@ -670,13 +669,8 @@ export default function VoiceRoomView({
                     </button>
                   ))}
                 </div>
-                <div style={{ fontSize: typography.fontSizeSmall, color: palette.textSecondary, marginTop: spacing.unit * 0.75 }}>
-                  {screenSharePreset === "720p"
-                    ? "1280x720 • 30fps • 2 Mbps max"
-                    : "1920x1080 • 30fps • 3.5 Mbps max"}
-                </div>
 
-                <div style={{ marginTop: spacing.unit * 2, marginBottom: spacing.unit, fontWeight: 600, fontSize: typography.fontSizeSmall }}>
+                <div style={{ marginTop: spacing.unit * 3, marginBottom: spacing.unit * 2, fontWeight: 600, fontSize: typography.fontSizeSmall }}>
                   Noise suppression
                 </div>
                 <button
@@ -705,8 +699,8 @@ export default function VoiceRoomView({
                   style={{
                     display: "flex",
                     flexDirection: "column",
-                    gap: spacing.unit,
-                    marginTop: spacing.unit,
+                    gap: spacing.unit * 2,
+                    marginTop: spacing.unit * 2,
                     opacity: callState.isNoiseSuppressed ? 1 : 0.45,
                     pointerEvents: callState.isNoiseSuppressed ? "auto" : "none",
                   }}
@@ -744,7 +738,7 @@ export default function VoiceRoomView({
                     </span>
                   </label>
                 </div>
-                <div style={{ fontSize: typography.fontSizeSmall, color: palette.textSecondary, marginTop: spacing.unit }}>
+                <div style={{ fontSize: typography.fontSizeSmall, color: palette.textSecondary, marginTop: spacing.unit * 2 }}>
                   Noise suppression settings apply immediately
                 </div>
               </div>
