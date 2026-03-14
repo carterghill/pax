@@ -64,6 +64,10 @@ pub fn run() {
         .manage(state)
         .manage(voice::VoiceManager::new())
         .invoke_handler(tauri::generate_handler![
+            commands::auth::logout,
+            commands::auth::save_credentials,
+            commands::auth::load_credentials,
+            commands::auth::clear_saved_credentials,
             commands::rooms::login,
             commands::rooms::get_rooms,
             commands::messages::get_messages,

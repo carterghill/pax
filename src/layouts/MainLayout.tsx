@@ -20,7 +20,12 @@ const extractMatrixUserId = (identity: string) => {
   return match ? match[0] : trimmed;
 };
 
-export default function MainLayout({ userId }: { userId: string }) {
+interface MainLayoutProps {
+  userId: string;
+  onSignOut: () => void;
+}
+
+export default function MainLayout({ userId, onSignOut }: MainLayoutProps) {
   const { spaces, roomsBySpace, getRoom } = useRooms(userId);
   const { manualStatus, setManualStatus, effectivePresence } = usePresence();
   const voiceCall = useVoiceCall();
@@ -107,7 +112,7 @@ export default function MainLayout({ userId }: { userId: string }) {
           display: "flex",
         }}>
           {activeRoomId === "settings" ? (
-            <SettingsMenu />
+            <SettingsMenu onSignOut={onSignOut} />
           ) : activeRoom && activeRoom.roomType === VOICE_ROOM_TYPE ? (
             <VoiceRoomView
               room={activeRoom}
