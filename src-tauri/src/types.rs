@@ -1,4 +1,5 @@
 use serde::Serialize;
+use std::collections::HashMap;
 
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -73,4 +74,10 @@ pub struct VoiceParticipant {
 pub struct VoiceJoinResult {
     pub jwt: String,
     pub livekit_url: String,
+}
+
+#[derive(Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct VoiceParticipantsChangedPayload {
+    pub participants_by_room: HashMap<String, Vec<VoiceParticipant>>,
 }

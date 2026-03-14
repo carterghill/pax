@@ -1,11 +1,25 @@
-import { useEffect, useState, useCallback, useRef } from "react";
-import { invoke } from "@tauri-apps/api/core";
+import { useEffect, useRef, useState } from "react";
 import { listen } from "@tauri-apps/api/event";
 import { VoiceParticipant } from "../types/matrix";
 
 type ParticipantMap = Record<string, VoiceParticipant[]>;
+interface VoiceParticipantsChangedPayload {
+  participantsByRoom: ParticipantMap;
+}
 
-const RETRY_DELAY_MS = 2000;
+const sameParticipants = (a: VoiceParticipant[], b: VoiceParticipant[]) => {
+  if (a.length !== b.length) return false;
+  for (let i = 0; i < a.length; i += 1) {
+    if (
+      a[i].userId !== b[i]?.userId ||
+      a[i].displayName !== b[i]?.displayName ||
+      a[i].avatarUrl !== b[i]?.avatarUrl
+    ) {
+      return false;
+    }
+  }
+  return true;
+};
 
 export function useVoiceParticipants(voiceRoomIds: string[]) {
   const [participants, setParticipants] = useState<ParticipantMap>({});
@@ -16,65 +30,44 @@ export function useVoiceParticipants(voiceRoomIds: string[]) {
     roomIdsRef.current = voiceRoomIds;
   }, [voiceRoomIds]);
 
-  const fetchForRoom = useCallback(async (roomId: string) => {
-    try {
-      const result = await invoke<VoiceParticipant[]>("get_voice_participants", { roomId });
-      setParticipants((prev) => {
-        // Only update if actually changed to avoid unnecessary renders
-        const existing = prev[roomId] ?? [];
-        const changed =
-          existing.length !== result.length ||
-          existing.some((p, i) => p.userId !== result[i]?.userId);
-        if (!changed) return prev;
-        return { ...prev, [roomId]: result };
-      });
-      return result.length;
-    } catch (e) {
-      console.error(`Failed to fetch voice participants for ${roomId}:`, e);
-      return 0;
-    }
-  }, []);
-
-  const fetchAll = useCallback(async () => {
-    const roomIds = roomIdsRef.current;
-    if (roomIds.length === 0) return;
-
-    await Promise.all(roomIds.map((roomId) => fetchForRoom(roomId)));
-  }, [fetchForRoom]);
-
-  // Initial fetch when voice room IDs change (e.g. user navigates into a space).
-  // Also schedule a single retry after RETRY_DELAY_MS to cover the sync timing gap:
-  // room state may not be hydrated yet on first space entry.
+  // Keep only currently visible voice rooms in local state.
   useEffect(() => {
-    fetchAll();
-
-    const timer = setTimeout(() => {
-      fetchAll();
-    }, RETRY_DELAY_MS);
-
-    // Clean up stale room entries
     setParticipants((prev) => {
       const next: ParticipantMap = {};
       for (const id of voiceRoomIds) {
-        if (prev[id]) next[id] = prev[id];
+        next[id] = prev[id] ?? [];
       }
-      return next;
+      const unchanged =
+        Object.keys(prev).length === Object.keys(next).length &&
+        voiceRoomIds.every((id) => sameParticipants(prev[id] ?? [], next[id]));
+      return unchanged ? prev : next;
     });
+  }, [voiceRoomIds.join(",")]);
 
-    return () => clearTimeout(timer);
-  }, [voiceRoomIds.join(","), fetchAll]);
-
-  // Re-fetch all voice rooms on every sync cycle (voice-participants-changed)
-  // The dedup in fetchForRoom prevents unnecessary re-renders
+  // Rust pushes a full participants map each sync; no frontend polling.
   useEffect(() => {
-    const unlisten = listen("voice-participants-changed", () => {
-      fetchAll();
+    const unlisten = listen<VoiceParticipantsChangedPayload>("voice-participants-changed", (event) => {
+      const incoming = event.payload?.participantsByRoom ?? {};
+      const activeRoomIds = roomIdsRef.current;
+
+      setParticipants((prev) => {
+        const next: ParticipantMap = {};
+        for (const roomId of activeRoomIds) {
+          next[roomId] = incoming[roomId] ?? [];
+        }
+
+        const changed =
+          Object.keys(prev).length !== Object.keys(next).length ||
+          activeRoomIds.some((roomId) => !sameParticipants(prev[roomId] ?? [], next[roomId]));
+
+        return changed ? next : prev;
+      });
     });
 
     return () => {
       unlisten.then((fn) => fn());
     };
-  }, [fetchAll]);
+  }, []);
 
   return participants;
 }

@@ -1,3 +1,4 @@
+use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -10,6 +11,8 @@ use crate::types::{VoiceJoinResult, VoiceParticipant};
 use crate::{screen, voice, AppState};
 
 use super::{fmt_error_chain, get_or_fetch_member_avatar};
+
+const VOICE_ROOM_TYPE: &str = "org.matrix.msc3417.call";
 
 /// Check whether a call.member state event JSON represents an active participant.
 /// Handles both MSC4143 (per-device content) and MSC3401 (memberships array) formats,
@@ -84,6 +87,60 @@ async fn collect_active_call_users(room: &Room) -> Vec<String> {
     active
 }
 
+async fn collect_room_voice_participants(
+    room: &Room,
+    avatar_cache: &Arc<tokio::sync::Mutex<HashMap<String, String>>>,
+) -> Vec<VoiceParticipant> {
+    let active_user_ids = collect_active_call_users(room).await;
+    let mut participants = Vec::new();
+
+    for user_id in &active_user_ids {
+        let (display_name, avatar_url) = if let Ok(uid) = matrix_sdk::ruma::UserId::parse(user_id) {
+            match room.get_member_no_sync(&uid).await {
+                Ok(Some(member)) => {
+                    let name = member.display_name().map(|n| n.to_string());
+                    let avatar = get_or_fetch_member_avatar(&member, avatar_cache).await;
+                    (name, avatar)
+                }
+                _ => (None, None),
+            }
+        } else {
+            (None, None)
+        };
+
+        participants.push(VoiceParticipant {
+            user_id: user_id.clone(),
+            display_name,
+            avatar_url,
+        });
+    }
+
+    participants
+}
+
+pub(crate) async fn collect_voice_participants_for_joined_voice_rooms(
+    client: &Client,
+    avatar_cache: &Arc<tokio::sync::Mutex<HashMap<String, String>>>,
+) -> HashMap<String, Vec<VoiceParticipant>> {
+    let mut participants_by_room: HashMap<String, Vec<VoiceParticipant>> = HashMap::new();
+
+    for room in client.joined_rooms() {
+        let is_voice_room = room
+            .room_type()
+            .map(|rt| rt.to_string() == VOICE_ROOM_TYPE)
+            .unwrap_or(false);
+        if !is_voice_room {
+            continue;
+        }
+
+        let room_id = room.room_id().to_string();
+        let participants = collect_room_voice_participants(&room, avatar_cache).await;
+        participants_by_room.insert(room_id, participants);
+    }
+
+    participants_by_room
+}
+
 /// Discover the LiveKit JWT service URL by scanning existing call.member events in the room.
 pub(crate) async fn discover_livekit_service_url(room: &Room) -> Result<String, String> {
     for event_type_str in &["org.matrix.msc3401.call.member", "m.call.member"] {
@@ -145,31 +202,8 @@ pub async fn get_voice_participants(
 
     let room = client.get_room(&room_id_parsed).ok_or("Room not found")?;
 
-    let active_user_ids = collect_active_call_users(&room).await;
     let avatar_cache = state.avatar_cache.clone();
-
-    // Resolve display names and avatars for active users
-    let mut participants = Vec::new();
-    for user_id in &active_user_ids {
-        let (display_name, avatar_url) = if let Ok(uid) = matrix_sdk::ruma::UserId::parse(user_id) {
-            match room.get_member_no_sync(&uid).await {
-                Ok(Some(member)) => {
-                    let name = member.display_name().map(|n| n.to_string());
-                    let avatar = get_or_fetch_member_avatar(&member, &avatar_cache).await;
-                    (name, avatar)
-                }
-                _ => (None, None),
-            }
-        } else {
-            (None, None)
-        };
-
-        participants.push(VoiceParticipant {
-            user_id: user_id.clone(),
-            display_name,
-            avatar_url,
-        });
-    }
+    let participants = collect_room_voice_participants(&room, &avatar_cache).await;
 
     Ok(participants)
 }

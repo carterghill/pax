@@ -7,10 +7,14 @@ use matrix_sdk::ruma::UInt;
 use matrix_sdk::Room;
 use tauri::{Emitter, State};
 
-use crate::types::{MessageBatch, MessageInfo, PresencePayload, RoomMessagePayload, TypingPayload};
+use crate::types::{
+    MessageBatch, MessageInfo, PresencePayload, RoomMessagePayload, TypingPayload,
+    VoiceParticipantsChangedPayload,
+};
 use crate::AppState;
 
 use super::get_or_fetch_member_avatar;
+use super::voice_matrix::collect_voice_participants_for_joined_voice_rooms;
 
 #[tauri::command]
 pub async fn get_messages(
@@ -192,8 +196,10 @@ pub async fn start_sync(state: State<'_, Arc<AppState>>, app: tauri::AppHandle) 
         }
     });
 
-    // Clone the presence map for use inside the sync loop
+    // Clone shared state needed inside the sync loop.
     let presence_map = state.presence_map.clone();
+    let avatar_cache = state.avatar_cache.clone();
+    let voice_client = client.clone();
 
     // Spawn the continuous sync loop in the background
     // set_presence(Offline) tells the server: "do NOT auto-update my presence on sync"
@@ -206,6 +212,8 @@ pub async fn start_sync(state: State<'_, Arc<AppState>>, app: tauri::AppHandle) 
                 |response| {
                     let app = app.clone();
                     let presence_map = presence_map.clone();
+                    let avatar_cache = avatar_cache.clone();
+                    let voice_client = voice_client.clone();
                     async move {
                         // Extract presence updates from the sync response
                         for raw_event in &response.presence {
@@ -237,9 +245,14 @@ pub async fn start_sync(state: State<'_, Arc<AppState>>, app: tauri::AppHandle) 
 
                         let _ = app.emit("rooms-changed", ());
 
-                        // Signal voice participant refresh on every sync.
-                        // The frontend hook deduplicates unchanged data, so this is cheap.
-                        let _ = app.emit("voice-participants-changed", ());
+                        // Push voice participants directly from Rust so the
+                        // frontend doesn't need to poll room-by-room.
+                        let participants_by_room =
+                            collect_voice_participants_for_joined_voice_rooms(&voice_client, &avatar_cache).await;
+                        let _ = app.emit(
+                            "voice-participants-changed",
+                            VoiceParticipantsChangedPayload { participants_by_room },
+                        );
 
                         matrix_sdk::LoopCtrl::Continue
                     }
