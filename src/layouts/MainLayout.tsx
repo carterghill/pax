@@ -103,7 +103,7 @@ export default function MainLayout({ userId, onSignOut }: MainLayoutProps) {
           connectedVoiceRoomId={voiceCall.connectedRoomId}
           isVoiceConnecting={voiceCall.isConnecting}
           disconnectingFromRoomId={voiceCall.disconnectingFromRoomId}
-          screenSharingOwner={voiceCall.screenSharingOwner}
+          screenSharingOwners={voiceCall.screenSharingOwners}
           voiceCallParticipantStates={voiceCallParticipantStates}
           onSetParticipantVolume={voiceCall.setParticipantVolume}
         />

@@ -6,7 +6,7 @@ import { VoiceCallState } from "../hooks/useVoiceCall";
 import { normalizeUserId } from "../utils/matrix";
 import { useUserVolume } from "../hooks/useUserVolume";
 import VolumeContextMenu from "./VolumeContextMenu";
-import ScreenShareViewer from "./ScreenShareViewer";
+import ScreenShareGrid from "./ScreenShareGrid";
 
 interface VoiceRoomViewProps {
   room: Room;
@@ -159,7 +159,7 @@ export default function VoiceRoomView({
 
   const isConnected = callState.connectedRoomId === room.id && !callState.isConnecting;
   const isConnecting = callState.isConnecting && callState.connectedRoomId === room.id;
-  const hasScreenShare = !!callState.screenSharingOwner || callState.isLocalScreenSharing;
+  const hasScreenShare = callState.screenSharingOwners.length > 0 || callState.isLocalScreenSharing;
 
   // Build set of LiveKit participant identities (normalized) for matching
   const liveKitIdentitySet = useMemo(() => {
@@ -225,14 +225,12 @@ export default function VoiceRoomView({
     return result;
   }, [callState.participants, callState.connectedRoomId, callState.isConnecting, room.id, voiceParticipants, userId, liveKitIdentitySet]);
 
-  const sharerDisplayName = callState.isLocalScreenSharing
-    ? "You"
-    : callState.screenSharingOwner
-    ? (callState.screenSharingOwner.startsWith("@")
-        ? callState.screenSharingOwner.slice(1).split(":")[0]
-        : callState.screenSharingOwner)
-    : null;
-
+  // Display names for screen share header
+  const remoteSharers = callState.screenSharingOwners.filter(id => {
+    // Filter out local identity (we show "You are sharing" separately)
+    const localpart = id.startsWith("@") ? id.slice(1).split(":")[0] : id;
+    return localpart !== (userId.startsWith("@") ? userId.slice(1).split(":")[0] : userId);
+  });
   return (
     <div style={{
       flex: 1,
@@ -283,43 +281,10 @@ export default function VoiceRoomView({
         overflow: "hidden",
       }}>
         {hasScreenShare && (
-          <div style={{
-            flex: 1,
-            display: "flex",
-            flexDirection: "column",
-            backgroundColor: palette.bgSecondary,
-            borderRadius: spacing.unit,
-            margin: spacing.unit * 2,
-            overflow: "hidden",
-            minWidth: 0,
-          }}>
-            <div style={{
-              padding: spacing.unit * 2,
-              borderBottom: `1px solid ${palette.border}`,
-              fontSize: typography.fontSizeSmall,
-              color: palette.textSecondary,
-            }}>
-              {callState.isLocalScreenSharing
-                ? "You are sharing your screen"
-                : `${sharerDisplayName} is sharing their screen`}
-            </div>
-            <ScreenShareViewer
-              active={!!callState.screenSharingOwner && !callState.isLocalScreenSharing}
-            />
-            {/* Fallback for local screen share (we don't view our own stream) */}
-            {callState.isLocalScreenSharing && (
-              <div style={{
-                flex: 1,
-                display: "flex",
-                alignItems: "center",
-                justifyContent: "center",
-                backgroundColor: palette.bgPrimary,
-                color: palette.textSecondary,
-              }}>
-                <span>You are sharing your screen</span>
-              </div>
-            )}
-          </div>
+          <ScreenShareGrid
+            remoteSharers={remoteSharers}
+            isLocalScreenSharing={callState.isLocalScreenSharing}
+          />
         )}
         <div style={{
           flex: hasScreenShare ? "0 0 auto" : 1,
@@ -443,7 +408,7 @@ export default function VoiceRoomView({
             }}>
               {p.displayName}{p.isLocal ? " (you)" : ""}
               <span style={{ marginLeft: spacing.unit, display: "inline-flex", alignItems: "center", gap: spacing.unit }}>
-                {!p.isConnecting && callState.screenSharingOwner === p.identity && (
+                {!p.isConnecting && callState.screenSharingOwners.includes(p.identity) && (
                   <Monitor size={12} color="#23a55a" />
                 )}
                 {!p.isConnecting && p.isMuted && <MicOff size={12} color={palette.textSecondary} />}

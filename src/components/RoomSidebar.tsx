@@ -35,7 +35,7 @@ interface RoomSidebarProps {
   connectedVoiceRoomId: string | null;
   isVoiceConnecting: boolean;
   disconnectingFromRoomId: string | null;
-  screenSharingOwner: string | null;
+  screenSharingOwners: string[];
   voiceCallParticipantStates: Record<string, { isMuted: boolean; isDeafened: boolean }>;
   onSetParticipantVolume: (identity: string, volume: number) => void;
 }
@@ -157,7 +157,7 @@ export default function RoomSidebar({
   connectedVoiceRoomId,
   isVoiceConnecting,
   disconnectingFromRoomId,
-  screenSharingOwner,
+  screenSharingOwners,
   voiceCallParticipantStates,
   onSetParticipantVolume,
 }: RoomSidebarProps) {
@@ -267,7 +267,7 @@ export default function RoomSidebar({
                       key={p.userId}
                       participant={p}
                       isLocalUser={p.userId === userId}
-                      isSharingScreen={screenSharingOwner === p.userId}
+                      isSharingScreen={screenSharingOwners.includes(p.userId)}
                       isMuted={isConnectedHere ? !!state?.isMuted : false}
                       isDeafened={isConnectedHere ? !!state?.isDeafened : false}
                       isConnecting={isParticipantConnecting}

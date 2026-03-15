@@ -17,6 +17,8 @@ import { useTheme } from "../theme/ThemeContext";
 
 interface ScreenShareViewerProps {
   active: boolean;
+  /** Participant identity whose stream to display */
+  identity: string;
 }
 
 function getPaxVideoUrl(path: string): string {
@@ -27,7 +29,7 @@ function getPaxVideoUrl(path: string): string {
   return `paxvideo://localhost${path}`;
 }
 
-export default function ScreenShareViewer({ active }: ScreenShareViewerProps) {
+export default function ScreenShareViewer({ active, identity }: ScreenShareViewerProps) {
   const { palette, spacing, typography } = useTheme();
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const containerRef = useRef<HTMLDivElement>(null);
@@ -48,7 +50,7 @@ export default function ScreenShareViewer({ active }: ScreenShareViewerProps) {
       const h = Math.round(rect.height * dpr);
       if (w > 0 && h > 0) {
         // Fire-and-forget — don't await, don't block rendering
-        fetch(getPaxVideoUrl(`/resize?w=${w}&h=${h}`)).catch(() => {});
+        fetch(getPaxVideoUrl(`/resize?id=${encodeURIComponent(identity)}&w=${w}&h=${h}`)).catch(() => {});
       }
     };
 
@@ -66,9 +68,9 @@ export default function ScreenShareViewer({ active }: ScreenShareViewerProps) {
     return () => {
       observer.disconnect();
       // Reset to native resolution when viewer unmounts
-      fetch(getPaxVideoUrl("/resize?w=0&h=0")).catch(() => {});
+      fetch(getPaxVideoUrl(`/resize?id=${encodeURIComponent(identity)}&w=0&h=0`)).catch(() => {});
     };
-  }, [active]);
+  }, [active, identity]);
 
   // ── Frame fetch loop ──────────────────────────────────────────────
   const fetchAndDrawFrame = useCallback(async () => {
@@ -76,7 +78,7 @@ export default function ScreenShareViewer({ active }: ScreenShareViewerProps) {
     if (!canvas) return;
 
     try {
-      const resp = await fetch(getPaxVideoUrl("/frame"));
+      const resp = await fetch(getPaxVideoUrl(`/frame?id=${encodeURIComponent(identity)}`));
       if (resp.status === 204 || !resp.ok) return;
 
       const buf = await resp.arrayBuffer();
@@ -109,7 +111,7 @@ export default function ScreenShareViewer({ active }: ScreenShareViewerProps) {
     } catch {
       // Silently retry
     }
-  }, [loading, dimensions]);
+  }, [loading, dimensions, identity]);
 
   useEffect(() => {
     if (!active) {
@@ -141,6 +143,8 @@ export default function ScreenShareViewer({ active }: ScreenShareViewerProps) {
       ref={containerRef}
       style={{
         flex: 1,
+        width: "100%",
+        height: "100%",
         display: "flex",
         alignItems: "center",
         justifyContent: "center",

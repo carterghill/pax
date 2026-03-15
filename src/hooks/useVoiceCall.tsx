@@ -26,7 +26,7 @@ interface VoiceStateEvent {
   isMicEnabled: boolean;
   isDeafened: boolean;
   isNoiseSuppressed: boolean;
-  screenSharingOwner: string | null;
+  screenSharingOwners: string[];
   isLocalScreenSharing: boolean;
   error: string | null;
   participants: VoiceParticipant[];
@@ -39,7 +39,7 @@ export interface VoiceCallState {
   isDeafened: boolean;
   error: string | null;
   isNoiseSuppressed: boolean;
-  screenSharingOwner: string | null;
+  screenSharingOwners: string[];
   isLocalScreenSharing: boolean;
   participants: VoiceParticipant[];
   /** Room we're disconnecting from; our name may still appear in the list until Matrix syncs */
@@ -53,7 +53,7 @@ export function useVoiceCall() {
     isMicEnabled: false,
     isDeafened: false,
     isNoiseSuppressed: true,
-    screenSharingOwner: null,
+    screenSharingOwners: [],
     isLocalScreenSharing: false,
     error: null,
     participants: [],
@@ -78,7 +78,7 @@ export function useVoiceCall() {
         isMicEnabled: ev.isMicEnabled,
         isDeafened: ev.isDeafened ?? false,
         isNoiseSuppressed: ev.isNoiseSuppressed,
-        screenSharingOwner: ev.screenSharingOwner ?? null,
+        screenSharingOwners: ev.screenSharingOwners ?? [],
         isLocalScreenSharing: ev.isLocalScreenSharing ?? false,
         error: ev.error,
         participants: ev.participants,
@@ -141,7 +141,7 @@ export function useVoiceCall() {
         isMicEnabled: false,
         isDeafened: false,
         isNoiseSuppressed: false,
-        screenSharingOwner: null,
+        screenSharingOwners: [],
         isLocalScreenSharing: false,
         error: String(e),
         participants: [],
@@ -161,7 +161,7 @@ export function useVoiceCall() {
       isMicEnabled: false,
       isDeafened: false,
       isNoiseSuppressed: false,
-      screenSharingOwner: null,
+      screenSharingOwners: [],
       isLocalScreenSharing: false,
       error: null,
       participants: [],

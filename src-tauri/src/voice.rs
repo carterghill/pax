@@ -54,8 +54,8 @@ pub struct VoiceStateEvent {
     pub is_mic_enabled: bool,
     pub is_deafened: bool,
     pub is_noise_suppressed: bool,
-    /// Identity of the participant currently sharing their screen (if any)
-    pub screen_sharing_owner: Option<String>,
+    /// Identities of participants currently sharing their screens
+    pub screen_sharing_owners: Vec<String>,
     /// Whether this client is currently sharing its own screen
     pub is_local_screen_sharing: bool,
     pub error: Option<String>,
@@ -81,12 +81,12 @@ struct AudioState {
     deafened: bool,
     /// Whether mic noise suppression is enabled
     noise_suppression_enabled: bool,
-    /// Identity of the participant currently sharing their screen, if any
-    screen_sharing_owner: Option<String>,
+    /// Identities of participants currently sharing their screens
+    screen_sharing_owners: Vec<String>,
     /// Whether this client is currently sharing its own screen
     is_local_screen_sharing: bool,
-    /// Shutdown flag for the remote screen share video receiver task
-    video_recv_shutdown: Option<Arc<AtomicBool>>,
+    /// Per-identity shutdown flags for remote screen share video receiver tasks
+    video_recv_shutdowns: HashMap<String, Arc<AtomicBool>>,
 }
 impl Default for AudioState {
     fn default() -> Self {
@@ -100,9 +100,9 @@ impl Default for AudioState {
             mic_enabled: true,
             deafened: false,
             noise_suppression_enabled: true,
-            screen_sharing_owner: None,
+            screen_sharing_owners: Vec::new(),
             is_local_screen_sharing: false,
-            video_recv_shutdown: None,
+            video_recv_shutdowns: HashMap::new(),
         }
     }
 }
@@ -161,7 +161,7 @@ impl VoiceManager {
             is_mic_enabled: false,
             is_deafened: false,
             is_noise_suppressed: true,
-            screen_sharing_owner: None,
+            screen_sharing_owners: vec![],
             is_local_screen_sharing: false,
             error: None,
             participants: vec![],
@@ -265,14 +265,14 @@ impl VoiceManager {
             guard.take()
         };
         if let Some(session) = session {
-            // Stop the video receiver if active
+            // Stop all video receivers
             {
                 let mut st = session.audio_state.lock();
-                if let Some(shutdown) = st.video_recv_shutdown.take() {
+                for (_, shutdown) in st.video_recv_shutdowns.drain() {
                     shutdown.store(true, Ordering::Relaxed);
                 }
             }
-            crate::video_recv::clear_frame_buffer();
+            crate::video_recv::clear_all_frame_buffers();
 
             // Signal the event loop to stop
             let _ = session.shutdown_tx.send(()).await;
@@ -578,20 +578,24 @@ async fn run_event_loop(
                                 let identity_clone = identity.clone();
                                 eprintln!("[Pax] TrackSubscribed: Video/Screenshare from '{}' (local='{}')", identity_clone, local_identity);
                                 let mut st = audio_state.lock();
-                                st.screen_sharing_owner = Some(identity);
 
-                                // Stop any existing video receiver before starting a new one
-                                if let Some(old_shutdown) = st.video_recv_shutdown.take() {
-                                    old_shutdown.store(true, Ordering::Relaxed);
+                                // Add to owners list (if not already present)
+                                if !st.screen_sharing_owners.contains(&identity) {
+                                    st.screen_sharing_owners.push(identity.clone());
                                 }
 
-                                // Only receive if WE are not the one sharing (don't view our own stream)
+                                // Only receive if WE are not the one sharing
                                 if identity_clone != local_identity {
-                                    eprintln!("[Pax] Spawning video receiver for remote screen share");
+                                    // Stop any existing receiver for this specific identity
+                                    if let Some(old_shutdown) = st.video_recv_shutdowns.remove(&identity_clone) {
+                                        old_shutdown.store(true, Ordering::Relaxed);
+                                    }
+
+                                    eprintln!("[Pax] Spawning video receiver for '{}'", identity_clone);
                                     let shutdown = Arc::new(AtomicBool::new(false));
-                                    st.video_recv_shutdown = Some(shutdown.clone());
+                                    st.video_recv_shutdowns.insert(identity_clone.clone(), shutdown.clone());
                                     drop(st);
-                                    crate::video_recv::spawn_video_receiver(video_track, shutdown);
+                                    crate::video_recv::spawn_video_receiver(identity_clone, video_track, shutdown);
                                 } else {
                                     eprintln!("[Pax] Skipping video receiver (local screen share)");
                                     drop(st);
@@ -605,15 +609,13 @@ async fn run_event_loop(
                         let identity = participant.identity().to_string();
                         if publication.source() == TrackSource::Screenshare {
                             let mut st = audio_state.lock();
-                            if st.screen_sharing_owner.as_deref() == Some(&identity) {
-                                st.screen_sharing_owner = None;
-                                // Shut down the video receiver and clear frame buffer
-                                if let Some(shutdown) = st.video_recv_shutdown.take() {
-                                    shutdown.store(true, Ordering::Relaxed);
-                                }
-                                crate::video_recv::clear_frame_buffer();
+                            st.screen_sharing_owners.retain(|id| id != &identity);
+                            // Shut down only this identity's receiver
+                            if let Some(shutdown) = st.video_recv_shutdowns.remove(&identity) {
+                                shutdown.store(true, Ordering::Relaxed);
                             }
                             drop(st);
+                            crate::video_recv::clear_frame_buffer_for(&identity);
                             emit_state(&app_handle, &room_id, &local_identity, &audio_state, false, true, None);
                         } else if publication.source() == TrackSource::Microphone {
                             let mut st = audio_state.lock();
@@ -685,13 +687,12 @@ async fn run_event_loop(
                             st.remote_participants.retain(|id| id != &identity);
                             st.remote_mic_muted.remove(&identity);
                             st.remote_deafened.remove(&identity);
-                            if st.screen_sharing_owner.as_deref() == Some(&identity) {
-                                st.screen_sharing_owner = None;
-                                // Shut down the video receiver and clear frame buffer
-                                if let Some(shutdown) = st.video_recv_shutdown.take() {
+                            if st.screen_sharing_owners.contains(&identity) {
+                                st.screen_sharing_owners.retain(|id| id != &identity);
+                                if let Some(shutdown) = st.video_recv_shutdowns.remove(&identity) {
                                     shutdown.store(true, Ordering::Relaxed);
                                 }
-                                crate::video_recv::clear_frame_buffer();
+                                crate::video_recv::clear_frame_buffer_for(&identity);
                             }
                         }
                         emit_state(&app_handle, &room_id, &local_identity, &audio_state, false, true, None);
@@ -759,7 +760,7 @@ fn emit_state(
         is_mic_enabled: st.mic_enabled,
         is_deafened: st.deafened,
         is_noise_suppressed: st.noise_suppression_enabled,
-        screen_sharing_owner: st.screen_sharing_owner.clone(),
+        screen_sharing_owners: st.screen_sharing_owners.clone(),
         is_local_screen_sharing: st.is_local_screen_sharing,
         error,
         participants,
