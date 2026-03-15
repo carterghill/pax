@@ -959,13 +959,24 @@ fn setup_mic_input(
     let default_config = device.default_input_config()
         .map_err(|e| format!("Failed to get default input config: {}", e))?;
     let channels = default_config.channels();
+    let device_rate = default_config.sample_rate().0;
     let config = cpal::StreamConfig {
         channels,
         sample_rate: default_config.sample_rate(),
         buffer_size: cpal::BufferSize::Default,
     };
-    log::info!("[Pax] Mic config: {}ch @ {}Hz", channels, default_config.sample_rate().0);
-    // Local frame accumulator — shared with the cpal callback via Arc<Mutex>
+    log::info!("[Pax] Mic config: {}ch @ {}Hz (target {}Hz)", channels, device_rate, SAMPLE_RATE);
+    let needs_resample = device_rate != SAMPLE_RATE;
+    if needs_resample {
+        log::info!("[Pax] Mic resampling enabled: {}Hz → {}Hz", device_rate, SAMPLE_RATE);
+    }
+    // Pre-resample accumulator (f32 mono at device rate) — only used when resampling
+    let raw_buf: Arc<Mutex<Vec<f32>>> = Arc::new(Mutex::new(
+        Vec::with_capacity(SAMPLES_PER_10MS as usize * 2),
+    ));
+    // Fractional position tracker for linear interpolation resampling
+    let resample_frac: Arc<Mutex<f64>> = Arc::new(Mutex::new(0.0));
+    // Post-resample frame accumulator (i16 at 48000 Hz)
     let frame_buf: Arc<Mutex<Vec<i16>>> = Arc::new(Mutex::new(
         Vec::with_capacity(SAMPLES_PER_10MS as usize * 2),
     ));
@@ -980,29 +991,68 @@ fn setup_mic_input(
                 };
                 let ch = channels as usize;
                 let frame_size = SAMPLES_PER_10MS as usize;
-                let mut buf = frame_buf.lock();
-                // Extract mono (channel 0) and convert f32 → i16
-                for frame in data.chunks(ch) {
-                    let sample = if is_muted { 0.0 } else { frame[0] };
-                    let clamped = sample.clamp(-1.0, 1.0);
-                    buf.push((clamped * 32767.0) as i16);
-                }
-                // Send completed frames immediately via channel
-                while buf.len() >= frame_size {
-                    let mut samples: Vec<i16> = buf.drain(..frame_size).collect();
 
-                    // Apply noise suppression (RNNoise-style) only when enabled and not muted.
-                    if noise_suppression_enabled && !is_muted {
-                        let mut np = noise_proc.lock();
-                        np.set_enabled(true);
-                        np.process_i16_in_place(&mut samples[..]);
-                    } else {
-                        let mut np = noise_proc.lock();
-                        np.set_enabled(false);
+                if needs_resample {
+                    // ── Resampling path: device_rate → 48000 Hz ──
+                    let mut raw = raw_buf.lock();
+                    // Extract mono (channel 0) as f32
+                    for frame in data.chunks(ch) {
+                        let sample = if is_muted { 0.0 } else { frame[0].clamp(-1.0, 1.0) };
+                        raw.push(sample);
                     }
-
-                    // try_send is non-blocking — drop frame if channel is full (backpressure)
-                    let _ = frame_tx.try_send(samples);
+                    // Resample accumulated device-rate samples to 48000 Hz via linear interpolation
+                    let step = device_rate as f64 / SAMPLE_RATE as f64; // input step per output sample
+                    let mut frac = resample_frac.lock();
+                    let mut buf = frame_buf.lock();
+                    while *frac + step < raw.len() as f64 {
+                        let idx = *frac as usize;
+                        let t = *frac - idx as f64;
+                        let s0 = raw[idx] as f64;
+                        let s1 = if idx + 1 < raw.len() { raw[idx + 1] as f64 } else { s0 };
+                        let sample = (s0 * (1.0 - t) + s1 * t) as f32;
+                        buf.push((sample * 32767.0) as i16);
+                        *frac += step;
+                    }
+                    // Remove consumed input samples and adjust fractional position
+                    let consumed = *frac as usize;
+                    if consumed > 0 && consumed <= raw.len() {
+                        raw.drain(..consumed);
+                        *frac -= consumed as f64;
+                    }
+                    drop(frac);
+                    // Send completed 480-sample frames
+                    while buf.len() >= frame_size {
+                        let mut samples: Vec<i16> = buf.drain(..frame_size).collect();
+                        if noise_suppression_enabled && !is_muted {
+                            let mut np = noise_proc.lock();
+                            np.set_enabled(true);
+                            np.process_i16_in_place(&mut samples[..]);
+                        } else {
+                            let mut np = noise_proc.lock();
+                            np.set_enabled(false);
+                        }
+                        let _ = frame_tx.try_send(samples);
+                    }
+                } else {
+                    // ── No resampling needed (device already at 48000 Hz) ──
+                    let mut buf = frame_buf.lock();
+                    for frame in data.chunks(ch) {
+                        let sample = if is_muted { 0.0 } else { frame[0] };
+                        let clamped = sample.clamp(-1.0, 1.0);
+                        buf.push((clamped * 32767.0) as i16);
+                    }
+                    while buf.len() >= frame_size {
+                        let mut samples: Vec<i16> = buf.drain(..frame_size).collect();
+                        if noise_suppression_enabled && !is_muted {
+                            let mut np = noise_proc.lock();
+                            np.set_enabled(true);
+                            np.process_i16_in_place(&mut samples[..]);
+                        } else {
+                            let mut np = noise_proc.lock();
+                            np.set_enabled(false);
+                        }
+                        let _ = frame_tx.try_send(samples);
+                    }
                 }
             },
             move |err| {
@@ -1023,30 +1073,73 @@ fn setup_speaker_output(audio_state: Arc<Mutex<AudioState>>) -> Result<cpal::Str
     let default_config = device.default_output_config()
         .map_err(|e| format!("Failed to get default output config: {}", e))?;
     let channels = default_config.channels();
+    let device_rate = default_config.sample_rate().0;
     let config = cpal::StreamConfig {
         channels,
         sample_rate: default_config.sample_rate(),
         buffer_size: cpal::BufferSize::Default,
     };
-    log::info!("[Pax] Speaker config: {}ch @ {}Hz", channels, default_config.sample_rate().0);
+    log::info!("[Pax] Speaker config: {}ch @ {}Hz (buffer at {}Hz)", channels, device_rate, SAMPLE_RATE);
+    let needs_resample = device_rate != SAMPLE_RATE;
+    if needs_resample {
+        log::info!("[Pax] Speaker resampling enabled: {}Hz → {}Hz", SAMPLE_RATE, device_rate);
+    }
     let state = audio_state.clone();
+    // Persistent resampling state: fractional position in the 48000 Hz buffer
+    // and the previous sample for interpolation (shared across callbacks).
+    let resample_frac: Arc<Mutex<f64>> = Arc::new(Mutex::new(0.0));
+    let prev_sample: Arc<Mutex<f32>> = Arc::new(Mutex::new(0.0));
     let stream = device
         .build_output_stream(
             &config,
             move |data: &mut [f32], _: &cpal::OutputCallbackInfo| {
                 let mut st = state.lock();
                 let ch = channels as usize;
-                // Our playback buffer is mono — duplicate each sample to all output channels
-                for frame in data.chunks_mut(ch) {
-                    let sample = if st.deafened {
-                        // Consume the buffer while deafened to avoid delayed playback after undeafen.
-                        let _ = st.playback_buffer.pop_front();
-                        0.0
-                    } else {
-                        st.playback_buffer.pop_front().unwrap_or(0.0)
-                    };
-                    for s in frame.iter_mut() {
-                        *s = sample;
+                if needs_resample {
+                    // ── Resampling path: 48000 Hz buffer → device_rate ──
+                    // step = how many 48000 Hz buffer positions to advance per output sample
+                    let step = SAMPLE_RATE as f64 / device_rate as f64;
+                    let mut frac = resample_frac.lock();
+                    let mut prev = prev_sample.lock();
+                    for frame in data.chunks_mut(ch) {
+                        if st.deafened {
+                            // Consume buffer proportionally while deafened
+                            *frac += step;
+                            while *frac >= 1.0 {
+                                let _ = st.playback_buffer.pop_front();
+                                *frac -= 1.0;
+                            }
+                            for s in frame.iter_mut() {
+                                *s = 0.0;
+                            }
+                        } else {
+                            // Advance fractional position and consume buffer samples
+                            *frac += step;
+                            while *frac >= 1.0 {
+                                *prev = st.playback_buffer.pop_front().unwrap_or(0.0);
+                                *frac -= 1.0;
+                            }
+                            // Interpolate between previous and next buffer sample
+                            let next = st.playback_buffer.front().copied().unwrap_or(*prev);
+                            let t = *frac as f32;
+                            let sample = *prev * (1.0 - t) + next * t;
+                            for s in frame.iter_mut() {
+                                *s = sample;
+                            }
+                        }
+                    }
+                } else {
+                    // ── No resampling needed (device already at 48000 Hz) ──
+                    for frame in data.chunks_mut(ch) {
+                        let sample = if st.deafened {
+                            let _ = st.playback_buffer.pop_front();
+                            0.0
+                        } else {
+                            st.playback_buffer.pop_front().unwrap_or(0.0)
+                        };
+                        for s in frame.iter_mut() {
+                            *s = sample;
+                        }
                     }
                 }
             },
