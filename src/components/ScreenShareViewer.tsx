@@ -189,8 +189,15 @@ export default function ScreenShareViewer({ active, identity }: ScreenShareViewe
   const glStateRef = useRef<GlState | null>(null);
   const [loading, setLoading] = useState(true);
   const [dimensions, setDimensions] = useState<{ width: number; height: number } | null>(null);
+  // Refs to avoid calling React setState on every frame
+  const loadingRef = useRef(true);
+  const dimsRef = useRef<{ width: number; height: number } | null>(null);
 
   // ── Debounced resize reporting ──────────────────────────────────────
+  // Report 85% of actual viewport — CSS bilinear upscale handles the rest
+  // invisibly. Cuts IPC data ~28% (e.g. 2.2MB vs 3.1MB at 1080p).
+  // This matches WebRTC SFU behavior where screen share caps below native.
+  const IPC_SCALE = 0.85;
   useEffect(() => {
     if (!active || !containerRef.current) return;
 
@@ -202,8 +209,8 @@ export default function ScreenShareViewer({ active, identity }: ScreenShareViewe
       if (!el) return;
       const rect = el.getBoundingClientRect();
       const dpr = window.devicePixelRatio || 1;
-      const w = Math.round(rect.width * dpr);
-      const h = Math.round(rect.height * dpr);
+      const w = Math.round(rect.width * dpr * IPC_SCALE);
+      const h = Math.round(rect.height * dpr * IPC_SCALE);
       if (w > 0 && h > 0) {
         fetch(`${URL_PREFIX}/resize?id=${encodedId}&w=${w}&h=${h}`).catch(() => {});
       }
@@ -224,31 +231,55 @@ export default function ScreenShareViewer({ active, identity }: ScreenShareViewe
   }, [active, identity]);
 
   // ── Event-driven frame delivery ────────────────────────────────────
+  // Single `busy` flag spans the entire fetch→draw cycle. If events arrive
+  // while busy, we set `pendingEvent` so we immediately start the next
+  // fetch after the current draw completes. This prevents:
+  //   - Wasted fetches (old: two fetches in flight, one buffer discarded)
+  //   - GC pressure from discarded ArrayBuffers
+  //   - Pipeline overrun while maintaining responsiveness
   useEffect(() => {
     if (!active || !identity) {
       setLoading(true);
       setDimensions(null);
+      loadingRef.current = true;
+      dimsRef.current = null;
       glStateRef.current = null;
       return;
     }
 
     let mounted = true;
     let busy = false;
+    let pendingEvent = false; // event arrived while busy — fetch again after draw
+    let rafId = 0;
     let unlisten: UnlistenFn | null = null;
     const encodedId = encodeURIComponent(identity);
 
+    const onDrawComplete = () => {
+      busy = false;
+      // If we missed events while busy, immediately start next cycle
+      if (pendingEvent && mounted) {
+        pendingEvent = false;
+        fetchAndDraw();
+      }
+    };
+
     const fetchAndDraw = async () => {
-      if (busy || !mounted) return;
+      if (busy || !mounted) {
+        // Mark that we want to fetch again once the current cycle finishes
+        pendingEvent = true;
+        return;
+      }
       busy = true;
+      pendingEvent = false;
 
       try {
         const resp = await fetch(`${URL_PREFIX}/frame?id=${encodedId}`);
         if (!mounted) { busy = false; return; }
-        if (resp.status === 204 || !resp.ok) { busy = false; return; }
+        if (resp.status === 204 || !resp.ok) { onDrawComplete(); return; }
 
         const buf = await resp.arrayBuffer();
         if (!mounted) { busy = false; return; }
-        if (buf.byteLength < 8) { busy = false; return; }
+        if (buf.byteLength < 8) { onDrawComplete(); return; }
 
         const header = new DataView(buf, 0, 8);
         const width = header.getUint32(0, true);
@@ -258,34 +289,37 @@ export default function ScreenShareViewer({ active, identity }: ScreenShareViewe
         const uvSize = (width >> 1) * (height >> 1);
         const expectedSize = 8 + ySize + uvSize * 2;
         if (buf.byteLength < expectedSize || width === 0 || height === 0) {
-          busy = false;
+          onDrawComplete();
           return;
         }
 
-        // Initialize WebGL on first frame
-        if (!glStateRef.current) {
-          const canvas = canvasRef.current;
-          if (canvas) {
-            glStateRef.current = initGl(canvas);
+        // Draw at next vsync — busy stays true until draw completes
+        rafId = requestAnimationFrame(() => {
+          if (!mounted) { busy = false; return; }
+
+          if (!glStateRef.current) {
+            const canvas = canvasRef.current;
+            if (canvas) glStateRef.current = initGl(canvas);
           }
-        }
 
-        const glState = glStateRef.current;
-        if (!glState) { busy = false; return; }
+          const glState = glStateRef.current;
+          if (!glState) { onDrawComplete(); return; }
 
-        // Upload textures and draw — GPU-accelerated, sub-millisecond
-        uploadAndDraw(glState, buf, width, height);
+          uploadAndDraw(glState, buf, width, height);
 
-        setLoading(false);
-        setDimensions((prev) =>
-          prev?.width === width && prev?.height === height
-            ? prev
-            : { width, height }
-        );
+          if (loadingRef.current) {
+            loadingRef.current = false;
+            setLoading(false);
+          }
+          if (!dimsRef.current || dimsRef.current.width !== width || dimsRef.current.height !== height) {
+            dimsRef.current = { width, height };
+            setDimensions({ width, height });
+          }
 
-        busy = false;
+          onDrawComplete();
+        });
       } catch {
-        busy = false;
+        onDrawComplete();
       }
     };
 
@@ -301,8 +335,11 @@ export default function ScreenShareViewer({ active, identity }: ScreenShareViewe
 
     return () => {
       mounted = false;
+      if (rafId) cancelAnimationFrame(rafId);
       if (unlisten) unlisten();
       glStateRef.current = null;
+      loadingRef.current = true;
+      dimsRef.current = null;
       fetch(`${URL_PREFIX}/resize?id=${encodeURIComponent(identity)}&w=0&h=0`).catch(() => {});
     };
   }, [active, identity]);

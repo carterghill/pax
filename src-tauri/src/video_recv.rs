@@ -1,11 +1,12 @@
 //! Multi-stream screen share video reception pipeline.
 //!
-//! Sends I420 (YUV420p) planes directly to the frontend — no CPU-side
-//! color conversion. The frontend renders via WebGL YUV→RGB shader,
-//! matching how browser <video> elements work internally.
+//! Each stream runs on its own DEDICATED OS THREAD with a private
+//! single-threaded tokio runtime. This eliminates scheduling contention
+//! with the main tokio runtime (audio, Matrix sync, presence, etc.)
+//! which was causing frame timing jitter regardless of resolution.
 //!
-//! Binary frame format: [u32 w][u32 h][Y plane: w*h][U plane: w/2*h/2][V plane: w/2*h/2]
-//! Total per frame: 8 + w*h*1.5 bytes (3.1MB for 1080p vs 8.3MB for RGBA)
+//! Binary frame format: [u32 w][u32 h][Y plane][U plane][V plane]
+//! Total per frame: 8 + w*h*1.5 bytes (3.1MB for 1080p)
 
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -26,8 +27,8 @@ pub struct FrameReadyEvent {
 }
 
 struct StreamState {
-    /// Pre-formatted I420 response body: [u32 w][u32 h][Y][U][V] in Arc.
-    body: Arc<Vec<u8>>,
+    /// Pre-formatted I420 body. None = already consumed by handler.
+    body: Option<Vec<u8>>,
     width: u32,
     height: u32,
     frame_number: u64,
@@ -38,6 +39,9 @@ struct StreamState {
 static STREAMS: Lazy<Mutex<HashMap<String, StreamState>>> =
     Lazy::new(|| Mutex::new(HashMap::new()));
 
+/// Spawn a video receiver on a **dedicated OS thread** with its own
+/// single-threaded tokio runtime. This ensures frame processing never
+/// competes with audio, Matrix sync, or any other async work.
 pub fn spawn_video_receiver(
     identity: String,
     video_track: RemoteVideoTrack,
@@ -45,140 +49,145 @@ pub fn spawn_video_receiver(
     app_handle: AppHandle,
 ) {
     let id = identity.clone();
-    tokio::spawn(async move {
-        {
-            let mut streams = STREAMS.lock();
-            let entry = streams.entry(id.clone()).or_insert_with(|| StreamState {
-                body: Arc::new(Vec::new()),
-                width: 0, height: 0, frame_number: 0,
-                receiving: true, target: (0, 0),
+    std::thread::Builder::new()
+        .name(format!("pax-video-{}", id))
+        .spawn(move || {
+            // Private runtime — only this stream's work runs here.
+            let rt = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .expect("[Pax VideoRecv] Failed to create runtime");
+
+            rt.block_on(async move {
+                {
+                    let mut streams = STREAMS.lock();
+                    let entry = streams.entry(id.clone()).or_insert_with(|| StreamState {
+                        body: None, width: 0, height: 0, frame_number: 0,
+                        receiving: true, target: (0, 0),
+                    });
+                    entry.receiving = true;
+                }
+                eprintln!("[Pax VideoRecv] Dedicated thread started for '{}'", id);
+
+                let rtc_track = video_track.rtc_track();
+                let mut stream = NativeVideoStream::new(rtc_track);
+                let mut frame_number: u64 = 0;
+
+                loop {
+                    // Only await point — and this thread has nothing else to do,
+                    // so wakeup is immediate when a frame arrives.
+                    let first = stream.next().await;
+                    let Some(mut latest_frame) = first else {
+                        eprintln!("[Pax VideoRecv] Stream ended for '{}'", id);
+                        break;
+                    };
+
+                    if shutdown.load(Ordering::Relaxed) {
+                        eprintln!("[Pax VideoRecv] Shutdown for '{}'", id);
+                        break;
+                    }
+
+                    // Drain to latest — skip any buffered frames
+                    loop {
+                        match futures_util::FutureExt::now_or_never(stream.next()) {
+                            Some(Some(newer)) => { latest_frame = newer; }
+                            _ => break,
+                        }
+                    }
+
+                    // Read target viewport
+                    let (tgt_w, tgt_h) = {
+                        let streams = STREAMS.lock();
+                        streams.get(&id).map(|s| s.target).unwrap_or((0, 0))
+                    };
+
+                    // Scale + pack runs inline — we own this thread, no need for
+                    // spawn_blocking (which would add scheduling overhead).
+                    let mut i420 = latest_frame.buffer.to_i420();
+                    let src_w = i420.width();
+                    let src_h = i420.height();
+
+                    if src_w == 0 || src_h == 0 {
+                        continue;
+                    }
+
+                    let needs_scale = tgt_w > 0 && tgt_h > 0 && (tgt_w < src_w || tgt_h < src_h);
+                    let final_i420 = if needs_scale {
+                        let (out_w, out_h) = fit_dimensions(src_w, src_h, tgt_w, tgt_h);
+                        i420.scale(out_w as i32, out_h as i32)
+                    } else {
+                        i420
+                    };
+
+                    let w = final_i420.width();
+                    let h = final_i420.height();
+                    let (data_y, data_u, data_v) = final_i420.data();
+                    let (stride_y, stride_u, stride_v) = final_i420.strides();
+
+                    let cw = (w / 2) as usize;
+                    let ch = (h / 2) as usize;
+                    let y_size = (w * h) as usize;
+                    let uv_size = cw * ch;
+                    let total = 8 + y_size + uv_size * 2;
+
+                    let mut body = Vec::with_capacity(total);
+                    body.extend_from_slice(&w.to_le_bytes());
+                    body.extend_from_slice(&h.to_le_bytes());
+
+                    if stride_y == w {
+                        body.extend_from_slice(&data_y[..y_size]);
+                    } else {
+                        for row in 0..h as usize {
+                            let start = row * stride_y as usize;
+                            body.extend_from_slice(&data_y[start..start + w as usize]);
+                        }
+                    }
+
+                    if stride_u == cw as u32 {
+                        body.extend_from_slice(&data_u[..uv_size]);
+                    } else {
+                        for row in 0..ch {
+                            let start = row * stride_u as usize;
+                            body.extend_from_slice(&data_u[start..start + cw]);
+                        }
+                    }
+
+                    if stride_v == cw as u32 {
+                        body.extend_from_slice(&data_v[..uv_size]);
+                    } else {
+                        for row in 0..ch {
+                            let start = row * stride_v as usize;
+                            body.extend_from_slice(&data_v[start..start + cw]);
+                        }
+                    }
+
+                    frame_number += 1;
+
+                    {
+                        let mut streams = STREAMS.lock();
+                        let entry = streams.entry(id.clone()).or_insert_with(|| StreamState {
+                            body: None, width: 0, height: 0, frame_number: 0,
+                            receiving: true, target: (tgt_w, tgt_h),
+                        });
+                        entry.body = Some(body);
+                        entry.width = w;
+                        entry.height = h;
+                        entry.frame_number = frame_number;
+                    }
+
+                    let _ = app_handle.emit("screen-share-frame-ready", FrameReadyEvent {
+                        id: id.clone(),
+                    });
+                }
+
+                {
+                    let mut streams = STREAMS.lock();
+                    streams.remove(&id);
+                }
+                eprintln!("[Pax VideoRecv] Thread exiting for '{}'", id);
             });
-            entry.receiving = true;
-        }
-        eprintln!("[Pax VideoRecv] Task started for '{}'", id);
-
-        let rtc_track = video_track.rtc_track();
-        let mut stream = NativeVideoStream::new(rtc_track);
-        let mut frame_number: u64 = 0;
-
-        loop {
-            let first = stream.next().await;
-            let Some(mut latest_frame) = first else {
-                eprintln!("[Pax VideoRecv] Stream ended for '{}'", id);
-                break;
-            };
-
-            if shutdown.load(Ordering::Relaxed) {
-                eprintln!("[Pax VideoRecv] Shutdown for '{}'", id);
-                break;
-            }
-
-            // Drain to latest
-            loop {
-                match futures_util::FutureExt::now_or_never(stream.next()) {
-                    Some(Some(newer)) => { latest_frame = newer; }
-                    _ => break,
-                }
-            }
-
-            let mut i420 = latest_frame.buffer.to_i420();
-            let src_w = i420.width();
-            let src_h = i420.height();
-
-            if src_w == 0 || src_h == 0 {
-                continue;
-            }
-
-            let (tgt_w, tgt_h) = {
-                let streams = STREAMS.lock();
-                streams.get(&id).map(|s| s.target).unwrap_or((0, 0))
-            };
-
-            let needs_scale = tgt_w > 0 && tgt_h > 0 && (tgt_w < src_w || tgt_h < src_h);
-            let (out_w, out_h) = if needs_scale {
-                fit_dimensions(src_w, src_h, tgt_w, tgt_h)
-            } else {
-                (src_w, src_h)
-            };
-
-            let final_i420 = if needs_scale {
-                i420.scale(out_w as i32, out_h as i32)
-            } else {
-                i420
-            };
-
-            let w = final_i420.width();
-            let h = final_i420.height();
-            let (data_y, data_u, data_v) = final_i420.data();
-            let (stride_y, stride_u, stride_v) = final_i420.strides();
-
-            let cw = (w / 2) as usize;
-            let ch = (h / 2) as usize;
-            let y_size = (w * h) as usize;
-            let uv_size = cw * ch;
-            let total = 8 + y_size + uv_size * 2;
-
-            let mut body = Vec::with_capacity(total);
-            body.extend_from_slice(&w.to_le_bytes());
-            body.extend_from_slice(&h.to_le_bytes());
-
-            // Pack Y plane (remove stride padding if any)
-            if stride_y == w {
-                body.extend_from_slice(&data_y[..y_size]);
-            } else {
-                for row in 0..h as usize {
-                    let start = row * stride_y as usize;
-                    body.extend_from_slice(&data_y[start..start + w as usize]);
-                }
-            }
-
-            // Pack U plane
-            if stride_u == cw as u32 {
-                body.extend_from_slice(&data_u[..uv_size]);
-            } else {
-                for row in 0..ch {
-                    let start = row * stride_u as usize;
-                    body.extend_from_slice(&data_u[start..start + cw]);
-                }
-            }
-
-            // Pack V plane
-            if stride_v == cw as u32 {
-                body.extend_from_slice(&data_v[..uv_size]);
-            } else {
-                for row in 0..ch {
-                    let start = row * stride_v as usize;
-                    body.extend_from_slice(&data_v[start..start + cw]);
-                }
-            }
-
-            frame_number += 1;
-            let frame_body = Arc::new(body);
-
-            {
-                let mut streams = STREAMS.lock();
-                let entry = streams.entry(id.clone()).or_insert_with(|| StreamState {
-                    body: Arc::new(Vec::new()),
-                    width: 0, height: 0, frame_number: 0,
-                    receiving: true, target: (tgt_w, tgt_h),
-                });
-                entry.body = frame_body;
-                entry.width = w;
-                entry.height = h;
-                entry.frame_number = frame_number;
-            }
-
-            let _ = app_handle.emit("screen-share-frame-ready", FrameReadyEvent {
-                id: id.clone(),
-            });
-        }
-
-        {
-            let mut streams = STREAMS.lock();
-            streams.remove(&id);
-        }
-        eprintln!("[Pax VideoRecv] Exited for '{}'", id);
-    });
+        })
+        .expect("[Pax VideoRecv] Failed to spawn thread");
 }
 
 fn fit_dimensions(src_w: u32, src_h: u32, max_w: u32, max_h: u32) -> (u32, u32) {
@@ -218,8 +227,7 @@ pub fn handle_protocol_request(
                 entry.target = if w == 0 && h == 0 { (0, 0) } else { (w, h) };
             } else if w > 0 && h > 0 {
                 streams.insert(id, StreamState {
-                    body: Arc::new(Vec::new()),
-                    width: 0, height: 0, frame_number: 0,
+                    body: None, width: 0, height: 0, frame_number: 0,
                     receiving: false, target: (w, h),
                 });
             }
@@ -252,23 +260,12 @@ pub fn handle_protocol_request(
             return ok_204();
         }
 
-        // Swap the body OUT of STREAMS — handler gets sole Arc ownership,
-        // so Arc::try_unwrap always succeeds (no 3.1MB clone).
-        // If the frontend re-fetches before the next frame, it gets 204.
-        let body_arc = {
+        let body = {
             let mut streams = STREAMS.lock();
-            streams.get_mut(&id).and_then(|s| {
-                if s.body.is_empty() {
-                    None
-                } else {
-                    Some(std::mem::replace(&mut s.body, Arc::new(Vec::new())))
-                }
-            })
+            streams.get_mut(&id).and_then(|s| s.body.take())
         };
 
-        if let Some(arc) = body_arc {
-            // try_unwrap now always succeeds — we're the only holder
-            let body = Arc::try_unwrap(arc).unwrap_or_else(|arc| (*arc).clone());
+        if let Some(body) = body {
             return tauri::http::Response::builder()
                 .status(200)
                 .header("content-type", "application/octet-stream")
