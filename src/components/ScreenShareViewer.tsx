@@ -1,4 +1,5 @@
-import { useEffect, useRef, useCallback, useState } from "react";
+import { useEffect, useRef, useState } from "react";
+import { listen, UnlistenFn } from "@tauri-apps/api/event";
 import { Monitor, Loader2 } from "lucide-react";
 import { useTheme } from "../theme/ThemeContext";
 
@@ -6,13 +7,11 @@ import { useTheme } from "../theme/ThemeContext";
  * ScreenShareViewer — Renders incoming screen share video frames.
  *
  * Pipeline:
- *   Rust: LiveKit NativeVideoStream → I420 scale (libyuv) → RGBA → raw buffer
- *   Tauri: paxvideo:// serves raw RGBA pixels
- *   Frontend: ResizeObserver → /resize?w=&h= → fetch /frame → putImageData
+ *   Rust: LiveKit NativeVideoStream → I420 scale (libyuv) → RGBA → store + emit event
+ *   Tauri: "screen-share-frame-ready" event notifies frontend immediately
+ *   Frontend: event → fetch /frame?id= → putImageData (zero polling delay)
  *
- * The frontend reports its actual display size (CSS pixels × devicePixelRatio)
- * so Rust only produces pixels at the resolution being displayed.
- * A 1920×1080 stream in a 800×450 viewer transfers ~1.4MB instead of ~8MB.
+ * Frames are rendered on the next requestAnimationFrame for vsync alignment.
  */
 
 interface ScreenShareViewerProps {
@@ -67,74 +66,94 @@ export default function ScreenShareViewer({ active, identity }: ScreenShareViewe
 
     return () => {
       observer.disconnect();
-      // Reset to native resolution when viewer unmounts
-      fetch(getPaxVideoUrl(`/resize?id=${encodeURIComponent(identity)}&w=0&h=0`)).catch(() => {});
     };
   }, [active, identity]);
 
-  // ── Frame fetch loop ──────────────────────────────────────────────
-  const fetchAndDrawFrame = useCallback(async () => {
-    const canvas = canvasRef.current;
-    if (!canvas) return;
-
-    try {
-      const resp = await fetch(getPaxVideoUrl(`/frame?id=${encodeURIComponent(identity)}`));
-      if (resp.status === 204 || !resp.ok) return;
-
-      const buf = await resp.arrayBuffer();
-      if (buf.byteLength < 8) return;
-
-      const header = new DataView(buf, 0, 8);
-      const width = header.getUint32(0, true);
-      const height = header.getUint32(4, true);
-
-      const expectedSize = 8 + width * height * 4;
-      if (buf.byteLength < expectedSize || width === 0 || height === 0) return;
-
-      if (loading) setLoading(false);
-
-      if (!dimensions || dimensions.width !== width || dimensions.height !== height) {
-        setDimensions({ width, height });
-      }
-
-      if (canvas.width !== width || canvas.height !== height) {
-        canvas.width = width;
-        canvas.height = height;
-      }
-
-      const ctx = canvas.getContext("2d");
-      if (!ctx) return;
-
-      const pixels = new Uint8ClampedArray(buf, 8, width * height * 4);
-      const imageData = new ImageData(pixels, width, height);
-      ctx.putImageData(imageData, 0, 0);
-    } catch {
-      // Silently retry
-    }
-  }, [loading, dimensions, identity]);
-
+  // ── Event-driven frame delivery ─────────────────────────────────────
+  // Rust emits "screen-share-frame-ready" when a new frame is stored.
+  // We fetch immediately on event, then draw on the next vsync.
   useEffect(() => {
-    if (!active) {
+    if (!active || !identity) {
       setLoading(true);
       setDimensions(null);
       return;
     }
 
-    let running = true;
+    let mounted = true;
+    let busy = false; // prevents overlapping fetches (backpressure)
+    let unlisten: UnlistenFn | null = null;
 
-    const poll = async () => {
-      while (running) {
-        await fetchAndDrawFrame();
-        await new Promise((r) => setTimeout(r, 16));
+    const fetchAndDraw = async () => {
+      if (busy || !mounted) return;
+      busy = true;
+
+      try {
+        const resp = await fetch(getPaxVideoUrl(`/frame?id=${encodeURIComponent(identity)}`));
+        if (!mounted) return;
+        if (resp.status === 204 || !resp.ok) return;
+
+        const buf = await resp.arrayBuffer();
+        if (!mounted) return;
+        if (buf.byteLength < 8) return;
+
+        const header = new DataView(buf, 0, 8);
+        const width = header.getUint32(0, true);
+        const height = header.getUint32(4, true);
+
+        const expectedSize = 8 + width * height * 4;
+        if (buf.byteLength < expectedSize || width === 0 || height === 0) return;
+
+        // Draw on next vsync for smooth timing
+        requestAnimationFrame(() => {
+          if (!mounted) return;
+          const canvas = canvasRef.current;
+          if (!canvas) return;
+
+          if (canvas.width !== width || canvas.height !== height) {
+            canvas.width = width;
+            canvas.height = height;
+          }
+
+          const ctx = canvas.getContext("2d");
+          if (!ctx) return;
+
+          const pixels = new Uint8ClampedArray(buf, 8, width * height * 4);
+          const imageData = new ImageData(pixels, width, height);
+          ctx.putImageData(imageData, 0, 0);
+
+          setLoading(false);
+          setDimensions((prev) =>
+            prev?.width === width && prev?.height === height
+              ? prev
+              : { width, height }
+          );
+        });
+      } catch {
+        // Expected during start/stop transitions
+      } finally {
+        busy = false;
       }
     };
 
-    poll();
+    // Listen for frame-ready events from Rust
+    listen<{ id: string }>("screen-share-frame-ready", (event) => {
+      if (event.payload.id === identity) {
+        fetchAndDraw();
+      }
+    }).then((fn) => {
+      unlisten = fn;
+    });
+
+    // Also do one initial fetch in case frames arrived before the listener registered
+    fetchAndDraw();
 
     return () => {
-      running = false;
+      mounted = false;
+      if (unlisten) unlisten();
+      // Reset target resolution
+      fetch(getPaxVideoUrl(`/resize?id=${encodeURIComponent(identity)}&w=0&h=0`)).catch(() => {});
     };
-  }, [active, fetchAndDrawFrame]);
+  }, [active, identity]);
 
   if (!active) return null;
 

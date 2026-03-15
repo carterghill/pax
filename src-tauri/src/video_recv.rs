@@ -18,6 +18,14 @@ use livekit::webrtc::video_stream::native::NativeVideoStream;
 use livekit::webrtc::prelude::VideoBuffer;
 use once_cell::sync::Lazy;
 use parking_lot::Mutex;
+use serde::Serialize;
+use tauri::{AppHandle, Emitter};
+
+// ─── Frame-ready event emitted to frontend ──────────────────────────────────
+#[derive(Clone, Serialize)]
+pub struct FrameReadyEvent {
+    pub id: String,
+}
 
 // ─── Global state (all keyed by participant identity) ───────────────────────
 
@@ -47,6 +55,7 @@ pub fn spawn_video_receiver(
     identity: String,
     video_track: RemoteVideoTrack,
     shutdown: Arc<AtomicBool>,
+    app_handle: AppHandle,
 ) {
     let id = identity.clone();
     tokio::spawn(async move {
@@ -132,6 +141,11 @@ pub fn spawn_video_receiver(
                     frame_number,
                 });
             }
+
+            // Notify frontend immediately — no polling delay
+            let _ = app_handle.emit("screen-share-frame-ready", FrameReadyEvent {
+                id: id.clone(),
+            });
         }
 
         // Clean up this stream's state

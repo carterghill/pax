@@ -595,7 +595,7 @@ async fn run_event_loop(
                                     let shutdown = Arc::new(AtomicBool::new(false));
                                     st.video_recv_shutdowns.insert(identity_clone.clone(), shutdown.clone());
                                     drop(st);
-                                    crate::video_recv::spawn_video_receiver(identity_clone, video_track, shutdown);
+                                    crate::video_recv::spawn_video_receiver(identity_clone, video_track, shutdown, app_handle.clone());
                                 } else {
                                     eprintln!("[Pax] Skipping video receiver (local screen share)");
                                     drop(st);
