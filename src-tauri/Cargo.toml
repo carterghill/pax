@@ -41,6 +41,8 @@ log = "0.4"
 tauri-plugin-log = "2"
 nnnoiseless = "0.5.2"
 screenshots = "0.8"
+# Pure-Rust JPEG encoding for screen share video reception (I420→RGBA→JPEG)
+image = { version = "0.25", default-features = false, features = ["jpeg"] }
 
 [target.'cfg(target_os = "windows")'.dependencies]
 wasapi = "0.22"

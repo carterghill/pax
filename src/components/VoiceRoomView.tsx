@@ -6,6 +6,7 @@ import { VoiceCallState } from "../hooks/useVoiceCall";
 import { normalizeUserId } from "../utils/matrix";
 import { useUserVolume } from "../hooks/useUserVolume";
 import VolumeContextMenu from "./VolumeContextMenu";
+import ScreenShareViewer from "./ScreenShareViewer";
 
 interface VoiceRoomViewProps {
   room: Room;
@@ -302,16 +303,22 @@ export default function VoiceRoomView({
                 ? "You are sharing your screen"
                 : `${sharerDisplayName} is sharing their screen`}
             </div>
-            <div style={{
-              flex: 1,
-              display: "flex",
-              alignItems: "center",
-              justifyContent: "center",
-              backgroundColor: palette.bgPrimary,
-              color: palette.textSecondary,
-            }}>
-              <span>Screen share video (native capture in progress)</span>
-            </div>
+            <ScreenShareViewer
+              active={!!callState.screenSharingOwner && !callState.isLocalScreenSharing}
+            />
+            {/* Fallback for local screen share (we don't view our own stream) */}
+            {callState.isLocalScreenSharing && (
+              <div style={{
+                flex: 1,
+                display: "flex",
+                alignItems: "center",
+                justifyContent: "center",
+                backgroundColor: palette.bgPrimary,
+                color: palette.textSecondary,
+              }}>
+                <span>You are sharing your screen</span>
+              </div>
+            )}
           </div>
         )}
         <div style={{

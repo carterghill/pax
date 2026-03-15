@@ -25,6 +25,7 @@ use futures_util::StreamExt;
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
 use nnnoiseless::DenoiseState;
 use once_cell::sync::Lazy;
+use std::sync::atomic::{AtomicBool, Ordering};
 // cpal::Stream is !Send because of platform internals, but we only ever
 // create streams on one thread and drop them (possibly on another).
 // This is safe for our use case.
@@ -84,6 +85,8 @@ struct AudioState {
     screen_sharing_owner: Option<String>,
     /// Whether this client is currently sharing its own screen
     is_local_screen_sharing: bool,
+    /// Shutdown flag for the remote screen share video receiver task
+    video_recv_shutdown: Option<Arc<AtomicBool>>,
 }
 impl Default for AudioState {
     fn default() -> Self {
@@ -99,6 +102,7 @@ impl Default for AudioState {
             noise_suppression_enabled: true,
             screen_sharing_owner: None,
             is_local_screen_sharing: false,
+            video_recv_shutdown: None,
         }
     }
 }
@@ -261,6 +265,15 @@ impl VoiceManager {
             guard.take()
         };
         if let Some(session) = session {
+            // Stop the video receiver if active
+            {
+                let mut st = session.audio_state.lock();
+                if let Some(shutdown) = st.video_recv_shutdown.take() {
+                    shutdown.store(true, Ordering::Relaxed);
+                }
+            }
+            crate::video_recv::clear_frame_buffer();
+
             // Signal the event loop to stop
             let _ = session.shutdown_tx.send(()).await;
             // Close the LiveKit room
@@ -560,11 +573,30 @@ async fn run_event_loop(
                                 handle_remote_audio(audio_track, identity, state_clone).await;
                             });
                             emit_state(&app_handle, &room_id, &local_identity, &audio_state, false, true, None);
-                        } else if let RemoteTrack::Video(_video_track) = track {
+                        } else if let RemoteTrack::Video(video_track) = track {
                             if source == TrackSource::Screenshare {
+                                let identity_clone = identity.clone();
+                                eprintln!("[Pax] TrackSubscribed: Video/Screenshare from '{}' (local='{}')", identity_clone, local_identity);
                                 let mut st = audio_state.lock();
                                 st.screen_sharing_owner = Some(identity);
-                                drop(st);
+
+                                // Stop any existing video receiver before starting a new one
+                                if let Some(old_shutdown) = st.video_recv_shutdown.take() {
+                                    old_shutdown.store(true, Ordering::Relaxed);
+                                }
+
+                                // Only receive if WE are not the one sharing (don't view our own stream)
+                                if identity_clone != local_identity {
+                                    eprintln!("[Pax] Spawning video receiver for remote screen share");
+                                    let shutdown = Arc::new(AtomicBool::new(false));
+                                    st.video_recv_shutdown = Some(shutdown.clone());
+                                    drop(st);
+                                    crate::video_recv::spawn_video_receiver(video_track, shutdown);
+                                } else {
+                                    eprintln!("[Pax] Skipping video receiver (local screen share)");
+                                    drop(st);
+                                }
+
                                 emit_state(&app_handle, &room_id, &local_identity, &audio_state, false, true, None);
                             }
                         }
@@ -575,6 +607,11 @@ async fn run_event_loop(
                             let mut st = audio_state.lock();
                             if st.screen_sharing_owner.as_deref() == Some(&identity) {
                                 st.screen_sharing_owner = None;
+                                // Shut down the video receiver and clear frame buffer
+                                if let Some(shutdown) = st.video_recv_shutdown.take() {
+                                    shutdown.store(true, Ordering::Relaxed);
+                                }
+                                crate::video_recv::clear_frame_buffer();
                             }
                             drop(st);
                             emit_state(&app_handle, &room_id, &local_identity, &audio_state, false, true, None);
@@ -650,6 +687,11 @@ async fn run_event_loop(
                             st.remote_deafened.remove(&identity);
                             if st.screen_sharing_owner.as_deref() == Some(&identity) {
                                 st.screen_sharing_owner = None;
+                                // Shut down the video receiver and clear frame buffer
+                                if let Some(shutdown) = st.video_recv_shutdown.take() {
+                                    shutdown.store(true, Ordering::Relaxed);
+                                }
+                                crate::video_recv::clear_frame_buffer();
                             }
                         }
                         emit_state(&app_handle, &room_id, &local_identity, &audio_state, false, true, None);

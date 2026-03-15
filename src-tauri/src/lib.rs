@@ -5,6 +5,7 @@ mod commands;
 mod idle;
 mod screen;
 mod types;
+pub mod video_recv;
 mod voice;
 
 use std::collections::HashMap;
@@ -66,6 +67,9 @@ pub fn run() {
     tauri::Builder::default()
         .manage(state)
         .manage(voice::VoiceManager::new())
+        .register_uri_scheme_protocol("paxvideo", |_app, request| {
+            video_recv::handle_protocol_request(request)
+        })
         .invoke_handler(tauri::generate_handler![
             commands::auth::logout,
             commands::auth::save_credentials,
