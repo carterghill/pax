@@ -1,5 +1,5 @@
 import { useState, useMemo, useCallback, useRef, useEffect } from "react";
-import { Grid2x2, Maximize2, Minimize2 } from "lucide-react";
+import { Grid2x2 } from "lucide-react";
 import { useTheme } from "../theme/ThemeContext";
 import ScreenShareViewer from "./ScreenShareViewer";
 
@@ -76,7 +76,6 @@ export default function ScreenShareGrid({
   const { cols, rows } = useMemo(() => {
     if (streamCount <= 1) return { cols: 1, rows: 1 };
 
-    const containerAR = containerSize.w / containerSize.h;
     const targetTileAR = 16 / 9; // ideal tile aspect ratio for screen content
 
     // For each candidate (cols, rows), compute how close each tile's

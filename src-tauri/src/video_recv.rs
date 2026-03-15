@@ -1,12 +1,11 @@
 //! Multi-stream screen share video reception pipeline.
 //!
-//! Supports multiple concurrent screen share streams, keyed by participant
-//! identity. Each stream has its own receive task, frame buffer, and
-//! target resolution. The frontend fetches frames per-identity via
-//! /frame?id=<identity> and reports viewport size per-identity via
-//! /resize?id=<identity>&w=X&h=Y.
+//! Sends I420 (YUV420p) planes directly to the frontend — no CPU-side
+//! color conversion. The frontend renders via WebGL YUV→RGB shader,
+//! matching how browser <video> elements work internally.
 //!
-//! Cross-platform (Linux + Windows) — libyuv handles scaling + conversion.
+//! Binary frame format: [u32 w][u32 h][Y plane: w*h][U plane: w/2*h/2][V plane: w/2*h/2]
+//! Total per frame: 8 + w*h*1.5 bytes (3.1MB for 1080p vs 8.3MB for RGBA)
 
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -21,39 +20,24 @@ use parking_lot::Mutex;
 use serde::Serialize;
 use tauri::{AppHandle, Emitter};
 
-// ─── Frame-ready event emitted to frontend ──────────────────────────────────
 #[derive(Clone, Serialize)]
 pub struct FrameReadyEvent {
     pub id: String,
 }
 
-// ─── Global state (all keyed by participant identity) ───────────────────────
-
-pub struct ScreenShareFrame {
-    /// Raw RGBA pixel data (4 bytes per pixel, row-major).
-    /// Wrapped in Arc so the protocol handler can grab a reference
-    /// without copying megabytes while holding the mutex.
-    pub rgba_data: Arc<Vec<u8>>,
-    pub width: u32,
-    pub height: u32,
-    pub frame_number: u64,
+struct StreamState {
+    /// Pre-formatted I420 response body: [u32 w][u32 h][Y][U][V] in Arc.
+    body: Arc<Vec<u8>>,
+    width: u32,
+    height: u32,
+    frame_number: u64,
+    receiving: bool,
+    target: (u32, u32),
 }
 
-/// Per-identity frame buffers. Each active screen share has its own entry.
-pub static FRAMES: Lazy<Arc<Mutex<HashMap<String, ScreenShareFrame>>>> =
-    Lazy::new(|| Arc::new(Mutex::new(HashMap::new())));
+static STREAMS: Lazy<Mutex<HashMap<String, StreamState>>> =
+    Lazy::new(|| Mutex::new(HashMap::new()));
 
-/// Per-identity "receiving" flags.
-pub static RECEIVING: Lazy<Arc<Mutex<HashMap<String, bool>>>> =
-    Lazy::new(|| Arc::new(Mutex::new(HashMap::new())));
-
-/// Per-identity target viewport dimensions (w, h). (0,0) = native resolution.
-pub static TARGETS: Lazy<Arc<Mutex<HashMap<String, (u32, u32)>>>> =
-    Lazy::new(|| Arc::new(Mutex::new(HashMap::new())));
-
-// ─── Video receive task ─────────────────────────────────────────────────────
-
-/// Spawn a background task for one participant's screen share stream.
 pub fn spawn_video_receiver(
     identity: String,
     video_track: RemoteVideoTrack,
@@ -63,18 +47,19 @@ pub fn spawn_video_receiver(
     let id = identity.clone();
     tokio::spawn(async move {
         {
-            let mut recv = RECEIVING.lock();
-            recv.insert(id.clone(), true);
+            let mut streams = STREAMS.lock();
+            let entry = streams.entry(id.clone()).or_insert_with(|| StreamState {
+                body: Arc::new(Vec::new()),
+                width: 0, height: 0, frame_number: 0,
+                receiving: true, target: (0, 0),
+            });
+            entry.receiving = true;
         }
         eprintln!("[Pax VideoRecv] Task started for '{}'", id);
 
         let rtc_track = video_track.rtc_track();
         let mut stream = NativeVideoStream::new(rtc_track);
         let mut frame_number: u64 = 0;
-        // Reusable RGBA buffer — avoids allocation every frame when dimensions are stable
-        let mut rgba_buf: Vec<u8> = Vec::new();
-        let mut buf_w: u32 = 0;
-        let mut buf_h: u32 = 0;
 
         loop {
             let first = stream.next().await;
@@ -104,80 +89,93 @@ pub fn spawn_video_receiver(
                 continue;
             }
 
-            // Read this stream's target viewport
             let (tgt_w, tgt_h) = {
-                let targets = TARGETS.lock();
-                targets.get(&id).copied().unwrap_or((0, 0))
+                let streams = STREAMS.lock();
+                streams.get(&id).map(|s| s.target).unwrap_or((0, 0))
             };
 
-            let (out_w, out_h) = if tgt_w > 0 && tgt_h > 0 && (tgt_w < src_w || tgt_h < src_h) {
+            let needs_scale = tgt_w > 0 && tgt_h > 0 && (tgt_w < src_w || tgt_h < src_h);
+            let (out_w, out_h) = if needs_scale {
                 fit_dimensions(src_w, src_h, tgt_w, tgt_h)
             } else {
                 (src_w, src_h)
             };
 
-            let final_i420 = if out_w != src_w || out_h != src_h {
+            let final_i420 = if needs_scale {
                 i420.scale(out_w as i32, out_h as i32)
             } else {
                 i420
             };
 
-            let (data_y, data_u, data_v) = final_i420.data();
-            let (stride_y, stride_u, stride_v) = final_i420.strides();
             let w = final_i420.width();
             let h = final_i420.height();
-            let dst_stride = w * 4;
-            let needed = (dst_stride * h) as usize;
+            let (data_y, data_u, data_v) = final_i420.data();
+            let (stride_y, stride_u, stride_v) = final_i420.strides();
 
-            // Reuse buffer if dimensions match, otherwise reallocate
-            if w != buf_w || h != buf_h {
-                rgba_buf = vec![0u8; needed];
-                buf_w = w;
-                buf_h = h;
+            let cw = (w / 2) as usize;
+            let ch = (h / 2) as usize;
+            let y_size = (w * h) as usize;
+            let uv_size = cw * ch;
+            let total = 8 + y_size + uv_size * 2;
+
+            let mut body = Vec::with_capacity(total);
+            body.extend_from_slice(&w.to_le_bytes());
+            body.extend_from_slice(&h.to_le_bytes());
+
+            // Pack Y plane (remove stride padding if any)
+            if stride_y == w {
+                body.extend_from_slice(&data_y[..y_size]);
+            } else {
+                for row in 0..h as usize {
+                    let start = row * stride_y as usize;
+                    body.extend_from_slice(&data_y[start..start + w as usize]);
+                }
             }
 
-            libwebrtc::native::yuv_helper::i420_to_abgr(
-                data_y, stride_y,
-                data_u, stride_u,
-                data_v, stride_v,
-                &mut rgba_buf, dst_stride,
-                w as i32, h as i32,
-            );
+            // Pack U plane
+            if stride_u == cw as u32 {
+                body.extend_from_slice(&data_u[..uv_size]);
+            } else {
+                for row in 0..ch {
+                    let start = row * stride_u as usize;
+                    body.extend_from_slice(&data_u[start..start + cw]);
+                }
+            }
+
+            // Pack V plane
+            if stride_v == cw as u32 {
+                body.extend_from_slice(&data_v[..uv_size]);
+            } else {
+                for row in 0..ch {
+                    let start = row * stride_v as usize;
+                    body.extend_from_slice(&data_v[start..start + cw]);
+                }
+            }
 
             frame_number += 1;
-
-            // Wrap in Arc — the protocol handler clones the Arc (cheap pointer)
-            // instead of copying megabytes while holding the mutex.
-            let frame_data = Arc::new(rgba_buf.clone());
+            let frame_body = Arc::new(body);
 
             {
-                let mut frames = FRAMES.lock();
-                frames.insert(id.clone(), ScreenShareFrame {
-                    rgba_data: frame_data,
-                    width: w,
-                    height: h,
-                    frame_number,
+                let mut streams = STREAMS.lock();
+                let entry = streams.entry(id.clone()).or_insert_with(|| StreamState {
+                    body: Arc::new(Vec::new()),
+                    width: 0, height: 0, frame_number: 0,
+                    receiving: true, target: (tgt_w, tgt_h),
                 });
+                entry.body = frame_body;
+                entry.width = w;
+                entry.height = h;
+                entry.frame_number = frame_number;
             }
 
-            // Notify frontend immediately — no polling delay
             let _ = app_handle.emit("screen-share-frame-ready", FrameReadyEvent {
                 id: id.clone(),
             });
         }
 
-        // Clean up this stream's state
         {
-            let mut frames = FRAMES.lock();
-            frames.remove(&id);
-        }
-        {
-            let mut recv = RECEIVING.lock();
-            recv.remove(&id);
-        }
-        {
-            let mut targets = TARGETS.lock();
-            targets.remove(&id);
+            let mut streams = STREAMS.lock();
+            streams.remove(&id);
         }
         eprintln!("[Pax VideoRecv] Exited for '{}'", id);
     });
@@ -187,90 +185,58 @@ fn fit_dimensions(src_w: u32, src_h: u32, max_w: u32, max_h: u32) -> (u32, u32) 
     let scale_x = max_w as f64 / src_w as f64;
     let scale_y = max_h as f64 / src_h as f64;
     let scale = scale_x.min(scale_y).min(1.0);
-
     let mut w = (src_w as f64 * scale).round() as u32;
     let mut h = (src_h as f64 * scale).round() as u32;
-
     w = (w / 2) * 2;
     h = (h / 2) * 2;
-    w = w.max(2);
-    h = h.max(2);
-
-    (w, h)
+    (w.max(2), h.max(2))
 }
 
-/// Clear one identity's frame buffer.
 pub fn clear_frame_buffer_for(identity: &str) {
-    FRAMES.lock().remove(identity);
-    RECEIVING.lock().remove(identity);
-    TARGETS.lock().remove(identity);
+    STREAMS.lock().remove(identity);
 }
 
-/// Clear all frame buffers (used on voice disconnect).
 pub fn clear_all_frame_buffers() {
-    FRAMES.lock().clear();
-    RECEIVING.lock().clear();
-    TARGETS.lock().clear();
+    STREAMS.lock().clear();
 }
 
 // ─── URI scheme protocol handler ────────────────────────────────────────────
 
-/// URL paths:
-///   /frame?id=X          — binary frame for identity X
-///   /resize?id=X&w=Y&h=Z — set target viewport for identity X
-///   /status              — JSON { streams: [{ id, receiving, frameNumber, width, height }] }
 pub fn handle_protocol_request(
     request: tauri::http::Request<Vec<u8>>,
 ) -> tauri::http::Response<Vec<u8>> {
     let uri = request.uri().to_string();
     let path = request.uri().path();
 
-    // ── /resize?id=X&w=Y&h=Z ───────────────────────────────────────────
     if path == "/resize" {
         let id = parse_query_param_str(&uri, "id").unwrap_or_default();
         let w = parse_query_param_u32(&uri, "w").unwrap_or(0);
         let h = parse_query_param_u32(&uri, "h").unwrap_or(0);
         if !id.is_empty() {
-            let mut targets = TARGETS.lock();
-            if w == 0 && h == 0 {
-                targets.remove(&id);
-            } else {
-                targets.insert(id, (w, h));
+            let mut streams = STREAMS.lock();
+            if let Some(entry) = streams.get_mut(&id) {
+                entry.target = if w == 0 && h == 0 { (0, 0) } else { (w, h) };
+            } else if w > 0 && h > 0 {
+                streams.insert(id, StreamState {
+                    body: Arc::new(Vec::new()),
+                    width: 0, height: 0, frame_number: 0,
+                    receiving: false, target: (w, h),
+                });
             }
         }
         return ok_204();
     }
 
-    // ── /status ─────────────────────────────────────────────────────────
     if path == "/status" || path.is_empty() || path == "/" {
-        let frames = FRAMES.lock();
-        let recv = RECEIVING.lock();
-
-        let mut streams = Vec::new();
-        // Include all identities we know about (receiving or with frames)
-        let mut all_ids: Vec<String> = recv.keys().cloned().collect();
-        for k in frames.keys() {
-            if !all_ids.contains(k) {
-                all_ids.push(k.clone());
-            }
-        }
-        for id in &all_ids {
-            let receiving = recv.get(id).copied().unwrap_or(false);
-            let (frame_number, width, height) = frames
-                .get(id)
-                .map(|f| (f.frame_number, f.width, f.height))
-                .unwrap_or((0, 0, 0));
-            streams.push(format!(
+        let streams = STREAMS.lock();
+        let mut items = Vec::new();
+        for (id, s) in streams.iter() {
+            items.push(format!(
                 r#"{{"id":"{}","receiving":{},"frameNumber":{},"width":{},"height":{}}}"#,
-                id.replace('"', "\\\""),
-                receiving,
-                frame_number,
-                width,
-                height,
+                id.replace('"', "\\\""), s.receiving, s.frame_number, s.width, s.height,
             ));
         }
-
-        let json = format!(r#"{{"streams":[{}]}}"#, streams.join(","));
+        let json = format!(r#"{{"streams":[{}]}}"#, items.join(","));
         return tauri::http::Response::builder()
             .status(200)
             .header("content-type", "application/json")
@@ -280,28 +246,29 @@ pub fn handle_protocol_request(
             .unwrap_or_else(|_| err_500());
     }
 
-    // ── /frame?id=X ─────────────────────────────────────────────────────
     if path == "/frame" {
         let id = parse_query_param_str(&uri, "id").unwrap_or_default();
         if id.is_empty() {
             return ok_204();
         }
 
-        // Grab an Arc reference + dimensions under the lock (nanoseconds),
-        // then drop the lock before building the response body.
-        let frame_info = {
-            let frames = FRAMES.lock();
-            frames.get(&id).map(|f| (f.rgba_data.clone(), f.width, f.height))
+        // Swap the body OUT of STREAMS — handler gets sole Arc ownership,
+        // so Arc::try_unwrap always succeeds (no 3.1MB clone).
+        // If the frontend re-fetches before the next frame, it gets 204.
+        let body_arc = {
+            let mut streams = STREAMS.lock();
+            streams.get_mut(&id).and_then(|s| {
+                if s.body.is_empty() {
+                    None
+                } else {
+                    Some(std::mem::replace(&mut s.body, Arc::new(Vec::new())))
+                }
+            })
         };
 
-        if let Some((rgba_arc, width, height)) = frame_info {
-            let header_size = 8;
-            let pixel_size = rgba_arc.len();
-            let mut body = Vec::with_capacity(header_size + pixel_size);
-            body.extend_from_slice(&width.to_le_bytes());
-            body.extend_from_slice(&height.to_le_bytes());
-            body.extend_from_slice(&rgba_arc);
-
+        if let Some(arc) = body_arc {
+            // try_unwrap now always succeeds — we're the only holder
+            let body = Arc::try_unwrap(arc).unwrap_or_else(|arc| (*arc).clone());
             return tauri::http::Response::builder()
                 .status(200)
                 .header("content-type", "application/octet-stream")
@@ -320,8 +287,6 @@ pub fn handle_protocol_request(
         .unwrap()
 }
 
-// ─── Helpers ────────────────────────────────────────────────────────────────
-
 fn ok_204() -> tauri::http::Response<Vec<u8>> {
     tauri::http::Response::builder()
         .status(204)
@@ -337,32 +302,28 @@ fn err_500() -> tauri::http::Response<Vec<u8>> {
         .unwrap()
 }
 
-/// Parse a u32 query parameter.
 fn parse_query_param_u32(uri: &str, key: &str) -> Option<u32> {
     parse_query_param_str(uri, key)?.parse().ok()
 }
 
-/// Parse a string query parameter (URL-decoded).
 fn parse_query_param_str(uri: &str, key: &str) -> Option<String> {
     let query = uri.split('?').nth(1)?;
     for pair in query.split('&') {
         let mut kv = pair.splitn(2, '=');
         if kv.next()? == key {
-            let raw = kv.next()?;
-            return Some(url_decode(raw));
+            return Some(url_decode(kv.next()?));
         }
     }
     None
 }
 
-/// Basic percent-decoding for query parameter values.
 fn url_decode(s: &str) -> String {
     let mut result = String::with_capacity(s.len());
     let mut chars = s.bytes();
     while let Some(b) = chars.next() {
         if b == b'%' {
-            let hi = chars.next().and_then(|c| hex_val(c));
-            let lo = chars.next().and_then(|c| hex_val(c));
+            let hi = chars.next().and_then(hex_val);
+            let lo = chars.next().and_then(hex_val);
             if let (Some(h), Some(l)) = (hi, lo) {
                 result.push((h << 4 | l) as char);
             }
