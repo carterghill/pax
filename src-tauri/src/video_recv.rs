@@ -55,55 +55,57 @@ pub fn spawn_video_receiver(
         eprintln!("[Pax VideoRecv] Task started, creating NativeVideoStream...");
 
         let rtc_track = video_track.rtc_track();
-        eprintln!("[Pax VideoRecv] Got rtc_track, creating stream...");
         let mut stream = NativeVideoStream::new(rtc_track);
-        eprintln!("[Pax VideoRecv] NativeVideoStream created, waiting for first frame...");
+        eprintln!("[Pax VideoRecv] NativeVideoStream created, waiting for frames...");
         let mut frame_number: u64 = 0;
-        let mut skip_counter: u64 = 0;
 
-        while let Some(video_frame) = stream.next().await {
-            skip_counter += 1;
-
-            // Log first few frames to confirm reception
-            if skip_counter <= 5 {
-                eprintln!(
-                    "[Pax VideoRecv] Frame #{} received (rotation={:?}, ts={})",
-                    skip_counter, video_frame.rotation, video_frame.timestamp_us
-                );
-            }
+        loop {
+            // 1. Wait for at least one frame
+            let first = stream.next().await;
+            let Some(mut latest_frame) = first else {
+                eprintln!("[Pax VideoRecv] Stream ended");
+                break;
+            };
 
             if shutdown.load(Ordering::Relaxed) {
                 eprintln!("[Pax VideoRecv] Shutdown requested");
                 break;
             }
 
-            // Throttle: if the sender is at 30fps, only process every other
-            // frame to target ~15fps for the viewer.  This saves significant
-            // CPU on the I420→JPEG encode.
-            if skip_counter % 2 != 0 {
-                continue;
+            // 2. Drain all buffered frames, keeping ONLY the newest.
+            //    This is the key to staying current — if encoding took 50ms
+            //    and 2 more frames arrived, we skip them and show the latest.
+            let mut drained = 0u32;
+            loop {
+                match futures_util::FutureExt::now_or_never(stream.next()) {
+                    Some(Some(newer_frame)) => {
+                        latest_frame = newer_frame;
+                        drained += 1;
+                    }
+                    _ => break,
+                }
+            }
+            if drained > 0 && frame_number < 5 {
+                eprintln!("[Pax VideoRecv] Drained {} stale frames", drained);
             }
 
-            // Convert the native buffer to I420 for a consistent pixel layout.
-            let i420 = video_frame.buffer.to_i420();
+            // 3. Convert I420 → RGBA (SIMD-fast, ~1ms)
+            let i420 = latest_frame.buffer.to_i420();
             let width = i420.width();
             let height = i420.height();
-
-            if skip_counter <= 10 {
-                eprintln!("[Pax VideoRecv] I420 frame: {}x{}", width, height);
-            }
 
             if width == 0 || height == 0 {
                 continue;
             }
 
-            // Use libwebrtc's SIMD-optimized libyuv for I420 → RGBA conversion.
             let (data_y, data_u, data_v) = i420.data();
             let (stride_y, stride_u, stride_v) = i420.strides();
             let dst_stride = width * 4;
             let mut rgba = vec![0u8; (dst_stride * height) as usize];
 
-            libwebrtc::native::yuv_helper::i420_to_rgba(
+            // NOTE: libyuv naming is counterintuitive — i420_to_abgr produces
+            // actual [R,G,B,A] byte order in memory (what everyone else calls RGBA).
+            libwebrtc::native::yuv_helper::i420_to_abgr(
                 data_y, stride_y,
                 data_u, stride_u,
                 data_v, stride_v,
@@ -111,22 +113,19 @@ pub fn spawn_video_receiver(
                 width as i32, height as i32,
             );
 
-            let jpeg = match encode_jpeg(&rgba, width, height) {
-                Some(data) => {
-                    if skip_counter <= 10 {
-                        eprintln!("[Pax VideoRecv] JPEG encoded: {} bytes", data.len());
-                    }
-                    data
-                }
-                None => {
-                    eprintln!("[Pax VideoRecv] JPEG encode FAILED for {}x{}", width, height);
-                    continue;
-                }
-            };
+            // 4. JPEG encode on a blocking thread so we don't stall the tokio runtime.
+            let jpeg = tokio::task::spawn_blocking(move || {
+                encode_jpeg(&rgba, width, height)
+            })
+            .await
+            .ok()
+            .flatten();
+
+            let Some(jpeg) = jpeg else { continue; };
 
             frame_number += 1;
 
-            // Store the latest frame (overwrite any previous one).
+            // 5. Store the latest frame (overwrite any previous one).
             {
                 let mut guard = SCREEN_SHARE_FRAME.lock();
                 *guard = Some(ScreenShareFrame {
