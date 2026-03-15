@@ -30,7 +30,10 @@ pub struct FrameReadyEvent {
 // ─── Global state (all keyed by participant identity) ───────────────────────
 
 pub struct ScreenShareFrame {
-    pub rgba_data: Vec<u8>,
+    /// Raw RGBA pixel data (4 bytes per pixel, row-major).
+    /// Wrapped in Arc so the protocol handler can grab a reference
+    /// without copying megabytes while holding the mutex.
+    pub rgba_data: Arc<Vec<u8>>,
     pub width: u32,
     pub height: u32,
     pub frame_number: u64,
@@ -68,6 +71,10 @@ pub fn spawn_video_receiver(
         let rtc_track = video_track.rtc_track();
         let mut stream = NativeVideoStream::new(rtc_track);
         let mut frame_number: u64 = 0;
+        // Reusable RGBA buffer — avoids allocation every frame when dimensions are stable
+        let mut rgba_buf: Vec<u8> = Vec::new();
+        let mut buf_w: u32 = 0;
+        let mut buf_h: u32 = 0;
 
         loop {
             let first = stream.next().await;
@@ -120,22 +127,33 @@ pub fn spawn_video_receiver(
             let w = final_i420.width();
             let h = final_i420.height();
             let dst_stride = w * 4;
-            let mut rgba = vec![0u8; (dst_stride * h) as usize];
+            let needed = (dst_stride * h) as usize;
+
+            // Reuse buffer if dimensions match, otherwise reallocate
+            if w != buf_w || h != buf_h {
+                rgba_buf = vec![0u8; needed];
+                buf_w = w;
+                buf_h = h;
+            }
 
             libwebrtc::native::yuv_helper::i420_to_abgr(
                 data_y, stride_y,
                 data_u, stride_u,
                 data_v, stride_v,
-                &mut rgba, dst_stride,
+                &mut rgba_buf, dst_stride,
                 w as i32, h as i32,
             );
 
             frame_number += 1;
 
+            // Wrap in Arc — the protocol handler clones the Arc (cheap pointer)
+            // instead of copying megabytes while holding the mutex.
+            let frame_data = Arc::new(rgba_buf.clone());
+
             {
                 let mut frames = FRAMES.lock();
                 frames.insert(id.clone(), ScreenShareFrame {
-                    rgba_data: rgba,
+                    rgba_data: frame_data,
                     width: w,
                     height: h,
                     frame_number,
@@ -269,14 +287,20 @@ pub fn handle_protocol_request(
             return ok_204();
         }
 
-        let frames = FRAMES.lock();
-        if let Some(frame) = frames.get(&id) {
+        // Grab an Arc reference + dimensions under the lock (nanoseconds),
+        // then drop the lock before building the response body.
+        let frame_info = {
+            let frames = FRAMES.lock();
+            frames.get(&id).map(|f| (f.rgba_data.clone(), f.width, f.height))
+        };
+
+        if let Some((rgba_arc, width, height)) = frame_info {
             let header_size = 8;
-            let pixel_size = frame.rgba_data.len();
+            let pixel_size = rgba_arc.len();
             let mut body = Vec::with_capacity(header_size + pixel_size);
-            body.extend_from_slice(&frame.width.to_le_bytes());
-            body.extend_from_slice(&frame.height.to_le_bytes());
-            body.extend_from_slice(&frame.rgba_data);
+            body.extend_from_slice(&width.to_le_bytes());
+            body.extend_from_slice(&height.to_le_bytes());
+            body.extend_from_slice(&rgba_arc);
 
             return tauri::http::Response::builder()
                 .status(200)

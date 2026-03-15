@@ -32,6 +32,8 @@ export default function ScreenShareViewer({ active, identity }: ScreenShareViewe
   const { palette, spacing, typography } = useTheme();
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const containerRef = useRef<HTMLDivElement>(null);
+  // Reuse ImageData across frames of the same dimensions to reduce GC pressure
+  const imageDataRef = useRef<ImageData | null>(null);
   const [loading, setLoading] = useState(true);
   const [dimensions, setDimensions] = useState<{ width: number; height: number } | null>(null);
 
@@ -76,6 +78,7 @@ export default function ScreenShareViewer({ active, identity }: ScreenShareViewe
     if (!active || !identity) {
       setLoading(true);
       setDimensions(null);
+      imageDataRef.current = null;
       return;
     }
 
@@ -112,14 +115,24 @@ export default function ScreenShareViewer({ active, identity }: ScreenShareViewe
           if (canvas.width !== width || canvas.height !== height) {
             canvas.width = width;
             canvas.height = height;
+            // Dimensions changed — need a fresh ImageData
+            imageDataRef.current = null;
           }
 
           const ctx = canvas.getContext("2d");
           if (!ctx) return;
 
-          const pixels = new Uint8ClampedArray(buf, 8, width * height * 4);
-          const imageData = new ImageData(pixels, width, height);
-          ctx.putImageData(imageData, 0, 0);
+          // Reuse ImageData when dimensions are stable (avoids GC pressure)
+          let imgData = imageDataRef.current;
+          if (!imgData || imgData.width !== width || imgData.height !== height) {
+            imgData = ctx.createImageData(width, height);
+            imageDataRef.current = imgData;
+          }
+
+          // Copy pixel data into the persistent ImageData buffer
+          const src = new Uint8Array(buf, 8, width * height * 4);
+          imgData.data.set(src);
+          ctx.putImageData(imgData, 0, 0);
 
           setLoading(false);
           setDimensions((prev) =>
