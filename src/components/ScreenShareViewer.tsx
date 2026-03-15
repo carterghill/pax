@@ -7,13 +7,11 @@ import { useTheme } from "../theme/ThemeContext";
  * Rust backend via the `paxvideo://` custom URI scheme protocol.
  *
  * Architecture:
- *   Rust: LiveKit NativeVideoStream → I420→RGBA→JPEG → frame buffer
- *   Tauri: paxvideo:// URI scheme serves latest JPEG frame
- *   Frontend: polls at ~15fps → fetch → createImageBitmap → canvas drawImage
+ *   Rust: LiveKit NativeVideoStream → I420→RGBA (libyuv SIMD) → raw pixel buffer
+ *   Tauri: paxvideo:// URI scheme serves raw RGBA bytes (8-byte header + pixels)
+ *   Frontend: polls → fetch ArrayBuffer → putImageData on canvas (zero decode)
  *
- * The polling approach provides natural backpressure — if the frontend is
- * slow to render, it simply skips frames.  The Rust side only ever stores
- * the latest frame, so there's no buffering or memory growth.
+ * No JPEG encode/decode in the pipeline — raw pixel transfer only.
  */
 
 interface ScreenShareViewerProps {
@@ -39,7 +37,6 @@ export default function ScreenShareViewer({ active }: ScreenShareViewerProps) {
   const { palette, spacing, typography } = useTheme();
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const containerRef = useRef<HTMLDivElement>(null);
-  const animFrameRef = useRef<number>(0);
   const [loading, setLoading] = useState(true);
   const [dimensions, setDimensions] = useState<{ width: number; height: number } | null>(null);
 
@@ -48,49 +45,43 @@ export default function ScreenShareViewer({ active }: ScreenShareViewerProps) {
     if (!canvas) return;
 
     try {
-      const url = getPaxVideoUrl("/frame");
-      const resp = await fetch(url);
+      const resp = await fetch(getPaxVideoUrl("/frame"));
 
-      if (resp.status === 204) {
-        // No frame available yet
-        return;
-      }
-      if (!resp.ok) return;
+      if (resp.status === 204 || !resp.ok) return;
 
-      const blob = await resp.blob();
-      if (blob.size === 0) return;
+      const buf = await resp.arrayBuffer();
+      // Binary format: 4 bytes width (u32 LE) + 4 bytes height (u32 LE) + RGBA pixels
+      if (buf.byteLength < 8) return;
 
-      // We got a real frame — clear loading state
+      const header = new DataView(buf, 0, 8);
+      const width = header.getUint32(0, true);   // little-endian
+      const height = header.getUint32(4, true);
+
+      const expectedSize = 8 + width * height * 4;
+      if (buf.byteLength < expectedSize || width === 0 || height === 0) return;
+
+      // Clear loading on first good frame
       if (loading) setLoading(false);
 
-      // createImageBitmap decodes the JPEG off the main thread
-      const bitmap = await createImageBitmap(blob);
+      if (!dimensions || dimensions.width !== width || dimensions.height !== height) {
+        setDimensions({ width, height });
+      }
 
-      if (
-        !dimensions ||
-        dimensions.width !== bitmap.width ||
-        dimensions.height !== bitmap.height
-      ) {
-        setDimensions({ width: bitmap.width, height: bitmap.height });
+      // Size the canvas to match the frame
+      if (canvas.width !== width || canvas.height !== height) {
+        canvas.width = width;
+        canvas.height = height;
       }
 
       const ctx = canvas.getContext("2d");
-      if (!ctx) {
-        bitmap.close();
-        return;
-      }
+      if (!ctx) return;
 
-      // Scale canvas to match the frame dimensions (for crisp rendering)
-      if (canvas.width !== bitmap.width || canvas.height !== bitmap.height) {
-        canvas.width = bitmap.width;
-        canvas.height = bitmap.height;
-      }
-
-      ctx.drawImage(bitmap, 0, 0);
-      bitmap.close();
-    } catch (e) {
-      // Fetch errors are expected when screen share just started/stopped
-      // or the protocol isn't ready yet. Silently retry.
+      // Create ImageData directly from the raw RGBA bytes — zero decoding
+      const pixels = new Uint8ClampedArray(buf, 8, width * height * 4);
+      const imageData = new ImageData(pixels, width, height);
+      ctx.putImageData(imageData, 0, 0);
+    } catch {
+      // Silently retry — expected during start/stop transitions
     }
   }, [loading, dimensions]);
 
@@ -106,8 +97,9 @@ export default function ScreenShareViewer({ active }: ScreenShareViewerProps) {
     const poll = async () => {
       while (running) {
         await fetchAndDrawFrame();
-        // Target ~15fps polling interval.
-        await new Promise((r) => setTimeout(r, 66));
+        // Minimal delay — Rust side stores latest-only so we can poll fast.
+        // The fetch round-trip (~3-5ms for 8MB in-process) is the natural throttle.
+        await new Promise((r) => setTimeout(r, 16)); // ~60fps cap
       }
     };
 
@@ -115,9 +107,6 @@ export default function ScreenShareViewer({ active }: ScreenShareViewerProps) {
 
     return () => {
       running = false;
-      if (animFrameRef.current) {
-        cancelAnimationFrame(animFrameRef.current);
-      }
     };
   }, [active, fetchAndDrawFrame]);
 
@@ -164,8 +153,6 @@ export default function ScreenShareViewer({ active }: ScreenShareViewerProps) {
           maxHeight: "100%",
           objectFit: "contain",
           display: loading ? "none" : "block",
-          // Crisp pixel rendering for screen content (text, code, etc.)
-          imageRendering: "auto",
         }}
       />
       {dimensions && !loading && (
