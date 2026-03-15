@@ -6,12 +6,15 @@ import { useTheme } from "../theme/ThemeContext";
 /**
  * ScreenShareViewer — GPU-accelerated YUV video renderer.
  *
- * Pipeline:
- *   Rust: LiveKit → I420 scale (libyuv) → pack Y/U/V planes → emit event
- *   Frontend: event → fetch I420 (~3MB) → upload 3 GL textures → YUV→RGB shader
+ * Architecture: STEADY PRESENTATION CLOCK
+ *   - Rust events set a "frame available" flag (instant, no async work)
+ *   - A continuous rAF loop checks the flag on each vsync tick
+ *   - If set: fetch the latest frame and draw
+ *   - If not: do nothing (canvas retains previous frame)
  *
- * This matches how browser <video> elements work internally.
- * At 1080p: 3.1MB transfer + GPU shader vs old 8.3MB + CPU putImageData.
+ * This decouples display timing from source timing, eliminating the
+ * "speeds up / slows down" pacing artifacts that occur when frame
+ * display is driven by irregular source events.
  */
 
 interface ScreenShareViewerProps {
@@ -30,12 +33,11 @@ const VERTEX_SRC = `
   varying vec2 v_uv;
   void main() {
     v_uv = a_pos * 0.5 + 0.5;
-    v_uv.y = 1.0 - v_uv.y; // flip Y for top-down image data
+    v_uv.y = 1.0 - v_uv.y;
     gl_Position = vec4(a_pos, 0.0, 1.0);
   }
 `;
 
-// BT.601 limited range YUV→RGB conversion (standard for WebRTC video)
 const FRAGMENT_SRC = `
   precision mediump float;
   varying vec2 v_uv;
@@ -46,7 +48,6 @@ const FRAGMENT_SRC = `
     float y = texture2D(u_y, v_uv).r;
     float u = texture2D(u_u, v_uv).r - 0.5;
     float v = texture2D(u_v, v_uv).r - 0.5;
-    // BT.601
     float r = y + 1.402 * v;
     float g = y - 0.344 * u - 0.714 * v;
     float b = y + 1.772 * u;
@@ -74,7 +75,6 @@ function initGl(canvas: HTMLCanvasElement): GlState | null {
   });
   if (!gl) return null;
 
-  // Compile shaders
   const vs = gl.createShader(gl.VERTEX_SHADER)!;
   gl.shaderSource(vs, VERTEX_SRC);
   gl.compileShader(vs);
@@ -89,7 +89,6 @@ function initGl(canvas: HTMLCanvasElement): GlState | null {
   gl.linkProgram(program);
   gl.useProgram(program);
 
-  // Fullscreen quad (two triangles)
   const buf = gl.createBuffer();
   gl.bindBuffer(gl.ARRAY_BUFFER, buf);
   gl.bufferData(gl.ARRAY_BUFFER, new Float32Array([
@@ -101,16 +100,11 @@ function initGl(canvas: HTMLCanvasElement): GlState | null {
   gl.enableVertexAttribArray(aPos);
   gl.vertexAttribPointer(aPos, 2, gl.FLOAT, false, 0, 0);
 
-  // Bind texture units to uniforms
   gl.uniform1i(gl.getUniformLocation(program, "u_y"), 0);
   gl.uniform1i(gl.getUniformLocation(program, "u_u"), 1);
   gl.uniform1i(gl.getUniformLocation(program, "u_v"), 2);
-
-  // LUMINANCE textures have 1-byte-per-pixel rows — must disable
-  // the default 4-byte row alignment or uploads read garbage.
   gl.pixelStorei(gl.UNPACK_ALIGNMENT, 1);
 
-  // Create textures
   const texY = createLuminanceTexture(gl);
   const texU = createLuminanceTexture(gl);
   const texV = createLuminanceTexture(gl);
@@ -149,17 +143,13 @@ function uploadAndDraw(state: GlState, buf: ArrayBuffer, width: number, height: 
     state.currentH = height;
   }
 
-  // Use texSubImage2D when dimensions are stable (just updates pixel data,
-  // no GPU-side texture reallocation). Fall back to texImage2D on size change.
   if (dimsChanged) {
     gl.activeTexture(gl.TEXTURE0);
     gl.bindTexture(gl.TEXTURE_2D, texY);
     gl.texImage2D(gl.TEXTURE_2D, 0, gl.LUMINANCE, width, height, 0, gl.LUMINANCE, gl.UNSIGNED_BYTE, yData);
-
     gl.activeTexture(gl.TEXTURE1);
     gl.bindTexture(gl.TEXTURE_2D, texU);
     gl.texImage2D(gl.TEXTURE_2D, 0, gl.LUMINANCE, cw, ch, 0, gl.LUMINANCE, gl.UNSIGNED_BYTE, uData);
-
     gl.activeTexture(gl.TEXTURE2);
     gl.bindTexture(gl.TEXTURE_2D, texV);
     gl.texImage2D(gl.TEXTURE_2D, 0, gl.LUMINANCE, cw, ch, 0, gl.LUMINANCE, gl.UNSIGNED_BYTE, vData);
@@ -167,11 +157,9 @@ function uploadAndDraw(state: GlState, buf: ArrayBuffer, width: number, height: 
     gl.activeTexture(gl.TEXTURE0);
     gl.bindTexture(gl.TEXTURE_2D, texY);
     gl.texSubImage2D(gl.TEXTURE_2D, 0, 0, 0, width, height, gl.LUMINANCE, gl.UNSIGNED_BYTE, yData);
-
     gl.activeTexture(gl.TEXTURE1);
     gl.bindTexture(gl.TEXTURE_2D, texU);
     gl.texSubImage2D(gl.TEXTURE_2D, 0, 0, 0, cw, ch, gl.LUMINANCE, gl.UNSIGNED_BYTE, uData);
-
     gl.activeTexture(gl.TEXTURE2);
     gl.bindTexture(gl.TEXTURE_2D, texV);
     gl.texSubImage2D(gl.TEXTURE_2D, 0, 0, 0, cw, ch, gl.LUMINANCE, gl.UNSIGNED_BYTE, vData);
@@ -189,15 +177,10 @@ export default function ScreenShareViewer({ active, identity }: ScreenShareViewe
   const glStateRef = useRef<GlState | null>(null);
   const [loading, setLoading] = useState(true);
   const [dimensions, setDimensions] = useState<{ width: number; height: number } | null>(null);
-  // Refs to avoid calling React setState on every frame
   const loadingRef = useRef(true);
   const dimsRef = useRef<{ width: number; height: number } | null>(null);
 
   // ── Debounced resize reporting ──────────────────────────────────────
-  // Report 85% of actual viewport — CSS bilinear upscale handles the rest
-  // invisibly. Cuts IPC data ~28% (e.g. 2.2MB vs 3.1MB at 1080p).
-  // This matches WebRTC SFU behavior where screen share caps below native.
-  const IPC_SCALE = 0.85;
   useEffect(() => {
     if (!active || !containerRef.current) return;
 
@@ -209,8 +192,8 @@ export default function ScreenShareViewer({ active, identity }: ScreenShareViewe
       if (!el) return;
       const rect = el.getBoundingClientRect();
       const dpr = window.devicePixelRatio || 1;
-      const w = Math.round(rect.width * dpr * IPC_SCALE);
-      const h = Math.round(rect.height * dpr * IPC_SCALE);
+      const w = Math.round(rect.width * dpr);
+      const h = Math.round(rect.height * dpr);
       if (w > 0 && h > 0) {
         fetch(`${URL_PREFIX}/resize?id=${encodedId}&w=${w}&h=${h}`).catch(() => {});
       }
@@ -230,13 +213,17 @@ export default function ScreenShareViewer({ active, identity }: ScreenShareViewe
     };
   }, [active, identity]);
 
-  // ── Event-driven frame delivery ────────────────────────────────────
-  // Single `busy` flag spans the entire fetch→draw cycle. If events arrive
-  // while busy, we set `pendingEvent` so we immediately start the next
-  // fetch after the current draw completes. This prevents:
-  //   - Wasted fetches (old: two fetches in flight, one buffer discarded)
-  //   - GC pressure from discarded ArrayBuffers
-  //   - Pipeline overrun while maintaining responsiveness
+  // ── Steady presentation clock ──────────────────────────────────────
+  //
+  // Instead of: event → fetch → rAF → draw (display locked to source clock)
+  // We use:     event → set flag; rAF loop → if flag → fetch → draw
+  //
+  // The rAF loop runs at display refresh rate (60Hz). On each vsync tick:
+  //   - If frameAvailable is set AND no fetch is in flight → start fetch+draw
+  //   - Otherwise → do nothing (canvas retains previous frame)
+  //
+  // This guarantees frames are presented at steady vsync intervals regardless
+  // of when source frames arrive. No more 16ms-16ms-33ms stutter pattern.
   useEffect(() => {
     if (!active || !identity) {
       setLoading(true);
@@ -248,54 +235,43 @@ export default function ScreenShareViewer({ active, identity }: ScreenShareViewe
     }
 
     let mounted = true;
-    let busy = false;
-    let pendingEvent = false; // event arrived while busy — fetch again after draw
+    let frameAvailable = true; // start true to fetch first frame immediately
+    let fetchInFlight = false;
     let rafId = 0;
     let unlisten: UnlistenFn | null = null;
     const encodedId = encodeURIComponent(identity);
 
-    const onDrawComplete = () => {
-      busy = false;
-      // If we missed events while busy, immediately start next cycle
-      if (pendingEvent && mounted) {
-        pendingEvent = false;
-        fetchAndDraw();
-      }
-    };
+    // The presentation loop — runs every vsync
+    const tick = () => {
+      if (!mounted) return;
+      rafId = requestAnimationFrame(tick); // schedule next tick first
 
-    const fetchAndDraw = async () => {
-      if (busy || !mounted) {
-        // Mark that we want to fetch again once the current cycle finishes
-        pendingEvent = true;
-        return;
-      }
-      busy = true;
-      pendingEvent = false;
+      // Nothing to do if no new frame or fetch already in progress
+      if (!frameAvailable || fetchInFlight) return;
 
-      try {
-        const resp = await fetch(`${URL_PREFIX}/frame?id=${encodedId}`);
-        if (!mounted) { busy = false; return; }
-        if (resp.status === 204 || !resp.ok) { onDrawComplete(); return; }
+      // Consume the flag and start fetch
+      frameAvailable = false;
+      fetchInFlight = true;
 
-        const buf = await resp.arrayBuffer();
-        if (!mounted) { busy = false; return; }
-        if (buf.byteLength < 8) { onDrawComplete(); return; }
+      // Async fetch+draw — fires off, doesn't block the rAF loop
+      (async () => {
+        try {
+          const resp = await fetch(`${URL_PREFIX}/frame?id=${encodedId}`);
+          if (!mounted) return;
+          if (resp.status === 204 || !resp.ok) return;
 
-        const header = new DataView(buf, 0, 8);
-        const width = header.getUint32(0, true);
-        const height = header.getUint32(4, true);
+          const buf = await resp.arrayBuffer();
+          if (!mounted) return;
+          if (buf.byteLength < 8) return;
 
-        const ySize = width * height;
-        const uvSize = (width >> 1) * (height >> 1);
-        const expectedSize = 8 + ySize + uvSize * 2;
-        if (buf.byteLength < expectedSize || width === 0 || height === 0) {
-          onDrawComplete();
-          return;
-        }
+          const header = new DataView(buf, 0, 8);
+          const width = header.getUint32(0, true);
+          const height = header.getUint32(4, true);
 
-        // Draw at next vsync — busy stays true until draw completes
-        rafId = requestAnimationFrame(() => {
-          if (!mounted) { busy = false; return; }
+          const ySize = width * height;
+          const uvSize = (width >> 1) * (height >> 1);
+          const expectedSize = 8 + ySize + uvSize * 2;
+          if (buf.byteLength < expectedSize || width === 0 || height === 0) return;
 
           if (!glStateRef.current) {
             const canvas = canvasRef.current;
@@ -303,7 +279,7 @@ export default function ScreenShareViewer({ active, identity }: ScreenShareViewe
           }
 
           const glState = glStateRef.current;
-          if (!glState) { onDrawComplete(); return; }
+          if (!glState) return;
 
           uploadAndDraw(glState, buf, width, height);
 
@@ -315,27 +291,29 @@ export default function ScreenShareViewer({ active, identity }: ScreenShareViewe
             dimsRef.current = { width, height };
             setDimensions({ width, height });
           }
-
-          onDrawComplete();
-        });
-      } catch {
-        onDrawComplete();
-      }
+        } catch {
+          // Expected during start/stop transitions
+        } finally {
+          fetchInFlight = false;
+        }
+      })();
     };
 
+    // Start the presentation loop
+    rafId = requestAnimationFrame(tick);
+
+    // Rust events just set the flag — instant, no async work
     listen<{ id: string }>("screen-share-frame-ready", (event) => {
       if (event.payload.id === identity) {
-        fetchAndDraw();
+        frameAvailable = true;
       }
     }).then((fn) => {
       unlisten = fn;
     });
 
-    fetchAndDraw();
-
     return () => {
       mounted = false;
-      if (rafId) cancelAnimationFrame(rafId);
+      cancelAnimationFrame(rafId);
       if (unlisten) unlisten();
       glStateRef.current = null;
       loadingRef.current = true;
