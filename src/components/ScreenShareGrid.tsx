@@ -1,4 +1,4 @@
-import { useState, useMemo, useCallback } from "react";
+import { useState, useMemo, useCallback, useRef, useEffect } from "react";
 import { Grid2x2, Maximize2, Minimize2 } from "lucide-react";
 import { useTheme } from "../theme/ThemeContext";
 import ScreenShareViewer from "./ScreenShareViewer";
@@ -35,6 +35,23 @@ export default function ScreenShareGrid({
 }: ScreenShareGridProps) {
   const { palette, spacing, typography } = useTheme();
   const [focusedId, setFocusedId] = useState<string | null>(null);
+  const gridRef = useRef<HTMLDivElement>(null);
+  const [containerSize, setContainerSize] = useState<{ w: number; h: number }>({ w: 800, h: 600 });
+
+  // Track container size for smart grid layout
+  useEffect(() => {
+    if (!gridRef.current) return;
+    const observer = new ResizeObserver((entries) => {
+      for (const entry of entries) {
+        const rect = entry.contentRect;
+        if (rect.width > 0 && rect.height > 0) {
+          setContainerSize({ w: rect.width, h: rect.height });
+        }
+      }
+    });
+    observer.observe(gridRef.current);
+    return () => observer.disconnect();
+  }, []);
 
   // If the focused stream disappears, fall back to grid
   const effectiveFocusId = focusedId && remoteSharers.includes(focusedId) ? focusedId : null;
@@ -54,14 +71,37 @@ export default function ScreenShareGrid({
   const isGridMode = effectiveFocusId === null;
   const streamCount = allStreams.length;
 
-  // Compute CSS grid dimensions for grid mode
+  // Compute CSS grid dimensions for grid mode.
+  // Picks the arrangement where tiles are closest to 16:9 aspect ratio.
   const { cols, rows } = useMemo(() => {
     if (streamCount <= 1) return { cols: 1, rows: 1 };
-    if (streamCount === 2) return { cols: 2, rows: 1 };
-    if (streamCount <= 4) return { cols: 2, rows: 2 };
-    if (streamCount <= 6) return { cols: 3, rows: 2 };
-    return { cols: 3, rows: Math.ceil(streamCount / 3) };
-  }, [streamCount]);
+
+    const containerAR = containerSize.w / containerSize.h;
+    const targetTileAR = 16 / 9; // ideal tile aspect ratio for screen content
+
+    // For each candidate (cols, rows), compute how close each tile's
+    // aspect ratio is to 16:9 and pick the best one.
+    const candidates: Array<{ cols: number; rows: number }> = [];
+    for (let c = 1; c <= Math.min(streamCount, 4); c++) {
+      const r = Math.ceil(streamCount / c);
+      candidates.push({ cols: c, rows: r });
+    }
+
+    let best = candidates[0];
+    let bestScore = Infinity;
+    for (const cand of candidates) {
+      const tileW = containerSize.w / cand.cols;
+      const tileH = containerSize.h / cand.rows;
+      const tileAR = tileW / tileH;
+      // Score: how far from 16:9 (log ratio so over/under are weighted equally)
+      const score = Math.abs(Math.log(tileAR / targetTileAR));
+      if (score < bestScore) {
+        bestScore = score;
+        best = cand;
+      }
+    }
+    return best;
+  }, [streamCount, containerSize]);
 
   const handleTileClick = useCallback((identity: string) => {
     if (identity === "__local__") return; // Can't focus local placeholder
@@ -76,7 +116,7 @@ export default function ScreenShareGrid({
     const otherStreams = allStreams.filter((s) => s.identity !== effectiveFocusId);
 
     return (
-      <div style={{ flex: 1, display: "flex", flexDirection: "column", overflow: "hidden" }}>
+      <div ref={gridRef} style={{ flex: 1, display: "flex", flexDirection: "column", overflow: "hidden" }}>
         {/* Controls bar */}
         <div style={{
           display: "flex",
@@ -178,7 +218,7 @@ export default function ScreenShareGrid({
 
   // ── Grid mode ───────────────────────────────────────────────────────
   return (
-    <div style={{
+    <div ref={gridRef} style={{
       flex: 1,
       display: "grid",
       gridTemplateColumns: `repeat(${cols}, 1fr)`,
