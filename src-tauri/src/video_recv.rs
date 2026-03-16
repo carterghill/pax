@@ -146,11 +146,27 @@ pub fn spawn_video_receiver(
 
                     // ── Native GPU path ──────────────────────────────
                     if let Some(ref mut renderer) = gpu_renderer {
-                        let (data_y, data_u, data_v) = i420.data();
-                        let (stride_y, stride_u, stride_v) = i420.strides();
+                        // Read target viewport size to scale the frame
+                        // BEFORE uploading to GPU.  This is critical:
+                        //   - Reduces upload from 3.1MB → ~0.2MB (15x less)
+                        //   - Uses libwebrtc SIMD scaler (better than bilinear)
+                        //   - Smaller planes more likely to hit fast upload path
+                        let (fit_w, fit_h) = renderer.get_fit_dimensions(src_w, src_h);
+                        let final_i420 = if fit_w > 0 && fit_h > 0
+                            && (fit_w < src_w || fit_h < src_h)
+                        {
+                            i420.scale(fit_w as i32, fit_h as i32)
+                        } else {
+                            i420
+                        };
+
+                        let w = final_i420.width();
+                        let h = final_i420.height();
+                        let (data_y, data_u, data_v) = final_i420.data();
+                        let (stride_y, stride_u, stride_v) = final_i420.strides();
                         renderer.render_frame(
                             data_y, data_u, data_v,
-                            src_w, src_h,
+                            w, h,
                             stride_y, stride_u, stride_v,
                         );
                         continue;

@@ -208,8 +208,6 @@ pub struct GpuRenderer {
     hwnd: isize,
     identity: String,
     frame_count: u64,
-    call_count: u64,
-    logged_waiting: bool,
     // Track whether HWND has been positioned/shown by video thread
     hwnd_applied_w: u32,
     hwnd_applied_h: u32,
@@ -448,19 +446,43 @@ impl GpuRenderer {
             hwnd,
             identity,
             frame_count: 0,
-            call_count: 0,
-            logged_waiting: false,
             hwnd_applied_w: 0,
             hwnd_applied_h: 0,
             hwnd_visible: false,
         })
     }
 
+    /// Compute the aspect-ratio-preserving dimensions to scale the source
+    /// frame to before uploading to GPU.  Uses the same f64 uniform-scale
+    /// approach as the WebGL fallback path for pixel-identical results.
+    /// Returns (0, 0) if the overlay hasn't received a valid target rect yet.
+    pub fn get_fit_dimensions(&self, src_w: u32, src_h: u32) -> (u32, u32) {
+        let (_, _, target_w, target_h, _) =
+            match get_overlay_target(&self.identity) {
+                Some(t) => t,
+                None => return (0, 0),
+            };
+        if target_w < 8 || target_h < 8 || src_w == 0 || src_h == 0 {
+            return (0, 0);
+        }
+        // Same uniform-scale-factor approach as fit_dimensions() in the
+        // protocol fallback path — f64 precision, applied to BOTH dimensions.
+        let scale_x = target_w as f64 / src_w as f64;
+        let scale_y = target_h as f64 / src_h as f64;
+        let scale = scale_x.min(scale_y).min(1.0); // never upscale
+        let mut w = (src_w as f64 * scale).round() as u32;
+        let mut h = (src_h as f64 * scale).round() as u32;
+        // I420 requires even dimensions
+        w = (w / 2) * 2;
+        h = (h / 2) * 2;
+        (w.max(2), h.max(2))
+    }
+
     /// Render an I420 frame to the overlay surface.
     ///
-    /// `data_y`, `data_u`, `data_v` are the raw plane buffers from
-    /// `I420Buffer::data()`.  Strides may differ from widths if the
-    /// decoder adds padding.
+    /// The caller should pre-scale the frame to `get_fit_dimensions()` before
+    /// calling this — that reduces upload bandwidth by ~15x and uses
+    /// libwebrtc's SIMD scaler for better quality than GPU bilinear.
     pub fn render_frame(
         &mut self,
         data_y: &[u8],
@@ -472,82 +494,44 @@ impl GpuRenderer {
         stride_u: u32,
         stride_v: u32,
     ) {
-        self.call_count += 1;
-
-        // Drain Win32 messages for this thread's HWND.  Without this, the
-        // main thread deadlocks during window resize (it sends WM_SIZE to
-        // our child HWND and blocks until we process it).
+        // Drain Win32 messages to prevent main-thread deadlock during resize.
         platform::pump_messages();
 
         if width == 0 || height == 0 {
-            if self.call_count <= 5 {
-                eprintln!("[Pax GpuRenderer] render_frame: skipping zero-size frame ({}x{})", width, height);
-            }
             return;
         }
 
-        // Read the target rect from the shared overlay state.
+        // Read target rect (set atomically by frontend, no mutex contention)
         let (target_x, target_y, target_w, target_h, target_visible) =
             match get_overlay_target(&self.identity) {
                 Some(t) => t,
-                None => {
-                    if self.call_count <= 5 {
-                        eprintln!("[Pax GpuRenderer] render_frame: overlay '{}' not found in OVERLAYS", self.identity);
-                    }
-                    return;
-                }
+                None => return,
             };
 
-        if self.call_count <= 5 {
-            eprintln!(
-                "[Pax GpuRenderer] render_frame #{}: frame={}x{} target={}x{} visible={}",
-                self.call_count, width, height, target_w, target_h, target_visible
-            );
-        }
-
-        // Don't render until the frontend has reported a valid size.
-        const MIN_SURFACE: u32 = 8;
-        if target_w < MIN_SURFACE || target_h < MIN_SURFACE {
-            if !self.logged_waiting {
-                eprintln!(
-                    "[Pax GpuRenderer] Waiting for frontend rect (currently {}x{})",
-                    target_w, target_h
-                );
-                self.logged_waiting = true;
-            }
+        if target_w < 8 || target_h < 8 {
             return;
         }
 
-        // Apply HWND position/size from the video thread
+        // Apply HWND position/size (thread-local, no cross-thread messaging)
         if target_w != self.hwnd_applied_w || target_h != self.hwnd_applied_h {
             platform::set_hwnd_rect(self.hwnd, target_x, target_y, target_w, target_h);
             self.hwnd_applied_w = target_w;
             self.hwnd_applied_h = target_h;
-            eprintln!(
-                "[Pax GpuRenderer] HWND resized to {}x{} at ({},{})",
-                target_w, target_h, target_x, target_y
-            );
         }
 
-        // Show/hide the HWND from the video thread
         if target_visible && !self.hwnd_visible {
             platform::set_hwnd_visible(self.hwnd, true);
             self.hwnd_visible = true;
-            eprintln!("[Pax GpuRenderer] HWND shown");
         } else if !target_visible && self.hwnd_visible {
             platform::set_hwnd_visible(self.hwnd, false);
             self.hwnd_visible = false;
-            eprintln!("[Pax GpuRenderer] HWND hidden");
         }
 
         if !target_visible {
-            if self.call_count <= 5 {
-                eprintln!("[Pax GpuRenderer] render_frame: skipping, not visible");
-            }
             return;
         }
 
-        // Configure/reconfigure wgpu surface to match the target dimensions
+        // Reconfigure surface on resize
         if target_w != self.surface_w || target_h != self.surface_h {
             self.surface_config.width = target_w;
             self.surface_config.height = target_h;
@@ -556,7 +540,7 @@ impl GpuRenderer {
             self.surface_h = target_h;
         }
 
-        // Recreate YUV textures if frame resolution changed
+        // Recreate YUV textures on frame resolution change
         let cw = width / 2;
         let ch = height / 2;
         if width != self.current_frame_w || height != self.current_frame_h {
@@ -565,86 +549,37 @@ impl GpuRenderer {
             self.current_frame_h = height;
         }
 
-        // Upload Y plane
-        upload_plane(
-            &self.queue,
-            self.tex_y.as_ref().unwrap(),
-            data_y,
-            stride_y,
-            width,
-            height,
-            &mut self.staging_y,
-        );
-        // Upload U plane
-        upload_plane(
-            &self.queue,
-            self.tex_u.as_ref().unwrap(),
-            data_u,
-            stride_u,
-            cw,
-            ch,
-            &mut self.staging_u,
-        );
-        // Upload V plane
-        upload_plane(
-            &self.queue,
-            self.tex_v.as_ref().unwrap(),
-            data_v,
-            stride_v,
-            cw,
-            ch,
-            &mut self.staging_v,
-        );
+        // Upload Y/U/V planes
+        upload_plane(&self.queue, self.tex_y.as_ref().unwrap(), data_y, stride_y, width, height, &mut self.staging_y);
+        upload_plane(&self.queue, self.tex_u.as_ref().unwrap(), data_u, stride_u, cw, ch, &mut self.staging_u);
+        upload_plane(&self.queue, self.tex_v.as_ref().unwrap(), data_v, stride_v, cw, ch, &mut self.staging_v);
 
-        // Acquire swap chain frame and render
+        // Acquire swap chain frame
         let frame = match self.surface.get_current_texture() {
             Ok(f) => f,
             Err(wgpu::SurfaceError::Outdated | wgpu::SurfaceError::Lost) => {
-                self.surface
-                    .configure(&self.device, &self.surface_config);
+                self.surface.configure(&self.device, &self.surface_config);
                 match self.surface.get_current_texture() {
                     Ok(f) => f,
-                    Err(e) => {
-                        eprintln!("[Pax GpuRenderer] Surface error after reconfig: {}", e);
-                        return;
-                    }
+                    Err(_) => return,
                 }
             }
-            Err(e) => {
-                eprintln!("[Pax GpuRenderer] Surface error: {}", e);
-                return;
-            }
+            Err(_) => return,
         };
 
-        let view = frame
-            .texture
-            .create_view(&wgpu::TextureViewDescriptor::default());
+        let view = frame.texture.create_view(&wgpu::TextureViewDescriptor::default());
 
-        // Compute letterboxed viewport to maintain source aspect ratio.
-        // The clear color (black) fills the bars.
-        let src_aspect = width as f32 / height as f32;
-        let dst_aspect = target_w as f32 / target_h as f32;
-        let (vp_x, vp_y, vp_w, vp_h) = if src_aspect > dst_aspect {
-            // Source is wider — pillarbox (black bars top/bottom)
-            let fit_h = (target_w as f32 / src_aspect).round() as u32;
-            let y_off = (target_h.saturating_sub(fit_h)) / 2;
-            (0, y_off, target_w, fit_h)
-        } else {
-            // Source is taller — letterbox (black bars left/right)
-            let fit_w = (target_h as f32 * src_aspect).round() as u32;
-            let x_off = (target_w.saturating_sub(fit_w)) / 2;
-            (x_off, 0, fit_w, target_h)
-        };
+        // Viewport: center the (pre-scaled) frame within the container.
+        // Since the caller already scaled to the correct aspect ratio,
+        // the frame dimensions define the viewport directly.
+        let vp_x = (target_w.saturating_sub(width)) / 2;
+        let vp_y = (target_h.saturating_sub(height)) / 2;
 
-        let mut encoder = self
-            .device
-            .create_command_encoder(&wgpu::CommandEncoderDescriptor {
-                label: Some("yuv_enc"),
-            });
+        let mut encoder = self.device.create_command_encoder(&wgpu::CommandEncoderDescriptor { label: None });
 
         {
             let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
-                label: Some("yuv_pass"),
+                label: None,
                 color_attachments: &[Some(wgpu::RenderPassColorAttachment {
                     view: &view,
                     resolve_target: None,
@@ -658,11 +593,7 @@ impl GpuRenderer {
                 occlusion_query_set: None,
             });
 
-            pass.set_viewport(
-                vp_x as f32, vp_y as f32,
-                vp_w.max(1) as f32, vp_h.max(1) as f32,
-                0.0, 1.0,
-            );
+            pass.set_viewport(vp_x as f32, vp_y as f32, width.max(1) as f32, height.max(1) as f32, 0.0, 1.0);
             pass.set_pipeline(&self.pipeline);
             pass.set_bind_group(0, self.bind_group.as_ref().unwrap(), &[]);
             pass.draw(0..3, 0..1);
@@ -674,14 +605,11 @@ impl GpuRenderer {
         self.frame_count += 1;
         if self.frame_count == 1 {
             eprintln!(
-                "[Pax GpuRenderer] First frame rendered ({}x{} → {}x{})",
+                "[Pax GpuRenderer] First frame rendered ({}x{} in {}x{} surface)",
                 width, height, self.surface_w, self.surface_h
             );
         } else if self.frame_count % 300 == 0 {
-            eprintln!(
-                "[Pax GpuRenderer] Frame {} ({}x{} → {}x{})",
-                self.frame_count, width, height, self.surface_w, self.surface_h
-            );
+            eprintln!("[Pax GpuRenderer] Frame {}", self.frame_count);
         }
     }
 
@@ -766,7 +694,7 @@ fn upload_plane(
 ) {
     let aligned_bpr = align_up(width, wgpu::COPY_BYTES_PER_ROW_ALIGNMENT);
 
-    // Fast path: source stride matches aligned stride — no copy needed
+    // Fast path 1: source stride already matches alignment — zero copy
     if stride == aligned_bpr {
         let len = (stride * height) as usize;
         if data.len() >= len {
@@ -778,17 +706,15 @@ fn upload_plane(
                     bytes_per_row: Some(aligned_bpr),
                     rows_per_image: Some(height),
                 },
-                wgpu::Extent3d {
-                    width,
-                    height,
-                    depth_or_array_layers: 1,
-                },
+                wgpu::Extent3d { width, height, depth_or_array_layers: 1 },
             );
             return;
         }
     }
 
-    // Slow path: copy with padding into pre-allocated staging buffer
+    // Fast path 2: source stride equals width (common for scaled I420) but
+    // doesn't match alignment.  Copy each row with alignment padding.
+    // This is still a memcpy but avoids per-row bounds checks.
     let dst_stride = aligned_bpr as usize;
     let src_stride = stride as usize;
     let row_bytes = width as usize;
@@ -797,15 +723,12 @@ fn upload_plane(
         staging.resize(needed, 0);
     }
 
+    // Use copy_from_slice for each row — compiler can auto-vectorize
     for row in 0..height as usize {
         let src_start = row * src_stride;
         let dst_start = row * dst_stride;
-        let src_end = src_start + row_bytes;
-        let dst_end = dst_start + row_bytes;
-        if src_end <= data.len() && dst_end <= staging.len() {
-            staging[dst_start..dst_end]
-                .copy_from_slice(&data[src_start..src_end]);
-        }
+        staging[dst_start..dst_start + row_bytes]
+            .copy_from_slice(&data[src_start..src_start + row_bytes]);
     }
 
     queue.write_texture(
@@ -816,11 +739,7 @@ fn upload_plane(
             bytes_per_row: Some(aligned_bpr),
             rows_per_image: Some(height),
         },
-        wgpu::Extent3d {
-            width,
-            height,
-            depth_or_array_layers: 1,
-        },
+        wgpu::Extent3d { width, height, depth_or_array_layers: 1 },
     );
 }
 
