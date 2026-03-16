@@ -22,13 +22,17 @@ pub fn overlay_set_visible(identity: String, visible: bool) {
 }
 
 /// Update the obstruction rects for a native overlay.
-/// Each rect is in physical pixels relative to the overlay's origin.
-/// The video thread will clip these areas out of the HWND so DOM elements
-/// (modals, dropdowns, tooltips) show through.
 #[command]
 pub fn overlay_set_obstructions(
     identity: String,
     obstructions: Vec<crate::native_overlay::ObstructionRect>,
 ) {
     crate::native_overlay::set_overlay_obstructions(&identity, obstructions);
+}
+
+/// Get hover states for all overlays.  Returns a map of identity → hovered.
+/// Called by the frontend rAF loop to apply hover styling (e.g. border highlight).
+#[command]
+pub fn overlay_get_hover_states() -> std::collections::HashMap<String, bool> {
+    crate::native_overlay::get_all_overlay_hover_states()
 }

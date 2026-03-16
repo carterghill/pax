@@ -1,31 +1,17 @@
 /**
- * OverlayObstructions — manages clip regions for native video overlays.
+ * OverlayObstructions — manages clip regions and hover state for native
+ * video overlays.
  *
- * When DOM elements (modals, dropdowns, tooltips) overlap the native video
- * HWND, we need to clip those pixels out so the DOM content shows through.
+ * Clip regions:  When DOM elements overlap the native video HWND, we clip
+ * those pixels out so the DOM content shows through.
  *
- * Architecture:
- *   - ScreenShareViewer registers its identity + container rect
- *   - Any component with a popup/overlay calls registerObstruction(element)
- *   - A rAF loop computes intersections and sends clip rects to Rust
- *   - Rust applies SetWindowRgn to cut holes in the HWND
- *
- * Usage:
- *   // In ScreenShareViewer (already done — registers via containerRef)
- *   registerOverlay(identity, containerElement);
- *   unregisterOverlay(identity);
- *
- *   // In any popup/modal/dropdown component:
- *   const id = registerObstruction(myDivRef.current);
- *   // on cleanup:
- *   unregisterObstruction(id);
- *
- *   // Or use the React hook:
- *   useOverlayObstruction(ref, isVisible);
+ * Hover state:  The native HWND tracks WM_MOUSEMOVE / WM_MOUSELEAVE in Rust.
+ * We poll the hover state and expose it to React via useOverlayHover().
+ * This lets the frontend show border highlights, controls, etc.
  */
 
 import { invoke } from "@tauri-apps/api/core";
-import { useEffect, useRef } from "react";
+import { useEffect, useRef, useState } from "react";
 
 // ─── Types ──────────────────────────────────────────────────────────────────
 
@@ -57,50 +43,54 @@ let running = false;
 // Cache last-sent obstructions per identity to avoid redundant invokes
 const lastSent: Map<string, string> = new Map();
 
+// ─── Hover state ────────────────────────────────────────────────────────────
+
+/** Current hover states, polled from Rust every few frames. */
+const hoverStates: Map<string, boolean> = new Map();
+
+/** Listeners that want to be notified when hover states change. */
+const hoverListeners: Set<() => void> = new Set();
+
+let hoverPollCounter = 0;
+
+function notifyHoverListeners() {
+  for (const listener of hoverListeners) {
+    listener();
+  }
+}
+
 // ─── Registration API ───────────────────────────────────────────────────────
 
-/** Register a native video overlay.  Called by ScreenShareViewer. */
 export function registerOverlay(identity: string, element: HTMLElement) {
   overlays.set(identity, { identity, element });
   startLoop();
 }
 
-/** Unregister a native video overlay.  Called on ScreenShareViewer cleanup. */
 export function unregisterOverlay(identity: string) {
   overlays.delete(identity);
   lastSent.delete(identity);
-  // Clear obstructions on Rust side
+  hoverStates.delete(identity);
   invoke("overlay_set_obstructions", { identity, obstructions: [] }).catch(() => {});
   if (overlays.size === 0) {
     stopLoop();
   }
 }
 
-/**
- * Register a DOM element as an obstruction (modal, dropdown, tooltip, etc).
- * Returns an ID for unregistration.
- */
 export function registerObstruction(element: HTMLElement): number {
   const id = nextObstructionId++;
   obstructions.set(id, { id, element });
   return id;
 }
 
-/** Unregister an obstruction. */
 export function unregisterObstruction(id: number) {
   obstructions.delete(id);
 }
 
-// ─── React hook ─────────────────────────────────────────────────────────────
+// ─── React hooks ────────────────────────────────────────────────────────────
 
 /**
  * Hook for popup/modal/dropdown components.
- * Pass a ref to the popup's root element and whether it's currently visible.
- * Automatically registers/unregisters the obstruction.
- *
- * @example
- *   const menuRef = useRef<HTMLDivElement>(null);
- *   useOverlayObstruction(menuRef, isMenuOpen);
+ * Automatically registers/unregisters the element as an obstruction.
  */
 export function useOverlayObstruction(
   ref: React.RefObject<HTMLElement | null>,
@@ -121,7 +111,30 @@ export function useOverlayObstruction(
   }, [visible, ref.current]);
 }
 
-// ─── Intersection computation loop ─────────────────────────────────────────
+/**
+ * Hook to get native overlay hover state for a given stream identity.
+ * Returns true when the mouse cursor is over the native video HWND.
+ * Updates at ~20fps (polled every 3rd rAF frame).
+ */
+export function useOverlayHover(identity: string): boolean {
+  const [hovered, setHovered] = useState(false);
+
+  useEffect(() => {
+    const listener = () => {
+      const newVal = hoverStates.get(identity) ?? false;
+      setHovered((prev) => (prev !== newVal ? newVal : prev));
+    };
+    hoverListeners.add(listener);
+    listener();
+    return () => {
+      hoverListeners.delete(listener);
+    };
+  }, [identity]);
+
+  return hovered;
+}
+
+// ─── Main loop ──────────────────────────────────────────────────────────────
 
 function startLoop() {
   if (running) return;
@@ -142,7 +155,7 @@ function tick() {
 
   const dpr = window.devicePixelRatio || 1;
 
-  // For each overlay, compute which obstructions intersect it
+  // ── Obstruction computation ──
   for (const [identity, overlay] of overlays) {
     const overlayRect = overlay.element.getBoundingClientRect();
     if (overlayRect.width <= 0 || overlayRect.height <= 0) continue;
@@ -153,14 +166,12 @@ function tick() {
       const obsRect = obs.element.getBoundingClientRect();
       if (obsRect.width <= 0 || obsRect.height <= 0) continue;
 
-      // Compute intersection in CSS pixels
       const ix1 = Math.max(overlayRect.left, obsRect.left);
       const iy1 = Math.max(overlayRect.top, obsRect.top);
       const ix2 = Math.min(overlayRect.right, obsRect.right);
       const iy2 = Math.min(overlayRect.bottom, obsRect.bottom);
 
       if (ix2 > ix1 && iy2 > iy1) {
-        // Convert to physical pixels relative to overlay origin
         clipRects.push({
           x: Math.round((ix1 - overlayRect.left) * dpr),
           y: Math.round((iy1 - overlayRect.top) * dpr),
@@ -170,12 +181,37 @@ function tick() {
       }
     }
 
-    // Only invoke if obstructions changed
     const key = JSON.stringify(clipRects);
     if (lastSent.get(identity) !== key) {
       lastSent.set(identity, key);
       invoke("overlay_set_obstructions", { identity, obstructions: clipRects })
         .catch(() => {});
     }
+  }
+
+  // ── Hover state polling (every 3rd frame ≈ 20fps) ──
+  hoverPollCounter++;
+  if (hoverPollCounter % 3 === 0) {
+    invoke<Record<string, boolean>>("overlay_get_hover_states")
+      .then((states) => {
+        let changed = false;
+        for (const [identity, hovered] of Object.entries(states)) {
+          if (hoverStates.get(identity) !== hovered) {
+            hoverStates.set(identity, hovered);
+            changed = true;
+          }
+        }
+        // Clear stale entries
+        for (const [identity] of hoverStates) {
+          if (!(identity in states)) {
+            hoverStates.delete(identity);
+            changed = true;
+          }
+        }
+        if (changed) {
+          notifyHoverListeners();
+        }
+      })
+      .catch(() => {});
   }
 }

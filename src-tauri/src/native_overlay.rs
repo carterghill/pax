@@ -90,9 +90,7 @@ struct OverlayEntry {
     target_w: std::sync::atomic::AtomicU32,
     target_h: std::sync::atomic::AtomicU32,
     visible: std::sync::atomic::AtomicBool,
-    /// Rects to clip OUT of the video overlay.  Protected by a separate
-    /// mutex so the frontend can update obstructions without contending
-    /// with the atomic rect/visibility fields.
+    /// Rects to clip OUT of the video overlay.
     obstructions: Mutex<Vec<ObstructionRect>>,
 }
 
@@ -189,13 +187,32 @@ pub fn get_overlay_obstructions(identity: &str) -> Vec<ObstructionRect> {
 }
 
 /// Remove all overlays from the registry (called on voice disconnect).
-/// Actual HWND destruction is deferred to GpuRenderer::Drop on each video thread.
 pub fn destroy_all_overlays() {
     let mut overlays = OVERLAYS.lock();
     for (id, entry) in overlays.drain() {
         entry.visible.store(false, Ordering::Relaxed);
         eprintln!("[Pax NativeOverlay] Unregistered overlay for '{}'", id);
     }
+}
+
+/// Get hover states for all overlays by checking cursor position against
+/// each HWND's screen rect.  Called from frontend (~20fps).  No wnd_proc
+/// involvement, no locks held during render.
+pub fn get_all_overlay_hover_states() -> HashMap<String, bool> {
+    let cursor = platform::get_cursor_pos();
+    let overlays = OVERLAYS.lock();
+    overlays
+        .iter()
+        .filter(|(_, e)| e.visible.load(Ordering::Relaxed))
+        .map(|(id, e)| {
+            let (left, top, right, bottom) = platform::get_hwnd_screen_rect(e.hwnd);
+            let hovered = cursor.0 >= left
+                && cursor.0 < right
+                && cursor.1 >= top
+                && cursor.1 < bottom;
+            (id.clone(), hovered)
+        })
+        .collect()
 }
 
 /// Check if native overlay is supported on this platform.
@@ -832,17 +849,32 @@ mod platform {
         });
     }
 
-    /// Find the WebView2 HWND by enumerating sibling children of the parent.
-    /// Returns the first child HWND that isn't `skip_hwnd`.
-    unsafe fn find_webview_sibling(parent: HWND, skip_hwnd: HWND) -> HWND {
-        let mut child = GetWindow(parent, GW_CHILD);
-        while !child.is_null() {
-            if child != skip_hwnd {
-                return child;
+    /// Find the deepest descendant HWND of the WebView2 — that's where
+    /// Chromium actually processes mouse input (Chrome_RenderWidgetHostHWND).
+    /// Walks: parent → first non-overlay child (WebView2 container) → deepest child.
+    unsafe fn find_webview_input_hwnd(parent: HWND, skip_hwnd: HWND) -> HWND {
+        // Step 1: find the WebView2 container (sibling of our overlay)
+        let mut container = GetWindow(parent, GW_CHILD);
+        while !container.is_null() {
+            if container != skip_hwnd {
+                break;
             }
-            child = GetWindow(child, GW_HWNDNEXT);
+            container = GetWindow(container, GW_HWNDNEXT);
         }
-        std::ptr::null_mut()
+        if container.is_null() {
+            return std::ptr::null_mut();
+        }
+
+        // Step 2: drill down to the deepest child (Chrome_RenderWidgetHostHWND)
+        let mut target = container;
+        loop {
+            let child = GetWindow(target, GW_CHILD);
+            if child.is_null() {
+                break;
+            }
+            target = child;
+        }
+        target
     }
 
     /// Forward a mouse message from the overlay HWND to the WebView2 sibling.
@@ -885,7 +917,7 @@ mod platform {
         lparam: LPARAM,
     ) -> LRESULT {
         match msg {
-            // Forward mouse messages to the WebView2 so clicks/hovers pass through
+            // Forward mouse messages to the WebView2 so clicks pass through
             WM_LBUTTONDOWN | WM_LBUTTONUP | WM_LBUTTONDBLCLK
             | WM_RBUTTONDOWN | WM_RBUTTONUP | WM_RBUTTONDBLCLK
             | WM_MBUTTONDOWN | WM_MBUTTONUP
@@ -904,8 +936,7 @@ mod platform {
                 }
                 DefWindowProcW(hwnd, msg, wparam, lparam)
             }
-            // WM_SETCURSOR: return TRUE to prevent the system from setting cursor
-            // (we don't want the overlay to change the cursor — let WebView2 do it)
+            // Prevent the overlay from changing the cursor
             WM_SETCURSOR => 1,
             _ => DefWindowProcW(hwnd, msg, wparam, lparam),
         }
@@ -938,12 +969,12 @@ mod platform {
 
             // Find the WebView2 sibling HWND and cache it in our window's user data.
             // This lets wnd_proc forward mouse messages without searching each time.
-            let webview = find_webview_sibling(to_hwnd(parent), hwnd);
+            let webview = find_webview_input_hwnd(to_hwnd(parent), hwnd);
             if !webview.is_null() {
                 SetWindowLongPtrW(hwnd, GWLP_USERDATA, webview as isize);
-                eprintln!("[Pax NativeOverlay] Cached WebView2 HWND for mouse forwarding");
+                eprintln!("[Pax NativeOverlay] Cached Chromium input HWND for mouse forwarding");
             } else {
-                eprintln!("[Pax NativeOverlay] WARNING: Could not find WebView2 sibling HWND");
+                eprintln!("[Pax NativeOverlay] WARNING: Could not find Chromium input HWND");
             }
 
             SetWindowPos(
@@ -1062,6 +1093,24 @@ mod platform {
             }
         }
     }
+
+    /// Get the current cursor position in screen coordinates.
+    pub fn get_cursor_pos() -> (i32, i32) {
+        unsafe {
+            let mut pt = POINT { x: 0, y: 0 };
+            GetCursorPos(&mut pt);
+            (pt.x, pt.y)
+        }
+    }
+
+    /// Get the screen-space rect of a HWND: (left, top, right, bottom).
+    pub fn get_hwnd_screen_rect(hwnd: isize) -> (i32, i32, i32, i32) {
+        unsafe {
+            let mut rect = RECT { left: 0, top: 0, right: 0, bottom: 0 };
+            GetWindowRect(to_hwnd(hwnd), &mut rect);
+            (rect.left, rect.top, rect.right, rect.bottom)
+        }
+    }
 }
 
 // ─── Platform: Linux (stub) ─────────────────────────────────────────────────
@@ -1079,4 +1128,6 @@ mod platform {
     }
     pub fn pump_messages() {}
     pub fn apply_clip_region(_hwnd: isize, _w: u32, _h: u32, _obs: &[super::ObstructionRect]) {}
+    pub fn get_cursor_pos() -> (i32, i32) { (0, 0) }
+    pub fn get_hwnd_screen_rect(_hwnd: isize) -> (i32, i32, i32, i32) { (0, 0, 0, 0) }
 }

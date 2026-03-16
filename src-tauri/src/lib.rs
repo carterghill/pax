@@ -109,6 +109,7 @@ pub fn run() {
             commands::overlay::overlay_set_rect,
             commands::overlay::overlay_set_visible,
             commands::overlay::overlay_set_obstructions,
+            commands::overlay::overlay_get_hover_states,
             commands::codec::get_codec_preference,
             commands::codec::set_codec_preference,
             commands::codec::get_resolved_codec,

@@ -2,6 +2,7 @@ import { useState, useMemo, useCallback, useRef, useEffect } from "react";
 import { Grid2x2 } from "lucide-react";
 import { useTheme } from "../theme/ThemeContext";
 import ScreenShareViewer from "./ScreenShareViewer";
+import { useOverlayHover } from "../hooks/useOverlayObstruction";
 
 /**
  * ScreenShareGrid — Multi-stream screen share layout.
@@ -178,35 +179,20 @@ export default function ScreenShareGrid({
             {otherStreams.map((stream) => (
               <div
                 key={stream.identity}
-                onClick={() => handleTileClick(stream.identity)}
                 style={{
                   width: 180,
                   minWidth: 180,
                   height: "100%",
-                  borderRadius: spacing.unit,
-                  overflow: "hidden",
-                  cursor: stream.isLocal ? "default" : "pointer",
-                  border: `2px solid transparent`,
-                  position: "relative",
-                  backgroundColor: palette.bgPrimary,
-                  transition: "border-color 0.15s",
-                }}
-                onMouseEnter={(e) => {
-                  if (!stream.isLocal) (e.currentTarget.style.borderColor = palette.accent);
-                }}
-                onMouseLeave={(e) => {
-                  e.currentTarget.style.borderColor = "transparent";
                 }}
               >
-                {!stream.isLocal ? (
-                  <ScreenShareViewer
-                    active={true}
-                    identity={stream.identity}
-                  />
-                ) : (
-                  <LocalSharePlaceholder palette={palette} small />
-                )}
-                <TileLabel name={displayName(stream.identity)} palette={palette} typography={typography} spacing={spacing} />
+                <StreamTile
+                  stream={stream}
+                  onClick={() => handleTileClick(stream.identity)}
+                  palette={palette}
+                  spacing={spacing}
+                  typography={typography}
+                  small
+                />
               </div>
             ))}
           </div>
@@ -227,43 +213,76 @@ export default function ScreenShareGrid({
       overflow: "hidden",
     }}>
       {allStreams.map((stream) => (
-        <div
+        <StreamTile
           key={stream.identity}
+          stream={stream}
           onClick={() => handleTileClick(stream.identity)}
-          style={{
-            borderRadius: spacing.unit,
-            overflow: "hidden",
-            cursor: stream.isLocal ? "default" : "pointer",
-            border: "2px solid transparent",
-            position: "relative",
-            backgroundColor: palette.bgPrimary,
-            transition: "border-color 0.15s",
-            minHeight: 0,
-            minWidth: 0,
-          }}
-          onMouseEnter={(e) => {
-            if (!stream.isLocal) (e.currentTarget.style.borderColor = palette.accent);
-          }}
-          onMouseLeave={(e) => {
-            e.currentTarget.style.borderColor = "transparent";
-          }}
-        >
-          {!stream.isLocal ? (
-            <ScreenShareViewer
-              active={true}
-              identity={stream.identity}
-            />
-          ) : (
-            <LocalSharePlaceholder palette={palette} />
-          )}
-          <TileLabel name={displayName(stream.identity)} palette={palette} typography={typography} spacing={spacing} />
-        </div>
+          palette={palette}
+          spacing={spacing}
+          typography={typography}
+        />
       ))}
     </div>
   );
 }
 
 // ─── Sub-components ─────────────────────────────────────────────────────────
+
+/** A single stream tile that uses native HWND hover tracking for border highlight. */
+function StreamTile({
+  stream,
+  onClick,
+  palette,
+  spacing,
+  typography,
+  small,
+}: {
+  stream: { identity: string; isLocal: boolean };
+  onClick: () => void;
+  palette: any;
+  spacing: any;
+  typography: any;
+  small?: boolean;
+}) {
+  // Use native hover tracking — the HWND sets this via WM_MOUSEMOVE/WM_MOUSELEAVE
+  const nativeHover = useOverlayHover(stream.identity);
+  const showHover = !stream.isLocal && nativeHover;
+
+  return (
+    <div
+      onClick={onClick}
+      style={{
+        borderRadius: spacing.unit,
+        overflow: "hidden",
+        cursor: stream.isLocal ? "default" : "pointer",
+        border: `2px solid ${showHover ? palette.accent : "transparent"}`,
+        position: "relative",
+        backgroundColor: palette.bgPrimary,
+        transition: "border-color 0.15s",
+        height: "100%",
+        minHeight: 0,
+        minWidth: 0,
+      }}
+      // Keep DOM hover as fallback for tiles without native overlay (local share)
+      onMouseEnter={(e) => {
+        if (!stream.isLocal) e.currentTarget.style.borderColor = palette.accent;
+      }}
+      onMouseLeave={(e) => {
+        if (!showHover) e.currentTarget.style.borderColor = "transparent";
+      }}
+    >
+      {!stream.isLocal ? (
+        <ScreenShareViewer
+          active={true}
+          identity={stream.identity}
+        />
+      ) : (
+        <LocalSharePlaceholder palette={palette} small={small} />
+      )}
+      <TileLabel name={displayName(stream.identity)} palette={palette} typography={typography} spacing={spacing} />
+    </div>
+  );
+}
 
 function LocalSharePlaceholder({ palette, small }: { palette: any; small?: boolean }) {
   return (
