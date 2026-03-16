@@ -3,6 +3,7 @@ import { useTheme } from "../theme/ThemeContext";
 import { usePresenceContext } from "../hooks/PresenceContext";
 import { ManualStatus } from "../hooks/usePresence";
 import { ChevronDown } from "lucide-react";
+import { useOverlayObstruction } from "../hooks/useOverlayObstruction";
 
 const presenceColor: Record<string, string> = {
   online: "#23a55a",
@@ -43,6 +44,8 @@ export default function StatusDropdown({ displayName, avatarUrl }: StatusDropdow
   const { manualStatus, setManualStatus, effectivePresence } = usePresenceContext();
   const [open, setOpen] = useState(false);
   const dropdownRef = useRef<HTMLDivElement>(null);
+  const popupRef = useRef<HTMLDivElement>(null);
+  useOverlayObstruction(popupRef, open);
 
   // Close on outside click
   useEffect(() => {
@@ -145,7 +148,7 @@ export default function StatusDropdown({ displayName, avatarUrl }: StatusDropdow
 
       {/* Dropdown menu — opens upward */}
       {open && (
-        <div style={{
+        <div ref={popupRef} style={{
           position: "absolute",
           bottom: "100%",
           left: spacing.unit * 2,

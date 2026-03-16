@@ -7,6 +7,7 @@ import { normalizeUserId } from "../utils/matrix";
 import { useUserVolume } from "../hooks/useUserVolume";
 import VolumeContextMenu from "./VolumeContextMenu";
 import ScreenShareGrid from "./ScreenShareGrid";
+import { useOverlayObstruction } from "../hooks/useOverlayObstruction";
 
 interface VoiceRoomViewProps {
   room: Room;
@@ -56,6 +57,10 @@ export default function VoiceRoomView({
   const screenShareMenuRef = useRef<HTMLDivElement>(null);
   const generalSettingsRef = useRef<HTMLDivElement>(null);
   const activeShareRef = useRef<{ mode: "screen" | "window"; windowTitle?: string } | null>(null);
+
+  // Register popup menus as obstructions so they clip through the native video overlay
+  useOverlayObstruction(screenShareMenuRef, screenShareMenuOpen);
+  useOverlayObstruction(generalSettingsRef, generalSettingsOpen);
   const [windowList, setWindowList] = useState<[string, string][]>([]);
   const [windowListLoading, setWindowListLoading] = useState(false);
 

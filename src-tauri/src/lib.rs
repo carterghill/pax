@@ -108,6 +108,7 @@ pub fn run() {
             commands::overlay::overlay_is_supported,
             commands::overlay::overlay_set_rect,
             commands::overlay::overlay_set_visible,
+            commands::overlay::overlay_set_obstructions,
             commands::codec::get_codec_preference,
             commands::codec::set_codec_preference,
             commands::codec::get_resolved_codec,

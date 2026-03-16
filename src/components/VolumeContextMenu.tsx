@@ -1,6 +1,7 @@
 import { useEffect, useRef } from "react";
 import { Volume2, VolumeX } from "lucide-react";
 import { useTheme } from "../theme/ThemeContext";
+import { useOverlayObstruction } from "../hooks/useOverlayObstruction";
 
 interface VolumeContextMenuProps {
   /** Screen X where the menu should appear */
@@ -27,6 +28,7 @@ export default function VolumeContextMenu({
 }: VolumeContextMenuProps) {
   const { palette, spacing, typography } = useTheme();
   const menuRef = useRef<HTMLDivElement>(null);
+  useOverlayObstruction(menuRef);
 
   // Close on click-outside or Escape
   useEffect(() => {

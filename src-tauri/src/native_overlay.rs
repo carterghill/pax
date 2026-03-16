@@ -71,16 +71,29 @@ fn fs(in: VOut) -> @location(0) vec4f {
 
 // ─── Global overlay registry ────────────────────────────────────────────────
 
+/// A rectangle to clip out of the video overlay (physical pixels, relative
+/// to the overlay's own origin).  Reported by the frontend when DOM elements
+/// (modals, dropdowns, tooltips) overlap the video area.
+#[derive(Clone, Debug, PartialEq, serde::Deserialize)]
+pub struct ObstructionRect {
+    pub x: i32,
+    pub y: i32,
+    pub w: u32,
+    pub h: u32,
+}
+
 struct OverlayEntry {
     hwnd: isize,
     /// Target rect set by the frontend (physical pixels, parent-relative).
-    /// The video thread reads this and applies it to the HWND + wgpu surface.
-    /// Using atomics avoids any cross-thread Win32 messaging deadlock.
     target_x: std::sync::atomic::AtomicI32,
     target_y: std::sync::atomic::AtomicI32,
     target_w: std::sync::atomic::AtomicU32,
     target_h: std::sync::atomic::AtomicU32,
     visible: std::sync::atomic::AtomicBool,
+    /// Rects to clip OUT of the video overlay.  Protected by a separate
+    /// mutex so the frontend can update obstructions without contending
+    /// with the atomic rect/visibility fields.
+    obstructions: Mutex<Vec<ObstructionRect>>,
 }
 
 static OVERLAYS: Lazy<Mutex<HashMap<String, OverlayEntry>>> =
@@ -104,6 +117,7 @@ pub fn create_overlay(identity: &str, parent_hwnd: isize) -> Result<isize, Strin
         target_w: std::sync::atomic::AtomicU32::new(0),
         target_h: std::sync::atomic::AtomicU32::new(0),
         visible: std::sync::atomic::AtomicBool::new(false),
+        obstructions: Mutex::new(Vec::new()),
     });
     Ok(hwnd)
 }
@@ -143,8 +157,7 @@ pub fn set_overlay_visible(identity: &str, visible: bool) {
     }
 }
 
-/// Read the target rect for the given identity.  Called by the video thread
-/// to know what size to configure the surface and where to position the HWND.
+/// Read the target rect for the given identity.  Called by the video thread.
 pub fn get_overlay_target(identity: &str) -> Option<(i32, i32, u32, u32, bool)> {
     let overlays = OVERLAYS.lock();
     overlays.get(identity).map(|e| (
@@ -154,6 +167,25 @@ pub fn get_overlay_target(identity: &str) -> Option<(i32, i32, u32, u32, bool)> 
         e.target_h.load(Ordering::Relaxed),
         e.visible.load(Ordering::Relaxed),
     ))
+}
+
+/// Update the obstruction rects for the given identity.
+/// `rects` are in physical pixels, relative to the **overlay's own origin**.
+/// The video thread will apply these as a clip region on the next frame.
+pub fn set_overlay_obstructions(identity: &str, rects: Vec<ObstructionRect>) {
+    let overlays = OVERLAYS.lock();
+    if let Some(entry) = overlays.get(identity) {
+        *entry.obstructions.lock() = rects;
+    }
+}
+
+/// Read the current obstruction rects.  Called by the video thread.
+pub fn get_overlay_obstructions(identity: &str) -> Vec<ObstructionRect> {
+    let overlays = OVERLAYS.lock();
+    overlays
+        .get(identity)
+        .map(|e| e.obstructions.lock().clone())
+        .unwrap_or_default()
 }
 
 /// Remove all overlays from the registry (called on voice disconnect).
@@ -212,6 +244,8 @@ pub struct GpuRenderer {
     hwnd_applied_w: u32,
     hwnd_applied_h: u32,
     hwnd_visible: bool,
+    // Track applied clip region to avoid redundant SetWindowRgn calls
+    applied_obstructions: Vec<ObstructionRect>,
 }
 
 // SAFETY: GpuRenderer is created and used exclusively on a single thread
@@ -452,6 +486,7 @@ impl GpuRenderer {
             hwnd_applied_w: 0,
             hwnd_applied_h: 0,
             hwnd_visible: false,
+            applied_obstructions: Vec::new(),
         })
     }
 
@@ -532,6 +567,14 @@ impl GpuRenderer {
 
         if !target_visible {
             return;
+        }
+
+        // Apply clip region: subtract obstruction rects from the full HWND area.
+        // Only update SetWindowRgn when obstructions actually change.
+        let obstructions = get_overlay_obstructions(&self.identity);
+        if obstructions != self.applied_obstructions {
+            platform::apply_clip_region(self.hwnd, target_w, target_h, &obstructions);
+            self.applied_obstructions = obstructions;
         }
 
         // Reconfigure surface on resize
@@ -789,13 +832,83 @@ mod platform {
         });
     }
 
+    /// Find the WebView2 HWND by enumerating sibling children of the parent.
+    /// Returns the first child HWND that isn't `skip_hwnd`.
+    unsafe fn find_webview_sibling(parent: HWND, skip_hwnd: HWND) -> HWND {
+        let mut child = GetWindow(parent, GW_CHILD);
+        while !child.is_null() {
+            if child != skip_hwnd {
+                return child;
+            }
+            child = GetWindow(child, GW_HWNDNEXT);
+        }
+        std::ptr::null_mut()
+    }
+
+    /// Forward a mouse message from the overlay HWND to the WebView2 sibling.
+    /// Converts coordinates from our client space → screen → WebView2 client space.
+    unsafe fn forward_mouse_to_webview(
+        hwnd: HWND,
+        msg: u32,
+        wparam: WPARAM,
+        lparam: LPARAM,
+    ) -> bool {
+        let webview = GetWindowLongPtrW(hwnd, GWLP_USERDATA) as HWND;
+        if webview.is_null() {
+            return false;
+        }
+
+        let x = (lparam & 0xFFFF) as i16 as i32;
+        let y = ((lparam >> 16) & 0xFFFF) as i16 as i32;
+
+        // Get screen-space positions of both windows to compute offset
+        let mut our_rect: RECT = std::mem::zeroed();
+        let mut wv_rect: RECT = std::mem::zeroed();
+        GetWindowRect(hwnd, &mut our_rect);
+        GetWindowRect(webview, &mut wv_rect);
+
+        // our client (x,y) → screen → webview client
+        let screen_x = our_rect.left + x;
+        let screen_y = our_rect.top + y;
+        let wv_x = screen_x - wv_rect.left;
+        let wv_y = screen_y - wv_rect.top;
+
+        let new_lparam = ((wv_y as u16 as usize) << 16) | (wv_x as u16 as usize);
+        PostMessageW(webview, msg, wparam, new_lparam as LPARAM);
+        true
+    }
+
     unsafe extern "system" fn wnd_proc(
         hwnd: HWND,
         msg: u32,
         wparam: WPARAM,
         lparam: LPARAM,
     ) -> LRESULT {
-        DefWindowProcW(hwnd, msg, wparam, lparam)
+        match msg {
+            // Forward mouse messages to the WebView2 so clicks/hovers pass through
+            WM_LBUTTONDOWN | WM_LBUTTONUP | WM_LBUTTONDBLCLK
+            | WM_RBUTTONDOWN | WM_RBUTTONUP | WM_RBUTTONDBLCLK
+            | WM_MBUTTONDOWN | WM_MBUTTONUP
+            | WM_MOUSEMOVE => {
+                if forward_mouse_to_webview(hwnd, msg, wparam, lparam) {
+                    return 0;
+                }
+                DefWindowProcW(hwnd, msg, wparam, lparam)
+            }
+            // WM_MOUSEWHEEL coordinates are already in screen space
+            WM_MOUSEWHEEL => {
+                let webview = GetWindowLongPtrW(hwnd, GWLP_USERDATA) as HWND;
+                if !webview.is_null() {
+                    PostMessageW(webview, msg, wparam, lparam);
+                    return 0;
+                }
+                DefWindowProcW(hwnd, msg, wparam, lparam)
+            }
+            // WM_SETCURSOR: return TRUE to prevent the system from setting cursor
+            // (we don't want the overlay to change the cursor — let WebView2 do it)
+            WM_SETCURSOR => 1,
+            _ => DefWindowProcW(hwnd, msg, wparam, lparam),
+        }
     }
 
     pub fn create_child_hwnd(parent: isize) -> Result<isize, String> {
@@ -803,16 +916,16 @@ mod platform {
         unsafe {
             let name = class_name();
             let hwnd = CreateWindowExW(
-                0,
+                0, // no extended styles
                 name.as_ptr(),
                 std::ptr::null(),
-                WS_CHILD | WS_CLIPSIBLINGS, // start hidden — shown after first overlay_set_rect
+                WS_CHILD | WS_CLIPSIBLINGS,
                 0,
                 0,
                 1,
                 1,
                 to_hwnd(parent),
-                std::ptr::null_mut(), // no menu
+                std::ptr::null_mut(),
                 GetModuleHandleW(std::ptr::null()),
                 std::ptr::null(),
             );
@@ -821,6 +934,16 @@ mod platform {
                     "CreateWindowExW failed: {}",
                     std::io::Error::last_os_error()
                 ));
+            }
+
+            // Find the WebView2 sibling HWND and cache it in our window's user data.
+            // This lets wnd_proc forward mouse messages without searching each time.
+            let webview = find_webview_sibling(to_hwnd(parent), hwnd);
+            if !webview.is_null() {
+                SetWindowLongPtrW(hwnd, GWLP_USERDATA, webview as isize);
+                eprintln!("[Pax NativeOverlay] Cached WebView2 HWND for mouse forwarding");
+            } else {
+                eprintln!("[Pax NativeOverlay] WARNING: Could not find WebView2 sibling HWND");
             }
 
             SetWindowPos(
@@ -882,6 +1005,49 @@ mod platform {
         }
     }
 
+    /// Apply a clip region to the HWND that subtracts obstruction rects.
+    /// If `obstructions` is empty, removes the clip region (full visibility).
+    /// Coordinates are relative to the HWND's own client area.
+    pub fn apply_clip_region(
+        hwnd: isize,
+        total_w: u32,
+        total_h: u32,
+        obstructions: &[super::ObstructionRect],
+    ) {
+        use windows_sys::Win32::Graphics::Gdi::*;
+        unsafe {
+            if obstructions.is_empty() {
+                // Remove clip region — full HWND is visible
+                SetWindowRgn(to_hwnd(hwnd), std::ptr::null_mut(), 1);
+                return;
+            }
+
+            // Start with the full HWND rect
+            let full = CreateRectRgn(0, 0, total_w as i32, total_h as i32);
+            if full.is_null() {
+                return;
+            }
+
+            // Subtract each obstruction
+            for obs in obstructions {
+                let obs_rgn = CreateRectRgn(
+                    obs.x,
+                    obs.y,
+                    obs.x + obs.w as i32,
+                    obs.y + obs.h as i32,
+                );
+                if !obs_rgn.is_null() {
+                    CombineRgn(full, full, obs_rgn, RGN_DIFF);
+                    DeleteObject(obs_rgn as _);
+                }
+            }
+
+            // Apply.  SetWindowRgn takes ownership of the region — do NOT
+            // call DeleteObject on `full` after this.
+            SetWindowRgn(to_hwnd(hwnd), full, 1);
+        }
+    }
+
     /// Drain all pending Win32 messages for this thread.
     /// Must be called regularly from the video thread to prevent the main
     /// thread from deadlocking during window resize.  When the user resizes
@@ -912,4 +1078,5 @@ mod platform {
         (1, 1)
     }
     pub fn pump_messages() {}
+    pub fn apply_clip_region(_hwnd: isize, _w: u32, _h: u32, _obs: &[super::ObstructionRect]) {}
 }

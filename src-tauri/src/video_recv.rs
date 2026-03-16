@@ -110,6 +110,8 @@ pub fn spawn_video_receiver(
                 let rtc_track = video_track.rtc_track();
                 let mut stream = NativeVideoStream::new(rtc_track);
                 let mut frame_number: u64 = 0;
+                let mut total_process_us: u64 = 0;
+                let mut drained_count: u64 = 0;
 
                 loop {
                     let first = stream.next().await;
@@ -124,12 +126,16 @@ pub fn spawn_video_receiver(
                     }
 
                     // Drain to latest — skip any buffered frames
+                    let mut skipped = 0u32;
                     loop {
                         match futures_util::FutureExt::now_or_never(stream.next()) {
-                            Some(Some(newer)) => { latest_frame = newer; }
+                            Some(Some(newer)) => { latest_frame = newer; skipped += 1; }
                             _ => break,
                         }
                     }
+                    drained_count += skipped as u64;
+
+                    let process_start = std::time::Instant::now();
 
                     let mut i420 = latest_frame.buffer.to_i420();
                     let src_w = i420.width();
@@ -146,11 +152,6 @@ pub fn spawn_video_receiver(
 
                     // ── Native GPU path ──────────────────────────────
                     if let Some(ref mut renderer) = gpu_renderer {
-                        // Read target viewport size to scale the frame
-                        // BEFORE uploading to GPU.  This is critical:
-                        //   - Reduces upload from 3.1MB → ~0.2MB (15x less)
-                        //   - Uses libwebrtc SIMD scaler (better than bilinear)
-                        //   - Smaller planes more likely to hit fast upload path
                         let (fit_w, fit_h) = renderer.get_fit_dimensions(src_w, src_h);
                         let final_i420 = if fit_w > 0 && fit_h > 0
                             && (fit_w < src_w || fit_h < src_h)
@@ -169,6 +170,18 @@ pub fn spawn_video_receiver(
                             w, h,
                             stride_y, stride_u, stride_v,
                         );
+
+                        let elapsed_us = process_start.elapsed().as_micros() as u64;
+                        total_process_us += elapsed_us;
+
+                        // Log timing every 300 frames (~10s at 30fps)
+                        if frame_number % 300 == 0 {
+                            let avg_us = total_process_us / frame_number;
+                            eprintln!(
+                                "[Pax VideoRecv] '{}' stats: frame={} avg_process={}µs drained={} last={}µs",
+                                id, frame_number, avg_us, drained_count, elapsed_us
+                            );
+                        }
                         continue;
                     }
 

@@ -3,6 +3,7 @@ import { invoke } from "@tauri-apps/api/core";
 import { listen, UnlistenFn } from "@tauri-apps/api/event";
 import { Monitor, Loader2 } from "lucide-react";
 import { useTheme } from "../theme/ThemeContext";
+import { registerOverlay, unregisterOverlay } from "../hooks/useOverlayObstruction";
 
 /**
  * ScreenShareViewer — dual-path video renderer.
@@ -205,6 +206,9 @@ export default function ScreenShareViewer({ active, identity }: ScreenShareViewe
     console.log("[ScreenShareViewer] Native effect check:", { active, identity, useNative, hasContainer: !!containerRef.current });
     if (!active || !identity || useNative !== true || !containerRef.current) return;
 
+    // Register this overlay for obstruction tracking
+    registerOverlay(identity, containerRef.current);
+
     let mounted = true;
     let firstRect = true;
 
@@ -269,6 +273,7 @@ export default function ScreenShareViewer({ active, identity }: ScreenShareViewe
       observer.disconnect();
       cancelAnimationFrame(rafId);
       if (resizeTimer) clearTimeout(resizeTimer);
+      unregisterOverlay(identity);
       invoke("overlay_set_visible", { identity, visible: false }).catch(() => {});
     };
   }, [active, identity, useNative]);
