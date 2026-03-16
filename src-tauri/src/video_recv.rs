@@ -5,8 +5,16 @@
 //! with the main tokio runtime (audio, Matrix sync, presence, etc.)
 //! which was causing frame timing jitter regardless of resolution.
 //!
-//! Binary frame format: [u32 w][u32 h][Y plane][U plane][V plane]
-//! Total per frame: 8 + w*h*1.5 bytes (3.1MB for 1080p)
+//! TWO RENDERING PATHS:
+//!
+//!   Native GPU (preferred on Windows):
+//!     LiveKit decode → I420 → wgpu texture upload → GPU YUV→RGB → native HWND
+//!     Zero IPC overhead.  Frames never cross the Rust↔WebView boundary.
+//!
+//!   Protocol fallback (Linux, or if GPU init fails):
+//!     LiveKit decode → I420 → pack into Vec<u8> → paxvideo:// protocol → WebGL
+//!     Binary frame format: [u32 w][u32 h][Y plane][U plane][V plane]
+//!     Total per frame: 8 + w*h*1.5 bytes (3.1MB for 1080p)
 
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -42,11 +50,16 @@ static STREAMS: Lazy<Mutex<HashMap<String, StreamState>>> =
 /// Spawn a video receiver on a **dedicated OS thread** with its own
 /// single-threaded tokio runtime. This ensures frame processing never
 /// competes with audio, Matrix sync, or any other async work.
+///
+/// If `parent_hwnd` is `Some`, the thread creates a child HWND and initializes
+/// a native GPU renderer (zero-IPC path).
+/// If `None` or if GPU init fails, falls back to the protocol-based path.
 pub fn spawn_video_receiver(
     identity: String,
     video_track: RemoteVideoTrack,
     shutdown: Arc<AtomicBool>,
     app_handle: AppHandle,
+    parent_hwnd: Option<isize>,
 ) {
     let id = identity.clone();
     std::thread::Builder::new()
@@ -59,7 +72,28 @@ pub fn spawn_video_receiver(
                 .expect("[Pax VideoRecv] Failed to create runtime");
 
             rt.block_on(async move {
-                {
+                // ── Try to initialize native GPU renderer ────────────
+                let mut gpu_renderer: Option<crate::native_overlay::GpuRenderer> = None;
+                if let Some(phwnd) = parent_hwnd {
+                    match crate::native_overlay::GpuRenderer::new(phwnd, id.clone()).await {
+                        Ok(renderer) => {
+                            eprintln!("[Pax VideoRecv] Native GPU renderer initialized for '{}'", id);
+                            gpu_renderer = Some(renderer);
+                        }
+                        Err(e) => {
+                            eprintln!(
+                                "[Pax VideoRecv] GPU init failed for '{}': {} — falling back to protocol",
+                                id, e
+                            );
+                            // Fall through to protocol path
+                        }
+                    }
+                }
+
+                let use_native = gpu_renderer.is_some();
+
+                // Only register in STREAMS for protocol-based path
+                if !use_native {
                     let mut streams = STREAMS.lock();
                     let entry = streams.entry(id.clone()).or_insert_with(|| StreamState {
                         body: None, width: 0, height: 0, frame_number: 0,
@@ -67,15 +101,17 @@ pub fn spawn_video_receiver(
                     });
                     entry.receiving = true;
                 }
-                eprintln!("[Pax VideoRecv] Dedicated thread started for '{}'", id);
+
+                eprintln!(
+                    "[Pax VideoRecv] Dedicated thread started for '{}' (native_gpu={})",
+                    id, use_native
+                );
 
                 let rtc_track = video_track.rtc_track();
                 let mut stream = NativeVideoStream::new(rtc_track);
                 let mut frame_number: u64 = 0;
 
                 loop {
-                    // Only await point — and this thread has nothing else to do,
-                    // so wakeup is immediate when a frame arrives.
                     let first = stream.next().await;
                     let Some(mut latest_frame) = first else {
                         eprintln!("[Pax VideoRecv] Stream ended for '{}'", id);
@@ -95,21 +131,37 @@ pub fn spawn_video_receiver(
                         }
                     }
 
+                    let mut i420 = latest_frame.buffer.to_i420();
+                    let src_w = i420.width();
+                    let src_h = i420.height();
+                    if src_w == 0 || src_h == 0 {
+                        continue;
+                    }
+
+                    frame_number += 1;
+
+                    if frame_number == 1 {
+                        eprintln!("[Pax VideoRecv] First frame decoded for '{}': {}x{}", id, src_w, src_h);
+                    }
+
+                    // ── Native GPU path ──────────────────────────────
+                    if let Some(ref mut renderer) = gpu_renderer {
+                        let (data_y, data_u, data_v) = i420.data();
+                        let (stride_y, stride_u, stride_v) = i420.strides();
+                        renderer.render_frame(
+                            data_y, data_u, data_v,
+                            src_w, src_h,
+                            stride_y, stride_u, stride_v,
+                        );
+                        continue;
+                    }
+
+                    // ── Protocol fallback path ───────────────────────
                     // Read target viewport
                     let (tgt_w, tgt_h) = {
                         let streams = STREAMS.lock();
                         streams.get(&id).map(|s| s.target).unwrap_or((0, 0))
                     };
-
-                    // Scale + pack runs inline — we own this thread, no need for
-                    // spawn_blocking (which would add scheduling overhead).
-                    let mut i420 = latest_frame.buffer.to_i420();
-                    let src_w = i420.width();
-                    let src_h = i420.height();
-
-                    if src_w == 0 || src_h == 0 {
-                        continue;
-                    }
 
                     let needs_scale = tgt_w > 0 && tgt_h > 0 && (tgt_w < src_w || tgt_h < src_h);
                     let final_i420 = if needs_scale {
@@ -161,8 +213,6 @@ pub fn spawn_video_receiver(
                         }
                     }
 
-                    frame_number += 1;
-
                     {
                         let mut streams = STREAMS.lock();
                         let entry = streams.entry(id.clone()).or_insert_with(|| StreamState {
@@ -180,7 +230,8 @@ pub fn spawn_video_receiver(
                     });
                 }
 
-                {
+                // Cleanup
+                if !use_native {
                     let mut streams = STREAMS.lock();
                     streams.remove(&id);
                 }

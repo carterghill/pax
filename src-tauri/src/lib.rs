@@ -3,6 +3,7 @@
 pub mod platform;
 mod commands;
 mod idle;
+pub mod native_overlay;
 mod screen;
 mod types;
 pub mod video_recv;
@@ -100,6 +101,9 @@ pub fn run() {
             commands::messages::send_typing_notice,
             commands::presence::set_presence,
             commands::presence::start_idle_monitor,
+            commands::overlay::overlay_is_supported,
+            commands::overlay::overlay_set_rect,
+            commands::overlay::overlay_set_visible,
         ])
         .setup(|app| {
             // Set window icon (taskbar + title bar) from our bundled icons

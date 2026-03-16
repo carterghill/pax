@@ -273,6 +273,7 @@ impl VoiceManager {
                 }
             }
             crate::video_recv::clear_all_frame_buffers();
+            crate::native_overlay::destroy_all_overlays();
 
             // Signal the event loop to stop
             let _ = session.shutdown_tx.send(()).await;
@@ -478,6 +479,32 @@ impl VoiceManager {
         Ok(())
     }
 }
+
+// ─── Native overlay helper ──────────────────────────────────────────────────
+
+/// Get the parent HWND for native overlay creation.  The actual child HWND
+/// will be created on the video receiver thread to avoid Win32 message pump
+/// deadlocks.  Returns `Some(parent_hwnd)` on Windows, `None` elsewhere.
+fn get_parent_hwnd_for_overlay(app_handle: &AppHandle) -> Option<isize> {
+    if !crate::native_overlay::is_supported() {
+        return None;
+    }
+
+    #[cfg(target_os = "windows")]
+    {
+        use tauri::Manager;
+        let window = app_handle.get_webview_window("main")?;
+        let hwnd = window.hwnd().ok()?.0 as isize;
+        Some(hwnd)
+    }
+
+    #[cfg(not(target_os = "windows"))]
+    {
+        let _ = app_handle;
+        None
+    }
+}
+
 // ─── Mic capture pump ───────────────────────────────────────────────────────
 /// Receives completed mic frames from the cpal callback channel and sends to LiveKit.
 /// Zero latency added — frames arrive as soon as cpal has enough samples.
@@ -590,12 +617,17 @@ async fn run_event_loop(
                                     if let Some(old_shutdown) = st.video_recv_shutdowns.remove(&identity_clone) {
                                         old_shutdown.store(true, Ordering::Relaxed);
                                     }
+                                    crate::native_overlay::destroy_overlay(&identity_clone);
 
                                     eprintln!("[Pax] Spawning video receiver for '{}'", identity_clone);
                                     let shutdown = Arc::new(AtomicBool::new(false));
                                     st.video_recv_shutdowns.insert(identity_clone.clone(), shutdown.clone());
                                     drop(st);
-                                    crate::video_recv::spawn_video_receiver(identity_clone, video_track, shutdown, app_handle.clone());
+
+                                    // Get parent HWND for native overlay (child HWND created on video thread)
+                                    let parent_hwnd = get_parent_hwnd_for_overlay(&app_handle);
+
+                                    crate::video_recv::spawn_video_receiver(identity_clone, video_track, shutdown, app_handle.clone(), parent_hwnd);
                                 } else {
                                     eprintln!("[Pax] Skipping video receiver (local screen share)");
                                     drop(st);
@@ -616,6 +648,7 @@ async fn run_event_loop(
                             }
                             drop(st);
                             crate::video_recv::clear_frame_buffer_for(&identity);
+                            crate::native_overlay::destroy_overlay(&identity);
                             emit_state(&app_handle, &room_id, &local_identity, &audio_state, false, true, None);
                         } else if publication.source() == TrackSource::Microphone {
                             let mut st = audio_state.lock();
@@ -693,6 +726,7 @@ async fn run_event_loop(
                                     shutdown.store(true, Ordering::Relaxed);
                                 }
                                 crate::video_recv::clear_frame_buffer_for(&identity);
+                                crate::native_overlay::destroy_overlay(&identity);
                             }
                         }
                         emit_state(&app_handle, &room_id, &local_identity, &audio_state, false, true, None);

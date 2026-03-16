@@ -1,6 +1,7 @@
 pub mod auth;
 pub mod members;
 pub mod messages;
+pub mod overlay;
 pub mod presence;
 pub mod rooms;
 pub mod voice_matrix;

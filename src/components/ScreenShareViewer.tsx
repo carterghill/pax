@@ -1,20 +1,20 @@
 import { useEffect, useRef, useState } from "react";
+import { invoke } from "@tauri-apps/api/core";
 import { listen, UnlistenFn } from "@tauri-apps/api/event";
 import { Monitor, Loader2 } from "lucide-react";
 import { useTheme } from "../theme/ThemeContext";
 
 /**
- * ScreenShareViewer — GPU-accelerated YUV video renderer.
+ * ScreenShareViewer — dual-path video renderer.
  *
- * Architecture: STEADY PRESENTATION CLOCK
- *   - Rust events set a "frame available" flag (instant, no async work)
- *   - A continuous rAF loop checks the flag on each vsync tick
- *   - If set: fetch the latest frame and draw
- *   - If not: do nothing (canvas retains previous frame)
+ * Native GPU path (Windows):
+ *   Rust renders decoded I420 frames directly to a native HWND overlay
+ *   using wgpu.  This component just reports its bounding rect so Rust
+ *   can position the overlay to match.  Zero IPC for frame data.
  *
- * This decouples display timing from source timing, eliminating the
- * "speeds up / slows down" pacing artifacts that occur when frame
- * display is driven by irregular source events.
+ * WebGL fallback (Linux, or if native init fails):
+ *   Fetches packed I420 frames via paxvideo:// protocol and renders
+ *   with a YUV→RGB WebGL shader.  Same as before.
  */
 
 interface ScreenShareViewerProps {
@@ -26,7 +26,20 @@ const URL_PREFIX = navigator.userAgent.includes("Windows")
   ? "http://paxvideo.localhost"
   : "paxvideo://localhost";
 
-// ─── WebGL YUV Renderer ─────────────────────────────────────────────────────
+// ─── Native overlay support detection (cached) ─────────────────────────────
+
+let _nativeSupported: boolean | null = null;
+async function isNativeOverlaySupported(): Promise<boolean> {
+  if (_nativeSupported !== null) return _nativeSupported;
+  try {
+    _nativeSupported = await invoke<boolean>("overlay_is_supported");
+  } catch {
+    _nativeSupported = false;
+  }
+  return _nativeSupported;
+}
+
+// ─── WebGL YUV Renderer (fallback) ─────────────────────────────────────────
 
 const VERTEX_SRC = `
   attribute vec2 a_pos;
@@ -172,21 +185,106 @@ function uploadAndDraw(state: GlState, buf: ArrayBuffer, width: number, height: 
 
 export default function ScreenShareViewer({ active, identity }: ScreenShareViewerProps) {
   const { palette, spacing, typography } = useTheme();
-  const canvasRef = useRef<HTMLCanvasElement>(null);
   const containerRef = useRef<HTMLDivElement>(null);
+  const canvasRef = useRef<HTMLCanvasElement>(null);
   const glStateRef = useRef<GlState | null>(null);
   const [loading, setLoading] = useState(true);
-  const [dimensions, setDimensions] = useState<{ width: number; height: number } | null>(null);
+  const [useNative, setUseNative] = useState<boolean | null>(null); // null = detecting
   const loadingRef = useRef(true);
-  const dimsRef = useRef<{ width: number; height: number } | null>(null);
 
-  // ── Debounced resize reporting ──────────────────────────────────────
+  // ── Detect native overlay support ────────────────────────────────
   useEffect(() => {
-    if (!active || !containerRef.current) return;
+    isNativeOverlaySupported().then((supported) => {
+      console.log("[ScreenShareViewer] Native overlay supported:", supported);
+      setUseNative(supported);
+    });
+  }, []);
 
+  // ── Native overlay: report rect to Rust ──────────────────────────
+  useEffect(() => {
+    console.log("[ScreenShareViewer] Native effect check:", { active, identity, useNative, hasContainer: !!containerRef.current });
+    if (!active || !identity || useNative !== true || !containerRef.current) return;
+
+    let mounted = true;
+    let firstRect = true;
+
+    const reportRect = () => {
+      const el = containerRef.current;
+      if (!el || !mounted) return;
+      const rect = el.getBoundingClientRect();
+      const dpr = window.devicePixelRatio || 1;
+      const x = Math.round(rect.left * dpr);
+      const y = Math.round(rect.top * dpr);
+      const w = Math.round(rect.width * dpr);
+      const h = Math.round(rect.height * dpr);
+      if (w > 0 && h > 0) {
+        console.log("[ScreenShareViewer] Reporting rect:", { identity, x, y, w, h });
+        invoke("overlay_set_rect", { identity, x, y, w, h })
+          .catch((e) => console.error("[ScreenShareViewer] overlay_set_rect failed:", e));
+        if (firstRect) {
+          invoke("overlay_set_visible", { identity, visible: true })
+            .catch((e) => console.error("[ScreenShareViewer] overlay_set_visible failed:", e));
+          firstRect = false;
+          setLoading(false);
+          loadingRef.current = false;
+        }
+      }
+    };
+
+    // Report initial rect
+    reportRect();
+
+    // Track container resize
     let resizeTimer: ReturnType<typeof setTimeout> | null = null;
+    const observer = new ResizeObserver(() => {
+      if (resizeTimer) clearTimeout(resizeTimer);
+      resizeTimer = setTimeout(reportRect, 16); // ~1 frame debounce
+    });
+    observer.observe(containerRef.current);
+
+    // Track scroll/layout shifts with rAF for smooth positioning
+    let rafId = 0;
+    let lastX = -1, lastY = -1, lastW = -1, lastH = -1;
+    const trackPosition = () => {
+      if (!mounted) return;
+      rafId = requestAnimationFrame(trackPosition);
+      const el = containerRef.current;
+      if (!el) return;
+      const rect = el.getBoundingClientRect();
+      const dpr = window.devicePixelRatio || 1;
+      const x = Math.round(rect.left * dpr);
+      const y = Math.round(rect.top * dpr);
+      const w = Math.round(rect.width * dpr);
+      const h = Math.round(rect.height * dpr);
+      if (x !== lastX || y !== lastY || w !== lastW || h !== lastH) {
+        lastX = x; lastY = y; lastW = w; lastH = h;
+        invoke("overlay_set_rect", { identity, x, y, w, h })
+          .catch((e) => console.error("[ScreenShareViewer] rAF set_rect failed:", e));
+      }
+    };
+    rafId = requestAnimationFrame(trackPosition);
+
+    return () => {
+      mounted = false;
+      observer.disconnect();
+      cancelAnimationFrame(rafId);
+      if (resizeTimer) clearTimeout(resizeTimer);
+      invoke("overlay_set_visible", { identity, visible: false }).catch(() => {});
+    };
+  }, [active, identity, useNative]);
+
+  // ── WebGL fallback: steady presentation clock ────────────────────
+  useEffect(() => {
+    if (!active || !identity || useNative !== false) return;
+
+    let mounted = true;
+    let frameAvailable = true;
+    let fetchInFlight = false;
+    let rafId = 0;
+    let unlisten: UnlistenFn | null = null;
     const encodedId = encodeURIComponent(identity);
 
+    // Debounced resize reporting for protocol path
     const reportSize = () => {
       const el = containerRef.current;
       if (!el) return;
@@ -198,62 +296,23 @@ export default function ScreenShareViewer({ active, identity }: ScreenShareViewe
         fetch(`${URL_PREFIX}/resize?id=${encodedId}&w=${w}&h=${h}`).catch(() => {});
       }
     };
-
     reportSize();
+    let resizeTimer: ReturnType<typeof setTimeout> | null = null;
+    const resizeObs = containerRef.current
+      ? new ResizeObserver(() => {
+          if (resizeTimer) clearTimeout(resizeTimer);
+          resizeTimer = setTimeout(reportSize, 150);
+        })
+      : null;
+    if (resizeObs && containerRef.current) resizeObs.observe(containerRef.current);
 
-    const observer = new ResizeObserver(() => {
-      if (resizeTimer) clearTimeout(resizeTimer);
-      resizeTimer = setTimeout(reportSize, 150);
-    });
-    observer.observe(containerRef.current);
-
-    return () => {
-      observer.disconnect();
-      if (resizeTimer) clearTimeout(resizeTimer);
-    };
-  }, [active, identity]);
-
-  // ── Steady presentation clock ──────────────────────────────────────
-  //
-  // Instead of: event → fetch → rAF → draw (display locked to source clock)
-  // We use:     event → set flag; rAF loop → if flag → fetch → draw
-  //
-  // The rAF loop runs at display refresh rate (60Hz). On each vsync tick:
-  //   - If frameAvailable is set AND no fetch is in flight → start fetch+draw
-  //   - Otherwise → do nothing (canvas retains previous frame)
-  //
-  // This guarantees frames are presented at steady vsync intervals regardless
-  // of when source frames arrive. No more 16ms-16ms-33ms stutter pattern.
-  useEffect(() => {
-    if (!active || !identity) {
-      setLoading(true);
-      setDimensions(null);
-      loadingRef.current = true;
-      dimsRef.current = null;
-      glStateRef.current = null;
-      return;
-    }
-
-    let mounted = true;
-    let frameAvailable = true; // start true to fetch first frame immediately
-    let fetchInFlight = false;
-    let rafId = 0;
-    let unlisten: UnlistenFn | null = null;
-    const encodedId = encodeURIComponent(identity);
-
-    // The presentation loop — runs every vsync
     const tick = () => {
       if (!mounted) return;
-      rafId = requestAnimationFrame(tick); // schedule next tick first
-
-      // Nothing to do if no new frame or fetch already in progress
+      rafId = requestAnimationFrame(tick);
       if (!frameAvailable || fetchInFlight) return;
-
-      // Consume the flag and start fetch
       frameAvailable = false;
       fetchInFlight = true;
 
-      // Async fetch+draw — fires off, doesn't block the rAF loop
       (async () => {
         try {
           const resp = await fetch(`${URL_PREFIX}/frame?id=${encodedId}`);
@@ -287,10 +346,6 @@ export default function ScreenShareViewer({ active, identity }: ScreenShareViewe
             loadingRef.current = false;
             setLoading(false);
           }
-          if (!dimsRef.current || dimsRef.current.width !== width || dimsRef.current.height !== height) {
-            dimsRef.current = { width, height };
-            setDimensions({ width, height });
-          }
         } catch {
           // Expected during start/stop transitions
         } finally {
@@ -299,10 +354,8 @@ export default function ScreenShareViewer({ active, identity }: ScreenShareViewe
       })();
     };
 
-    // Start the presentation loop
     rafId = requestAnimationFrame(tick);
 
-    // Rust events just set the flag — instant, no async work
     listen<{ id: string }>("screen-share-frame-ready", (event) => {
       if (event.payload.id === identity) {
         frameAvailable = true;
@@ -315,12 +368,13 @@ export default function ScreenShareViewer({ active, identity }: ScreenShareViewe
       mounted = false;
       cancelAnimationFrame(rafId);
       if (unlisten) unlisten();
+      if (resizeObs) resizeObs.disconnect();
+      if (resizeTimer) clearTimeout(resizeTimer);
       glStateRef.current = null;
       loadingRef.current = true;
-      dimsRef.current = null;
       fetch(`${URL_PREFIX}/resize?id=${encodeURIComponent(identity)}&w=0&h=0`).catch(() => {});
     };
-  }, [active, identity]);
+  }, [active, identity, useNative]);
 
   if (!active) return null;
 
@@ -339,6 +393,7 @@ export default function ScreenShareViewer({ active, identity }: ScreenShareViewe
         overflow: "hidden",
       }}
     >
+      {/* Loading spinner */}
       {loading && (
         <div
           style={{
@@ -356,20 +411,35 @@ export default function ScreenShareViewer({ active, identity }: ScreenShareViewe
             style={{ animation: "ssv-spin 1s linear infinite" }}
           />
           <span style={{ fontSize: typography.fontSizeSmall }}>
-            Waiting for screen share frames...
+            {useNative === null
+              ? "Initializing..."
+              : useNative
+                ? "Waiting for native video..."
+                : "Waiting for screen share frames..."}
           </span>
         </div>
       )}
-      <canvas
-        ref={canvasRef}
-        style={{
-          maxWidth: "100%",
-          maxHeight: "100%",
-          objectFit: "contain",
-          display: loading ? "none" : "block",
-        }}
-      />
-      {dimensions && !loading && (
+
+      {/* Native path: layout anchor div — HWND renders on top */}
+      {useNative === true && !loading && (
+        <div style={{ width: "100%", height: "100%" }} />
+      )}
+
+      {/* WebGL fallback path: canvas */}
+      {useNative === false && (
+        <canvas
+          ref={canvasRef}
+          style={{
+            maxWidth: "100%",
+            maxHeight: "100%",
+            objectFit: "contain",
+            display: loading ? "none" : "block",
+          }}
+        />
+      )}
+
+      {/* Resolution/mode badge */}
+      {!loading && (
         <div
           style={{
             position: "absolute",
@@ -381,10 +451,13 @@ export default function ScreenShareViewer({ active, identity }: ScreenShareViewe
             display: "flex",
             alignItems: "center",
             gap: spacing.unit,
+            // Ensure badge renders above the native overlay
+            zIndex: 10,
+            pointerEvents: "none",
           }}
         >
           <Monitor size={10} />
-          {dimensions.width}×{dimensions.height}
+          {useNative ? "Native GPU" : "WebGL"}
         </div>
       )}
     </div>
