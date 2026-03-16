@@ -548,7 +548,11 @@ async fn start_screen_capture_libwebrtc_or_fallback(
     let (audio_track, loopback_stream, audio_capture_thread) =
         setup_screen_share_audio_process_loopback(mode, None, shutdown.clone());
     #[cfg(not(target_os = "windows"))]
-    let (audio_track, loopback_stream, audio_capture_thread) = (None, None, None);
+    let (audio_track, loopback_stream, audio_capture_thread): (
+        Option<LocalAudioTrack>,
+        Option<cpal::Stream>,
+        Option<std::thread::JoinHandle<()>>,
+    ) = (None, None, None);
     let _ = loopback_stream;
 
     Ok(ScreenShareHandle {
@@ -673,7 +677,11 @@ async fn start_screen_capture_screenshots_fallback(
     let (audio_track, loopback_stream, audio_capture_thread) =
         setup_screen_share_audio_process_loopback(ScreenShareMode::Screen, None, shutdown.clone());
     #[cfg(not(target_os = "windows"))]
-    let (audio_track, loopback_stream, audio_capture_thread) = (None, None, None);
+    let (audio_track, loopback_stream, audio_capture_thread): (
+        Option<LocalAudioTrack>,
+        Option<cpal::Stream>,
+        Option<std::thread::JoinHandle<()>>,
+    ) = (None, None, None);
     let _ = loopback_stream;
 
     Ok(ScreenShareHandle {
