@@ -13,7 +13,7 @@ use std::sync::Arc;
 use std::thread;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
-use livekit::options::{TrackPublishOptions, VideoCodec, VideoEncoding};
+use livekit::options::{TrackPublishOptions, VideoEncoding};
 use livekit::track::{LocalAudioTrack, LocalTrack, LocalVideoTrack};
 use livekit::track::TrackSource;
 use livekit::webrtc::video_frame::{I420Buffer, VideoFrame, VideoRotation};
@@ -250,8 +250,10 @@ async fn start_screen_capture_windows_graphics(
     );
 
     let framerate = preset.fps() as f64;
+    let codec = crate::codec::resolve_codec();
     eprintln!(
-        "[Pax] Publishing screen track to LiveKit (VP8, {}, {}fps)",
+        "[Pax] Publishing screen track to LiveKit ({:?}, {}, {}fps)",
+        codec,
         preset.label(),
         preset.fps()
     );
@@ -260,7 +262,7 @@ async fn start_screen_capture_windows_graphics(
             LocalTrack::Video(track.clone()),
             TrackPublishOptions {
                 source: TrackSource::Screenshare,
-                video_codec: VideoCodec::VP8,
+                video_codec: codec,
                 simulcast: false,
                 video_encoding: Some(VideoEncoding {
                     max_bitrate: bitrate,
@@ -530,7 +532,7 @@ async fn start_screen_capture_libwebrtc_or_fallback(
             LocalTrack::Video(track.clone()),
             TrackPublishOptions {
                 source: TrackSource::Screenshare,
-                video_codec: VideoCodec::VP8,
+                video_codec: crate::codec::resolve_codec(),
                 simulcast: false,
                 video_encoding: Some(VideoEncoding {
                     max_bitrate: bitrate,
@@ -655,7 +657,7 @@ async fn start_screen_capture_screenshots_fallback(
             LocalTrack::Video(track.clone()),
             TrackPublishOptions {
                 source: TrackSource::Screenshare,
-                video_codec: VideoCodec::VP8,
+                video_codec: crate::codec::resolve_codec(),
                 simulcast: false,
                 video_encoding: Some(VideoEncoding {
                     max_bitrate: bitrate,

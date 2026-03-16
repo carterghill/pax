@@ -45,6 +45,7 @@ screenshots = "0.8"
 # Native GPU overlay rendering (zero-IPC video)
 wgpu = "25"
 raw-window-handle = "0.6"
+pollster = "0.4"
 
 [target.'cfg(target_os = "windows")'.dependencies]
 wasapi = "0.22"

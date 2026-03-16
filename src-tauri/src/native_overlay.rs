@@ -280,6 +280,9 @@ impl GpuRenderer {
             adapter.get_info().backend
         );
 
+        // Auto-detect best video codec based on GPU capabilities
+        crate::codec::detect_best_codec(&adapter.get_info().name);
+
         let (device, queue) = adapter
             .request_device(
                 &wgpu::DeviceDescriptor {

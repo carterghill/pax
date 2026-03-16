@@ -1,6 +1,7 @@
 #![recursion_limit = "256"]
 
 pub mod platform;
+pub mod codec;
 mod commands;
 mod idle;
 pub mod native_overlay;
@@ -56,6 +57,9 @@ pub fn run() {
     ensure_system_certs();
     let display_server = platform::detect_display_server();
 
+    // Detect best video codec based on GPU before any screen share publishes
+    detect_codec_early();
+
     let state = Arc::new(AppState {
         client: Mutex::new(None),
         http_client: reqwest::Client::new(),
@@ -104,6 +108,9 @@ pub fn run() {
             commands::overlay::overlay_is_supported,
             commands::overlay::overlay_set_rect,
             commands::overlay::overlay_set_visible,
+            commands::codec::get_codec_preference,
+            commands::codec::set_codec_preference,
+            commands::codec::get_resolved_codec,
         ])
         .setup(|app| {
             // Set window icon (taskbar + title bar) from our bundled icons
@@ -141,4 +148,24 @@ pub fn run() {
         })
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
+}
+
+/// Detect the best video codec by probing the GPU adapter at startup.
+/// Runs synchronously (blocking) because it's called once during init.
+fn detect_codec_early() {
+    let instance = wgpu::Instance::new(&wgpu::InstanceDescriptor {
+        backends: wgpu::Backends::DX12 | wgpu::Backends::VULKAN,
+        ..Default::default()
+    });
+    // Synchronous adapter request (no surface needed for detection)
+    let adapter = pollster::block_on(instance.request_adapter(&wgpu::RequestAdapterOptions {
+        power_preference: wgpu::PowerPreference::HighPerformance,
+        compatible_surface: None,
+        force_fallback_adapter: false,
+    }));
+    if let Ok(adapter) = adapter {
+        codec::detect_best_codec(&adapter.get_info().name);
+    } else {
+        eprintln!("[Pax] GPU adapter probe failed — defaulting to H264");
+    }
 }
