@@ -12,7 +12,6 @@ use crate::AppState;
 
 use super::auth::{save_session_to_credentials, SavedSession};
 use super::{fmt_error_chain, get_or_fetch_room_avatar};
-use crate::commands::voice_matrix::matrix_voice_leave_all_joined_rooms;
 
 fn store_path(app: &tauri::AppHandle) -> Result<std::path::PathBuf, String> {
     Ok(app
@@ -77,12 +76,6 @@ pub async fn login(
         );
     }
 
-    let client_cleanup = client.clone();
-    let http_client = state.http_client.clone();
-    tokio::spawn(async move {
-        let _ = matrix_voice_leave_all_joined_rooms(&client_cleanup, &http_client, None).await;
-    });
-
     let user_id = client
         .user_id()
         .ok_or("No user ID after login")?
@@ -141,12 +134,6 @@ pub async fn restore_session(
         .map_err(|e| format!("Session expired: {e}"))?;
 
     eprintln!("[Pax] restore_session: valid — user_id={}", user_id);
-
-    let client_cleanup = client.clone();
-    let http_client = state.http_client.clone();
-    tokio::spawn(async move {
-        let _ = matrix_voice_leave_all_joined_rooms(&client_cleanup, &http_client, None).await;
-    });
 
     *state.client.lock().await = Some(client);
     *state.sync_running.lock().await = false;

@@ -19,6 +19,16 @@ use tauri::Manager;
 
 use platform::DisplayServer;
 
+/// LiveKit server admin credentials for kicking stale participants.
+/// Loaded from .env at startup; all fields optional so the app still
+/// works (without kick capability) if the .env is missing.
+#[derive(Clone, Default)]
+pub struct LivekitConfig {
+    pub api_key: Option<String>,
+    pub api_secret: Option<String>,
+    pub url: Option<String>,
+}
+
 pub struct AppState {
     pub client: Mutex<Option<Client>>,
     pub http_client: reqwest::Client,
@@ -26,6 +36,7 @@ pub struct AppState {
     pub avatar_cache: Arc<Mutex<HashMap<String, String>>>,
     pub sync_running: Arc<Mutex<bool>>,
     pub display_server: DisplayServer,
+    pub livekit: LivekitConfig,
 }
 
 /// Ensure the system CA certificate store is used for TLS on Linux.
@@ -57,6 +68,19 @@ pub fn run() {
     ensure_system_certs();
     let display_server = platform::detect_display_server();
 
+    // Load .env (silently ignored if missing — e.g. production builds)
+    dotenvy::dotenv().ok();
+    let livekit = LivekitConfig {
+        api_key: std::env::var("LIVEKIT_API_KEY").ok().filter(|s| !s.is_empty()),
+        api_secret: std::env::var("LIVEKIT_API_SECRET").ok().filter(|s| !s.is_empty()),
+        url: std::env::var("LIVEKIT_URL").ok().filter(|s| !s.is_empty()),
+    };
+    if livekit.api_key.is_some() {
+        eprintln!("[Pax] LiveKit admin credentials loaded from .env");
+    } else {
+        eprintln!("[Pax] No LiveKit admin credentials — multi-device kick disabled");
+    }
+
     // Detect best video codec based on GPU before any screen share publishes
     detect_codec_early();
 
@@ -67,6 +91,7 @@ pub fn run() {
         avatar_cache: Arc::new(Mutex::new(HashMap::new())),
         sync_running: Arc::new(Mutex::new(false)),
         display_server,
+        livekit,
     });
 
     tauri::Builder::default()

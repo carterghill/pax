@@ -3,12 +3,14 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use futures_util::future::join_all;
+use jsonwebtoken::{encode, EncodingKey, Header};
 use matrix_sdk::ruma::events::StateEventType;
 use matrix_sdk::{Client, Room};
+use serde::Serialize;
 use tauri::State;
 
 use crate::types::{VoiceJoinResult, VoiceParticipant};
-use crate::{screen, voice, AppState};
+use crate::{screen, voice, AppState, LivekitConfig};
 
 use super::{fmt_error_chain, get_or_fetch_member_avatar};
 
@@ -469,6 +471,228 @@ pub(crate) async fn matrix_voice_leave_all_joined_rooms(
     Ok(())
 }
 
+/// JWT claims for a LiveKit admin token (used to kick participants).
+#[derive(Serialize)]
+struct LivekitAdminClaims {
+    iss: String,
+    sub: String,
+    iat: u64,
+    nbf: u64,
+    exp: u64,
+    video: LivekitVideoGrant,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct LivekitVideoGrant {
+    room_admin: bool,
+    room_list: bool,
+    room: String,
+}
+
+/// Kick other devices of the same user from a LiveKit room.
+/// Reads call.member state events to discover other device identities,
+/// then calls the LiveKit Room Service API to remove each one.
+/// Best-effort: errors are logged but do not block the join flow.
+async fn kick_other_devices_from_livekit(
+    http: &reqwest::Client,
+    user_id: &str,
+    our_device_id: &str,
+    config: &LivekitConfig,
+) {
+    let (api_key, api_secret, lk_url) = match (&config.api_key, &config.api_secret, &config.url) {
+        (Some(k), Some(s), Some(u)) => {
+            eprintln!("[Pax] kick: using LiveKit at {} (key={}...)", u, &k[..k.len().min(8)]);
+            (k.clone(), s.clone(), u.clone())
+        }
+        _ => {
+            eprintln!("[Pax] kick: no LiveKit credentials configured, skipping");
+            return;
+        }
+    };
+
+    // 1. Generate admin JWT (used for both listing and kicking)
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs();
+    let claims = LivekitAdminClaims {
+        iss: api_key.clone(),
+        sub: String::new(),
+        iat: now,
+        nbf: now,
+        exp: now + 60,
+        video: LivekitVideoGrant {
+            room_admin: true,
+            room_list: true,
+            room: String::new(),
+        },
+    };
+    let token = match encode(
+        &Header::default(),
+        &claims,
+        &EncodingKey::from_secret(api_secret.as_bytes()),
+    ) {
+        Ok(t) => t,
+        Err(e) => {
+            eprintln!("[Pax] kick: failed to sign LiveKit admin JWT: {e}");
+            return;
+        }
+    };
+
+    // 2. List all LiveKit rooms, then check each for our other devices.
+    //    We can't use the Matrix room ID directly because lk-jwt-service
+    //    transforms/encodes the room name.
+    let list_rooms_url = format!(
+        "{}/twirp/livekit.RoomService/ListRooms",
+        lk_url.trim_end_matches('/')
+    );
+    eprintln!("[Pax] kick: calling ListRooms at {}", list_rooms_url);
+    let rooms_json = match http
+        .post(&list_rooms_url)
+        .timeout(Duration::from_secs(5))
+        .bearer_auth(&token)
+        .json(&serde_json::json!({}))
+        .send()
+        .await
+    {
+        Ok(resp) if resp.status().is_success() => {
+            let json = resp.json::<serde_json::Value>().await.unwrap_or_default();
+            eprintln!("[Pax] kick: ListRooms response: {}", json);
+            json
+        }
+        Ok(resp) => {
+            let status = resp.status();
+            let body = resp.text().await.unwrap_or_default();
+            eprintln!("[Pax] kick: ListRooms failed ({}): {}", status, body);
+            return;
+        }
+        Err(e) => {
+            eprintln!("[Pax] kick: ListRooms request failed: {e}");
+            return;
+        }
+    };
+
+    let rooms = match rooms_json.get("rooms").and_then(|r| r.as_array()) {
+        Some(r) => r.clone(),
+        None => {
+            eprintln!("[Pax] kick: no rooms array in response");
+            return;
+        }
+    };
+
+    eprintln!("[Pax] kick: found {} LiveKit rooms", rooms.len());
+    let our_prefix = format!("{}:", user_id);
+    let our_identity = format!("{}:{}", user_id, our_device_id);
+
+    for lk_room in &rooms {
+        let room_name = lk_room.get("name").and_then(|n| n.as_str()).unwrap_or_default();
+        if room_name.is_empty() {
+            continue;
+        }
+        eprintln!("[Pax] kick: checking LiveKit room '{}'", room_name);
+
+        // Generate a room-scoped admin JWT (LiveKit requires the room name
+        // in the grant for participant-level operations)
+        let room_claims = LivekitAdminClaims {
+            iss: api_key.clone(),
+            sub: String::new(),
+            iat: now,
+            nbf: now,
+            exp: now + 60,
+            video: LivekitVideoGrant {
+                room_admin: true,
+                room_list: false,
+                room: room_name.to_string(),
+            },
+        };
+        let room_token = match encode(
+            &Header::default(),
+            &room_claims,
+            &EncodingKey::from_secret(api_secret.as_bytes()),
+        ) {
+            Ok(t) => t,
+            Err(_) => continue,
+        };
+
+        // 3. List participants in this room
+        let list_url = format!(
+            "{}/twirp/livekit.RoomService/ListParticipants",
+            lk_url.trim_end_matches('/')
+        );
+        let participants_json = match http
+            .post(&list_url)
+            .timeout(Duration::from_secs(5))
+            .bearer_auth(&room_token)
+            .json(&serde_json::json!({ "room": room_name }))
+            .send()
+            .await
+        {
+            Ok(resp) if resp.status().is_success() => {
+                let json = resp.json::<serde_json::Value>().await.unwrap_or_default();
+                eprintln!("[Pax] kick: ListParticipants response: {}", json);
+                json
+            }
+            Ok(resp) => {
+                let status = resp.status();
+                let body = resp.text().await.unwrap_or_default();
+                eprintln!("[Pax] kick: ListParticipants failed for room '{}' ({}): {}", room_name, status, body);
+                continue;
+            }
+            Err(e) => {
+                eprintln!("[Pax] kick: ListParticipants request failed for room '{}': {}", room_name, e);
+                continue;
+            }
+        };
+
+        let participants = match participants_json.get("participants").and_then(|p| p.as_array()) {
+            Some(p) => p,
+            None => {
+                eprintln!("[Pax] kick: no participants array for room '{}'", room_name);
+                continue;
+            }
+        };
+
+        eprintln!("[Pax] kick: {} participants in room '{}'", participants.len(), room_name);
+        // 4. Find and kick participants matching our userId but different deviceId
+        for p in participants {
+            let identity = p.get("identity").and_then(|i| i.as_str()).unwrap_or_default();
+            eprintln!("[Pax] kick:   identity='{}' our_prefix='{}' our_identity='{}'", identity, our_prefix, our_identity);
+            if identity.starts_with(&our_prefix) && identity != our_identity {
+                eprintln!("[Pax] Kicking stale LiveKit participant: {} (room={})", identity, room_name);
+                let kick_url = format!(
+                    "{}/twirp/livekit.RoomService/RemoveParticipant",
+                    lk_url.trim_end_matches('/')
+                );
+                let kick_body = serde_json::json!({
+                    "room": room_name,
+                    "identity": identity,
+                });
+                match http
+                    .post(&kick_url)
+                    .timeout(Duration::from_secs(5))
+                    .bearer_auth(&room_token)
+                    .json(&kick_body)
+                    .send()
+                    .await
+                {
+                    Ok(resp) if resp.status().is_success() => {
+                        eprintln!("[Pax] Kicked {} from LiveKit room {}", identity, room_name);
+                    }
+                    Ok(resp) => {
+                        let status = resp.status();
+                        let body = resp.text().await.unwrap_or_default();
+                        eprintln!("[Pax] Kick failed for {} ({}): {}", identity, status, body);
+                    }
+                    Err(e) => {
+                        eprintln!("[Pax] Kick request failed for {}: {}", identity, e);
+                    }
+                }
+            }
+        }
+    }
+}
+
 #[tauri::command]
 pub async fn voice_connect(
     state: State<'_, Arc<AppState>>,
@@ -476,6 +700,7 @@ pub async fn voice_connect(
     app_handle: tauri::AppHandle,
     room_id: String,
 ) -> Result<(), String> {
+    eprintln!("[Pax] voice_connect called for room {}", room_id);
     let (client, http_client) = {
         let guard = state.client.lock().await;
         let client = guard.as_ref().ok_or("Not logged in")?.clone();
@@ -489,6 +714,21 @@ pub async fn voice_connect(
         client.device_id().ok_or("No device ID")?,
         "m.call"
     );
+
+    // Kick other devices of the same user from the LiveKit room.
+    // Uses the LiveKit Room Service API to list actual participants and
+    // remove any that match our userId but have a different deviceId.
+    let user_id_str = client.user_id().ok_or("No user ID")?.to_string();
+    let device_id_str = client.device_id().ok_or("No device ID")?.to_string();
+    eprintln!("[Pax] About to kick other devices (user={}, device={})", user_id_str, device_id_str);
+    kick_other_devices_from_livekit(
+        &http_client,
+        &user_id_str,
+        &device_id_str,
+        &state.livekit,
+    )
+    .await;
+    eprintln!("[Pax] Kick check complete, proceeding with join");
 
     // Optimistic join: start the Matrix join + LiveKit connect immediately.
     // Run leave-all-rooms cleanup in parallel as fire-and-forget so the user
