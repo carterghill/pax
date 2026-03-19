@@ -26,6 +26,7 @@ const resolveVoiceState = (
 };
 
 interface RoomSidebarProps {
+  width: number;
   rooms: Room[];
   activeRoomId: string | null;
   onSelectRoom: (roomId: string) => void;
@@ -148,6 +149,7 @@ function VoiceParticipantRow({
 }
 
 export default function RoomSidebar({
+  width,
   rooms,
   activeRoomId,
   onSelectRoom,
@@ -177,7 +179,8 @@ export default function RoomSidebar({
 
   return (
     <div style={{
-      width: spacing.sidebarWidth,
+      width,
+      minWidth: width,
       backgroundColor: palette.bgSecondary,
       display: "flex",
       flexDirection: "column",
@@ -299,8 +302,10 @@ export default function RoomSidebar({
         )}
       </div>
 
-      {/* User status at bottom */}
-      <StatusDropdown displayName={displayName} avatarUrl={null} />
+      {/* User status at bottom — flexShrink: 0 so it stays full width */}
+      <div style={{ flexShrink: 0 }}>
+        <StatusDropdown displayName={displayName} avatarUrl={null} />
+      </div>
 
       {/* Volume context menu */}
       {contextMenu && (

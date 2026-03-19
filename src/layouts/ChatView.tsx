@@ -1,4 +1,4 @@
-import { useState, useEffect } from "react";
+import { useState, useEffect, useCallback, useRef } from "react";
 import { listen } from "@tauri-apps/api/event";
 import { Hash, Users } from "lucide-react";
 import MessageList from "../components/MessageList";
@@ -8,9 +8,15 @@ import { useMessages } from "../hooks/useMessages";
 import { useTheme } from "../theme/ThemeContext";
 import { Room } from "../types/matrix";
 
+const USER_MENU_DEFAULT_WIDTH = 240;
+const MIN_USER_MENU_WIDTH = 180;
+const MAX_USER_MENU_WIDTH = 400;
+
 interface ChatViewProps {
   room: Room;
   userId: string;
+  userMenuWidth: number;
+  onUserMenuWidthChange: (width: number) => void;
 }
 
 interface TypingPayload {
@@ -73,11 +79,38 @@ function TypingIndicator({ names, palette, typography, spacing }: {
   );
 }
 
-export default function ChatView({ room, userId }: ChatViewProps) {
+export default function ChatView({
+  room,
+  userId,
+  userMenuWidth,
+  onUserMenuWidthChange,
+}: ChatViewProps) {
   const { messages, loadMore, hasMore, loading, initialLoading, refreshing, refresh } = useMessages(room.id);
   const { palette, typography, spacing } = useTheme();
   const [typingNames, setTypingNames] = useState<string[]>([]);
   const [showUsers, setShowUsers] = useState(true);
+
+  const startXRef = useRef(0);
+  const startWidthRef = useRef(0);
+  const [isUserMenuResizeHovered, setIsUserMenuResizeHovered] = useState(false);
+
+  const handleUserMenuResizeStart = useCallback((e: React.MouseEvent) => {
+    e.preventDefault();
+    startXRef.current = e.clientX;
+    startWidthRef.current = userMenuWidth;
+
+    const onMove = (ev: MouseEvent) => {
+      const dx = ev.clientX - startXRef.current;
+      const next = Math.min(MAX_USER_MENU_WIDTH, Math.max(MIN_USER_MENU_WIDTH, startWidthRef.current - dx));
+      onUserMenuWidthChange(next);
+    };
+    const onUp = () => {
+      window.removeEventListener("mousemove", onMove);
+      window.removeEventListener("mouseup", onUp);
+    };
+    window.addEventListener("mousemove", onMove);
+    window.addEventListener("mouseup", onUp);
+  }, [userMenuWidth, onUserMenuWidthChange]);
 
   // Listen for typing events in this room
   useEffect(() => {
@@ -108,16 +141,23 @@ export default function ChatView({ room, userId }: ChatViewProps) {
         height: spacing.headerHeight,
         borderBottom: `1px solid ${palette.border}`,
         display: "flex",
+        position: "relative",
         alignItems: "center",
         gap: spacing.unit * 3,
         boxSizing: "border-box",
+        minWidth: 0,
       }}>
-        <Hash size={20} color={palette.textSecondary} />
+        <Hash size={20} color={palette.textSecondary} style={{ flexShrink: 0 }} />
         <span style={{
           fontWeight: typography.fontWeightBold,
           color: palette.textHeading,
           fontSize: typography.fontSizeBase,
           flex: 1,
+          minWidth: 0,
+          overflow: "hidden",
+          textOverflow: "ellipsis",
+          whiteSpace: "nowrap",
+          paddingRight: spacing.unit * 8,
         }}>
           {room.name}
         </span>
@@ -133,6 +173,9 @@ export default function ChatView({ room, userId }: ChatViewProps) {
             display: "flex",
             alignItems: "center",
             justifyContent: "center",
+            flexShrink: 0,
+            position: "absolute",
+            right: spacing.unit * 2,
           }}
         >
           <Users
@@ -181,8 +224,26 @@ export default function ChatView({ room, userId }: ChatViewProps) {
           />
         </div>
 
-        {/* User menu panel */}
-        {showUsers && <UserMenu roomId={room.id} userId={userId} />}
+        {/* User menu panel with resizable inside border */}
+        {showUsers && (
+          <>
+            <div
+              onMouseDown={handleUserMenuResizeStart}
+              onDoubleClick={() => onUserMenuWidthChange(USER_MENU_DEFAULT_WIDTH)}
+              onMouseEnter={() => setIsUserMenuResizeHovered(true)}
+              onMouseLeave={() => setIsUserMenuResizeHovered(false)}
+              style={{
+                width: 6,
+                flexShrink: 0,
+                cursor: "col-resize",
+                backgroundColor: isUserMenuResizeHovered ? palette.border : "transparent",
+                transition: "background-color 0.15s",
+              }}
+              title="Drag to resize, double-click to reset"
+            />
+            <UserMenu width={userMenuWidth} roomId={room.id} userId={userId} />
+          </>
+        )}
       </div>
     </div>
   );

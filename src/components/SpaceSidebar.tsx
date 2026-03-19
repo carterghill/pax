@@ -75,6 +75,8 @@ export default function SpaceSidebar({
     <div
       style={{
         width: 72,
+        minWidth: 72,
+        flexShrink: 0,
         backgroundColor: palette.bgTertiary,
         display: "flex",
         flexDirection: "column",

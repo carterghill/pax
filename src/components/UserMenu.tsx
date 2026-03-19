@@ -3,6 +3,7 @@ import { useRoomMembers } from "../hooks/useRoomMembers";
 import { usePresenceContext } from "../hooks/PresenceContext";
 
 interface UserMenuProps {
+  width: number;
   roomId: string;
   userId: string;
 }
@@ -14,7 +15,7 @@ const presenceColor: Record<string, string> = {
   offline: "#80848e",
 };
 
-export default function UserMenu({ roomId, userId }: UserMenuProps) {
+export default function UserMenu({ width, roomId, userId }: UserMenuProps) {
   const { palette, typography, spacing } = useTheme();
   const { members, loading } = useRoomMembers(roomId);
   const { effectivePresence } = usePresenceContext();
@@ -37,7 +38,8 @@ export default function UserMenu({ roomId, userId }: UserMenuProps) {
 
   return (
     <div style={{
-      width: 240,
+      width,
+      minWidth: width,
       flexShrink: 0,
       backgroundColor: palette.bgSecondary,
       borderLeft: `1px solid ${palette.border}`,
