@@ -8,10 +8,12 @@
 ///   Spkr: LiveKit → NativeAudioStream → per-user volume → mix → ring buffer → cpal output
 use std::collections::{HashMap, VecDeque};
 use std::sync::Arc;
+use std::time::Duration;
 use parking_lot::Mutex;
 use serde::Serialize;
 use tauri::{AppHandle, Emitter};
 use tokio::sync::mpsc;
+use tokio::time::{interval_at, Instant as TokioInstant, MissedTickBehavior};
 use livekit::prelude::*;
 use livekit::track::{LocalAudioTrack, LocalTrack, RemoteTrack, TrackSource};
 use livekit::options::TrackPublishOptions;
@@ -36,6 +38,13 @@ unsafe impl Sync for SendStream {}
 const SAMPLE_RATE: u32 = 48000;
 const NUM_CHANNELS: u32 = 1;
 const SAMPLES_PER_10MS: u32 = SAMPLE_RATE / 100; // 480
+/// EMA blend for smoothed RMS (higher = snappier).
+const SPEAKING_LEVEL_EMA: f32 = 0.22;
+/// Normalized RMS (0..1) — above this shows the speaking ring alongside LiveKit’s active list.
+/// LiveKit’s server-side `active` flag is conservative; this picks up normal conversation levels.
+const SPEAKING_LEVEL_THRESHOLD: f32 = 0.009;
+/// How often to push voice state so RMS-based speaking indicators stay responsive.
+const SPEAKING_UI_TICK_MS: u64 = 90;
 // ─── Types emitted to the frontend ─────────────────────────────────────────
 #[derive(Clone, Serialize, Debug)]
 #[serde(rename_all = "camelCase")]
@@ -67,8 +76,12 @@ struct AudioState {
     playback_buffer: VecDeque<f32>,
     /// Per-user volume multiplier (0.0 – 2.0, default 1.0)
     user_volumes: HashMap<String, f32>,
-    /// Currently active speakers
+    /// Currently active speakers (from LiveKit server)
     active_speakers: Vec<String>,
+    /// Smoothed normalized RMS (0..1) from local mic frames (post noise processing).
+    local_mic_level_smooth: f32,
+    /// Smoothed normalized RMS per remote identity from decoded mic audio.
+    remote_mic_level_smooth: HashMap<String, f32>,
     /// All remote participant identities we know about
     remote_participants: Vec<String>,
     /// Per-remote participant mic mute state (true = muted)
@@ -94,6 +107,8 @@ impl Default for AudioState {
             playback_buffer: VecDeque::with_capacity(SAMPLE_RATE as usize),
             user_volumes: HashMap::new(),
             active_speakers: Vec::new(),
+            local_mic_level_smooth: 0.0,
+            remote_mic_level_smooth: HashMap::new(),
             remote_participants: Vec::new(),
             remote_mic_muted: HashMap::new(),
             remote_deafened: HashMap::new(),
@@ -505,6 +520,32 @@ fn get_parent_hwnd_for_overlay(app_handle: &AppHandle) -> Option<isize> {
     }
 }
 
+#[inline]
+fn rms_i16_normalized(samples: &[i16]) -> f32 {
+    if samples.is_empty() {
+        return 0.0;
+    }
+    let mut acc = 0.0f64;
+    for &s in samples {
+        let x = s as f64 * (1.0 / 32768.0);
+        acc += x * x;
+    }
+    (acc / samples.len() as f64).sqrt() as f32
+}
+
+#[inline]
+fn ema_speaking_level(prev: f32, instant: f32) -> f32 {
+    prev * (1.0 - SPEAKING_LEVEL_EMA) + instant * SPEAKING_LEVEL_EMA
+}
+
+fn merge_speaking_from_level(
+    server_active: bool,
+    level_smooth: f32,
+    allow_level: bool,
+) -> bool {
+    server_active || (allow_level && level_smooth >= SPEAKING_LEVEL_THRESHOLD)
+}
+
 // ─── Mic capture pump ───────────────────────────────────────────────────────
 /// Receives completed mic frames from the cpal callback channel and sends to LiveKit.
 /// Zero latency added — frames arrive as soon as cpal has enough samples.
@@ -548,6 +589,12 @@ async fn handle_remote_audio(
         }
 
         // Convert i16 → f32, apply volume, and MIX (add) into the buffer.
+        let inst = rms_i16_normalized(samples);
+        st.remote_mic_level_smooth
+            .entry(identity.clone())
+            .and_modify(|e| *e = ema_speaking_level(*e, inst))
+            .or_insert(inst);
+
         for &s in samples {
             let f = ((s as f32 / 32768.0) * volume).clamp(-1.0, 1.0);
             st.playback_buffer.push_back(f);
@@ -566,10 +613,18 @@ async fn run_event_loop(
 ) {
     // Emit initial connected state
     emit_state(&app_handle, &room_id, &local_identity, &audio_state, false, true, None);
+    let mut speaking_tick = interval_at(
+        TokioInstant::now() + Duration::from_millis(SPEAKING_UI_TICK_MS),
+        Duration::from_millis(SPEAKING_UI_TICK_MS),
+    );
+    speaking_tick.set_missed_tick_behavior(MissedTickBehavior::Skip);
     loop {
         tokio::select! {
             _ = shutdown_rx.recv() => {
                 break;
+            }
+            _ = speaking_tick.tick() => {
+                emit_state(&app_handle, &room_id, &local_identity, &audio_state, false, true, None);
             }
             event = events.recv() => {
                 match event {
@@ -653,6 +708,7 @@ async fn run_event_loop(
                         } else if publication.source() == TrackSource::Microphone {
                             let mut st = audio_state.lock();
                             st.remote_mic_muted.remove(&identity);
+                            st.remote_mic_level_smooth.remove(&identity);
                             drop(st);
                             emit_state(&app_handle, &room_id, &local_identity, &audio_state, false, true, None);
                         }
@@ -720,6 +776,7 @@ async fn run_event_loop(
                             st.remote_participants.retain(|id| id != &identity);
                             st.remote_mic_muted.remove(&identity);
                             st.remote_deafened.remove(&identity);
+                            st.remote_mic_level_smooth.remove(&identity);
                             if st.screen_sharing_owners.contains(&identity) {
                                 st.screen_sharing_owners.retain(|id| id != &identity);
                                 if let Some(shutdown) = st.video_recv_shutdowns.remove(&identity) {
@@ -770,9 +827,11 @@ fn emit_state(
     let mut participants = Vec::new();
     // Local participant
     if is_connected {
+        let server = st.active_speakers.contains(&local_identity.to_string());
+        let level_speaking = merge_speaking_from_level(false, st.local_mic_level_smooth, st.mic_enabled);
         participants.push(VoiceParticipantInfo {
             identity: local_identity.to_string(),
-            is_speaking: st.active_speakers.contains(&local_identity.to_string()),
+            is_speaking: server || level_speaking,
             is_local: true,
             is_muted: !st.mic_enabled,
             is_deafened: st.deafened,
@@ -780,11 +839,15 @@ fn emit_state(
     }
     // Remote participants
     for id in &st.remote_participants {
+        let server = st.active_speakers.contains(id);
+        let muted = *st.remote_mic_muted.get(id).unwrap_or(&false);
+        let smooth = *st.remote_mic_level_smooth.get(id).unwrap_or(&0.0);
+        let level_speaking = merge_speaking_from_level(false, smooth, !muted);
         participants.push(VoiceParticipantInfo {
             identity: id.clone(),
-            is_speaking: st.active_speakers.contains(id),
+            is_speaking: server || level_speaking,
             is_local: false,
-            is_muted: *st.remote_mic_muted.get(id).unwrap_or(&false),
+            is_muted: muted,
             is_deafened: *st.remote_deafened.get(id).unwrap_or(&false),
         });
     }
@@ -1066,6 +1129,12 @@ fn setup_mic_input(
                             let mut np = noise_proc.lock();
                             np.set_enabled(false);
                         }
+                        {
+                            let inst = rms_i16_normalized(&samples);
+                            let mut st = audio_state.lock();
+                            st.local_mic_level_smooth =
+                                ema_speaking_level(st.local_mic_level_smooth, inst);
+                        }
                         let _ = frame_tx.try_send(samples);
                     }
                 } else {
@@ -1085,6 +1154,12 @@ fn setup_mic_input(
                         } else {
                             let mut np = noise_proc.lock();
                             np.set_enabled(false);
+                        }
+                        {
+                            let inst = rms_i16_normalized(&samples);
+                            let mut st = audio_state.lock();
+                            st.local_mic_level_smooth =
+                                ema_speaking_level(st.local_mic_level_smooth, inst);
                         }
                         let _ = frame_tx.try_send(samples);
                     }

@@ -123,9 +123,16 @@ export default function MainLayout({ userId, onSignOut }: MainLayoutProps) {
   const voiceParticipants = useVoiceParticipants(voiceRoomIds);
   const voiceCallParticipantStates = useMemo(
     () => {
-      const stateMap: Record<string, { isMuted: boolean; isDeafened: boolean }> = {};
+      const stateMap: Record<
+        string,
+        { isMuted: boolean; isDeafened: boolean; isSpeaking: boolean }
+      > = {};
       for (const p of voiceCall.participants) {
-        const state = { isMuted: p.isMuted, isDeafened: p.isDeafened };
+        const state = {
+          isMuted: p.isMuted,
+          isDeafened: p.isDeafened,
+          isSpeaking: p.isSpeaking,
+        };
         const mxid = extractMatrixUserId(p.identity);
         const keys = [
           p.identity,

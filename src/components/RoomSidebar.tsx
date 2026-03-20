@@ -8,7 +8,10 @@ import { useUserVolume } from "../hooks/useUserVolume";
 import { VOICE_ROOM_TYPE, localpartFromUserId, normalizeUserId } from "../utils/matrix";
 const resolveVoiceState = (
   participant: VoiceParticipant,
-  voiceCallParticipantStates: Record<string, { isMuted: boolean; isDeafened: boolean }>
+  voiceCallParticipantStates: Record<
+    string,
+    { isMuted: boolean; isDeafened: boolean; isSpeaking: boolean }
+  >
 ) => {
   const candidates = [
     participant.userId,
@@ -37,7 +40,10 @@ interface RoomSidebarProps {
   isVoiceConnecting: boolean;
   disconnectingFromRoomId: string | null;
   screenSharingOwners: string[];
-  voiceCallParticipantStates: Record<string, { isMuted: boolean; isDeafened: boolean }>;
+  voiceCallParticipantStates: Record<
+    string,
+    { isMuted: boolean; isDeafened: boolean; isSpeaking: boolean }
+  >;
   onSetParticipantVolume: (identity: string, volume: number) => void;
 }
 
@@ -47,6 +53,7 @@ function VoiceParticipantRow({
   isSharingScreen,
   isMuted,
   isDeafened,
+  isSpeaking,
   isConnecting,
   onContextMenu,
 }: {
@@ -55,6 +62,7 @@ function VoiceParticipantRow({
   isSharingScreen: boolean;
   isMuted: boolean;
   isDeafened: boolean;
+  isSpeaking: boolean;
   isConnecting: boolean;
   onContextMenu: (e: React.MouseEvent) => void;
 }) {
@@ -88,6 +96,9 @@ function VoiceParticipantRow({
             borderRadius: "50%",
             objectFit: "cover",
             flexShrink: 0,
+            boxSizing: "border-box",
+            border: isSpeaking ? "2px solid #23a55a" : "2px solid transparent",
+            transition: "border-color 0.15s ease",
           }}
         />
       ) : (
@@ -103,6 +114,9 @@ function VoiceParticipantRow({
           fontSize: 10,
           fontWeight: typography.fontWeightBold,
           flexShrink: 0,
+          boxSizing: "border-box",
+          border: isSpeaking ? "2px solid #23a55a" : "2px solid transparent",
+          transition: "border-color 0.15s ease",
         }}>
           {name.charAt(0).toUpperCase()}
         </div>
@@ -273,6 +287,7 @@ export default function RoomSidebar({
                       isSharingScreen={screenSharingOwners.includes(p.userId)}
                       isMuted={isConnectedHere ? !!state?.isMuted : false}
                       isDeafened={isConnectedHere ? !!state?.isDeafened : false}
+                      isSpeaking={isConnectedHere ? !!state?.isSpeaking : false}
                       isConnecting={isParticipantConnecting}
                       onContextMenu={(e) => {
                         // Map userId to the identity format used by LiveKit
