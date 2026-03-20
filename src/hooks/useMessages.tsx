@@ -8,21 +8,23 @@ interface RoomMessagePayload {
   message: Message;
 }
 
+interface MessageEditPayload {
+  roomId: string;
+  targetEventId: string;
+  body: string;
+}
+
 interface CachedRoom {
   messages: Message[];
   prevBatch: string | null;
 }
 
-function mergeMessages(prev: Message[], fetched: Message[]): Message[] {
-  const prevIds = new Set(prev.map((m) => m.eventId));
-  const merged = [...prev];
-  for (const msg of fetched) {
-    if (!prevIds.has(msg.eventId)) {
-      merged.push(msg);
-      prevIds.add(msg.eventId);
-    }
-  }
-  return merged.sort((a, b) => a.timestamp - b.timestamp);
+/** Merge by `eventId`; later arguments win (used so refresh / newer fetches overwrite bodies + `edited`). */
+function mergeMessagesByEventId(first: Message[], second: Message[]): Message[] {
+  const map = new Map<string, Message>();
+  for (const m of first) map.set(m.eventId, m);
+  for (const m of second) map.set(m.eventId, m);
+  return [...map.values()].sort((a, b) => a.timestamp - b.timestamp);
 }
 
 const globalCache = new Map<string, CachedRoom>();
@@ -73,7 +75,7 @@ export function useMessages(roomId: string | null) {
       .then((batch) => {
         const fetched = batch.messages.reverse();
         const prev = cacheRef.current.get(roomId)?.messages ?? [];
-        const merged = prev.length === 0 ? fetched : mergeMessages(prev, fetched);
+        const merged = mergeMessagesByEventId(prev, fetched);
 
         setMessages(merged);
         setPrevBatch(batch.prevBatch);
@@ -96,9 +98,31 @@ export function useMessages(roomId: string | null) {
       if (msgRoomId !== roomId) return;
 
       setMessages((prev) => {
-        // Deduplicate by eventId (sent messages arrive via both refresh and sync)
-        if (prev.some((m) => m.eventId === message.eventId)) return prev;
-        const next = [...prev, message];
+        const next = mergeMessagesByEventId(prev, [message]);
+        cacheRef.current.set(roomId, {
+          messages: next,
+          prevBatch: cacheRef.current.get(roomId)?.prevBatch ?? null,
+        });
+        return next;
+      });
+    });
+
+    return () => {
+      unlisten.then((fn) => fn());
+    };
+  }, [roomId]);
+
+  useEffect(() => {
+    if (!roomId) return;
+
+    const unlisten = listen<MessageEditPayload>("room-message-edit", (event) => {
+      const { roomId: rid, targetEventId, body } = event.payload;
+      if (rid !== roomId) return;
+
+      setMessages((prev) => {
+        const next = prev.map((m) =>
+          m.eventId === targetEventId ? { ...m, body, edited: true } : m,
+        );
         cacheRef.current.set(roomId, {
           messages: next,
           prevBatch: cacheRef.current.get(roomId)?.prevBatch ?? null,
@@ -124,7 +148,7 @@ export function useMessages(roomId: string | null) {
       });
       const older = batch.messages.reverse();
       setMessages((prev) => {
-        const merged = [...older, ...prev];
+        const merged = mergeMessagesByEventId(older, prev);
         cacheRef.current.set(roomId, {
           messages: merged,
           prevBatch: batch.prevBatch,
@@ -150,7 +174,7 @@ export function useMessages(roomId: string | null) {
       });
       const fetched = batch.messages.reverse();
       const prev = cacheRef.current.get(roomId)?.messages ?? [];
-      const merged = mergeMessages(prev, fetched);
+      const merged = mergeMessagesByEventId(prev, fetched);
 
       setMessages(merged);
       setPrevBatch(batch.prevBatch);

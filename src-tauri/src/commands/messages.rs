@@ -4,6 +4,8 @@ use std::sync::Arc;
 use matrix_sdk::room::MessagesOptions;
 use matrix_sdk::room::edit::EditedContent;
 use matrix_sdk::ruma::events::room::message::OriginalSyncRoomMessageEvent;
+use matrix_sdk::ruma::events::room::message::Relation;
+use matrix_sdk::ruma::events::room::message::RoomMessageEventContent;
 use matrix_sdk::ruma::events::room::message::RoomMessageEventContentWithoutRelation;
 use matrix_sdk::ruma::events::typing::SyncTypingEvent;
 use matrix_sdk::ruma::events::AnyMessageLikeEventContent;
@@ -13,8 +15,8 @@ use matrix_sdk::Room;
 use tauri::{Emitter, State};
 
 use crate::types::{
-    MessageBatch, MessageInfo, PresencePayload, RoomMessagePayload, RoomRedactionPolicy,
-    TypingPayload, VoiceParticipantsChangedPayload,
+    MessageBatch, MessageEditPayload, MessageInfo, PresencePayload, RoomMessagePayload,
+    RoomRedactionPolicy, TypingPayload, VoiceParticipantsChangedPayload,
 };
 use crate::AppState;
 
@@ -61,6 +63,8 @@ pub async fn get_messages(
     let mut raw_msgs = Vec::new();
     let mut unique_senders = Vec::new();
     let mut seen_senders = std::collections::HashSet::new();
+    // target event id -> (replacement body, origin_server_ts); keep latest edit per target
+    let mut latest_replacement: HashMap<String, (String, u64)> = HashMap::new();
 
     for event in response.chunk {
         let raw = match event.raw().deserialize() {
@@ -76,6 +80,20 @@ pub async fn get_messages(
                 matrix_sdk::ruma::events::SyncMessageLikeEvent::Original(o) => o,
                 _ => continue,
             };
+
+            if let Some(Relation::Replacement(repl)) = &original.content.relates_to {
+                let target = repl.event_id.to_string();
+                let new_body = extract_body(&RoomMessageEventContent::from(repl.new_content.clone()));
+                let ts: u64 = original.origin_server_ts.0.into();
+                let replace = match latest_replacement.get(&target) {
+                    None => true,
+                    Some((_, prev_ts)) => ts >= *prev_ts,
+                };
+                if replace {
+                    latest_replacement.insert(target, (new_body, ts));
+                }
+                continue;
+            }
 
             let sender_str = original.sender.to_string();
             if seen_senders.insert(sender_str.clone()) {
@@ -113,13 +131,19 @@ pub async fn get_messages(
                 .get(&m.sender)
                 .cloned()
                 .unwrap_or((None, None));
+            let edited = latest_replacement.contains_key(&m.event_id);
+            let body = latest_replacement
+                .get(&m.event_id)
+                .map(|(b, _)| b.clone())
+                .unwrap_or(m.body);
             MessageInfo {
                 event_id: m.event_id,
                 sender: m.sender,
                 sender_name,
-                body: m.body,
+                body,
                 timestamp: m.timestamp,
                 avatar_url,
+                edited,
             }
         })
         .collect();
@@ -273,6 +297,18 @@ pub async fn start_sync(state: State<'_, Arc<AppState>>, app: tauri::AppHandle) 
         let avatar_cache = avatar_cache.clone();
         async move {
             let room_id = room.room_id().to_string();
+
+            if let Some(Relation::Replacement(repl)) = &ev.content.relates_to {
+                let new_body = extract_body(&RoomMessageEventContent::from(repl.new_content.clone()));
+                let payload = MessageEditPayload {
+                    room_id,
+                    target_event_id: repl.event_id.to_string(),
+                    body: new_body,
+                };
+                let _ = app.emit("room-message-edit", payload);
+                return;
+            }
+
             let body = extract_body(&ev.content);
             let sender = ev.sender.to_string();
 
@@ -296,6 +332,7 @@ pub async fn start_sync(state: State<'_, Arc<AppState>>, app: tauri::AppHandle) 
                     body,
                     timestamp,
                     avatar_url,
+                    edited: false,
                 },
             };
             let _ = app.emit("room-message", payload);

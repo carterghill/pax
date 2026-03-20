@@ -21,6 +21,7 @@ pub struct MessageInfo {
     pub body: String,
     pub timestamp: u64,
     pub avatar_url: Option<String>,
+    pub edited: bool,
 }
 
 #[derive(Serialize)]
@@ -51,6 +52,15 @@ pub struct PresencePayload {
 pub struct RoomMessagePayload {
     pub room_id: String,
     pub message: MessageInfo,
+}
+
+/// Live edit: merge into the existing timeline row with `target_event_id` (do not append).
+#[derive(Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct MessageEditPayload {
+    pub room_id: String,
+    pub target_event_id: String,
+    pub body: String,
 }
 
 #[derive(Clone, Serialize)]

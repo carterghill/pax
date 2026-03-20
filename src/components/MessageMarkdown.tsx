@@ -17,8 +17,25 @@ import {
 } from "lucide-react";
 import { useTheme } from "../theme/ThemeContext";
 
+/** Word joiner–wrapped `(edited)` inside markdown emphasis so we can style it without matching user italics. */
+const EDITED_EMPHASIS = ` *\u2060(edited)\u2060*`;
+
 interface MessageMarkdownProps {
   children: string;
+  /** When true, append an inline “(edited)” label at the end of the rendered text (same line as the last line). */
+  edited?: boolean;
+}
+
+function flattenTextNode(value: ReactNode): string {
+  if (value == null || typeof value === "boolean") return "";
+  if (typeof value === "string" || typeof value === "number") return String(value);
+  if (Array.isArray(value)) return value.map(flattenTextNode).join("");
+  return "";
+}
+
+function isEditedEmphasisContent(value: ReactNode): boolean {
+  const s = flattenTextNode(value).replace(/\s/g, "");
+  return /^\u2060?\(edited\)\u2060?$/.test(s);
 }
 
 function codeBlockLabel(children: ReactNode): string {
@@ -36,8 +53,13 @@ function isExternalHref(href: string | undefined): boolean {
   return /^https?:\/\//i.test(href) || href.startsWith("//");
 }
 
-export default function MessageMarkdown({ children }: MessageMarkdownProps) {
+export default function MessageMarkdown({ children, edited = false }: MessageMarkdownProps) {
   const { palette, typography, spacing, name: themeName } = useTheme();
+
+  const markdownSource = useMemo(() => {
+    if (!edited) return children;
+    return `${children.trimEnd()}${EDITED_EMPHASIS}`;
+  }, [children, edited]);
 
   const components = useMemo<Components>(
     () => ({
@@ -58,9 +80,23 @@ export default function MessageMarkdown({ children }: MessageMarkdownProps) {
       strong: ({ children: c }) => (
         <strong style={{ fontWeight: typography.fontWeightBold }}>{c}</strong>
       ),
-      em: ({ children: c }) => (
-        <em style={{ fontStyle: "italic" }}>{c}</em>
-      ),
+      em: ({ children: c }) => {
+        if (edited && isEditedEmphasisContent(c)) {
+          return (
+            <span
+              style={{
+                fontSize: typography.fontSizeSmall,
+                color: palette.textSecondary,
+                fontStyle: "italic",
+                fontWeight: typography.fontWeightNormal,
+              }}
+            >
+              (edited)
+            </span>
+          );
+        }
+        return <em style={{ fontStyle: "italic" }}>{c}</em>;
+      },
       a: ({ href, children: c }) => {
         const external = isExternalHref(href);
         const LinkIcon = external ? ExternalLink : Link2;
@@ -454,7 +490,7 @@ export default function MessageMarkdown({ children }: MessageMarkdownProps) {
         />
       ),
     }),
-    [palette, typography, spacing, themeName],
+    [palette, typography, spacing, themeName, edited],
   );
 
   return (
@@ -470,7 +506,7 @@ export default function MessageMarkdown({ children }: MessageMarkdownProps) {
       }}
     >
       <ReactMarkdown remarkPlugins={[remarkGfm]} components={components}>
-        {children}
+        {markdownSource}
       </ReactMarkdown>
     </div>
   );

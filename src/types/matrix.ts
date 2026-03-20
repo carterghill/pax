@@ -14,6 +14,8 @@ export interface Message {
   body: string;
   timestamp: number;
   avatarUrl: string | null;
+  /** True when the latest content comes from an m.replace edit */
+  edited?: boolean;
 }
 
 export interface MessageBatch {

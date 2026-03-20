@@ -290,7 +290,7 @@ export default function MessageList({
                   </span>
                 </div>
               )}
-              <MessageMarkdown>{msg.body}</MessageMarkdown>
+              <MessageMarkdown edited={Boolean(msg.edited)}>{msg.body}</MessageMarkdown>
             </div>
 
             {showMessageActions && rowActive && (
