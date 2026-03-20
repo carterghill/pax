@@ -1,6 +1,7 @@
 import { useRef, useEffect } from "react";
 import { Message } from "../types/matrix";
 import { useTheme } from "../theme/ThemeContext";
+import MessageMarkdown from "./MessageMarkdown";
 
 interface MessageListProps {
   messages: Message[];
@@ -178,14 +179,7 @@ export default function MessageList({
                   </span>
                 </div>
               )}
-              <div style={{
-                color: palette.textPrimary,
-                fontSize: typography.fontSizeBase,
-                lineHeight: typography.lineHeight,
-                wordBreak: "break-word",
-              }}>
-                {msg.body}
-              </div>
+              <MessageMarkdown>{msg.body}</MessageMarkdown>
             </div>
           </div>
         );

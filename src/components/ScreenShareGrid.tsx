@@ -279,7 +279,7 @@ function StreamTile({
       ) : (
         <LocalSharePlaceholder palette={palette} small={small} />
       )}
-      <TileLabel name={displayName(stream.identity)} palette={palette} typography={typography} spacing={spacing} />
+      <TileLabel name={displayName(stream.identity)} typography={typography} spacing={spacing} />
     </div>
   );
 }
@@ -301,9 +301,8 @@ function LocalSharePlaceholder({ palette, small }: { palette: any; small?: boole
   );
 }
 
-function TileLabel({ name, palette, typography, spacing }: {
+function TileLabel({ name, typography, spacing }: {
   name: string;
-  palette: any;
   typography: any;
   spacing: any;
 }) {
