@@ -1,4 +1,4 @@
-import { useState, useRef, useCallback, useEffect } from "react";
+import { useState, useRef, useCallback, useEffect, Fragment } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import {
   Type,
@@ -50,7 +50,7 @@ export default function MessageInput({ roomId, roomName, onMessageSent }: Messag
   const rootRef = useRef<HTMLDivElement>(null);
   const typingTimeout = useRef<ReturnType<typeof setTimeout> | null>(null);
   const isTyping = useRef(false);
-  const { palette, typography, spacing } = useTheme();
+  const { palette, typography, spacing, name: themeName } = useTheme();
 
   const sendTyping = useCallback(
     (typing: boolean) => {
@@ -233,19 +233,27 @@ export default function MessageInput({ roomId, roomName, onMessageSent }: Messag
 
   type FormatItem = { icon: typeof Bold; label: string; run: () => void };
 
-  const formatItems: FormatItem[] = [
-    { icon: Bold, label: "Bold", run: () => wrapSelection("**", "**", "bold") },
-    { icon: Italic, label: "Italic", run: () => wrapSelection("_", "_", "italic") },
-    { icon: Strikethrough, label: "Strikethrough", run: () => wrapSelection("~~", "~~", "text") },
-    { icon: Code, label: "Inline code", run: () => wrapSelection("`", "`", "code") },
-    { icon: Braces, label: "Code block", run: () => insertBlockCode() },
-    { icon: Link, label: "Link", run: () => insertLink() },
-    { icon: List, label: "Bullet list", run: () => prefixLines("- ") },
-    { icon: ListOrdered, label: "Numbered list", run: () => prefixLines("", true) },
-    { icon: TextQuote, label: "Quote", run: () => prefixLines("> ") },
-    { icon: Heading1, label: "Heading 1", run: () => toggleHeadingPrefix("#") },
-    { icon: Heading2, label: "Heading 2", run: () => toggleHeadingPrefix("##") },
-    { icon: Minus, label: "Horizontal rule", run: () => insertHorizontalRule() },
+  const formatGroups: FormatItem[][] = [
+    [
+      { icon: Bold, label: "Bold", run: () => wrapSelection("**", "**", "bold") },
+      { icon: Italic, label: "Italic", run: () => wrapSelection("_", "_", "italic") },
+      { icon: Strikethrough, label: "Strikethrough", run: () => wrapSelection("~~", "~~", "text") },
+    ],
+    [
+      { icon: Code, label: "Inline code", run: () => wrapSelection("`", "`", "code") },
+      { icon: Braces, label: "Code block", run: () => insertBlockCode() },
+    ],
+    [{ icon: Link, label: "Link", run: () => insertLink() }],
+    [
+      { icon: List, label: "Bullet list", run: () => prefixLines("- ") },
+      { icon: ListOrdered, label: "Numbered list", run: () => prefixLines("", true) },
+      { icon: TextQuote, label: "Quote", run: () => prefixLines("> ") },
+    ],
+    [
+      { icon: Heading1, label: "Heading 1", run: () => toggleHeadingPrefix("#") },
+      { icon: Heading2, label: "Heading 2", run: () => toggleHeadingPrefix("##") },
+    ],
+    [{ icon: Minus, label: "Horizontal rule", run: () => insertHorizontalRule() }],
   ];
 
   async function handleSend() {
@@ -274,7 +282,10 @@ export default function MessageInput({ roomId, roomName, onMessageSent }: Messag
     }
   }
 
-  const iconBtnSize = 18;
+  const iconBtnSize = 22;
+  const formatBtnPx = spacing.unit * 10;
+  const formatBtnGap = spacing.unit * 0.75;
+  const groupGap = spacing.unit * 1.5;
 
   return (
     <div
@@ -290,55 +301,92 @@ export default function MessageInput({ roomId, roomName, onMessageSent }: Messag
             bottom: "100%",
             right: 0,
             marginBottom: spacing.unit * 2,
-            padding: spacing.unit * 1.5,
+            padding: `${spacing.unit * 2}px ${spacing.unit * 2.5}px`,
             display: "flex",
+            flexDirection: "row",
             flexWrap: "wrap",
-            gap: spacing.unit / 2,
-            maxWidth: 280,
+            alignItems: "center",
             justifyContent: "flex-end",
-            backgroundColor: palette.bgSecondary,
+            rowGap: spacing.unit * 1.25,
+            columnGap: groupGap,
+            width: "max-content",
+            maxWidth: "min(100%, calc(100vw - 24px))",
+            backgroundColor: palette.bgTertiary,
             border: `1px solid ${palette.border}`,
-            borderRadius: spacing.unit * 1.5,
-            boxShadow: "0 4px 24px rgba(0,0,0,0.35)",
+            borderRadius: spacing.unit * 2,
+            boxShadow:
+              themeName === "light"
+                ? `0 8px 28px rgba(0,0,0,0.1), 0 0 0 1px ${palette.border} inset`
+                : `0 12px 44px rgba(0,0,0,0.5), 0 0 0 1px rgba(255,255,255,0.06) inset`,
             zIndex: 20,
           }}
         >
-          {formatItems.map(({ icon: Icon, label, run }) => (
-            <button
-              key={label}
-              type="button"
-              role="menuitem"
-              title={label}
-              aria-label={label}
-              onMouseDown={(e) => e.preventDefault()}
-              onClick={() => {
-                run();
-                setFormatMenuOpen(false);
-              }}
-              style={{
-                display: "flex",
-                alignItems: "center",
-                justifyContent: "center",
-                width: spacing.unit * 8,
-                height: spacing.unit * 8,
-                padding: 0,
-                border: "none",
-                borderRadius: spacing.unit,
-                backgroundColor: "transparent",
-                color: palette.textSecondary,
-                cursor: "pointer",
-              }}
-              onMouseEnter={(e) => {
-                e.currentTarget.style.backgroundColor = palette.bgHover;
-                e.currentTarget.style.color = palette.textPrimary;
-              }}
-              onMouseLeave={(e) => {
-                e.currentTarget.style.backgroundColor = "transparent";
-                e.currentTarget.style.color = palette.textSecondary;
-              }}
-            >
-              <Icon size={iconBtnSize} strokeWidth={2} />
-            </button>
+          {formatGroups.map((group, groupIndex) => (
+            <Fragment key={groupIndex}>
+              {groupIndex > 0 && (
+                <div
+                  aria-hidden
+                  role="separator"
+                  style={{
+                    width: 1,
+                    height: formatBtnPx - spacing.unit,
+                    flexShrink: 0,
+                    alignSelf: "center",
+                    borderRadius: 1,
+                    backgroundColor: palette.border,
+                    opacity: 0.9,
+                  }}
+                />
+              )}
+              <div
+                style={{
+                  display: "flex",
+                  flexDirection: "row",
+                  flexWrap: "nowrap",
+                  alignItems: "center",
+                  gap: formatBtnGap,
+                }}
+              >
+                {group.map(({ icon: Icon, label, run }) => (
+                  <button
+                    key={label}
+                    type="button"
+                    role="menuitem"
+                    title={label}
+                    aria-label={label}
+                    onMouseDown={(e) => e.preventDefault()}
+                    onClick={() => {
+                      run();
+                      setFormatMenuOpen(false);
+                    }}
+                    style={{
+                      display: "flex",
+                      alignItems: "center",
+                      justifyContent: "center",
+                      width: formatBtnPx,
+                      height: formatBtnPx,
+                      padding: 0,
+                      border: "none",
+                      borderRadius: spacing.unit * 1.25,
+                      backgroundColor: palette.bgSecondary,
+                      color: palette.textSecondary,
+                      cursor: "pointer",
+                      boxShadow: `0 0 0 1px ${palette.border}`,
+                    }}
+                    onMouseEnter={(e) => {
+                      e.currentTarget.style.backgroundColor = palette.bgHover;
+                      e.currentTarget.style.color = palette.textHeading;
+                    }}
+                    onMouseLeave={(e) => {
+                      e.currentTarget.style.backgroundColor = palette.bgSecondary;
+                      e.currentTarget.style.color = palette.textSecondary;
+                    }}
+                  >
+                    <Icon size={iconBtnSize} strokeWidth={2} />
+                  </button>
+                ))}
+              </div>
+            </Fragment>
           ))}
         </div>
       )}
