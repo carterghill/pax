@@ -1,4 +1,5 @@
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useLayoutEffect, useRef, useState } from "react";
+import { createPortal } from "react-dom";
 import { invoke } from "@tauri-apps/api/core";
 import { MoreVertical, Pencil, Trash2 } from "lucide-react";
 import { Message, RoomRedactionPolicy } from "../types/matrix";
@@ -59,6 +60,9 @@ function messageAllowsDelete(msg: Message, userId: string, policy: RoomRedaction
   return policy.canRedactOther;
 }
 
+/** Above composer (z-index 20) and other overlays; must escape message column stacking. */
+const MESSAGE_ACTIONS_MENU_Z = 10_000;
+
 export default function MessageList({
   messages,
   loading,
@@ -79,6 +83,8 @@ export default function MessageList({
   const shouldAutoScrollRef = useRef(true);
   const [hoveredEventId, setHoveredEventId] = useState<string | null>(null);
   const [openMenuEventId, setOpenMenuEventId] = useState<string | null>(null);
+  const [menuFixedPos, setMenuFixedPos] = useState<{ top: number; right: number } | null>(null);
+  const menuAnchorRef = useRef<HTMLButtonElement>(null);
 
   function isNearBottom(): boolean {
     const container = containerRef.current;
@@ -112,6 +118,41 @@ export default function MessageList({
       document.removeEventListener("keydown", onKey);
     };
   }, [openMenuEventId]);
+
+  useLayoutEffect(() => {
+    if (!openMenuEventId) {
+      setMenuFixedPos(null);
+      return;
+    }
+
+    const update = () => {
+      const btn = menuAnchorRef.current;
+      if (!btn) return;
+      const r = btn.getBoundingClientRect();
+      setMenuFixedPos({
+        top: r.bottom + spacing.unit,
+        right: window.innerWidth - r.right,
+      });
+    };
+
+    update();
+    const ro = new ResizeObserver(update);
+    if (menuAnchorRef.current) ro.observe(menuAnchorRef.current);
+    window.addEventListener("resize", update);
+    window.addEventListener("scroll", update, true);
+    const cont = containerRef.current;
+    cont?.addEventListener("scroll", update, { passive: true });
+
+    return () => {
+      ro.disconnect();
+      window.removeEventListener("resize", update);
+      window.removeEventListener("scroll", update, true);
+      cont?.removeEventListener("scroll", update);
+    };
+  }, [openMenuEventId, spacing.unit]);
+
+  const openMenuMsg =
+    openMenuEventId === null ? undefined : messages.find((m) => m.eventId === openMenuEventId);
 
   function handleScroll() {
     if (!containerRef.current) return;
@@ -148,7 +189,10 @@ export default function MessageList({
       style={{
         flex: 1,
         overflowY: "auto",
-        padding: `${spacing.unit * 4}px 0`,
+        paddingTop: spacing.unit * 6,
+        paddingBottom: spacing.unit * 4,
+        paddingLeft: 0,
+        paddingRight: 0,
       }}
     >
       {hasMore && (
@@ -171,6 +215,8 @@ export default function MessageList({
           hoveredEventId === msg.eventId || openMenuEventId === msg.eventId;
         const menuOpen = openMenuEventId === msg.eventId;
 
+        const menuBtn = spacing.unit * 7;
+
         return (
           <div
             key={msg.eventId}
@@ -181,9 +227,11 @@ export default function MessageList({
               }
             }}
             style={{
+              position: "relative",
               padding: showHeader
                 ? `${spacing.unit * 3}px ${spacing.unit * 4}px ${spacing.unit}px`
                 : `${spacing.unit / 2}px ${spacing.unit * 4}px`,
+              paddingRight: showMessageActions ? spacing.unit * 4 + menuBtn + spacing.unit * 2 : spacing.unit * 4,
               display: "flex",
               gap: spacing.unit * 3,
               marginTop: showHeader ? spacing.unit : 0,
@@ -224,7 +272,7 @@ export default function MessageList({
               )}
             </div>
 
-            <div style={{ flex: 1, minWidth: 0, position: "relative" }}>
+            <div style={{ flex: 1, minWidth: 0 }}>
               {showHeader && (
                 <div style={{ display: "flex", alignItems: "baseline", gap: spacing.unit * 2 }}>
                   <span style={{
@@ -242,139 +290,168 @@ export default function MessageList({
                   </span>
                 </div>
               )}
-              <div style={{
-                display: "flex",
-                flexDirection: "row",
-                alignItems: "flex-start",
-                gap: spacing.unit,
-                minWidth: 0,
-              }}>
-                <div style={{ flex: 1, minWidth: 0 }}>
-                  <MessageMarkdown>{msg.body}</MessageMarkdown>
-                </div>
-                {showMessageActions && rowActive && (
-                  <div
-                    data-message-actions-root
-                    style={{ flexShrink: 0, position: "relative", marginTop: showHeader ? 0 : 1 }}
-                  >
-                    <button
-                      type="button"
-                      title="Message actions"
-                      aria-expanded={menuOpen}
-                      aria-haspopup="menu"
-                      onMouseDown={(e) => e.preventDefault()}
-                      onClick={() => setOpenMenuEventId((id) => (id === msg.eventId ? null : msg.eventId))}
-                      style={{
-                        display: "flex",
-                        alignItems: "center",
-                        justifyContent: "center",
-                        width: spacing.unit * 7,
-                        height: spacing.unit * 7,
-                        padding: 0,
-                        border: "none",
-                        borderRadius: spacing.unit,
-                        backgroundColor: menuOpen ? palette.bgHover : "transparent",
-                        color: palette.textSecondary,
-                        cursor: "pointer",
-                      }}
-                    >
-                      <MoreVertical size={18} strokeWidth={2} />
-                    </button>
-                    {menuOpen && (
-                      <div
-                        role="menu"
-                        aria-label="Message actions"
-                        style={{
-                          position: "absolute",
-                          top: "100%",
-                          right: 0,
-                          marginTop: spacing.unit,
-                          minWidth: spacing.unit * 32,
-                          padding: spacing.unit,
-                          backgroundColor: palette.bgTertiary,
-                          border: `1px solid ${palette.border}`,
-                          borderRadius: spacing.unit * 1.5,
-                          boxShadow:
-                            themeName === "light"
-                              ? "0 8px 24px rgba(0,0,0,0.12)"
-                              : "0 10px 36px rgba(0,0,0,0.45)",
-                          zIndex: 5,
-                        }}
-                      >
-                        {canEdit && (
-                          <button
-                            type="button"
-                            role="menuitem"
-                            onMouseDown={(e) => e.preventDefault()}
-                            onClick={() => {
-                              setOpenMenuEventId(null);
-                              onRequestEdit(msg);
-                            }}
-                            style={{
-                              display: "flex",
-                              alignItems: "center",
-                              gap: spacing.unit * 2,
-                              width: "100%",
-                              padding: `${spacing.unit * 1.5}px ${spacing.unit * 2}px`,
-                              border: "none",
-                              borderRadius: spacing.unit,
-                              background: "none",
-                              color: palette.textPrimary,
-                              fontSize: typography.fontSizeSmall,
-                              cursor: "pointer",
-                              textAlign: "left",
-                            }}
-                          >
-                            <Pencil size={16} strokeWidth={2} />
-                            Edit
-                          </button>
-                        )}
-                        {canDelete && (
-                          <button
-                            type="button"
-                            role="menuitem"
-                            onMouseDown={(e) => e.preventDefault()}
-                            onClick={async () => {
-                              setOpenMenuEventId(null);
-                              if (!window.confirm("Delete this message?")) return;
-                              try {
-                                await invoke("redact_message", {
-                                  roomId,
-                                  eventId: msg.eventId,
-                                });
-                                onMessagesMutated();
-                              } catch (e) {
-                                console.error("Failed to delete message:", e);
-                              }
-                            }}
-                            style={{
-                              display: "flex",
-                              alignItems: "center",
-                              gap: spacing.unit * 2,
-                              width: "100%",
-                              padding: `${spacing.unit * 1.5}px ${spacing.unit * 2}px`,
-                              border: "none",
-                              borderRadius: spacing.unit,
-                              background: "none",
-                              color: palette.textPrimary,
-                              fontSize: typography.fontSizeSmall,
-                              cursor: "pointer",
-                              textAlign: "left",
-                            }}
-                          >
-                            <Trash2 size={16} strokeWidth={2} />
-                            Delete
-                          </button>
-                        )}
-                      </div>
-                    )}
-                  </div>
-                )}
-              </div>
+              <MessageMarkdown>{msg.body}</MessageMarkdown>
             </div>
+
+            {showMessageActions && rowActive && (
+              <div
+                data-message-actions-root
+                style={{
+                  position: "absolute",
+                  top: 0,
+                  right: spacing.unit * 4,
+                  transform: "translateY(-50%)",
+                  zIndex: 2,
+                }}
+              >
+                <button
+                  ref={menuOpen ? menuAnchorRef : undefined}
+                  type="button"
+                  title="Message actions"
+                  aria-expanded={menuOpen}
+                  aria-haspopup="menu"
+                  onMouseDown={(e) => e.preventDefault()}
+                  onClick={() => setOpenMenuEventId((id) => (id === msg.eventId ? null : msg.eventId))}
+                  style={{
+                    display: "flex",
+                    alignItems: "center",
+                    justifyContent: "center",
+                    width: menuBtn,
+                    height: menuBtn,
+                    padding: 0,
+                    border: `1px solid ${rowActive ? palette.border : "transparent"}`,
+                    borderRadius: spacing.unit * 1.25,
+                    backgroundColor: menuOpen ? palette.bgHover : palette.bgTertiary,
+                    color: palette.textSecondary,
+                    cursor: "pointer",
+                    boxShadow:
+                      themeName === "light"
+                        ? "0 1px 3px rgba(0,0,0,0.08)"
+                        : "0 2px 8px rgba(0,0,0,0.35)",
+                  }}
+                >
+                  <MoreVertical size={18} strokeWidth={2} />
+                </button>
+              </div>
+            )}
           </div>
         );
       })}
+
+      {openMenuMsg &&
+        menuFixedPos &&
+        createPortal(
+          <div
+            data-message-actions-root
+            role="menu"
+            aria-label="Message actions"
+            style={{
+              position: "fixed",
+              top: menuFixedPos.top,
+              right: menuFixedPos.right,
+              zIndex: MESSAGE_ACTIONS_MENU_Z,
+              minWidth: spacing.unit * 40,
+              padding: spacing.unit * 1.5,
+              display: "flex",
+              flexDirection: "column",
+              gap: spacing.unit * 0.5,
+              backgroundColor: palette.bgSecondary,
+              border: `1px solid ${palette.border}`,
+              borderRadius: spacing.unit * 2,
+              boxShadow:
+                themeName === "light"
+                  ? "0 8px 24px rgba(0,0,0,0.12)"
+                  : "0 10px 36px rgba(0,0,0,0.45)",
+            }}
+          >
+            {messageAllowsEdit(openMenuMsg, userId) && (
+              <button
+                type="button"
+                role="menuitem"
+                onMouseDown={(e) => e.preventDefault()}
+                onClick={() => {
+                  setOpenMenuEventId(null);
+                  onRequestEdit(openMenuMsg);
+                }}
+                style={{
+                  display: "flex",
+                  alignItems: "center",
+                  gap: spacing.unit * 2.5,
+                  width: "100%",
+                  padding: `${spacing.unit * 2.25}px ${spacing.unit * 3}px`,
+                  border: "none",
+                  borderRadius: spacing.unit * 1.25,
+                  backgroundColor: "transparent",
+                  color: palette.textPrimary,
+                  fontSize: typography.fontSizeBase,
+                  fontFamily: typography.fontFamily,
+                  fontWeight: typography.fontWeightNormal,
+                  cursor: "pointer",
+                  textAlign: "left",
+                }}
+                onMouseEnter={(e) => {
+                  e.currentTarget.style.backgroundColor = palette.bgHover;
+                  e.currentTarget.style.color = palette.textHeading;
+                }}
+                onMouseLeave={(e) => {
+                  e.currentTarget.style.backgroundColor = "transparent";
+                  e.currentTarget.style.color = palette.textPrimary;
+                }}
+              >
+                <Pencil size={20} strokeWidth={2} color="currentColor" />
+                Edit
+              </button>
+            )}
+            {messageAllowsDelete(openMenuMsg, userId, redactionPolicy) && (
+              <button
+                type="button"
+                role="menuitem"
+                onMouseDown={(e) => e.preventDefault()}
+                onClick={async () => {
+                  setOpenMenuEventId(null);
+                  if (!window.confirm("Delete this message?")) return;
+                  try {
+                    await invoke("redact_message", {
+                      roomId,
+                      eventId: openMenuMsg.eventId,
+                    });
+                    onMessagesMutated();
+                  } catch (e) {
+                    console.error("Failed to delete message:", e);
+                  }
+                }}
+                style={{
+                  display: "flex",
+                  alignItems: "center",
+                  gap: spacing.unit * 2.5,
+                  width: "100%",
+                  padding: `${spacing.unit * 2.25}px ${spacing.unit * 3}px`,
+                  border: "none",
+                  borderRadius: spacing.unit * 1.25,
+                  backgroundColor: "transparent",
+                  color: palette.textPrimary,
+                  fontSize: typography.fontSizeBase,
+                  fontFamily: typography.fontFamily,
+                  fontWeight: typography.fontWeightNormal,
+                  cursor: "pointer",
+                  textAlign: "left",
+                }}
+                onMouseEnter={(e) => {
+                  e.currentTarget.style.backgroundColor = palette.bgHover;
+                  e.currentTarget.style.color = palette.textHeading;
+                }}
+                onMouseLeave={(e) => {
+                  e.currentTarget.style.backgroundColor = "transparent";
+                  e.currentTarget.style.color = palette.textPrimary;
+                }}
+              >
+                <Trash2 size={20} strokeWidth={2} color="currentColor" />
+                Delete
+              </button>
+            )}
+          </div>,
+          document.body,
+        )}
 
       {refreshing && (
         <div style={{
