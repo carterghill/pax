@@ -17,10 +17,17 @@ import {
 } from "lucide-react";
 import { useTheme } from "../theme/ThemeContext";
 
+export interface EditingMessageRef {
+  eventId: string;
+  body: string;
+}
+
 interface MessageInputProps {
   roomId: string;
   roomName: string;
   onMessageSent: () => void;
+  editingMessage?: EditingMessageRef | null;
+  onCancelEdit?: () => void;
 }
 
 function getSelectedLineSpan(value: string, start: number, end: number): { lineStart: number; lineEnd: number } {
@@ -42,7 +49,13 @@ function afterTextUpdate(
   });
 }
 
-export default function MessageInput({ roomId, roomName, onMessageSent }: MessageInputProps) {
+export default function MessageInput({
+  roomId,
+  roomName,
+  onMessageSent,
+  editingMessage = null,
+  onCancelEdit,
+}: MessageInputProps) {
   const [text, setText] = useState("");
   const [sending, setSending] = useState(false);
   const [formatMenuOpen, setFormatMenuOpen] = useState(false);
@@ -64,6 +77,8 @@ export default function MessageInput({ roomId, roomName, onMessageSent }: Messag
   function handleChange(e: React.ChangeEvent<HTMLTextAreaElement>) {
     const val = e.target.value;
     setText(val);
+
+    if (editingMessage) return;
 
     if (val.trim().length > 0) {
       sendTyping(true);
@@ -101,6 +116,16 @@ export default function MessageInput({ roomId, roomName, onMessageSent }: Messag
       document.removeEventListener("keydown", onKey);
     };
   }, [formatMenuOpen]);
+
+  useEffect(() => {
+    if (!editingMessage) return;
+    setText(editingMessage.body);
+    requestAnimationFrame(() => {
+      inputRef.current?.focus();
+      const len = editingMessage.body.length;
+      inputRef.current?.setSelectionRange(len, len);
+    });
+  }, [editingMessage?.eventId]);
 
   const wrapSelection = useCallback(
     (before: string, after: string, emptyPlaceholder: string) => {
@@ -265,12 +290,22 @@ export default function MessageInput({ roomId, roomName, onMessageSent }: Messag
 
     setSending(true);
     try {
-      await invoke("send_message", { roomId, body: trimmed });
-      setText("");
+      if (editingMessage) {
+        await invoke("edit_message", {
+          roomId,
+          eventId: editingMessage.eventId,
+          body: trimmed,
+        });
+        onCancelEdit?.();
+        setText("");
+      } else {
+        await invoke("send_message", { roomId, body: trimmed });
+        setText("");
+      }
       onMessageSent();
       inputRef.current?.focus();
     } catch (e) {
-      console.error("Failed to send:", e);
+      console.error(editingMessage ? "Failed to edit:" : "Failed to send:", e);
     }
     setSending(false);
   }
@@ -279,6 +314,18 @@ export default function MessageInput({ roomId, roomName, onMessageSent }: Messag
     if (e.key === "Enter" && !e.shiftKey) {
       e.preventDefault();
       handleSend();
+      return;
+    }
+    if (e.key === "Escape") {
+      if (formatMenuOpen) {
+        setFormatMenuOpen(false);
+        return;
+      }
+      if (editingMessage && onCancelEdit) {
+        e.preventDefault();
+        setText("");
+        onCancelEdit();
+      }
     }
   }
 
@@ -405,7 +452,7 @@ export default function MessageInput({ roomId, roomName, onMessageSent }: Messag
           value={text}
           onChange={handleChange}
           onKeyDown={handleKeyDown}
-          placeholder={`Message #${roomName}`}
+          placeholder={editingMessage ? "Edit message" : `Message #${roomName}`}
           rows={1}
           style={{
             flex: 1,

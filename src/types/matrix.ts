@@ -21,6 +21,11 @@ export interface MessageBatch {
   prevBatch: string | null;
 }
 
+export interface RoomRedactionPolicy {
+  canRedactOwn: boolean;
+  canRedactOther: boolean;
+}
+
 export interface RoomMember {
   userId: string;
   displayName: string | null;

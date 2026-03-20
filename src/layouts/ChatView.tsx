@@ -1,12 +1,13 @@
 import { useState, useEffect, useCallback, useRef } from "react";
+import { useRoomRedactionPolicy } from "../hooks/useRoomRedactionPolicy";
 import { listen } from "@tauri-apps/api/event";
 import { Hash, Users } from "lucide-react";
 import MessageList from "../components/MessageList";
-import MessageInput from "../components/MessageInput";
+import MessageInput, { type EditingMessageRef } from "../components/MessageInput";
 import UserMenu from "../components/UserMenu";
 import { useMessages } from "../hooks/useMessages";
 import { useTheme } from "../theme/ThemeContext";
-import { Room } from "../types/matrix";
+import { Message, Room } from "../types/matrix";
 
 const USER_MENU_DEFAULT_WIDTH = 240;
 const MIN_USER_MENU_WIDTH = 180;
@@ -86,9 +87,11 @@ export default function ChatView({
   onUserMenuWidthChange,
 }: ChatViewProps) {
   const { messages, loadMore, hasMore, loading, initialLoading, refreshing, refresh } = useMessages(room.id);
+  const redactionPolicy = useRoomRedactionPolicy(room.id);
   const { palette, typography, spacing } = useTheme();
   const [typingNames, setTypingNames] = useState<string[]>([]);
   const [showUsers, setShowUsers] = useState(true);
+  const [editingMessage, setEditingMessage] = useState<EditingMessageRef | null>(null);
 
   const startXRef = useRef(0);
   const startWidthRef = useRef(0);
@@ -131,6 +134,14 @@ export default function ChatView({
       unlisten.then((fn) => fn());
     };
   }, [room.id]);
+
+  useEffect(() => {
+    setEditingMessage(null);
+  }, [room.id]);
+
+  const handleRequestEdit = useCallback((msg: Message) => {
+    setEditingMessage({ eventId: msg.eventId, body: msg.body });
+  }, []);
 
   return (
     <div ref={containerRef} style={{
@@ -212,6 +223,11 @@ export default function ChatView({
             refreshing={refreshing}
             hasMore={hasMore}
             onLoadMore={loadMore}
+            roomId={room.id}
+            userId={userId}
+            redactionPolicy={redactionPolicy}
+            onRequestEdit={handleRequestEdit}
+            onMessagesMutated={refresh}
           />
 
           {/* Typing indicator */}
@@ -224,9 +240,12 @@ export default function ChatView({
 
           {/* Message input */}
           <MessageInput
+            key={room.id}
             roomId={room.id}
             roomName={room.name}
             onMessageSent={refresh}
+            editingMessage={editingMessage}
+            onCancelEdit={() => setEditingMessage(null)}
           />
         </div>
 

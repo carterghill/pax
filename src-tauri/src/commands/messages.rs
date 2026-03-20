@@ -2,15 +2,19 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 use matrix_sdk::room::MessagesOptions;
+use matrix_sdk::room::edit::EditedContent;
 use matrix_sdk::ruma::events::room::message::OriginalSyncRoomMessageEvent;
+use matrix_sdk::ruma::events::room::message::RoomMessageEventContentWithoutRelation;
 use matrix_sdk::ruma::events::typing::SyncTypingEvent;
+use matrix_sdk::ruma::events::AnyMessageLikeEventContent;
+use matrix_sdk::ruma::EventId;
 use matrix_sdk::ruma::UInt;
 use matrix_sdk::Room;
 use tauri::{Emitter, State};
 
 use crate::types::{
-    MessageBatch, MessageInfo, PresencePayload, RoomMessagePayload, TypingPayload,
-    VoiceParticipantsChangedPayload,
+    MessageBatch, MessageInfo, PresencePayload, RoomMessagePayload, RoomRedactionPolicy,
+    TypingPayload, VoiceParticipantsChangedPayload,
 };
 use crate::AppState;
 
@@ -147,6 +151,101 @@ pub async fn send_message(
     room.send(content)
         .await
         .map_err(|e| format!("Failed to send message: {e}"))?;
+
+    Ok(())
+}
+
+#[tauri::command]
+pub async fn get_room_redaction_policy(
+    state: State<'_, Arc<AppState>>,
+    room_id: String,
+) -> Result<RoomRedactionPolicy, String> {
+    let client = {
+        let guard = state.client.lock().await;
+        guard.as_ref().ok_or("Not logged in")?.clone()
+    };
+
+    let room_id_parsed =
+        matrix_sdk::ruma::RoomId::parse(&room_id).map_err(|e| format!("Invalid room ID: {e}"))?;
+
+    let room = client.get_room(&room_id_parsed).ok_or("Room not found")?;
+
+    let pl = room
+        .power_levels()
+        .await
+        .map_err(|e| format!("Failed to read power levels: {e}"))?;
+
+    let own = client.user_id().ok_or("Not logged in")?;
+
+    Ok(RoomRedactionPolicy {
+        can_redact_own: pl.user_can_redact_own_event(own),
+        can_redact_other: pl.user_can_redact_event_of_other(own),
+    })
+}
+
+#[tauri::command]
+pub async fn edit_message(
+    state: State<'_, Arc<AppState>>,
+    room_id: String,
+    event_id: String,
+    body: String,
+) -> Result<(), String> {
+    let client = {
+        let guard = state.client.lock().await;
+        guard.as_ref().ok_or("Not logged in")?.clone()
+    };
+
+    let room_id_parsed =
+        matrix_sdk::ruma::RoomId::parse(&room_id).map_err(|e| format!("Invalid room ID: {e}"))?;
+
+    let room = client.get_room(&room_id_parsed).ok_or("Room not found")?;
+
+    let event_id_parsed =
+        EventId::parse(&event_id).map_err(|e| format!("Invalid event ID: {e}"))?;
+
+    let new_content = RoomMessageEventContentWithoutRelation::text_plain(&body);
+
+    let edit_content = room
+        .make_edit_event(&event_id_parsed, EditedContent::RoomMessage(new_content))
+        .await
+        .map_err(|e| format!("Failed to prepare edit: {e}"))?;
+
+    match edit_content {
+        AnyMessageLikeEventContent::RoomMessage(content) => {
+            room
+                .send(content)
+                .await
+                .map_err(|e| format!("Failed to send edit: {e}"))?;
+        }
+        _ => return Err("Unexpected edit content type".to_string()),
+    }
+
+    Ok(())
+}
+
+#[tauri::command]
+pub async fn redact_message(
+    state: State<'_, Arc<AppState>>,
+    room_id: String,
+    event_id: String,
+) -> Result<(), String> {
+    let client = {
+        let guard = state.client.lock().await;
+        guard.as_ref().ok_or("Not logged in")?.clone()
+    };
+
+    let room_id_parsed =
+        matrix_sdk::ruma::RoomId::parse(&room_id).map_err(|e| format!("Invalid room ID: {e}"))?;
+
+    let room = client.get_room(&room_id_parsed).ok_or("Room not found")?;
+
+    let event_id_parsed =
+        EventId::parse(&event_id).map_err(|e| format!("Invalid event ID: {e}"))?;
+
+    room
+        .redact(&event_id_parsed, None, None)
+        .await
+        .map_err(|e| format!("Failed to redact message: {e}"))?;
 
     Ok(())
 }

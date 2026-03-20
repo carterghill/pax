@@ -81,3 +81,10 @@ pub struct VoiceJoinResult {
 pub struct VoiceParticipantsChangedPayload {
     pub participants_by_room: HashMap<String, Vec<VoiceParticipant>>,
 }
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RoomRedactionPolicy {
+    pub can_redact_own: bool,
+    pub can_redact_other: bool,
+}
