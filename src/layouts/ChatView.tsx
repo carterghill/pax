@@ -92,6 +92,7 @@ export default function ChatView({
 
   const startXRef = useRef(0);
   const startWidthRef = useRef(0);
+  const containerRef = useRef<HTMLDivElement>(null);
   const [isUserMenuResizeHovered, setIsUserMenuResizeHovered] = useState(false);
 
   const handleUserMenuResizeStart = useCallback((e: React.MouseEvent) => {
@@ -101,7 +102,10 @@ export default function ChatView({
 
     const onMove = (ev: MouseEvent) => {
       const dx = ev.clientX - startXRef.current;
-      const next = Math.min(MAX_USER_MENU_WIDTH, Math.max(MIN_USER_MENU_WIDTH, startWidthRef.current - dx));
+      // Clamp so the chat column never goes below ~200px
+      const containerW = containerRef.current?.offsetWidth ?? 600;
+      const maxW = Math.min(MAX_USER_MENU_WIDTH, containerW - 200 - 6); // 6 = handle
+      const next = Math.max(MIN_USER_MENU_WIDTH, Math.min(maxW, startWidthRef.current - dx));
       onUserMenuWidthChange(next);
     };
     const onUp = () => {
@@ -129,11 +133,13 @@ export default function ChatView({
   }, [room.id]);
 
   return (
-    <div style={{
+    <div ref={containerRef} style={{
       flex: 1,
       display: "flex",
       flexDirection: "column",
       height: "100vh",
+      minWidth: 0,
+      overflow: "hidden",
     }}>
       {/* Channel header */}
       <div style={{

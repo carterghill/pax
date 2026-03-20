@@ -18,7 +18,7 @@ const MIN_ROOM_SIDEBAR_WIDTH = 180;
 const MAX_ROOM_SIDEBAR_WIDTH = 400;
 const MIN_USER_MENU_WIDTH = 180;
 const MAX_USER_MENU_WIDTH = 400;
-const MIN_CHAT_VIEW_WIDTH = 0; // chat can shrink; we reserve the user menu instead
+const MIN_CHAT_VIEW_WIDTH = 200;
 const SPACE_SIDEBAR_WIDTH = 72;
 const RESIZE_HANDLE = 6;
 const USER_MENU_HANDLE = 6;
@@ -156,21 +156,6 @@ export default function MainLayout({ userId, onSignOut }: MainLayoutProps) {
     }
   }, [setActiveRoomId, getRoom, connectedVoiceRoomId, connectVoiceCall]);
 
-  const [viewportWidth, setViewportWidth] = useState(() =>
-    typeof window !== "undefined" ? window.innerWidth : 1200
-  );
-  useEffect(() => {
-    const onResize = () => setViewportWidth(window.innerWidth);
-    window.addEventListener("resize", onResize);
-    return () => window.removeEventListener("resize", onResize);
-  }, []);
-
-  const maxRoomSidebarWidth = Math.max(
-    MIN_ROOM_SIDEBAR_WIDTH,
-    viewportWidth - SPACE_SIDEBAR_WIDTH - RESIZE_HANDLE - MIN_CHAT_VIEW_WIDTH - USER_MENU_HANDLE - userMenuWidth
-  );
-  const effectiveRoomSidebarWidth = Math.min(roomSidebarWidth, maxRoomSidebarWidth);
-
   const handleResizeStart = useCallback((e: React.MouseEvent) => {
     e.preventDefault();
     startXRef.current = e.clientX;
@@ -178,7 +163,11 @@ export default function MainLayout({ userId, onSignOut }: MainLayoutProps) {
 
     const onMove = (ev: MouseEvent) => {
       const dx = ev.clientX - startXRef.current;
-      const next = Math.min(maxRoomSidebarWidth, Math.max(MIN_ROOM_SIDEBAR_WIDTH, startWidthRef.current + dx));
+      const maxW = Math.max(
+        MIN_ROOM_SIDEBAR_WIDTH,
+        window.innerWidth - SPACE_SIDEBAR_WIDTH - RESIZE_HANDLE - MIN_CHAT_VIEW_WIDTH - USER_MENU_HANDLE - userMenuWidth
+      );
+      const next = Math.min(Math.min(maxW, MAX_ROOM_SIDEBAR_WIDTH), Math.max(MIN_ROOM_SIDEBAR_WIDTH, startWidthRef.current + dx));
       setRoomSidebarWidth(next);
     };
     const onUp = () => {
@@ -187,7 +176,7 @@ export default function MainLayout({ userId, onSignOut }: MainLayoutProps) {
     };
     window.addEventListener("mousemove", onMove);
     window.addEventListener("mouseup", onUp);
-  }, [roomSidebarWidth, maxRoomSidebarWidth]);
+  }, [roomSidebarWidth, userMenuWidth]);
 
   return (
     <PresenceContext.Provider value={{ manualStatus, setManualStatus, effectivePresence }}>
@@ -206,7 +195,7 @@ export default function MainLayout({ userId, onSignOut }: MainLayoutProps) {
         />
         <div style={{ display: "flex", flexShrink: 0 }}>
           <RoomSidebar
-            width={effectiveRoomSidebarWidth}
+            width={roomSidebarWidth}
             rooms={visibleRooms}
             activeRoomId={activeRoomId}
             onSelectRoom={handleSelectRoom}
@@ -238,6 +227,7 @@ export default function MainLayout({ userId, onSignOut }: MainLayoutProps) {
         <main style={{
           flex: 1,
           minWidth: 0,
+          overflow: "hidden",
           backgroundColor: palette.bgPrimary,
           color: palette.textPrimary,
           display: "flex",
