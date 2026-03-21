@@ -295,6 +295,10 @@ export default function ScreenShareViewer({ active, identity }: ScreenShareViewe
       if (document.visibilityState === "hidden") clearGeoTimer();
     };
 
+    /** Desktop focus loss (Alt-Tab) doesn't fire visibilitychange; handle explicitly. */
+    const onBlur = () => clearGeoTimer();
+    const onFocusReturn = () => scheduleGeometry();
+
     const observer = new ResizeObserver(() => scheduleGeometry());
     observer.observe(containerRef.current);
 
@@ -313,6 +317,8 @@ export default function ScreenShareViewer({ active, identity }: ScreenShareViewe
     window.addEventListener("scroll", onScroll, { capture: true, passive: true });
 
     document.addEventListener("visibilitychange", onVisibility);
+    window.addEventListener("blur", onBlur);
+    window.addEventListener("focus", onFocusReturn);
 
     return () => {
       mounted = false;
@@ -320,6 +326,8 @@ export default function ScreenShareViewer({ active, identity }: ScreenShareViewe
       window.removeEventListener("resize", onWinResize);
       window.removeEventListener("scroll", onScroll, { capture: true });
       document.removeEventListener("visibilitychange", onVisibility);
+      window.removeEventListener("blur", onBlur);
+      window.removeEventListener("focus", onFocusReturn);
       clearGeoTimer();
       unregisterOverlay(identity);
       invoke("overlay_set_visible", { identity, visible: false }).catch(() => {});

@@ -82,6 +82,17 @@ let nextObstructionId = 1;
 let rafId = 0;
 let running = false;
 
+/** Track OS window focus — skip expensive per-frame work while unfocused. */
+let windowFocused = document.hasFocus();
+window.addEventListener("focus", () => {
+  windowFocused = true;
+  // Invalidate cache so the first tick after refocus sends a fresh report
+  lastSent.clear();
+});
+window.addEventListener("blur", () => {
+  windowFocused = false;
+});
+
 // Cache last-sent obstructions per identity to avoid redundant invokes
 const lastSent: Map<string, string> = new Map();
 
@@ -227,7 +238,7 @@ function tick() {
   if (!running) return;
   rafId = requestAnimationFrame(tick);
 
-  if (overlays.size === 0) return;
+  if (overlays.size === 0 || !windowFocused) return;
 
   const dpr = window.devicePixelRatio || 1;
 

@@ -120,6 +120,22 @@ pub fn spawn_video_receiver(
                 let mut total_process_us: u64 = 0;
                 let mut drained_count: u64 = 0;
 
+                // ── Periodic Win32 message pump (native GPU path only) ──
+                // The overlay HWND is owned by THIS thread.  When the main
+                // thread (Tauri UI) sends messages to our HWND — e.g. during
+                // focus transitions, resize, taskbar restore — it uses
+                // SendMessage, which BLOCKS THE MAIN THREAD until we call
+                // PeekMessage/DispatchMessage here.  If we only pump inside
+                // render_frame (once per video frame, ~30fps), the main
+                // thread can stall for 30+ ms per message.  Pumping every
+                // ~4 ms keeps the main thread responsive.
+                let mut pump_ticker = tokio::time::interval(
+                    std::time::Duration::from_millis(4),
+                );
+                pump_ticker.set_missed_tick_behavior(
+                    tokio::time::MissedTickBehavior::Skip,
+                );
+
                 loop {
                     if shutdown.load(Ordering::Relaxed) {
                         eprintln!("[Pax VideoRecv] Shutdown for '{}'", id);
@@ -132,6 +148,10 @@ pub fn spawn_video_receiver(
                             let cr = clip_rx.as_mut().expect("clip_rx checked is_some");
                             tokio::select! {
                                 biased;
+                                // Highest priority: keep the main thread unblocked
+                                _ = pump_ticker.tick() => {
+                                    crate::native_overlay::pump_messages();
+                                }
                                 msg = cr.recv() => {
                                     match msg {
                                         Some(()) => {

@@ -289,6 +289,15 @@ pub fn is_supported() -> bool {
     cfg!(target_os = "windows")
 }
 
+/// Drain pending Win32 messages on the **calling** thread.
+///
+/// Exposed so the video receiver loop can pump between frames — without this,
+/// `SendMessage` from the main thread (during focus/resize) blocks until the
+/// next `render_frame` call, which may be 30+ ms away.
+pub fn pump_messages() {
+    platform::pump_messages();
+}
+
 // ─── GPU Renderer (owned by video receiver thread) ──────────────────────────
 
 /// Align `value` up to the next multiple of `align`.
@@ -449,7 +458,7 @@ impl GpuRenderer {
             present_mode,
             alpha_mode: wgpu::CompositeAlphaMode::Opaque,
             view_formats: vec![],
-            desired_maximum_frame_latency: 1,
+            desired_maximum_frame_latency: 2,
         };
         // NOTE: don't configure yet — deferred until HWND is sized by frontend
 
@@ -1065,6 +1074,12 @@ mod platform {
             }
             // Prevent the overlay from changing the cursor
             WM_SETCURSOR => 1,
+            // We manage HWND geometry ourselves from the video thread —
+            // short-circuit layout messages so DefWindowProcW doesn't do
+            // extra synchronous work that keeps SendMessage blocked on the
+            // main thread.
+            WM_SIZE | WM_MOVE | WM_WINDOWPOSCHANGING | WM_WINDOWPOSCHANGED
+            | WM_DISPLAYCHANGE | WM_SHOWWINDOW => 0,
             _ => DefWindowProcW(hwnd, msg, wparam, lparam),
         }
     }
