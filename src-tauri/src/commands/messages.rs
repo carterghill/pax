@@ -4,6 +4,7 @@ use std::sync::Arc;
 use matrix_sdk::room::MessagesOptions;
 use matrix_sdk::room::edit::EditedContent;
 use matrix_sdk::ruma::events::room::message::OriginalSyncRoomMessageEvent;
+use matrix_sdk::ruma::events::room::redaction::OriginalSyncRoomRedactionEvent;
 use matrix_sdk::ruma::events::room::message::Relation;
 use matrix_sdk::ruma::events::room::message::RoomMessageEventContent;
 use matrix_sdk::ruma::events::room::message::RoomMessageEventContentWithoutRelation;
@@ -15,8 +16,8 @@ use matrix_sdk::Room;
 use tauri::{Emitter, State};
 
 use crate::types::{
-    MessageBatch, MessageEditPayload, MessageInfo, PresencePayload, RoomMessagePayload,
-    RoomRedactionPolicy, TypingPayload, VoiceParticipantsChangedPayload,
+    MessageBatch, MessageEditPayload, MessageInfo, MessageRedactedPayload, PresencePayload,
+    RoomMessagePayload, RoomRedactionPolicy, TypingPayload, VoiceParticipantsChangedPayload,
 };
 use crate::AppState;
 
@@ -336,6 +337,29 @@ pub async fn start_sync(state: State<'_, Arc<AppState>>, app: tauri::AppHandle) 
                 },
             };
             let _ = app.emit("room-message", payload);
+        }
+    });
+
+    // Redactions (e.g. deleted messages): drop the target from the client timeline
+    let app_handle = app.clone();
+    client.add_event_handler(move |ev: OriginalSyncRoomRedactionEvent, room: Room| {
+        let app = app_handle.clone();
+        async move {
+            let room_id = room.room_id().to_string();
+            let redacted = ev
+                .content
+                .redacts
+                .as_ref()
+                .or(ev.redacts.as_ref())
+                .map(|id| id.to_string());
+            let Some(redacted_event_id) = redacted else {
+                return;
+            };
+            let payload = MessageRedactedPayload {
+                room_id,
+                redacted_event_id,
+            };
+            let _ = app.emit("room-message-redacted", payload);
         }
     });
 

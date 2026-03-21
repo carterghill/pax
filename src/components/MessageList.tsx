@@ -18,6 +18,7 @@ interface MessageListProps {
   redactionPolicy: RoomRedactionPolicy;
   onRequestEdit: (msg: Message) => void;
   onMessagesMutated: () => void;
+  onMessageRemoved: (eventId: string) => void;
 }
 
 const NON_EDITABLE_BODIES = new Set([
@@ -75,6 +76,7 @@ export default function MessageList({
   redactionPolicy,
   onRequestEdit,
   onMessagesMutated,
+  onMessageRemoved,
 }: MessageListProps) {
   const { palette, typography, spacing, name: themeName } = useTheme();
   const AUTO_SCROLL_THRESHOLD_PX = 120;
@@ -415,6 +417,7 @@ export default function MessageList({
                       roomId,
                       eventId: openMenuMsg.eventId,
                     });
+                    onMessageRemoved(openMenuMsg.eventId);
                     onMessagesMutated();
                   } catch (e) {
                     console.error("Failed to delete message:", e);

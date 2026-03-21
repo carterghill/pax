@@ -14,6 +14,11 @@ interface MessageEditPayload {
   body: string;
 }
 
+interface MessageRedactedPayload {
+  roomId: string;
+  redactedEventId: string;
+}
+
 interface CachedRoom {
   messages: Message[];
   prevBatch: string | null;
@@ -25,6 +30,17 @@ function mergeMessagesByEventId(first: Message[], second: Message[]): Message[] 
   for (const m of first) map.set(m.eventId, m);
   for (const m of second) map.set(m.eventId, m);
   return [...map.values()].sort((a, b) => a.timestamp - b.timestamp);
+}
+
+/**
+ * After fetching the latest window from the server, drop any in-memory rows in that time window
+ * that the server no longer returned (e.g. redacted / deleted messages).
+ */
+function mergeLatestServerWindow(prev: Message[], fetched: Message[]): Message[] {
+  if (fetched.length === 0) return prev;
+  const oldestFetchedTs = fetched[0].timestamp;
+  const olderOnly = prev.filter((m) => m.timestamp < oldestFetchedTs);
+  return mergeMessagesByEventId(olderOnly, fetched);
 }
 
 const globalCache = new Map<string, CachedRoom>();
@@ -75,7 +91,7 @@ export function useMessages(roomId: string | null) {
       .then((batch) => {
         const fetched = batch.messages.reverse();
         const prev = cacheRef.current.get(roomId)?.messages ?? [];
-        const merged = mergeMessagesByEventId(prev, fetched);
+        const merged = mergeLatestServerWindow(prev, fetched);
 
         setMessages(merged);
         setPrevBatch(batch.prevBatch);
@@ -136,6 +152,28 @@ export function useMessages(roomId: string | null) {
     };
   }, [roomId]);
 
+  useEffect(() => {
+    if (!roomId) return;
+
+    const unlisten = listen<MessageRedactedPayload>("room-message-redacted", (event) => {
+      const { roomId: rid, redactedEventId } = event.payload;
+      if (rid !== roomId) return;
+
+      setMessages((prev) => {
+        const next = prev.filter((m) => m.eventId !== redactedEventId);
+        cacheRef.current.set(roomId, {
+          messages: next,
+          prevBatch: cacheRef.current.get(roomId)?.prevBatch ?? null,
+        });
+        return next;
+      });
+    });
+
+    return () => {
+      unlisten.then((fn) => fn());
+    };
+  }, [roomId]);
+
   const loadMore = useCallback(async () => {
     if (!roomId || !prevBatch || loading) return;
 
@@ -174,7 +212,7 @@ export function useMessages(roomId: string | null) {
       });
       const fetched = batch.messages.reverse();
       const prev = cacheRef.current.get(roomId)?.messages ?? [];
-      const merged = mergeMessagesByEventId(prev, fetched);
+      const merged = mergeLatestServerWindow(prev, fetched);
 
       setMessages(merged);
       setPrevBatch(batch.prevBatch);
@@ -184,6 +222,21 @@ export function useMessages(roomId: string | null) {
     }
   }, [roomId]);
 
+  const removeMessageById = useCallback(
+    (eventId: string) => {
+      if (!roomId) return;
+      setMessages((prev) => {
+        const next = prev.filter((m) => m.eventId !== eventId);
+        cacheRef.current.set(roomId, {
+          messages: next,
+          prevBatch: cacheRef.current.get(roomId)?.prevBatch ?? null,
+        });
+        return next;
+      });
+    },
+    [roomId],
+  );
+
   return {
     messages,
     loadMore,
@@ -192,5 +245,6 @@ export function useMessages(roomId: string | null) {
     initialLoading,
     refreshing,
     refresh,
+    removeMessageById,
   };
 }

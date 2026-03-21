@@ -63,6 +63,14 @@ pub struct MessageEditPayload {
     pub body: String,
 }
 
+/// Remove a timeline row when an event is redacted (e.g. message deleted).
+#[derive(Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct MessageRedactedPayload {
+    pub room_id: String,
+    pub redacted_event_id: String,
+}
+
 #[derive(Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct TypingPayload {

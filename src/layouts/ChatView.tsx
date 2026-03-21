@@ -86,7 +86,16 @@ export default function ChatView({
   userMenuWidth,
   onUserMenuWidthChange,
 }: ChatViewProps) {
-  const { messages, loadMore, hasMore, loading, initialLoading, refreshing, refresh } = useMessages(room.id);
+  const {
+    messages,
+    loadMore,
+    hasMore,
+    loading,
+    initialLoading,
+    refreshing,
+    refresh,
+    removeMessageById,
+  } = useMessages(room.id);
   const redactionPolicy = useRoomRedactionPolicy(room.id);
   const { palette, typography, spacing } = useTheme();
   const [typingNames, setTypingNames] = useState<string[]>([]);
@@ -228,6 +237,7 @@ export default function ChatView({
             redactionPolicy={redactionPolicy}
             onRequestEdit={handleRequestEdit}
             onMessagesMutated={refresh}
+            onMessageRemoved={removeMessageById}
           />
 
           {/* Typing indicator */}
