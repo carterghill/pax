@@ -14,6 +14,12 @@ pub fn overlay_set_rect(identity: String, x: i32, y: i32, w: u32, h: u32) {
     crate::native_overlay::set_overlay_rect(&identity, x, y, w, h);
 }
 
+/// RGB for letterbox clear (0..1), should match `ScreenShareViewer` `backgroundColor` / theme `bgPrimary`.
+#[command]
+pub fn overlay_set_letterbox_color(identity: String, r: f32, g: f32, b: f32) {
+    crate::native_overlay::set_overlay_letterbox_color(&identity, r, g, b);
+}
+
 /// Show or hide a native overlay.
 #[command]
 pub fn overlay_set_visible(identity: String, visible: bool) {

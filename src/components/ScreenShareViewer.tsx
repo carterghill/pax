@@ -27,6 +27,22 @@ const URL_PREFIX = navigator.userAgent.includes("Windows")
   ? "http://paxvideo.localhost"
   : "paxvideo://localhost";
 
+/** Match `backgroundColor: palette.bgPrimary` for the native GPU letterbox clear (DX12 is opaque-only). */
+function bgPrimaryToRgb01(hex: string): { r: number; g: number; b: number } {
+  const fallback = { r: 49 / 255, g: 51 / 255, b: 56 / 255 };
+  const h = hex.trim().replace(/^#/, "");
+  const x = (s: string) => parseInt(s, 16) / 255;
+  let out: { r: number; g: number; b: number };
+  if (h.length === 3) {
+    out = { r: x(h[0] + h[0]), g: x(h[1] + h[1]), b: x(h[2] + h[2]) };
+  } else if (h.length === 6) {
+    out = { r: x(h.slice(0, 2)), g: x(h.slice(2, 4)), b: x(h.slice(4, 6)) };
+  } else {
+    return fallback;
+  }
+  return Number.isFinite(out.r) && Number.isFinite(out.g) && Number.isFinite(out.b) ? out : fallback;
+}
+
 // ─── Native overlay support detection (cached) ─────────────────────────────
 
 let _nativeSupported: boolean | null = null;
@@ -225,6 +241,10 @@ export default function ScreenShareViewer({ active, identity }: ScreenShareViewe
         console.log("[ScreenShareViewer] Reporting rect:", { identity, x, y, w, h });
         invoke("overlay_set_rect", { identity, x, y, w, h })
           .catch((e) => console.error("[ScreenShareViewer] overlay_set_rect failed:", e));
+        const { r, g, b } = bgPrimaryToRgb01(palette.bgPrimary);
+        invoke("overlay_set_letterbox_color", { identity, r, g, b }).catch((e) =>
+          console.error("[ScreenShareViewer] overlay_set_letterbox_color failed:", e),
+        );
         if (firstRect) {
           invoke("overlay_set_visible", { identity, visible: true })
             .catch((e) => console.error("[ScreenShareViewer] overlay_set_visible failed:", e));
@@ -264,6 +284,8 @@ export default function ScreenShareViewer({ active, identity }: ScreenShareViewe
         lastX = x; lastY = y; lastW = w; lastH = h;
         invoke("overlay_set_rect", { identity, x, y, w, h })
           .catch((e) => console.error("[ScreenShareViewer] rAF set_rect failed:", e));
+        const { r, g, b } = bgPrimaryToRgb01(palette.bgPrimary);
+        invoke("overlay_set_letterbox_color", { identity, r, g, b }).catch(() => {});
       }
     };
     rafId = requestAnimationFrame(trackPosition);
@@ -276,7 +298,7 @@ export default function ScreenShareViewer({ active, identity }: ScreenShareViewe
       unregisterOverlay(identity);
       invoke("overlay_set_visible", { identity, visible: false }).catch(() => {});
     };
-  }, [active, identity, useNative]);
+  }, [active, identity, useNative, palette.bgPrimary]);
 
   // ── WebGL fallback: steady presentation clock ────────────────────
   useEffect(() => {

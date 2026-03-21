@@ -135,6 +135,7 @@ pub fn run() {
             commands::presence::start_idle_monitor,
             commands::overlay::overlay_is_supported,
             commands::overlay::overlay_set_rect,
+            commands::overlay::overlay_set_letterbox_color,
             commands::overlay::overlay_set_visible,
             commands::overlay::overlay_set_obstructions,
             commands::overlay::overlay_get_hover_states,

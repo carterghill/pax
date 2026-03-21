@@ -11,7 +11,7 @@
  */
 
 import { invoke } from "@tauri-apps/api/core";
-import { useEffect, useLayoutEffect, useRef, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 
 // ─── Types ──────────────────────────────────────────────────────────────────
 
@@ -30,6 +30,24 @@ interface ObstructionRect {
   y: number;
   w: number;
   h: number;
+  /** Physical px; must match serde field on Rust `ObstructionRect`. */
+  corner_radius?: number;
+}
+
+/** Used border-radius in CSS px → physical px for native round-rect clip. */
+function obstructionCornerRadiusPhysicalPx(el: HTMLElement, dpr: number): number {
+  const raw = getComputedStyle(el).borderRadius;
+  const token = raw.split(/[\s/]+/)[0]?.trim() ?? "";
+  if (!token) return 0;
+  if (token.endsWith("%")) {
+    const rect = el.getBoundingClientRect();
+    const pct = parseFloat(token);
+    if (!Number.isFinite(pct)) return 0;
+    const basis = Math.min(rect.width, rect.height) * dpr;
+    return Math.round((pct / 100) * basis);
+  }
+  const cssPx = parseFloat(token);
+  return Number.isFinite(cssPx) ? Math.round(cssPx * dpr) : 0;
 }
 
 // ─── Global state ───────────────────────────────────────────────────────────
@@ -98,29 +116,18 @@ export function useOverlayObstruction(
 ) {
   const idRef = useRef<number | null>(null);
 
-  // useLayoutEffect: ref is attached before this runs; avoids a frame where the
-  // obstruction map is empty while the menu is already painted.
-  useLayoutEffect(() => {
-    if (!visible) {
-      if (idRef.current !== null) {
-        unregisterObstruction(idRef.current);
-        idRef.current = null;
-      }
-      return;
+  // Same registration pattern as commit ce8d3ec ("added border radius to cut-through").
+  useEffect(() => {
+    if (visible && ref.current) {
+      idRef.current = registerObstruction(ref.current);
     }
-    const el = ref.current;
-    if (!el) return;
-    if (idRef.current !== null) {
-      unregisterObstruction(idRef.current);
-    }
-    idRef.current = registerObstruction(el);
     return () => {
       if (idRef.current !== null) {
         unregisterObstruction(idRef.current);
         idRef.current = null;
       }
     };
-  }, [visible, ref]);
+  }, [visible, ref.current]);
 }
 
 /**
@@ -184,14 +191,13 @@ function tick() {
       const iy2 = Math.min(overlayRect.bottom, obsRect.bottom);
 
       if (ix2 > ix1 && iy2 > iy1) {
-        const w = Math.round((ix2 - ix1) * dpr);
-        const h = Math.round((iy2 - iy1) * dpr);
-        if (w < 1 || h < 1) continue;
+        const corner_radius = obstructionCornerRadiusPhysicalPx(obs.element, dpr);
         clipRects.push({
           x: Math.round((ix1 - overlayRect.left) * dpr),
           y: Math.round((iy1 - overlayRect.top) * dpr),
-          w,
-          h,
+          w: Math.round((ix2 - ix1) * dpr),
+          h: Math.round((iy2 - iy1) * dpr),
+          ...(corner_radius > 0 ? { corner_radius } : {}),
         });
       }
     }

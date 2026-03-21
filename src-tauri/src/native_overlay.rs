@@ -94,6 +94,10 @@ struct OverlayEntry {
     target_w: std::sync::atomic::AtomicU32,
     target_h: std::sync::atomic::AtomicU32,
     visible: std::sync::atomic::AtomicBool,
+    /// Letterbox clear color (sRGB-ish 0..1), `f32::to_bits` in atomics — matches WebView `bgPrimary`.
+    letterbox_r: std::sync::atomic::AtomicU32,
+    letterbox_g: std::sync::atomic::AtomicU32,
+    letterbox_b: std::sync::atomic::AtomicU32,
     /// Rects to clip OUT of the video overlay.
     obstructions: Mutex<Vec<ObstructionRect>>,
 }
@@ -112,6 +116,10 @@ pub fn create_overlay(identity: &str, parent_hwnd: isize) -> Result<isize, Strin
         "[Pax NativeOverlay] Created overlay HWND {:?} for '{}' (parent={:?})",
         hwnd, identity, parent_hwnd
     );
+    // Default letterbox ≈ dark theme `#313338` until the frontend sends `bgPrimary`.
+    const DEF_R: f32 = 49.0 / 255.0;
+    const DEF_G: f32 = 51.0 / 255.0;
+    const DEF_B: f32 = 56.0 / 255.0;
     OVERLAYS.lock().insert(identity.to_string(), OverlayEntry {
         hwnd,
         target_x: std::sync::atomic::AtomicI32::new(0),
@@ -119,6 +127,9 @@ pub fn create_overlay(identity: &str, parent_hwnd: isize) -> Result<isize, Strin
         target_w: std::sync::atomic::AtomicU32::new(0),
         target_h: std::sync::atomic::AtomicU32::new(0),
         visible: std::sync::atomic::AtomicBool::new(false),
+        letterbox_r: std::sync::atomic::AtomicU32::new(DEF_R.to_bits()),
+        letterbox_g: std::sync::atomic::AtomicU32::new(DEF_G.to_bits()),
+        letterbox_b: std::sync::atomic::AtomicU32::new(DEF_B.to_bits()),
         obstructions: Mutex::new(Vec::new()),
     });
     Ok(hwnd)
@@ -169,6 +180,34 @@ pub fn get_overlay_target(identity: &str) -> Option<(i32, i32, u32, u32, bool)> 
         e.target_h.load(Ordering::Relaxed),
         e.visible.load(Ordering::Relaxed),
     ))
+}
+
+/// Letterbox fill for the GPU clear pass (opaque swapchains ignore alpha — match WebView background).
+pub fn set_overlay_letterbox_color(identity: &str, r: f32, g: f32, b: f32) {
+    let overlays = OVERLAYS.lock();
+    if let Some(entry) = overlays.get(identity) {
+        let r = r.clamp(0.0, 1.0);
+        let g = g.clamp(0.0, 1.0);
+        let b = b.clamp(0.0, 1.0);
+        entry.letterbox_r.store(r.to_bits(), Ordering::Relaxed);
+        entry.letterbox_g.store(g.to_bits(), Ordering::Relaxed);
+        entry.letterbox_b.store(b.to_bits(), Ordering::Relaxed);
+    }
+}
+
+pub fn get_overlay_letterbox_color(identity: &str) -> (f32, f32, f32) {
+    const DEF_R: f32 = 49.0 / 255.0;
+    const DEF_G: f32 = 51.0 / 255.0;
+    const DEF_B: f32 = 56.0 / 255.0;
+    let overlays = OVERLAYS.lock();
+    let Some(entry) = overlays.get(identity) else {
+        return (DEF_R, DEF_G, DEF_B);
+    };
+    (
+        f32::from_bits(entry.letterbox_r.load(Ordering::Relaxed)),
+        f32::from_bits(entry.letterbox_g.load(Ordering::Relaxed)),
+        f32::from_bits(entry.letterbox_b.load(Ordering::Relaxed)),
+    )
 }
 
 /// Update the obstruction rects for the given identity.
@@ -267,6 +306,10 @@ pub struct GpuRenderer {
     hwnd_visible: bool,
     // Track applied clip region to avoid redundant SetWindowRgn calls
     applied_obstructions: Vec<ObstructionRect>,
+    applied_vp_x: u32,
+    applied_vp_y: u32,
+    applied_vp_w: u32,
+    applied_vp_h: u32,
 }
 
 // SAFETY: GpuRenderer is created and used exclusively on a single thread
@@ -367,6 +410,8 @@ impl GpuRenderer {
             wgpu::PresentMode::Fifo
         };
 
+        // DX12 surfaces are typically Opaque; letterbox uses `get_overlay_letterbox_color`
+        // (from WebView `bgPrimary`) instead of alpha compositing.
         let surface_config = wgpu::SurfaceConfiguration {
             usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
             format,
@@ -508,6 +553,10 @@ impl GpuRenderer {
             hwnd_applied_h: 0,
             hwnd_visible: false,
             applied_obstructions: Vec::new(),
+            applied_vp_x: 0,
+            applied_vp_y: 0,
+            applied_vp_w: 0,
+            applied_vp_h: 0,
         })
     }
 
@@ -590,12 +639,35 @@ impl GpuRenderer {
             return;
         }
 
-        // Apply clip region: subtract obstruction rects from the full HWND area.
-        // Only update SetWindowRgn when obstructions actually change.
+        // Viewport: center the (pre-scaled) frame within the container.
+        // Since the caller already scaled to the correct aspect ratio,
+        // the frame dimensions define the viewport directly.
+        let vp_x = (target_w.saturating_sub(width)) / 2;
+        let vp_y = (target_h.saturating_sub(height)) / 2;
+
+        // Apply clip region: keep only the video viewport (no letterbox bars), then
+        // subtract obstruction rects. This gives true "alpha" behavior for bars even
+        // when the swapchain only supports Opaque alpha mode.
         let obstructions = get_overlay_obstructions(&self.identity);
-        if obstructions != self.applied_obstructions {
-            platform::apply_clip_region(self.hwnd, target_w, target_h, &obstructions);
+        if obstructions != self.applied_obstructions
+            || vp_x != self.applied_vp_x
+            || vp_y != self.applied_vp_y
+            || width != self.applied_vp_w
+            || height != self.applied_vp_h
+        {
+            platform::apply_clip_region(
+                self.hwnd,
+                vp_x as i32,
+                vp_y as i32,
+                width,
+                height,
+                &obstructions,
+            );
             self.applied_obstructions = obstructions;
+            self.applied_vp_x = vp_x;
+            self.applied_vp_y = vp_y;
+            self.applied_vp_w = width;
+            self.applied_vp_h = height;
         }
 
         // Reconfigure surface on resize
@@ -636,12 +708,6 @@ impl GpuRenderer {
 
         let view = frame.texture.create_view(&wgpu::TextureViewDescriptor::default());
 
-        // Viewport: center the (pre-scaled) frame within the container.
-        // Since the caller already scaled to the correct aspect ratio,
-        // the frame dimensions define the viewport directly.
-        let vp_x = (target_w.saturating_sub(width)) / 2;
-        let vp_y = (target_h.saturating_sub(height)) / 2;
-
         let mut encoder = self.device.create_command_encoder(&wgpu::CommandEncoderDescriptor { label: None });
 
         {
@@ -651,7 +717,15 @@ impl GpuRenderer {
                     view: &view,
                     resolve_target: None,
                     ops: wgpu::Operations {
-                        load: wgpu::LoadOp::Clear(wgpu::Color::BLACK),
+                        load: wgpu::LoadOp::Clear({
+                            let (lr, lg, lb) = get_overlay_letterbox_color(&self.identity);
+                            wgpu::Color {
+                                r: lr as f64,
+                                g: lg as f64,
+                                b: lb as f64,
+                                a: 1.0,
+                            }
+                        }),
                         store: wgpu::StoreOp::Store,
                     },
                 })],
@@ -1040,25 +1114,35 @@ mod platform {
         }
     }
 
-    /// Apply a clip region to the HWND that subtracts obstruction rects.
-    /// If `obstructions` is empty, removes the clip region (full visibility).
+    /// Apply a clip region to the HWND that starts from the active video viewport
+    /// and subtracts obstruction rects.
     /// Coordinates are relative to the HWND's own client area.
     pub fn apply_clip_region(
         hwnd: isize,
-        total_w: u32,
-        total_h: u32,
+        video_x: i32,
+        video_y: i32,
+        video_w: u32,
+        video_h: u32,
         obstructions: &[super::ObstructionRect],
     ) {
         use windows_sys::Win32::Graphics::Gdi::*;
         unsafe {
-            if obstructions.is_empty() {
-                // Remove clip region — full HWND is visible
-                SetWindowRgn(to_hwnd(hwnd), std::ptr::null_mut(), 1);
+            if video_w == 0 || video_h == 0 {
+                // Empty viewport, hide all.
+                let empty = CreateRectRgn(0, 0, 0, 0);
+                if !empty.is_null() {
+                    SetWindowRgn(to_hwnd(hwnd), empty, 1);
+                }
                 return;
             }
 
-            // Start with the full HWND rect
-            let full = CreateRectRgn(0, 0, total_w as i32, total_h as i32);
+            // Start with only the video viewport (letterbox bars excluded).
+            let full = CreateRectRgn(
+                video_x,
+                video_y,
+                video_x + video_w as i32,
+                video_y + video_h as i32,
+            );
             if full.is_null() {
                 return;
             }
@@ -1155,7 +1239,14 @@ mod platform {
         (1, 1)
     }
     pub fn pump_messages() {}
-    pub fn apply_clip_region(_hwnd: isize, _w: u32, _h: u32, _obs: &[super::ObstructionRect]) {}
+    pub fn apply_clip_region(
+        _hwnd: isize,
+        _video_x: i32,
+        _video_y: i32,
+        _video_w: u32,
+        _video_h: u32,
+        _obs: &[super::ObstructionRect],
+    ) {}
     pub fn get_cursor_pos() -> (i32, i32) { (0, 0) }
     pub fn get_hwnd_screen_rect(_hwnd: isize) -> (i32, i32, i32, i32) { (0, 0, 0, 0) }
 }
