@@ -80,10 +80,9 @@ pub struct ObstructionRect {
     pub y: i32,
     pub w: u32,
     pub h: u32,
-    /// Logical corner radius already scaled to **physical** pixels (matches `x`/`y`/`w`/`h`).
-    /// When `0`, a plain rectangle is used (legacy). When non-zero, `CreateRoundRectRgn` is used
-    /// so the punched hole matches CSS `border-radius` instead of the axis-aligned bounding box.
+    /// When non-zero, `CreateRoundRectRgn` is used (falls back to `CreateRectRgn` if that fails).
     #[serde(default)]
+    #[serde(alias = "cornerRadius")]
     pub corner_radius: u32,
 }
 
@@ -1064,20 +1063,30 @@ mod platform {
                 return;
             }
 
-            // Subtract each obstruction (rounded when corner_radius matches CSS border-radius)
+            // Subtract each obstruction (rounded when corner_radius > 0)
             for obs in obstructions {
                 let obs_rgn = if obs.corner_radius > 0 {
                     let ell = (obs.corner_radius as i32).saturating_mul(2);
                     let max_ell = obs.w.min(obs.h).max(2) as i32;
                     let ell = ell.clamp(2, max_ell);
-                    CreateRoundRectRgn(
+                    let rr = CreateRoundRectRgn(
                         obs.x,
                         obs.y,
                         obs.x + obs.w as i32,
                         obs.y + obs.h as i32,
                         ell,
                         ell,
-                    )
+                    );
+                    if rr.is_null() {
+                        CreateRectRgn(
+                            obs.x,
+                            obs.y,
+                            obs.x + obs.w as i32,
+                            obs.y + obs.h as i32,
+                        )
+                    } else {
+                        rr
+                    }
                 } else {
                     CreateRectRgn(
                         obs.x,
