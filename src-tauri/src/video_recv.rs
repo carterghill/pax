@@ -58,7 +58,7 @@ pub fn spawn_video_receiver(
     identity: String,
     video_track: RemoteVideoTrack,
     shutdown: Arc<AtomicBool>,
-    app_handle: AppHandle,
+    app_handle: Arc<AppHandle>,
     parent_hwnd: Option<isize>,
 ) {
     let id = identity.clone();

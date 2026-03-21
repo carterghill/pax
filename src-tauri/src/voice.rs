@@ -169,6 +169,9 @@ impl VoiceManager {
     ) -> Result<(), String> {
         // Disconnect existing session first
         self.disconnect_inner().await;
+        // AppHandle::clone uses Rc for the event loop — share via Arc from this tokio task
+        // and from nested spawns (e.g. video receiver) instead of cloning AppHandle on workers.
+        let app_handle = Arc::new(app_handle);
         // Emit "connecting" state
         let _ = app_handle.emit("voice-state-changed", VoiceStateEvent {
             connected_room_id: Some(room_id.clone()),
@@ -608,11 +611,11 @@ async fn run_event_loop(
     _room: Arc<livekit::Room>,
     room_id: String,
     local_identity: String,
-    app_handle: AppHandle,
+    app_handle: Arc<AppHandle>,
     mut shutdown_rx: mpsc::Receiver<()>,
 ) {
     // Emit initial connected state
-    emit_state(&app_handle, &room_id, &local_identity, &audio_state, false, true, None);
+    emit_state(app_handle.as_ref(), &room_id, &local_identity, &audio_state, false, true, None);
     let mut speaking_tick = interval_at(
         TokioInstant::now() + Duration::from_millis(SPEAKING_UI_TICK_MS),
         Duration::from_millis(SPEAKING_UI_TICK_MS),
@@ -624,7 +627,7 @@ async fn run_event_loop(
                 break;
             }
             _ = speaking_tick.tick() => {
-                emit_state(&app_handle, &room_id, &local_identity, &audio_state, false, true, None);
+                emit_state(app_handle.as_ref(), &room_id, &local_identity, &audio_state, false, true, None);
             }
             event = events.recv() => {
                 match event {
@@ -654,7 +657,7 @@ async fn run_event_loop(
                             tokio::spawn(async move {
                                 handle_remote_audio(audio_track, identity, state_clone).await;
                             });
-                            emit_state(&app_handle, &room_id, &local_identity, &audio_state, false, true, None);
+                            emit_state(app_handle.as_ref(), &room_id, &local_identity, &audio_state, false, true, None);
                         } else if let RemoteTrack::Video(video_track) = track {
                             if source == TrackSource::Screenshare {
                                 let identity_clone = identity.clone();
@@ -680,15 +683,21 @@ async fn run_event_loop(
                                     drop(st);
 
                                     // Get parent HWND for native overlay (child HWND created on video thread)
-                                    let parent_hwnd = get_parent_hwnd_for_overlay(&app_handle);
+                                    let parent_hwnd = get_parent_hwnd_for_overlay(app_handle.as_ref());
 
-                                    crate::video_recv::spawn_video_receiver(identity_clone, video_track, shutdown, app_handle.clone(), parent_hwnd);
+                                    crate::video_recv::spawn_video_receiver(
+                                        identity_clone,
+                                        video_track,
+                                        shutdown,
+                                        Arc::clone(&app_handle),
+                                        parent_hwnd,
+                                    );
                                 } else {
                                     eprintln!("[Pax] Skipping video receiver (local screen share)");
                                     drop(st);
                                 }
 
-                                emit_state(&app_handle, &room_id, &local_identity, &audio_state, false, true, None);
+                                emit_state(app_handle.as_ref(), &room_id, &local_identity, &audio_state, false, true, None);
                             }
                         }
                     }
@@ -704,13 +713,13 @@ async fn run_event_loop(
                             drop(st);
                             crate::video_recv::clear_frame_buffer_for(&identity);
                             crate::native_overlay::destroy_overlay(&identity);
-                            emit_state(&app_handle, &room_id, &local_identity, &audio_state, false, true, None);
+                            emit_state(app_handle.as_ref(), &room_id, &local_identity, &audio_state, false, true, None);
                         } else if publication.source() == TrackSource::Microphone {
                             let mut st = audio_state.lock();
                             st.remote_mic_muted.remove(&identity);
                             st.remote_mic_level_smooth.remove(&identity);
                             drop(st);
-                            emit_state(&app_handle, &room_id, &local_identity, &audio_state, false, true, None);
+                            emit_state(app_handle.as_ref(), &room_id, &local_identity, &audio_state, false, true, None);
                         }
                     }
                     Some(RoomEvent::TrackMuted { participant, publication }) => {
@@ -719,7 +728,7 @@ async fn run_event_loop(
                             let mut st = audio_state.lock();
                             st.remote_mic_muted.insert(identity, true);
                             drop(st);
-                            emit_state(&app_handle, &room_id, &local_identity, &audio_state, false, true, None);
+                            emit_state(app_handle.as_ref(), &room_id, &local_identity, &audio_state, false, true, None);
                         }
                     }
                     Some(RoomEvent::TrackUnmuted { participant, publication }) => {
@@ -728,7 +737,7 @@ async fn run_event_loop(
                             let mut st = audio_state.lock();
                             st.remote_mic_muted.insert(identity, false);
                             drop(st);
-                            emit_state(&app_handle, &room_id, &local_identity, &audio_state, false, true, None);
+                            emit_state(app_handle.as_ref(), &room_id, &local_identity, &audio_state, false, true, None);
                         }
                     }
                     Some(RoomEvent::ParticipantConnected(participant)) => {
@@ -749,7 +758,7 @@ async fn run_event_loop(
                                 st.remote_mic_muted.insert(participant.identity().to_string(), raw == "true");
                             }
                         }
-                        emit_state(&app_handle, &room_id, &local_identity, &audio_state, false, true, None);
+                        emit_state(app_handle.as_ref(), &room_id, &local_identity, &audio_state, false, true, None);
                     }
                     Some(RoomEvent::ParticipantAttributesChanged { participant, changed_attributes }) => {
                         let mut changed = false;
@@ -765,7 +774,7 @@ async fn run_event_loop(
                         }
                         drop(st);
                         if changed {
-                            emit_state(&app_handle, &room_id, &local_identity, &audio_state, false, true, None);
+                            emit_state(app_handle.as_ref(), &room_id, &local_identity, &audio_state, false, true, None);
                         }
                     }
                     Some(RoomEvent::ParticipantDisconnected(participant)) => {
@@ -786,7 +795,7 @@ async fn run_event_loop(
                                 crate::native_overlay::destroy_overlay(&identity);
                             }
                         }
-                        emit_state(&app_handle, &room_id, &local_identity, &audio_state, false, true, None);
+                        emit_state(app_handle.as_ref(), &room_id, &local_identity, &audio_state, false, true, None);
                     }
                     Some(RoomEvent::ActiveSpeakersChanged { speakers }) => {
                         let speaker_ids: Vec<String> = speakers
@@ -797,11 +806,11 @@ async fn run_event_loop(
                             let mut st = audio_state.lock();
                             st.active_speakers = speaker_ids;
                         }
-                        emit_state(&app_handle, &room_id, &local_identity, &audio_state, false, true, None);
+                        emit_state(app_handle.as_ref(), &room_id, &local_identity, &audio_state, false, true, None);
                     }
                     Some(RoomEvent::Disconnected { reason }) => {
                         log::info!("[Pax] Disconnected from LiveKit room: {:?}", reason);
-                        emit_state(&app_handle, &room_id, &local_identity, &audio_state, false, false, Some("Disconnected from voice".into()));
+                        emit_state(app_handle.as_ref(), &room_id, &local_identity, &audio_state, false, false, Some("Disconnected from voice".into()));
                         break;
                     }
                     None => {

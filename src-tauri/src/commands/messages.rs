@@ -281,6 +281,12 @@ pub async fn start_sync(state: State<'_, Arc<AppState>>, app: tauri::AppHandle) 
     let client = guard.as_ref().ok_or("Not logged in")?.clone();
     drop(guard);
 
+    // `AppHandle::clone` bumps Tao's `Rc<EventLoopRunner>` — `Rc` is not thread-safe.
+    // Matrix runs `sync_with_callback` and event handlers on tokio worker threads; cloning
+    // `AppHandle` there races the refcount (UB), which surfaces as failed `Rc::inc_strong`
+    // checks on Rust 1.81+. Share one handle with `Arc::clone` from background threads instead.
+    let app = Arc::new(app);
+
     {
         let mut sync_running = state.sync_running.lock().await;
         if *sync_running {

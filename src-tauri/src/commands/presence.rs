@@ -42,6 +42,8 @@ pub async fn start_idle_monitor(
     app: tauri::AppHandle,
 ) -> Result<(), String> {
     let display_server = state.display_server;
+    // Avoid AppHandle::clone from the idle loop task when emitting (Rc in Tauri/Tao).
+    let app = Arc::new(app);
 
     tokio::spawn(async move {
         idle::run_idle_monitor(app, display_server).await;

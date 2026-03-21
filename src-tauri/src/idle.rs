@@ -7,8 +7,9 @@
 ///   3. `org.freedesktop.login1.Session` `IdleSinceHint` (systemd-logind,
 ///      works across most compositors but depends on the DE setting the hint)
 
+use std::sync::Arc;
 use std::time::Duration;
-use tauri::Emitter;
+use tauri::{AppHandle, Emitter};
 
 use crate::platform::DisplayServer;
 
@@ -25,7 +26,7 @@ use zbus::proxy::Builder;
 /// Spawn the idle-monitoring loop that emits `"idle-changed"` events.
 ///
 /// Picks the right backend based on the display server detected at startup.
-pub async fn run_idle_monitor(app: tauri::AppHandle, display_server: DisplayServer) {
+pub async fn run_idle_monitor(app: Arc<AppHandle>, display_server: DisplayServer) {
     let idle_threshold_ms: u64 = 300_000; // 5 minutes
     let poll_interval = Duration::from_secs(15);
     let mut was_idle = false;
