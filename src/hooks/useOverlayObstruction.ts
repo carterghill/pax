@@ -11,7 +11,7 @@
  */
 
 import { invoke } from "@tauri-apps/api/core";
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useLayoutEffect, useRef, useState } from "react";
 
 // ─── Types ──────────────────────────────────────────────────────────────────
 
@@ -116,8 +116,8 @@ export function useOverlayObstruction(
 ) {
   const idRef = useRef<number | null>(null);
 
-  // Same registration pattern as commit ce8d3ec ("added border radius to cut-through").
-  useEffect(() => {
+  // Layout effect avoids one-frame lag when opening/closing overlays.
+  useLayoutEffect(() => {
     if (visible && ref.current) {
       idRef.current = registerObstruction(ref.current);
     }

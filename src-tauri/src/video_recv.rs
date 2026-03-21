@@ -109,54 +109,164 @@ pub fn spawn_video_receiver(
 
                 let rtc_track = video_track.rtc_track();
                 let mut stream = NativeVideoStream::new(rtc_track);
+                let mut clip_rx = if use_native {
+                    let (clip_tx, clip_rx) = tokio::sync::mpsc::unbounded_channel();
+                    crate::native_overlay::register_overlay_clip_notifier(&id, clip_tx);
+                    Some(clip_rx)
+                } else {
+                    None
+                };
                 let mut frame_number: u64 = 0;
                 let mut total_process_us: u64 = 0;
                 let mut drained_count: u64 = 0;
 
                 loop {
-                    let first = stream.next().await;
-                    let Some(mut latest_frame) = first else {
-                        eprintln!("[Pax VideoRecv] Stream ended for '{}'", id);
-                        break;
-                    };
-
                     if shutdown.load(Ordering::Relaxed) {
                         eprintln!("[Pax VideoRecv] Shutdown for '{}'", id);
                         break;
                     }
 
-                    // Drain to latest — skip any buffered frames
-                    let mut skipped = 0u32;
-                    loop {
-                        match futures_util::FutureExt::now_or_never(stream.next()) {
-                            Some(Some(newer)) => { latest_frame = newer; skipped += 1; }
-                            _ => break,
-                        }
-                    }
-                    drained_count += skipped as u64;
-
-                    let process_start = std::time::Instant::now();
-
-                    let mut i420 = latest_frame.buffer.to_i420();
-                    let src_w = i420.width();
-                    let src_h = i420.height();
-                    if src_w == 0 || src_h == 0 {
-                        continue;
-                    }
-
-                    frame_number += 1;
-
-                    if frame_number == 1 {
-                        eprintln!("[Pax VideoRecv] First frame decoded for '{}': {}x{}", id, src_w, src_h);
-                    }
-
-                    // ── Native GPU path ──────────────────────────────
-                    if let Some(ref mut renderer) = gpu_renderer {
-                        let (fit_w, fit_h) = renderer.get_fit_dimensions(src_w, src_h);
-                        let final_i420 = if fit_w > 0 && fit_h > 0
-                            && (fit_w < src_w || fit_h < src_h)
+                    if clip_rx.is_some() {
+                        let mut close_clip_channel = false;
                         {
-                            i420.scale(fit_w as i32, fit_h as i32)
+                            let cr = clip_rx.as_mut().expect("clip_rx checked is_some");
+                            tokio::select! {
+                                biased;
+                                msg = cr.recv() => {
+                                    match msg {
+                                        Some(()) => {
+                                            while cr.try_recv().is_ok() {}
+                                            if let Some(renderer) = gpu_renderer.as_mut() {
+                                                renderer.refresh_obstruction_clip();
+                                            }
+                                        }
+                                        None => {
+                                            close_clip_channel = true;
+                                        }
+                                    }
+                                }
+                                first = stream.next() => {
+                                    let Some(mut latest_frame) = first else {
+                                        eprintln!("[Pax VideoRecv] Stream ended for '{}'", id);
+                                        break;
+                                    };
+
+                                    if shutdown.load(Ordering::Relaxed) {
+                                        eprintln!("[Pax VideoRecv] Shutdown for '{}'", id);
+                                        break;
+                                    }
+
+                                    let mut skipped = 0u32;
+                                    loop {
+                                        match futures_util::FutureExt::now_or_never(stream.next()) {
+                                            Some(Some(newer)) => { latest_frame = newer; skipped += 1; }
+                                            _ => break,
+                                        }
+                                    }
+                                    drained_count += skipped as u64;
+
+                                    let process_start = std::time::Instant::now();
+
+                                    let mut i420 = latest_frame.buffer.to_i420();
+                                    let src_w = i420.width();
+                                    let src_h = i420.height();
+                                    if src_w == 0 || src_h == 0 {
+                                        continue;
+                                    }
+
+                                    frame_number += 1;
+
+                                    if frame_number == 1 {
+                                        eprintln!(
+                                            "[Pax VideoRecv] First frame decoded for '{}': {}x{}",
+                                            id, src_w, src_h
+                                        );
+                                    }
+
+                                    let Some(renderer) = gpu_renderer.as_mut() else {
+                                        continue;
+                                    };
+                                    let (fit_w, fit_h) = renderer.get_fit_dimensions(src_w, src_h);
+                                    let final_i420 = if fit_w > 0 && fit_h > 0
+                                        && (fit_w < src_w || fit_h < src_h)
+                                    {
+                                        i420.scale(fit_w as i32, fit_h as i32)
+                                    } else {
+                                        i420
+                                    };
+
+                                    let w = final_i420.width();
+                                    let h = final_i420.height();
+                                    let (data_y, data_u, data_v) = final_i420.data();
+                                    let (stride_y, stride_u, stride_v) = final_i420.strides();
+                                    renderer.render_frame(
+                                        data_y, data_u, data_v,
+                                        w, h,
+                                        stride_y, stride_u, stride_v,
+                                    );
+
+                                    let elapsed_us = process_start.elapsed().as_micros() as u64;
+                                    total_process_us += elapsed_us;
+
+                                    if frame_number % 300 == 0 {
+                                        let avg_us = total_process_us / frame_number;
+                                        eprintln!(
+                                            "[Pax VideoRecv] '{}' stats: frame={} avg_process={}µs drained={} last={}µs",
+                                            id, frame_number, avg_us, drained_count, elapsed_us
+                                        );
+                                    }
+                                }
+                            }
+                        }
+                        if close_clip_channel {
+                            clip_rx = None;
+                        }
+                    } else {
+                        let first = stream.next().await;
+                        let Some(mut latest_frame) = first else {
+                            eprintln!("[Pax VideoRecv] Stream ended for '{}'", id);
+                            break;
+                        };
+
+                        if shutdown.load(Ordering::Relaxed) {
+                            eprintln!("[Pax VideoRecv] Shutdown for '{}'", id);
+                            break;
+                        }
+
+                        let mut skipped = 0u32;
+                        loop {
+                            match futures_util::FutureExt::now_or_never(stream.next()) {
+                                Some(Some(newer)) => { latest_frame = newer; skipped += 1; }
+                                _ => break,
+                            }
+                        }
+                        drained_count += skipped as u64;
+
+                        let mut i420 = latest_frame.buffer.to_i420();
+                        let src_w = i420.width();
+                        let src_h = i420.height();
+                        if src_w == 0 || src_h == 0 {
+                            continue;
+                        }
+
+                        frame_number += 1;
+
+                        if frame_number == 1 {
+                            eprintln!(
+                                "[Pax VideoRecv] First frame decoded for '{}': {}x{}",
+                                id, src_w, src_h
+                            );
+                        }
+
+                        let (tgt_w, tgt_h) = {
+                            let streams = STREAMS.lock();
+                            streams.get(&id).map(|s| s.target).unwrap_or((0, 0))
+                        };
+
+                        let needs_scale = tgt_w > 0 && tgt_h > 0 && (tgt_w < src_w || tgt_h < src_h);
+                        let final_i420 = if needs_scale {
+                            let (out_w, out_h) = fit_dimensions(src_w, src_h, tgt_w, tgt_h);
+                            i420.scale(out_w as i32, out_h as i32)
                         } else {
                             i420
                         };
@@ -165,98 +275,64 @@ pub fn spawn_video_receiver(
                         let h = final_i420.height();
                         let (data_y, data_u, data_v) = final_i420.data();
                         let (stride_y, stride_u, stride_v) = final_i420.strides();
-                        renderer.render_frame(
-                            data_y, data_u, data_v,
-                            w, h,
-                            stride_y, stride_u, stride_v,
-                        );
 
-                        let elapsed_us = process_start.elapsed().as_micros() as u64;
-                        total_process_us += elapsed_us;
+                        let cw = (w / 2) as usize;
+                        let ch = (h / 2) as usize;
+                        let y_size = (w * h) as usize;
+                        let uv_size = cw * ch;
+                        let total = 8 + y_size + uv_size * 2;
 
-                        // Log timing every 300 frames (~10s at 30fps)
-                        if frame_number % 300 == 0 {
-                            let avg_us = total_process_us / frame_number;
-                            eprintln!(
-                                "[Pax VideoRecv] '{}' stats: frame={} avg_process={}µs drained={} last={}µs",
-                                id, frame_number, avg_us, drained_count, elapsed_us
-                            );
+                        let mut body = Vec::with_capacity(total);
+                        body.extend_from_slice(&w.to_le_bytes());
+                        body.extend_from_slice(&h.to_le_bytes());
+
+                        if stride_y == w {
+                            body.extend_from_slice(&data_y[..y_size]);
+                        } else {
+                            for row in 0..h as usize {
+                                let start = row * stride_y as usize;
+                                body.extend_from_slice(&data_y[start..start + w as usize]);
+                            }
                         }
-                        continue;
-                    }
 
-                    // ── Protocol fallback path ───────────────────────
-                    // Read target viewport
-                    let (tgt_w, tgt_h) = {
-                        let streams = STREAMS.lock();
-                        streams.get(&id).map(|s| s.target).unwrap_or((0, 0))
-                    };
-
-                    let needs_scale = tgt_w > 0 && tgt_h > 0 && (tgt_w < src_w || tgt_h < src_h);
-                    let final_i420 = if needs_scale {
-                        let (out_w, out_h) = fit_dimensions(src_w, src_h, tgt_w, tgt_h);
-                        i420.scale(out_w as i32, out_h as i32)
-                    } else {
-                        i420
-                    };
-
-                    let w = final_i420.width();
-                    let h = final_i420.height();
-                    let (data_y, data_u, data_v) = final_i420.data();
-                    let (stride_y, stride_u, stride_v) = final_i420.strides();
-
-                    let cw = (w / 2) as usize;
-                    let ch = (h / 2) as usize;
-                    let y_size = (w * h) as usize;
-                    let uv_size = cw * ch;
-                    let total = 8 + y_size + uv_size * 2;
-
-                    let mut body = Vec::with_capacity(total);
-                    body.extend_from_slice(&w.to_le_bytes());
-                    body.extend_from_slice(&h.to_le_bytes());
-
-                    if stride_y == w {
-                        body.extend_from_slice(&data_y[..y_size]);
-                    } else {
-                        for row in 0..h as usize {
-                            let start = row * stride_y as usize;
-                            body.extend_from_slice(&data_y[start..start + w as usize]);
+                        if stride_u == cw as u32 {
+                            body.extend_from_slice(&data_u[..uv_size]);
+                        } else {
+                            for row in 0..ch {
+                                let start = row * stride_u as usize;
+                                body.extend_from_slice(&data_u[start..start + cw]);
+                            }
                         }
-                    }
 
-                    if stride_u == cw as u32 {
-                        body.extend_from_slice(&data_u[..uv_size]);
-                    } else {
-                        for row in 0..ch {
-                            let start = row * stride_u as usize;
-                            body.extend_from_slice(&data_u[start..start + cw]);
+                        if stride_v == cw as u32 {
+                            body.extend_from_slice(&data_v[..uv_size]);
+                        } else {
+                            for row in 0..ch {
+                                let start = row * stride_v as usize;
+                                body.extend_from_slice(&data_v[start..start + cw]);
+                            }
                         }
-                    }
 
-                    if stride_v == cw as u32 {
-                        body.extend_from_slice(&data_v[..uv_size]);
-                    } else {
-                        for row in 0..ch {
-                            let start = row * stride_v as usize;
-                            body.extend_from_slice(&data_v[start..start + cw]);
+                        {
+                            let mut streams = STREAMS.lock();
+                            let entry = streams.entry(id.clone()).or_insert_with(|| StreamState {
+                                body: None, width: 0, height: 0, frame_number: 0,
+                                receiving: true, target: (tgt_w, tgt_h),
+                            });
+                            entry.body = Some(body);
+                            entry.width = w;
+                            entry.height = h;
+                            entry.frame_number = frame_number;
                         }
-                    }
 
-                    {
-                        let mut streams = STREAMS.lock();
-                        let entry = streams.entry(id.clone()).or_insert_with(|| StreamState {
-                            body: None, width: 0, height: 0, frame_number: 0,
-                            receiving: true, target: (tgt_w, tgt_h),
+                        let _ = app_handle.emit("screen-share-frame-ready", FrameReadyEvent {
+                            id: id.clone(),
                         });
-                        entry.body = Some(body);
-                        entry.width = w;
-                        entry.height = h;
-                        entry.frame_number = frame_number;
                     }
+                }
 
-                    let _ = app_handle.emit("screen-share-frame-ready", FrameReadyEvent {
-                        id: id.clone(),
-                    });
+                if use_native {
+                    crate::native_overlay::unregister_overlay_clip_notifier(&id);
                 }
 
                 // Cleanup

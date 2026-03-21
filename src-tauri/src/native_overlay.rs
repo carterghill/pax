@@ -21,8 +21,9 @@
 
 use std::collections::HashMap;
 use std::sync::atomic::Ordering;
-use parking_lot::Mutex;
 use once_cell::sync::Lazy;
+use parking_lot::Mutex;
+use tokio::sync::mpsc;
 
 // ─── WGSL shader (embedded) ─────────────────────────────────────────────────
 
@@ -104,6 +105,26 @@ struct OverlayEntry {
 
 static OVERLAYS: Lazy<Mutex<HashMap<String, OverlayEntry>>> =
     Lazy::new(|| Mutex::new(HashMap::new()));
+
+/// Wake the video thread so it reapplies `SetWindowRgn` without waiting for the next frame.
+static OVERLAY_CLIP_NOTIFIERS: Lazy<Mutex<HashMap<String, mpsc::UnboundedSender<()>>>> =
+    Lazy::new(|| Mutex::new(HashMap::new()));
+
+pub fn register_overlay_clip_notifier(identity: &str, tx: mpsc::UnboundedSender<()>) {
+    OVERLAY_CLIP_NOTIFIERS
+        .lock()
+        .insert(identity.to_string(), tx);
+}
+
+pub fn unregister_overlay_clip_notifier(identity: &str) {
+    OVERLAY_CLIP_NOTIFIERS.lock().remove(identity);
+}
+
+fn notify_overlay_clip_changed(identity: &str) {
+    if let Some(tx) = OVERLAY_CLIP_NOTIFIERS.lock().get(identity) {
+        let _ = tx.send(());
+    }
+}
 
 // ─── Public API ─────────────────────────────────────────────────────────────
 
@@ -212,12 +233,16 @@ pub fn get_overlay_letterbox_color(identity: &str) -> (f32, f32, f32) {
 
 /// Update the obstruction rects for the given identity.
 /// `rects` are in physical pixels, relative to the **overlay's own origin**.
-/// The video thread will apply these as a clip region on the next frame.
+/// The video thread applies the clip region immediately when registered (see
+/// `register_overlay_clip_notifier`), and again each frame for safety.
 pub fn set_overlay_obstructions(identity: &str, rects: Vec<ObstructionRect>) {
-    let overlays = OVERLAYS.lock();
-    if let Some(entry) = overlays.get(identity) {
-        *entry.obstructions.lock() = rects;
+    {
+        let overlays = OVERLAYS.lock();
+        if let Some(entry) = overlays.get(identity) {
+            *entry.obstructions.lock() = rects;
+        }
     }
+    notify_overlay_clip_changed(identity);
 }
 
 /// Read the current obstruction rects.  Called by the video thread.
@@ -231,6 +256,7 @@ pub fn get_overlay_obstructions(identity: &str) -> Vec<ObstructionRect> {
 
 /// Remove all overlays from the registry (called on voice disconnect).
 pub fn destroy_all_overlays() {
+    OVERLAY_CLIP_NOTIFIERS.lock().clear();
     let mut overlays = OVERLAYS.lock();
     for (id, entry) in overlays.drain() {
         entry.visible.store(false, Ordering::Relaxed);
@@ -589,41 +615,35 @@ impl GpuRenderer {
         (w.max(2), h.max(2))
     }
 
-    /// Render an I420 frame to the overlay surface.
-    ///
-    /// The caller should pre-scale the frame to `get_fit_dimensions()` before
-    /// calling this — that reduces upload bandwidth by ~15x and uses
-    /// libwebrtc's SIMD scaler for better quality than GPU bilinear.
-    pub fn render_frame(
-        &mut self,
-        data_y: &[u8],
-        data_u: &[u8],
-        data_v: &[u8],
-        width: u32,
-        height: u32,
-        stride_y: u32,
-        stride_u: u32,
-        stride_v: u32,
-    ) {
+    /// Reapply HWND geometry + obstruction clip using the last decoded frame size.
+    /// Called when the frontend updates obstructions so cut-through is not delayed
+    /// until the next video frame.
+    pub fn refresh_obstruction_clip(&mut self) {
+        let w = self.current_frame_w;
+        let h = self.current_frame_h;
+        if w == 0 || h == 0 {
+            return;
+        }
+        let _ = self.prepare_hwnd_for_frame(w, h);
+    }
+
+    /// Position/size HWND, visibility, and `SetWindowRgn` for the given frame dimensions.
+    /// Returns overlay target size when the surface should be presented; `None` if hidden/invalid.
+    fn prepare_hwnd_for_frame(&mut self, width: u32, height: u32) -> Option<(u32, u32)> {
         // Drain Win32 messages to prevent main-thread deadlock during resize.
         platform::pump_messages();
 
         if width == 0 || height == 0 {
-            return;
+            return None;
         }
 
-        // Read target rect (set atomically by frontend, no mutex contention)
         let (target_x, target_y, target_w, target_h, target_visible) =
-            match get_overlay_target(&self.identity) {
-                Some(t) => t,
-                None => return,
-            };
+            get_overlay_target(&self.identity)?;
 
         if target_w < 8 || target_h < 8 {
-            return;
+            return None;
         }
 
-        // Apply HWND position/size (thread-local, no cross-thread messaging)
         if target_w != self.hwnd_applied_w || target_h != self.hwnd_applied_h {
             platform::set_hwnd_rect(self.hwnd, target_x, target_y, target_w, target_h);
             self.hwnd_applied_w = target_w;
@@ -639,18 +659,12 @@ impl GpuRenderer {
         }
 
         if !target_visible {
-            return;
+            return None;
         }
 
-        // Viewport: center the (pre-scaled) frame within the container.
-        // Since the caller already scaled to the correct aspect ratio,
-        // the frame dimensions define the viewport directly.
         let vp_x = (target_w.saturating_sub(width)) / 2;
         let vp_y = (target_h.saturating_sub(height)) / 2;
 
-        // Apply clip region: keep only the video viewport (no letterbox bars), then
-        // subtract obstruction rects. This gives true "alpha" behavior for bars even
-        // when the swapchain only supports Opaque alpha mode.
         let obstructions = get_overlay_obstructions(&self.identity);
         if obstructions != self.applied_obstructions
             || vp_x != self.applied_vp_x
@@ -672,6 +686,32 @@ impl GpuRenderer {
             self.applied_vp_w = width;
             self.applied_vp_h = height;
         }
+
+        Some((target_w, target_h))
+    }
+
+    /// Render an I420 frame to the overlay surface.
+    ///
+    /// The caller should pre-scale the frame to `get_fit_dimensions()` before
+    /// calling this — that reduces upload bandwidth by ~15x and uses
+    /// libwebrtc's SIMD scaler for better quality than GPU bilinear.
+    pub fn render_frame(
+        &mut self,
+        data_y: &[u8],
+        data_u: &[u8],
+        data_v: &[u8],
+        width: u32,
+        height: u32,
+        stride_y: u32,
+        stride_u: u32,
+        stride_v: u32,
+    ) {
+        let Some((target_w, target_h)) = self.prepare_hwnd_for_frame(width, height) else {
+            return;
+        };
+
+        let vp_x = (target_w.saturating_sub(width)) / 2;
+        let vp_y = (target_h.saturating_sub(height)) / 2;
 
         // Reconfigure surface on resize
         if target_w != self.surface_w || target_h != self.surface_h {
