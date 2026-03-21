@@ -1,8 +1,8 @@
-import { useState, useMemo, useCallback, useRef, useEffect } from "react";
+import { useState, useMemo, useCallback, useRef, useEffect, type MouseEvent } from "react";
 import { Grid2x2 } from "lucide-react";
 import { useTheme } from "../theme/ThemeContext";
 import ScreenShareViewer from "./ScreenShareViewer";
-import { useOverlayHover } from "../hooks/useOverlayObstruction";
+import { useOverlayHover, useOverlayObstruction } from "../hooks/useOverlayObstruction";
 
 /**
  * ScreenShareGrid — Multi-stream screen share layout.
@@ -20,6 +20,8 @@ interface ScreenShareGridProps {
   remoteSharers: string[];
   /** Whether the local user is sharing */
   isLocalScreenSharing: boolean;
+  /** Right-click a remote stream tile (e.g. volume menu over native overlay) */
+  onStreamContextMenu?: (e: MouseEvent, identity: string, displayName: string) => void;
 }
 
 /** Extract a short display name from a Matrix-style identity */
@@ -33,6 +35,7 @@ function displayName(identity: string): string {
 export default function ScreenShareGrid({
   remoteSharers,
   isLocalScreenSharing,
+  onStreamContextMenu,
 }: ScreenShareGridProps) {
   const { palette, spacing, typography } = useTheme();
   const [focusedId, setFocusedId] = useState<string | null>(null);
@@ -153,10 +156,17 @@ export default function ScreenShareGrid({
         {/* Focused stream — takes most of the space */}
         <div style={{ flex: 1, position: "relative", overflow: "hidden" }}>
           {focusedStream && !focusedStream.isLocal && (
-            <ScreenShareViewer
-              active={true}
-              identity={focusedStream.identity}
-            />
+            <>
+              <ScreenShareViewer
+                active={true}
+                identity={focusedStream.identity}
+              />
+              <TileLabel
+                name={displayName(focusedStream.identity)}
+                typography={typography}
+                spacing={spacing}
+              />
+            </>
           )}
           {focusedStream && focusedStream.isLocal && (
             <LocalSharePlaceholder palette={palette} />
@@ -188,6 +198,7 @@ export default function ScreenShareGrid({
                 <StreamTile
                   stream={stream}
                   onClick={() => handleTileClick(stream.identity)}
+                  onStreamContextMenu={onStreamContextMenu}
                   palette={palette}
                   spacing={spacing}
                   typography={typography}
@@ -217,6 +228,7 @@ export default function ScreenShareGrid({
           key={stream.identity}
           stream={stream}
           onClick={() => handleTileClick(stream.identity)}
+          onStreamContextMenu={onStreamContextMenu}
           palette={palette}
           spacing={spacing}
           typography={typography}
@@ -232,6 +244,7 @@ export default function ScreenShareGrid({
 function StreamTile({
   stream,
   onClick,
+  onStreamContextMenu,
   palette,
   spacing,
   typography,
@@ -239,6 +252,7 @@ function StreamTile({
 }: {
   stream: { identity: string; isLocal: boolean };
   onClick: () => void;
+  onStreamContextMenu?: (e: MouseEvent, identity: string, displayName: string) => void;
   palette: any;
   spacing: any;
   typography: any;
@@ -251,6 +265,10 @@ function StreamTile({
   return (
     <div
       onClick={onClick}
+      onContextMenu={(e) => {
+        if (stream.isLocal || !onStreamContextMenu) return;
+        onStreamContextMenu(e, stream.identity, displayName(stream.identity));
+      }}
       style={{
         borderRadius: spacing.unit,
         overflow: "hidden",
@@ -306,22 +324,29 @@ function TileLabel({ name, typography, spacing }: {
   typography: any;
   spacing: any;
 }) {
+  const labelRef = useRef<HTMLDivElement>(null);
+  useOverlayObstruction(labelRef, true);
+
   return (
-    <div style={{
-      position: "absolute",
-      bottom: spacing.unit,
-      left: spacing.unit,
-      padding: `${spacing.unit * 0.5}px ${spacing.unit * 1.5}px`,
-      backgroundColor: "rgba(0,0,0,0.6)",
-      borderRadius: spacing.unit,
-      fontSize: typography.fontSizeSmall - 1,
-      color: "#fff",
-      pointerEvents: "none",
-      maxWidth: "80%",
-      overflow: "hidden",
-      textOverflow: "ellipsis",
-      whiteSpace: "nowrap",
-    }}>
+    <div
+      ref={labelRef}
+      style={{
+        position: "absolute",
+        bottom: spacing.unit,
+        left: spacing.unit,
+        padding: `${spacing.unit * 0.5}px ${spacing.unit * 1.5}px`,
+        backgroundColor: "rgba(0,0,0,0.6)",
+        borderRadius: spacing.unit,
+        fontSize: typography.fontSizeSmall - 1,
+        color: "#fff",
+        pointerEvents: "none",
+        maxWidth: "80%",
+        overflow: "hidden",
+        textOverflow: "ellipsis",
+        whiteSpace: "nowrap",
+        zIndex: 2,
+      }}
+    >
       {name}
     </div>
   );

@@ -55,12 +55,16 @@ export default function VoiceRoomView({
   const [windowPickerOpen, setWindowPickerOpen] = useState(false);
   const [noiseConfig, setNoiseConfig] = useState({ extraAttenuation: 0.1, agcTargetRms: 6000 });
   const screenShareMenuRef = useRef<HTMLDivElement>(null);
+  const screenShareMenuPopupRef = useRef<HTMLDivElement>(null);
   const generalSettingsRef = useRef<HTMLDivElement>(null);
+  const generalSettingsPopupRef = useRef<HTMLDivElement>(null);
+  const windowPickerOverlayRef = useRef<HTMLDivElement>(null);
   const activeShareRef = useRef<{ mode: "screen" | "window"; windowTitle?: string } | null>(null);
 
-  // Register popup menus as obstructions so they clip through the native video overlay
-  useOverlayObstruction(screenShareMenuRef, screenShareMenuOpen);
-  useOverlayObstruction(generalSettingsRef, generalSettingsOpen);
+  // Popups are `position: absolute` — parent `getBoundingClientRect()` excludes them; ref the panels.
+  useOverlayObstruction(screenShareMenuPopupRef, screenShareMenuOpen);
+  useOverlayObstruction(generalSettingsPopupRef, generalSettingsOpen);
+  useOverlayObstruction(windowPickerOverlayRef, windowPickerOpen);
   const [windowList, setWindowList] = useState<[string, string][]>([]);
   const [windowListLoading, setWindowListLoading] = useState(false);
 
@@ -289,6 +293,15 @@ export default function VoiceRoomView({
           <ScreenShareGrid
             remoteSharers={remoteSharers}
             isLocalScreenSharing={callState.isLocalScreenSharing}
+            onStreamContextMenu={(e, identity, displayName) => {
+              e.preventDefault();
+              setContextMenu({
+                x: e.clientX,
+                y: e.clientY,
+                identity,
+                displayName,
+              });
+            }}
           />
         )}
         <div style={{
@@ -544,7 +557,9 @@ export default function VoiceRoomView({
               {callState.isLocalScreenSharing ? <MonitorUp size={20} /> : <Monitor size={20} />}
             </button>
             {screenShareMenuOpen && !callState.isLocalScreenSharing && (
-              <div style={{
+              <div
+                ref={screenShareMenuPopupRef}
+                style={{
                 position: "absolute",
                 bottom: `calc(100% + ${spacing.unit * 4}px)`,
                 left: "50%",
@@ -557,7 +572,8 @@ export default function VoiceRoomView({
                 flexDirection: "column",
                 gap: spacing.unit,
                 zIndex: 10,
-              }}>
+              }}
+              >
                 <button
                   onClick={() => {
                     void startShare("screen");
@@ -594,7 +610,9 @@ export default function VoiceRoomView({
               </div>
             )}
             {windowPickerOpen && (
-              <div style={{
+              <div
+                ref={windowPickerOverlayRef}
+                style={{
                 position: "fixed",
                 inset: 0,
                 backgroundColor: "rgba(0,0,0,0.5)",
@@ -602,7 +620,9 @@ export default function VoiceRoomView({
                 alignItems: "center",
                 justifyContent: "center",
                 zIndex: 1000,
-              }} onClick={() => setWindowPickerOpen(false)}>
+              }}
+                onClick={() => setWindowPickerOpen(false)}
+              >
                 <div style={{
                   backgroundColor: palette.bgSecondary,
                   border: `1px solid ${palette.border}`,
@@ -684,7 +704,9 @@ export default function VoiceRoomView({
               <Settings size={20} />
             </button>
             {generalSettingsOpen && (
-              <div style={{
+              <div
+                ref={generalSettingsPopupRef}
+                style={{
                 position: "absolute",
                 bottom: `calc(100% + ${spacing.unit * 4}px)`,
                 left: "50%",
@@ -695,7 +717,8 @@ export default function VoiceRoomView({
                 padding: spacing.unit * 4,
                 minWidth: 260,
                 zIndex: 10,
-              }}>
+              }}
+              >
                 <div style={{ marginBottom: spacing.unit * 2, fontWeight: 600, fontSize: typography.fontSizeSmall }}>
                   Screen share quality
                 </div>

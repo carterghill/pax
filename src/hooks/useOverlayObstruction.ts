@@ -117,9 +117,19 @@ export function useOverlayObstruction(
   const idRef = useRef<number | null>(null);
 
   // Layout effect avoids one-frame lag when opening/closing overlays.
+  // Note: do not list `ref.current` in deps — it does not trigger re-renders.
   useLayoutEffect(() => {
-    if (visible && ref.current) {
-      idRef.current = registerObstruction(ref.current);
+    if (!visible) {
+      return () => {
+        if (idRef.current !== null) {
+          unregisterObstruction(idRef.current);
+          idRef.current = null;
+        }
+      };
+    }
+    const el = ref.current;
+    if (el) {
+      idRef.current = registerObstruction(el);
     }
     return () => {
       if (idRef.current !== null) {
@@ -127,7 +137,7 @@ export function useOverlayObstruction(
         idRef.current = null;
       }
     };
-  }, [visible, ref.current]);
+  }, [visible, ref]);
 }
 
 /**
