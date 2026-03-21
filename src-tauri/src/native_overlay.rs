@@ -276,7 +276,7 @@ fn align_up(value: u32, align: u32) -> u32 {
 pub struct GpuRenderer {
     device: wgpu::Device,
     queue: wgpu::Queue,
-    surface: wgpu::Surface<'static>,
+    surface: Option<wgpu::Surface<'static>>,
     surface_config: wgpu::SurfaceConfiguration,
     pipeline: wgpu::RenderPipeline,
     bind_group_layout: wgpu::BindGroupLayout,
@@ -321,6 +321,9 @@ unsafe impl Send for GpuRenderer {}
 
 impl Drop for GpuRenderer {
     fn drop(&mut self) {
+        // Drop the swapchain/surface before destroying the HWND. Some backends
+        // may still touch the underlying window handle during surface teardown.
+        let _ = self.surface.take();
         // Destroy the HWND on the video thread (same thread that created it).
         // This is required by Win32 — DestroyWindow must be called from the
         // creating thread.
@@ -530,7 +533,7 @@ impl GpuRenderer {
         Ok(Self {
             device,
             queue,
-            surface,
+            surface: Some(surface),
             surface_config,
             pipeline,
             bind_group_layout,
@@ -674,7 +677,10 @@ impl GpuRenderer {
         if target_w != self.surface_w || target_h != self.surface_h {
             self.surface_config.width = target_w;
             self.surface_config.height = target_h;
-            self.surface.configure(&self.device, &self.surface_config);
+            let Some(surface) = self.surface.as_ref() else {
+                return;
+            };
+            surface.configure(&self.device, &self.surface_config);
             self.surface_w = target_w;
             self.surface_h = target_h;
         }
@@ -694,11 +700,14 @@ impl GpuRenderer {
         upload_plane(&self.queue, self.tex_v.as_ref().unwrap(), data_v, stride_v, cw, ch, &mut self.staging_v);
 
         // Acquire swap chain frame
-        let frame = match self.surface.get_current_texture() {
+        let Some(surface) = self.surface.as_ref() else {
+            return;
+        };
+        let frame = match surface.get_current_texture() {
             Ok(f) => f,
             Err(wgpu::SurfaceError::Outdated | wgpu::SurfaceError::Lost) => {
-                self.surface.configure(&self.device, &self.surface_config);
-                match self.surface.get_current_texture() {
+                surface.configure(&self.device, &self.surface_config);
+                match surface.get_current_texture() {
                     Ok(f) => f,
                     Err(_) => return,
                 }
@@ -1147,7 +1156,7 @@ mod platform {
                 return;
             }
 
-            // Subtract each obstruction (rounded when corner_radius > 0)
+            // Subtract each obstruction.
             for obs in obstructions {
                 let obs_rgn = if obs.corner_radius > 0 {
                     let ell = (obs.corner_radius as i32).saturating_mul(2);

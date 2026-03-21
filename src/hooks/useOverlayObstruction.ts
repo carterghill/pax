@@ -191,12 +191,17 @@ function tick() {
       const iy2 = Math.min(overlayRect.bottom, obsRect.bottom);
 
       if (ix2 > ix1 && iy2 > iy1) {
+        // Keep rounded corners stable at overlay edges by sending the full
+        // obstruction element bounds (not the intersected slice).
         const corner_radius = obstructionCornerRadiusPhysicalPx(obs.element, dpr);
+        const w = Math.round(obsRect.width * dpr);
+        const h = Math.round(obsRect.height * dpr);
+        if (w <= 0 || h <= 0) continue;
         clipRects.push({
-          x: Math.round((ix1 - overlayRect.left) * dpr),
-          y: Math.round((iy1 - overlayRect.top) * dpr),
-          w: Math.round((ix2 - ix1) * dpr),
-          h: Math.round((iy2 - iy1) * dpr),
+          x: Math.round((obsRect.left - overlayRect.left) * dpr),
+          y: Math.round((obsRect.top - overlayRect.top) * dpr),
+          w,
+          h,
           ...(corner_radius > 0 ? { corner_radius } : {}),
         });
       }
