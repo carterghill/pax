@@ -217,18 +217,29 @@ export default function ScreenShareViewer({ active, identity }: ScreenShareViewe
     });
   }, []);
 
-  // ── Native overlay: report rect to Rust ──────────────────────────
+  // ── Native overlay: letterbox color (theme) — cheap, not on every resize tick ──
   useEffect(() => {
-    console.log("[ScreenShareViewer] Native effect check:", { active, identity, useNative, hasContainer: !!containerRef.current });
+    if (!active || !identity || useNative !== true) return;
+    const { r, g, b } = bgPrimaryToRgb01(palette.bgPrimary);
+    invoke("overlay_set_letterbox_color", { identity, r, g, b }).catch((e) =>
+      console.error("[ScreenShareViewer] overlay_set_letterbox_color failed:", e),
+    );
+  }, [palette.bgPrimary, active, identity, useNative]);
+
+  // ── Native overlay: report HWND geometry (throttled — no perpetual rAF) ─────
+  useEffect(() => {
     if (!active || !identity || useNative !== true || !containerRef.current) return;
 
-    // Register this overlay for obstruction tracking
     registerOverlay(identity, containerRef.current);
 
     let mounted = true;
     let firstRect = true;
+    let lastGeoAt = 0;
+    let geoTimer: ReturnType<typeof setTimeout> | null = null;
+    /** Min ms between `overlay_set_rect` IPC during drag-resize / layout churn */
+    const GEO_MIN_MS = 48;
 
-    const reportRect = () => {
+    const reportGeometry = () => {
       const el = containerRef.current;
       if (!el || !mounted) return;
       const rect = el.getBoundingClientRect();
@@ -237,68 +248,83 @@ export default function ScreenShareViewer({ active, identity }: ScreenShareViewe
       const y = Math.round(rect.top * dpr);
       const w = Math.round(rect.width * dpr);
       const h = Math.round(rect.height * dpr);
-      if (w > 0 && h > 0) {
-        console.log("[ScreenShareViewer] Reporting rect:", { identity, x, y, w, h });
-        invoke("overlay_set_rect", { identity, x, y, w, h })
-          .catch((e) => console.error("[ScreenShareViewer] overlay_set_rect failed:", e));
-        const { r, g, b } = bgPrimaryToRgb01(palette.bgPrimary);
-        invoke("overlay_set_letterbox_color", { identity, r, g, b }).catch((e) =>
-          console.error("[ScreenShareViewer] overlay_set_letterbox_color failed:", e),
+      if (w <= 0 || h <= 0) return;
+      invoke("overlay_set_rect", { identity, x, y, w, h }).catch((e) =>
+        console.error("[ScreenShareViewer] overlay_set_rect failed:", e),
+      );
+      if (firstRect) {
+        firstRect = false;
+        invoke("overlay_set_visible", { identity, visible: true }).catch((e) =>
+          console.error("[ScreenShareViewer] overlay_set_visible failed:", e),
         );
-        if (firstRect) {
-          invoke("overlay_set_visible", { identity, visible: true })
-            .catch((e) => console.error("[ScreenShareViewer] overlay_set_visible failed:", e));
-          firstRect = false;
-          setLoading(false);
-          loadingRef.current = false;
-        }
+        setLoading(false);
+        loadingRef.current = false;
       }
     };
 
-    // Report initial rect
-    reportRect();
+    const scheduleGeometry = () => {
+      const now = performance.now();
+      const run = () => {
+        lastGeoAt = performance.now();
+        geoTimer = null;
+        reportGeometry();
+      };
+      if (now - lastGeoAt >= GEO_MIN_MS) {
+        if (geoTimer !== null) {
+          clearTimeout(geoTimer);
+          geoTimer = null;
+        }
+        run();
+      } else if (geoTimer === null) {
+        geoTimer = setTimeout(run, GEO_MIN_MS - (now - lastGeoAt));
+      }
+    };
 
-    // Track container resize
-    let resizeTimer: ReturnType<typeof setTimeout> | null = null;
-    const observer = new ResizeObserver(() => {
-      if (resizeTimer) clearTimeout(resizeTimer);
-      resizeTimer = setTimeout(reportRect, 16); // ~1 frame debounce
-    });
+    reportGeometry();
+    lastGeoAt = performance.now();
+
+    /** Browsers defer timers while hidden; clear so they don't all fire at once on return. */
+    const clearGeoTimer = () => {
+      if (geoTimer !== null) {
+        clearTimeout(geoTimer);
+        geoTimer = null;
+      }
+    };
+
+    const onVisibility = () => {
+      if (document.visibilityState === "hidden") clearGeoTimer();
+    };
+
+    const observer = new ResizeObserver(() => scheduleGeometry());
     observer.observe(containerRef.current);
 
-    // Track scroll/layout shifts with rAF for smooth positioning
-    let rafId = 0;
-    let lastX = -1, lastY = -1, lastW = -1, lastH = -1;
-    const trackPosition = () => {
-      if (!mounted) return;
-      rafId = requestAnimationFrame(trackPosition);
-      const el = containerRef.current;
-      if (!el) return;
-      const rect = el.getBoundingClientRect();
-      const dpr = window.devicePixelRatio || 1;
-      const x = Math.round(rect.left * dpr);
-      const y = Math.round(rect.top * dpr);
-      const w = Math.round(rect.width * dpr);
-      const h = Math.round(rect.height * dpr);
-      if (x !== lastX || y !== lastY || w !== lastW || h !== lastH) {
-        lastX = x; lastY = y; lastW = w; lastH = h;
-        invoke("overlay_set_rect", { identity, x, y, w, h })
-          .catch((e) => console.error("[ScreenShareViewer] rAF set_rect failed:", e));
-        const { r, g, b } = bgPrimaryToRgb01(palette.bgPrimary);
-        invoke("overlay_set_letterbox_color", { identity, r, g, b }).catch(() => {});
-      }
+    const onWinResize = () => scheduleGeometry();
+    window.addEventListener("resize", onWinResize);
+
+    let scrollCoalesce = false;
+    const onScroll = () => {
+      if (scrollCoalesce) return;
+      scrollCoalesce = true;
+      requestAnimationFrame(() => {
+        scrollCoalesce = false;
+        scheduleGeometry();
+      });
     };
-    rafId = requestAnimationFrame(trackPosition);
+    window.addEventListener("scroll", onScroll, { capture: true, passive: true });
+
+    document.addEventListener("visibilitychange", onVisibility);
 
     return () => {
       mounted = false;
       observer.disconnect();
-      cancelAnimationFrame(rafId);
-      if (resizeTimer) clearTimeout(resizeTimer);
+      window.removeEventListener("resize", onWinResize);
+      window.removeEventListener("scroll", onScroll, { capture: true });
+      document.removeEventListener("visibilitychange", onVisibility);
+      clearGeoTimer();
       unregisterOverlay(identity);
       invoke("overlay_set_visible", { identity, visible: false }).catch(() => {});
     };
-  }, [active, identity, useNative, palette.bgPrimary]);
+  }, [active, identity, useNative]);
 
   // ── WebGL fallback: steady presentation clock ────────────────────
   useEffect(() => {

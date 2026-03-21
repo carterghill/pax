@@ -1133,7 +1133,7 @@ mod platform {
                 y,
                 w as i32,
                 h as i32,
-                SWP_NOACTIVATE | SWP_NOZORDER,
+                SWP_NOACTIVATE | SWP_NOZORDER | SWP_NOREDRAW,
             );
         }
     }
@@ -1177,10 +1177,9 @@ mod platform {
         use windows_sys::Win32::Graphics::Gdi::*;
         unsafe {
             if video_w == 0 || video_h == 0 {
-                // Empty viewport, hide all.
                 let empty = CreateRectRgn(0, 0, 0, 0);
                 if !empty.is_null() {
-                    SetWindowRgn(to_hwnd(hwnd), empty, 1);
+                    SetWindowRgn(to_hwnd(hwnd), empty, 0);
                 }
                 return;
             }
@@ -1236,7 +1235,10 @@ mod platform {
 
             // Apply.  SetWindowRgn takes ownership of the region — do NOT
             // call DeleteObject on `full` after this.
-            SetWindowRgn(to_hwnd(hwnd), full, 1);
+            // Pass 0 (don't force redraw) — wgpu's present() repaints the
+            // HWND on the next frame anyway; forced redraws during resize
+            // cause severe stalls because Windows synchronously repaints.
+            SetWindowRgn(to_hwnd(hwnd), full, 0);
         }
     }
 

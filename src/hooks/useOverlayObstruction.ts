@@ -34,20 +34,44 @@ interface ObstructionRect {
   corner_radius?: number;
 }
 
-/** Used border-radius in CSS px → physical px for native round-rect clip. */
-function obstructionCornerRadiusPhysicalPx(el: HTMLElement, dpr: number): number {
+/** Avoid `getComputedStyle` every frame when the element's size is unchanged. */
+const cornerRadiusCache = new WeakMap<
+  HTMLElement,
+  { w: number; h: number; radius: number }
+>();
+
+function obstructionCornerRadiusPhysicalPx(
+  el: HTMLElement,
+  dpr: number,
+  physicalW: number,
+  physicalH: number,
+): number {
+  const cached = cornerRadiusCache.get(el);
+  if (cached && cached.w === physicalW && cached.h === physicalH) {
+    return cached.radius;
+  }
+
   const raw = getComputedStyle(el).borderRadius;
   const token = raw.split(/[\s/]+/)[0]?.trim() ?? "";
-  if (!token) return 0;
-  if (token.endsWith("%")) {
-    const rect = el.getBoundingClientRect();
-    const pct = parseFloat(token);
-    if (!Number.isFinite(pct)) return 0;
-    const basis = Math.min(rect.width, rect.height) * dpr;
-    return Math.round((pct / 100) * basis);
+  let radius = 0;
+  if (!token) {
+    cornerRadiusCache.set(el, { w: physicalW, h: physicalH, radius: 0 });
+    return 0;
   }
-  const cssPx = parseFloat(token);
-  return Number.isFinite(cssPx) ? Math.round(cssPx * dpr) : 0;
+  if (token.endsWith("%")) {
+    const pct = parseFloat(token);
+    if (!Number.isFinite(pct)) {
+      cornerRadiusCache.set(el, { w: physicalW, h: physicalH, radius: 0 });
+      return 0;
+    }
+    const basis = Math.min(physicalW, physicalH);
+    radius = Math.round((pct / 100) * basis);
+  } else {
+    const cssPx = parseFloat(token);
+    radius = Number.isFinite(cssPx) ? Math.round(cssPx * dpr) : 0;
+  }
+  cornerRadiusCache.set(el, { w: physicalW, h: physicalH, radius });
+  return radius;
 }
 
 // ─── Global state ───────────────────────────────────────────────────────────
@@ -61,14 +85,37 @@ let running = false;
 // Cache last-sent obstructions per identity to avoid redundant invokes
 const lastSent: Map<string, string> = new Map();
 
+/** At most one `overlay_set_obstructions` in flight per stream; coalesce resize storms. */
+const obstructionInFlight = new Set<string>();
+const obstructionPending = new Map<string, { key: string; rects: ObstructionRect[] }>();
+
+function flushObstructionInvoke(identity: string) {
+  if (obstructionInFlight.has(identity)) return;
+  const pending = obstructionPending.get(identity);
+  if (!pending || pending.key === lastSent.get(identity)) {
+    obstructionPending.delete(identity);
+    return;
+  }
+  obstructionPending.delete(identity);
+  obstructionInFlight.add(identity);
+  const snap = pending;
+  invoke("overlay_set_obstructions", { identity, obstructions: snap.rects })
+    .then(() => {
+      lastSent.set(identity, snap.key);
+      obstructionInFlight.delete(identity);
+      flushObstructionInvoke(identity);
+    })
+    .catch((e) => {
+      obstructionInFlight.delete(identity);
+      console.error("[Pax] overlay_set_obstructions failed:", e);
+      flushObstructionInvoke(identity);
+    });
+}
+
 // ─── Hover state ────────────────────────────────────────────────────────────
 
-/** Current hover states, polled from Rust every few frames. */
 const hoverStates: Map<string, boolean> = new Map();
-
-/** Listeners that want to be notified when hover states change. */
 const hoverListeners: Set<() => void> = new Set();
-
 let hoverPollCounter = 0;
 
 function notifyHoverListeners() {
@@ -87,6 +134,8 @@ export function registerOverlay(identity: string, element: HTMLElement) {
 export function unregisterOverlay(identity: string) {
   overlays.delete(identity);
   lastSent.delete(identity);
+  obstructionPending.delete(identity);
+  obstructionInFlight.delete(identity);
   hoverStates.delete(identity);
   invoke("overlay_set_obstructions", { identity, obstructions: [] }).catch(() => {});
   if (overlays.size === 0) {
@@ -116,8 +165,6 @@ export function useOverlayObstruction(
 ) {
   const idRef = useRef<number | null>(null);
 
-  // Layout effect avoids one-frame lag when opening/closing overlays.
-  // Note: do not list `ref.current` in deps — it does not trigger re-renders.
   useLayoutEffect(() => {
     if (!visible) {
       return () => {
@@ -201,12 +248,10 @@ function tick() {
       const iy2 = Math.min(overlayRect.bottom, obsRect.bottom);
 
       if (ix2 > ix1 && iy2 > iy1) {
-        // Keep rounded corners stable at overlay edges by sending the full
-        // obstruction element bounds (not the intersected slice).
-        const corner_radius = obstructionCornerRadiusPhysicalPx(obs.element, dpr);
         const w = Math.round(obsRect.width * dpr);
         const h = Math.round(obsRect.height * dpr);
         if (w <= 0 || h <= 0) continue;
+        const corner_radius = obstructionCornerRadiusPhysicalPx(obs.element, dpr, w, h);
         clipRects.push({
           x: Math.round((obsRect.left - overlayRect.left) * dpr),
           y: Math.round((obsRect.top - overlayRect.top) * dpr),
@@ -218,14 +263,11 @@ function tick() {
     }
 
     const key = JSON.stringify(clipRects);
-    if (lastSent.get(identity) !== key) {
-      invoke("overlay_set_obstructions", { identity, obstructions: clipRects })
-        .then(() => {
-          lastSent.set(identity, key);
-        })
-        .catch((e) => {
-          console.error("[Pax] overlay_set_obstructions failed:", e);
-        });
+    if (key === lastSent.get(identity)) {
+      obstructionPending.delete(identity);
+    } else {
+      obstructionPending.set(identity, { key, rects: clipRects });
+      flushObstructionInvoke(identity);
     }
   }
 
@@ -241,7 +283,6 @@ function tick() {
             changed = true;
           }
         }
-        // Clear stale entries
         for (const [identity] of hoverStates) {
           if (!(identity in states)) {
             hoverStates.delete(identity);
