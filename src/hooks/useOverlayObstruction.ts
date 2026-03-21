@@ -30,6 +30,24 @@ interface ObstructionRect {
   y: number;
   w: number;
   h: number;
+  /** Physical px; must match serde field on Rust `ObstructionRect`. */
+  corner_radius?: number;
+}
+
+/** Used border-radius in CSS px → physical px for native round-rect clip. */
+function obstructionCornerRadiusPhysicalPx(el: HTMLElement, dpr: number): number {
+  const raw = getComputedStyle(el).borderRadius;
+  const token = raw.split(/[\s/]+/)[0]?.trim() ?? "";
+  if (!token) return 0;
+  if (token.endsWith("%")) {
+    const rect = el.getBoundingClientRect();
+    const pct = parseFloat(token);
+    if (!Number.isFinite(pct)) return 0;
+    const basis = Math.min(rect.width, rect.height) * dpr;
+    return Math.round((pct / 100) * basis);
+  }
+  const cssPx = parseFloat(token);
+  return Number.isFinite(cssPx) ? Math.round(cssPx * dpr) : 0;
 }
 
 // ─── Global state ───────────────────────────────────────────────────────────
@@ -172,11 +190,13 @@ function tick() {
       const iy2 = Math.min(overlayRect.bottom, obsRect.bottom);
 
       if (ix2 > ix1 && iy2 > iy1) {
+        const corner_radius = obstructionCornerRadiusPhysicalPx(obs.element, dpr);
         clipRects.push({
           x: Math.round((ix1 - overlayRect.left) * dpr),
           y: Math.round((iy1 - overlayRect.top) * dpr),
           w: Math.round((ix2 - ix1) * dpr),
           h: Math.round((iy2 - iy1) * dpr),
+          ...(corner_radius > 0 ? { corner_radius } : {}),
         });
       }
     }
