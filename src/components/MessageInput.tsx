@@ -26,7 +26,6 @@ import {
   Minus,
   Send,
   Smile,
-  Clapperboard,
 } from "lucide-react";
 import GifPicker, { Theme as GifPickerTheme } from "react-gif-picker";
 import { Picker } from "emoji-mart";
@@ -79,12 +78,13 @@ export default function MessageInput({
 }: MessageInputProps) {
   const [plainText, setPlainText] = useState("");
   const [sending, setSending] = useState(false);
-  const [openPopover, setOpenPopover] = useState<"format" | "emoji" | "gif" | null>(null);
+  const [formatOpen, setFormatOpen] = useState(false);
+  const [pickerOpen, setPickerOpen] = useState(false);
+  const [pickerTab, setPickerTab] = useState<"emoji" | "gif">("emoji");
   const [activeFormats, setActiveFormats] = useState<Set<string>>(new Set());
   const editorRef = useRef<HTMLDivElement>(null);
   const rootRef = useRef<HTMLDivElement>(null);
-  const emojiAnchorRef = useRef<HTMLButtonElement>(null);
-  const gifAnchorRef = useRef<HTMLButtonElement>(null);
+  const pickerAnchorRef = useRef<HTMLButtonElement>(null);
   const emojiPickerMountRef = useRef<HTMLDivElement>(null);
   const [popoverPos, setPopoverPos] = useState<{ bottom: number; right: number } | null>(null);
   const insertEmojiFromPickerRef = useRef<(native: string) => void>(() => {});
@@ -119,10 +119,8 @@ export default function MessageInput({
     el.style.height = `${Math.min(el.scrollHeight, composerMaxHeightPx)}px`;
   }, [composerMaxHeightPx]);
 
-  // Sync height on mount and when max changes (emoji-only toggle).
   useLayoutEffect(syncHeight, [syncHeight]);
 
-  // Set default paragraph separator so Enter produces <div> consistently.
   useEffect(() => {
     document.execCommand("defaultParagraphSeparator", false, "div");
   }, []);
@@ -148,7 +146,7 @@ export default function MessageInput({
     };
   }, [roomId]);
 
-  // ─── Editor input handler (uncontrolled – DOM is source of truth) ─────────
+  // ─── Editor input handler ─────────────────────────────────────────────────
 
   function handleEditorInput() {
     const el = editorRef.current;
@@ -177,8 +175,6 @@ export default function MessageInput({
       setActiveFormats(getActiveFormats(el));
     };
     document.addEventListener("selectionchange", update);
-    // Also refresh on keyup to catch Ctrl+B / Ctrl+I / Ctrl+S browser hotkeys
-    // which toggle formatting via execCommand but don't fire selectionchange.
     const el = editorRef.current;
     el?.addEventListener("keyup", update);
     return () => {
@@ -187,18 +183,13 @@ export default function MessageInput({
     };
   }, []);
 
-  // ─── Popover positioning (emoji + GIF only; format toolbar is inline) ─────
+  // ─── Picker positioning ───────────────────────────────────────────────────
 
   useLayoutEffect(() => {
     const margin = spacing.unit * 2;
-    const anchorFor = (p: typeof openPopover) => {
-      if (p === "emoji") return emojiAnchorRef.current;
-      if (p === "gif") return gifAnchorRef.current;
-      return null;
-    };
     const update = () => {
-      const anchor = anchorFor(openPopover);
-      if (!openPopover || !anchor) { setPopoverPos(null); return; }
+      const anchor = pickerAnchorRef.current;
+      if (!pickerOpen || !anchor) { setPopoverPos(null); return; }
       const r = anchor.getBoundingClientRect();
       setPopoverPos({
         bottom: window.innerHeight - r.top + margin,
@@ -208,20 +199,20 @@ export default function MessageInput({
     update();
     window.addEventListener("resize", update);
     return () => window.removeEventListener("resize", update);
-  }, [openPopover, spacing.unit]);
+  }, [pickerOpen, spacing.unit]);
 
-  // Close popovers on outside click / Escape.
+  // Close picker on outside click / Escape.
   useEffect(() => {
-    if (!openPopover) return;
+    if (!pickerOpen) return;
     const onDocDown = (e: MouseEvent) => {
       const t = e.target;
       if (t instanceof Element && t.closest("[data-pax-composer-popover]")) return;
       const root = rootRef.current;
       if (root && e.composedPath().includes(root)) return;
-      setOpenPopover(null);
+      setPickerOpen(false);
     };
     const onKey = (e: KeyboardEvent) => {
-      if (e.key === "Escape") setOpenPopover(null);
+      if (e.key === "Escape") setPickerOpen(false);
     };
     document.addEventListener("mousedown", onDocDown);
     document.addEventListener("keydown", onKey);
@@ -229,7 +220,7 @@ export default function MessageInput({
       document.removeEventListener("mousedown", onDocDown);
       document.removeEventListener("keydown", onKey);
     };
-  }, [openPopover]);
+  }, [pickerOpen]);
 
   // ─── Emoji picker mount ───────────────────────────────────────────────────
 
@@ -238,11 +229,11 @@ export default function MessageInput({
     if (!el) return;
     el.focus();
     document.execCommand("insertText", false, native);
-    setOpenPopover(null);
+    setPickerOpen(false);
   };
 
   useLayoutEffect(() => {
-    if (openPopover !== "emoji") return;
+    if (!pickerOpen || pickerTab !== "emoji") return;
     const mount = emojiPickerMountRef.current;
     if (!mount) return;
     mount.innerHTML = "";
@@ -263,7 +254,7 @@ export default function MessageInput({
     return () => {
       mount.innerHTML = "";
     };
-  }, [openPopover, popoverPos, themeName]);
+  }, [pickerOpen, pickerTab, popoverPos, themeName]);
 
   // ─── Edit message loading ─────────────────────────────────────────────────
 
@@ -337,8 +328,8 @@ export default function MessageInput({
     const trimmed = markdown.trim();
     if (!trimmed || sending) return;
 
-    // Close emoji/gif but keep format toolbar open across sends.
-    setOpenPopover((o) => (o === "format" ? o : null));
+    // Close picker but keep format toolbar open across sends.
+    setPickerOpen(false);
     sendTyping(false);
     if (typingTimeout.current) clearTimeout(typingTimeout.current);
 
@@ -354,17 +345,13 @@ export default function MessageInput({
       } else {
         await invoke("send_message", { roomId, body: trimmed });
       }
-      // Snapshot which inline formats were active so we can restore them.
       const prevFormats = getActiveFormats(el);
       el.innerHTML = "";
       setPlainText("");
       onMessageSent();
       el.focus();
-      // Re-apply inline formats: insert a zero-width space first so execCommand
-      // can wrap it in <b>/<i>/<s> elements, giving the cursor a styled home.
       if (prevFormats.has("bold") || prevFormats.has("italic") || prevFormats.has("strikethrough")) {
         document.execCommand("insertText", false, "\u200b");
-        // Select the ZWS so the format commands wrap it.
         const sel = window.getSelection();
         if (sel) { sel.selectAllChildren(el); }
         for (const fmt of prevFormats) {
@@ -372,10 +359,10 @@ export default function MessageInput({
           else if (fmt === "italic") document.execCommand("italic");
           else if (fmt === "strikethrough") document.execCommand("strikeThrough");
         }
-        // Collapse to end so typing appends inside the wrappers.
         if (sel) { sel.collapseToEnd(); }
       }
       refreshFormats();
+      syncHeight();
     } catch (e) {
       console.error(editingMessage ? "Failed to edit:" : "Failed to send:", e);
     }
@@ -389,8 +376,12 @@ export default function MessageInput({
       return;
     }
     if (e.key === "Escape") {
-      if (openPopover) {
-        setOpenPopover(null);
+      if (pickerOpen) {
+        setPickerOpen(false);
+        return;
+      }
+      if (formatOpen) {
+        setFormatOpen(false);
         return;
       }
       if (editingMessage && onCancelEdit) {
@@ -417,32 +408,10 @@ export default function MessageInput({
   };
   const canSend = plainText.trim().length > 0 && !sending;
 
-  // ─── Portals ──────────────────────────────────────────────────────────────
+  // ─── Picker portal (emoji + GIF tabs) ─────────────────────────────────────
 
-  const emojiPickerPortal =
-    openPopover === "emoji" &&
-    popoverPos &&
-    createPortal(
-      <div
-        data-pax-composer-popover
-        style={{
-          ...fixedPopoverStyle(popoverPos.bottom, popoverPos.right),
-          borderRadius: spacing.unit * 2,
-          overflow: "hidden",
-          border: `1px solid ${palette.border}`,
-          boxShadow:
-            themeName === "light"
-              ? `0 8px 28px rgba(0,0,0,0.12), 0 0 0 1px ${palette.border} inset`
-              : `0 12px 44px rgba(0,0,0,0.55), 0 0 0 1px rgba(255,255,255,0.06) inset`,
-        }}
-      >
-        <div ref={emojiPickerMountRef} />
-      </div>,
-      document.body,
-    );
-
-  const gifPickerPortal =
-    openPopover === "gif" &&
+  const pickerPortal =
+    pickerOpen &&
     popoverPos &&
     createPortal(
       <div
@@ -457,43 +426,92 @@ export default function MessageInput({
               ? `0 8px 28px rgba(0,0,0,0.12), 0 0 0 1px ${palette.border} inset`
               : `0 12px 44px rgba(0,0,0,0.55), 0 0 0 1px rgba(255,255,255,0.06) inset`,
           backgroundColor: palette.bgTertiary,
+          display: "flex",
+          flexDirection: "column",
+          width: 352,
         }}
       >
-        {tenorApiKey ? (
-          <GifPicker
-            tenorApiKey={tenorApiKey}
-            clientKey="pax"
-            theme={themeName === "light" ? GifPickerTheme.LIGHT : GifPickerTheme.DARK}
-            width={320}
-            height={380}
-            onGifClick={(gif) => {
-              const el = editorRef.current;
-              if (!el) return;
-              el.focus();
-              if (hrefLooksLikeDirectImageUrl(gif.url)) {
-                insertImageAtSelection(el, gif.url, composerImgStyle);
-              } else {
-                document.execCommand("insertText", false, gif.url);
-              }
-              setOpenPopover(null);
-              requestAnimationFrame(() => el.focus());
-            }}
-          />
-        ) : (
-          <div
-            style={{
-              width: 280,
-              padding: spacing.unit * 3,
-              color: palette.textSecondary,
-              fontSize: typography.fontSizeBase * 0.9,
-              lineHeight: typography.lineHeight,
-            }}
-          >
-            Add{" "}
-            <code style={{ color: palette.textPrimary }}>VITE_TENOR_API_KEY</code> to your env to search Tenor GIFs (free key
-            from Google Cloud → Tenor API).
-          </div>
-        )}
+        {/* Tab bar */}
+        <div
+          style={{
+            display: "flex",
+            borderBottom: `1px solid ${palette.border}`,
+            flexShrink: 0,
+          }}
+        >
+          {(["emoji", "gif"] as const).map((tab) => {
+            const active = pickerTab === tab;
+            return (
+              <button
+                key={tab}
+                type="button"
+                onMouseDown={(e) => e.preventDefault()}
+                onClick={() => setPickerTab(tab)}
+                style={{
+                  flex: 1,
+                  padding: `${spacing.unit * 2}px 0`,
+                  border: "none",
+                  borderBottom: `2px solid ${active ? palette.textPrimary : "transparent"}`,
+                  backgroundColor: "transparent",
+                  color: active ? palette.textPrimary : palette.textSecondary,
+                  fontSize: typography.fontSizeSmall,
+                  fontWeight: active ? typography.fontWeightBold : typography.fontWeightNormal,
+                  fontFamily: typography.fontFamily,
+                  cursor: "pointer",
+                  letterSpacing: "0.03em",
+                  transition: "color 0.1s, border-color 0.1s",
+                }}
+                onMouseEnter={(e) => {
+                  if (!active) e.currentTarget.style.color = palette.textPrimary;
+                }}
+                onMouseLeave={(e) => {
+                  if (!active) e.currentTarget.style.color = palette.textSecondary;
+                }}
+              >
+                {tab === "emoji" ? "Emoji" : "GIF"}
+              </button>
+            );
+          })}
+        </div>
+
+        {/* Tab content — both always mounted to avoid React vs imperative DOM conflicts */}
+        <div ref={emojiPickerMountRef} style={{ display: pickerTab === "emoji" ? "block" : "none" }} />
+        <div style={{ display: pickerTab === "gif" ? "block" : "none" }}>
+          {tenorApiKey ? (
+            <GifPicker
+              tenorApiKey={tenorApiKey}
+              clientKey="pax"
+              theme={themeName === "light" ? GifPickerTheme.LIGHT : GifPickerTheme.DARK}
+              width={350}
+              height={380}
+              onGifClick={(gif) => {
+                const el = editorRef.current;
+                if (!el) return;
+                el.focus();
+                if (hrefLooksLikeDirectImageUrl(gif.url)) {
+                  insertImageAtSelection(el, gif.url, composerImgStyle);
+                } else {
+                  document.execCommand("insertText", false, gif.url);
+                }
+                setPickerOpen(false);
+                requestAnimationFrame(() => el.focus());
+              }}
+            />
+          ) : (
+            <div
+              style={{
+                padding: spacing.unit * 3,
+                color: palette.textSecondary,
+                fontSize: typography.fontSizeBase * 0.9,
+                lineHeight: typography.lineHeight,
+              }}
+            >
+              Add{" "}
+              <code style={{ color: palette.textPrimary }}>VITE_TENOR_API_KEY</code> to your env to
+              search Tenor GIFs (free key from Google Cloud → Tenor API).
+            </div>
+          )}
+        </div>
       </div>,
       document.body,
     );
@@ -502,7 +520,6 @@ export default function MessageInput({
 
   return (
     <>
-      {/* Scoped rich-text styles for the composer editor */}
       <style>{`
         [data-pax-composer] strong, [data-pax-composer] b { font-weight: bold; }
         [data-pax-composer] em, [data-pax-composer] i { font-style: italic; }
@@ -649,61 +666,14 @@ export default function MessageInput({
         >
           <div style={{ position: "relative", flexShrink: 0 }}>
             <button
-              ref={gifAnchorRef}
+              ref={pickerAnchorRef}
               type="button"
-              title={tenorApiKey ? "GIF" : "GIF (configure Tenor API key)"}
-              aria-label="Insert GIF"
-              aria-expanded={openPopover === "gif"}
+              title="Emoji & GIF"
+              aria-label="Emoji & GIF"
+              aria-expanded={pickerOpen}
               aria-haspopup="dialog"
               onMouseDown={(e) => e.preventDefault()}
-              onClick={() => setOpenPopover((o) => (o === "gif" ? null : "gif"))}
-              style={{
-                flexShrink: 0,
-                display: "flex",
-                flexDirection: "row",
-                alignItems: "center",
-                justifyContent: "center",
-                gap: spacing.unit * 0.35,
-                width: "auto",
-                minWidth: inputToolBtnSize,
-                height: inputToolBtnSize,
-                paddingLeft: spacing.unit * 1.25,
-                paddingRight: spacing.unit * 1.25,
-                margin: spacing.unit,
-                marginRight: spacing.unit * 0.5,
-                border: "none",
-                borderRadius: inputToolBtnRadius,
-                backgroundColor: openPopover === "gif" ? palette.bgHover : "transparent",
-                color: openPopover === "gif" ? palette.textPrimary : palette.textSecondary,
-                cursor: "pointer",
-                fontFamily: typography.fontFamily,
-              }}
-              onMouseEnter={(e) => hoverToolBtn(e, openPopover === "gif", true)}
-              onMouseLeave={(e) => hoverToolBtn(e, openPopover === "gif", false)}
-            >
-              <Clapperboard size={inputToolIconSize - 2} strokeWidth={2} aria-hidden />
-              <span
-                style={{
-                  fontSize: typography.fontSizeSmall - 1,
-                  fontWeight: typography.fontWeightBold,
-                  letterSpacing: "0.04em",
-                  lineHeight: 1,
-                }}
-              >
-                GIF
-              </span>
-            </button>
-          </div>
-          <div style={{ position: "relative", flexShrink: 0 }}>
-            <button
-              ref={emojiAnchorRef}
-              type="button"
-              title="Emoji"
-              aria-label="Insert emoji"
-              aria-expanded={openPopover === "emoji"}
-              aria-haspopup="dialog"
-              onMouseDown={(e) => e.preventDefault()}
-              onClick={() => setOpenPopover((o) => (o === "emoji" ? null : "emoji"))}
+              onClick={() => setPickerOpen((o) => !o)}
               style={{
                 flexShrink: 0,
                 display: "flex",
@@ -713,16 +683,15 @@ export default function MessageInput({
                 height: inputToolBtnSize,
                 padding: 0,
                 margin: spacing.unit,
-                marginLeft: 0,
                 marginRight: spacing.unit * 0.75,
                 border: "none",
                 borderRadius: inputToolBtnRadius,
-                backgroundColor: openPopover === "emoji" ? palette.bgHover : "transparent",
-                color: openPopover === "emoji" ? palette.textPrimary : palette.textSecondary,
+                backgroundColor: pickerOpen ? palette.bgHover : "transparent",
+                color: pickerOpen ? palette.textPrimary : palette.textSecondary,
                 cursor: "pointer",
               }}
-              onMouseEnter={(e) => hoverToolBtn(e, openPopover === "emoji", true)}
-              onMouseLeave={(e) => hoverToolBtn(e, openPopover === "emoji", false)}
+              onMouseEnter={(e) => hoverToolBtn(e, pickerOpen, true)}
+              onMouseLeave={(e) => hoverToolBtn(e, pickerOpen, false)}
             >
               <Smile size={inputToolIconSize} strokeWidth={2} />
             </button>
@@ -731,10 +700,10 @@ export default function MessageInput({
         <button
           type="button"
           title="Text formatting"
-          aria-expanded={openPopover === "format"}
+          aria-expanded={formatOpen}
           aria-haspopup="menu"
           onMouseDown={(e) => e.preventDefault()}
-          onClick={() => setOpenPopover((o) => (o === "format" ? null : "format"))}
+          onClick={() => setFormatOpen((o) => !o)}
           style={{
             flexShrink: 0,
             display: "flex",
@@ -747,12 +716,12 @@ export default function MessageInput({
             marginLeft: 0,
             border: "none",
             borderRadius: inputToolBtnRadius,
-            backgroundColor: openPopover === "format" ? palette.bgHover : "transparent",
-            color: openPopover === "format" ? palette.textPrimary : palette.textSecondary,
+            backgroundColor: formatOpen ? palette.bgHover : "transparent",
+            color: formatOpen ? palette.textPrimary : palette.textSecondary,
             cursor: "pointer",
           }}
-          onMouseEnter={(e) => hoverToolBtn(e, openPopover === "format", true)}
-          onMouseLeave={(e) => hoverToolBtn(e, openPopover === "format", false)}
+          onMouseEnter={(e) => hoverToolBtn(e, formatOpen, true)}
+          onMouseLeave={(e) => hoverToolBtn(e, formatOpen, false)}
         >
           <Type size={inputToolIconSize} strokeWidth={2} />
         </button>
@@ -798,7 +767,7 @@ export default function MessageInput({
         </div>
 
         {/* Inline format toolbar */}
-        {openPopover === "format" && (
+        {formatOpen && (
           <>
             <div
               aria-hidden
@@ -895,8 +864,7 @@ export default function MessageInput({
         )}
       </div>
     </div>
-      {emojiPickerPortal}
-      {gifPickerPortal}
+      {pickerPortal}
     </>
   );
 }
