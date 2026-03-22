@@ -72,8 +72,10 @@ pub struct VoiceStateEvent {
 }
 // ─── Internal shared audio state ────────────────────────────────────────────
 struct AudioState {
-    /// Mixed playback samples from all remote participants (f32, mono)
-    playback_buffer: VecDeque<f32>,
+    /// Per-track playback buffers from remote participants (f32, mono).
+    /// Key is a track identifier like "identity::Microphone" or "identity::ScreenshareAudio".
+    /// The speaker output callback sums all buffers to produce the final mix.
+    playback_buffers: HashMap<String, VecDeque<f32>>,
     /// Per-user volume multiplier (0.0 – 2.0, default 1.0)
     user_volumes: HashMap<String, f32>,
     /// Currently active speakers (from LiveKit server)
@@ -104,7 +106,7 @@ struct AudioState {
 impl Default for AudioState {
     fn default() -> Self {
         Self {
-            playback_buffer: VecDeque::with_capacity(SAMPLE_RATE as usize),
+            playback_buffers: HashMap::new(),
             user_volumes: HashMap::new(),
             active_speakers: Vec::new(),
             local_mic_level_smooth: 0.0,
@@ -312,9 +314,12 @@ impl VoiceManager {
         let deafened = state.deafened;
         let room = session.room.clone();
         drop(state);
-        // Mute/unmute the published track
+        // Mute/unmute only the microphone track — leave screen share audio untouched
         let publications = session.room.local_participant().track_publications();
         for (_sid, pub_) in publications.iter() {
+            if pub_.source() != TrackSource::Microphone {
+                continue;
+            }
             if mic_enabled {
                 pub_.unmute();
             } else {
@@ -378,10 +383,10 @@ impl VoiceManager {
             let mut state = session.audio_state.lock();
             let old_volume = state.user_volumes.insert(identity.clone(), clamped);
 
-            // If the volume actually changed, clear the playback buffer so the new
-            // volume takes effect *immediately*.
+            // If the volume actually changed, clear all playback buffers so the new
+            // volume takes effect *immediately* (brief silence while buffers refill).
             if old_volume != Some(clamped) {
-                state.playback_buffer.clear();
+                state.playback_buffers.values_mut().for_each(|b| b.clear());
             }
         } 
     }
@@ -576,10 +581,12 @@ async fn mic_capture_pump(
     }
 }
 
-/// Receives audio from one remote participant, applies volume, and mixes into playback buffer.
+/// Receives audio from one remote track, applies volume, and writes into a per-track buffer.
+/// The speaker output callback sums all per-track buffers for the final mix.
 async fn handle_remote_audio(
     audio_track: RemoteAudioTrack,
     identity: String,
+    track_key: String,
     audio_state: Arc<Mutex<AudioState>>,
 ) {
     let mut stream = NativeAudioStream::new(
@@ -590,26 +597,33 @@ async fn handle_remote_audio(
     while let Some(frame) = stream.next().await {
         let samples: &[i16] = frame.data.as_ref();
         let mut st = audio_state.lock();
-        let key = identity.split(':').take(2).collect::<Vec<_>>().join(":");
-        let volume = *st.user_volumes.get(&key).unwrap_or(&1.0);
-        // Cap playback buffer at ~500ms to prevent unbounded growth
-        let max_buf = (SAMPLE_RATE / 2) as usize;
-        while st.playback_buffer.len() + samples.len() > max_buf {
-            st.playback_buffer.pop_front();
-        }
+        let vol_key = identity.split(':').take(2).collect::<Vec<_>>().join(":");
+        let volume = *st.user_volumes.get(&vol_key).unwrap_or(&1.0);
 
-        // Convert i16 → f32, apply volume, and MIX (add) into the buffer.
+        // Per-track RMS for speaking indicator (only track mic-source audio for levels)
         let inst = rms_i16_normalized(samples);
         st.remote_mic_level_smooth
             .entry(identity.clone())
             .and_modify(|e| *e = ema_speaking_level(*e, inst))
             .or_insert(inst);
 
+        let buf = st.playback_buffers
+            .entry(track_key.clone())
+            .or_insert_with(|| VecDeque::with_capacity(SAMPLE_RATE as usize));
+
+        // Cap per-track buffer at ~500ms to prevent unbounded growth
+        let max_buf = (SAMPLE_RATE / 2) as usize;
+        while buf.len() + samples.len() > max_buf {
+            buf.pop_front();
+        }
+
         for &s in samples {
             let f = ((s as f32 / 32768.0) * volume).clamp(-1.0, 1.0);
-            st.playback_buffer.push_back(f);
+            buf.push_back(f);
         }
     }
+    // Track ended — clean up its buffer
+    audio_state.lock().playback_buffers.remove(&track_key);
 }
 // ─── Event loop ─────────────────────────────────────────────────────────────
 async fn run_event_loop(
@@ -661,8 +675,9 @@ async fn run_event_loop(
                                 st.remote_deafened.insert(identity.clone(), deafened);
                             }
                             let state_clone = audio_state.clone();
+                            let track_key = format!("{}::{:?}", identity, source);
                             tokio::spawn(async move {
-                                handle_remote_audio(audio_track, identity, state_clone).await;
+                                handle_remote_audio(audio_track, identity, track_key, state_clone).await;
                             });
                             emit_state(app_handle.as_ref(), &room_id, &local_identity, &audio_state, false, true, None);
                         } else if let RemoteTrack::Video(video_track) = track {
@@ -710,7 +725,8 @@ async fn run_event_loop(
                     }
                     Some(RoomEvent::TrackUnsubscribed { publication, participant, .. }) => {
                         let identity = participant.identity().to_string();
-                        if publication.source() == TrackSource::Screenshare {
+                        let source = publication.source();
+                        if source == TrackSource::Screenshare {
                             let mut st = audio_state.lock();
                             st.screen_sharing_owners.retain(|id| id != &identity);
                             // Shut down only this identity's receiver
@@ -721,10 +737,14 @@ async fn run_event_loop(
                             crate::video_recv::clear_frame_buffer_for(&identity);
                             crate::native_overlay::destroy_overlay(&identity);
                             emit_state(app_handle.as_ref(), &room_id, &local_identity, &audio_state, false, true, None);
-                        } else if publication.source() == TrackSource::Microphone {
+                        } else if source == TrackSource::Microphone || source == TrackSource::ScreenshareAudio {
+                            let track_key = format!("{}::{:?}", identity, source);
                             let mut st = audio_state.lock();
-                            st.remote_mic_muted.remove(&identity);
-                            st.remote_mic_level_smooth.remove(&identity);
+                            st.playback_buffers.remove(&track_key);
+                            if source == TrackSource::Microphone {
+                                st.remote_mic_muted.remove(&identity);
+                                st.remote_mic_level_smooth.remove(&identity);
+                            }
                             drop(st);
                             emit_state(app_handle.as_ref(), &room_id, &local_identity, &audio_state, false, true, None);
                         }
@@ -793,6 +813,9 @@ async fn run_event_loop(
                             st.remote_mic_muted.remove(&identity);
                             st.remote_deafened.remove(&identity);
                             st.remote_mic_level_smooth.remove(&identity);
+                            // Remove all per-track playback buffers for this participant
+                            let prefix = format!("{}::", identity);
+                            st.playback_buffers.retain(|k, _| !k.starts_with(&prefix));
                             if st.screen_sharing_owners.contains(&identity) {
                                 st.screen_sharing_owners.retain(|id| id != &identity);
                                 if let Some(shutdown) = st.video_recv_shutdowns.remove(&identity) {
@@ -1215,6 +1238,27 @@ fn setup_speaker_output(audio_state: Arc<Mutex<AudioState>>) -> Result<cpal::Str
     // and the previous sample for interpolation (shared across callbacks).
     let resample_frac: Arc<Mutex<f64>> = Arc::new(Mutex::new(0.0));
     let prev_sample: Arc<Mutex<f32>> = Arc::new(Mutex::new(0.0));
+
+    /// Pop one sample from every per-track buffer and sum them into a single mixed sample.
+    #[inline]
+    fn pop_mixed(buffers: &mut HashMap<String, VecDeque<f32>>) -> f32 {
+        let mut sum = 0.0f32;
+        for buf in buffers.values_mut() {
+            sum += buf.pop_front().unwrap_or(0.0);
+        }
+        sum.clamp(-1.0, 1.0)
+    }
+
+    /// Peek the front sample from every per-track buffer and sum them.
+    #[inline]
+    fn peek_mixed(buffers: &HashMap<String, VecDeque<f32>>) -> f32 {
+        let mut sum = 0.0f32;
+        for buf in buffers.values() {
+            sum += buf.front().copied().unwrap_or(0.0);
+        }
+        sum.clamp(-1.0, 1.0)
+    }
+
     let stream = device
         .build_output_stream(
             &config,
@@ -1229,10 +1273,10 @@ fn setup_speaker_output(audio_state: Arc<Mutex<AudioState>>) -> Result<cpal::Str
                     let mut prev = prev_sample.lock();
                     for frame in data.chunks_mut(ch) {
                         if st.deafened {
-                            // Consume buffer proportionally while deafened
+                            // Consume buffers proportionally while deafened
                             *frac += step;
                             while *frac >= 1.0 {
-                                let _ = st.playback_buffer.pop_front();
+                                let _ = pop_mixed(&mut st.playback_buffers);
                                 *frac -= 1.0;
                             }
                             for s in frame.iter_mut() {
@@ -1242,11 +1286,11 @@ fn setup_speaker_output(audio_state: Arc<Mutex<AudioState>>) -> Result<cpal::Str
                             // Advance fractional position and consume buffer samples
                             *frac += step;
                             while *frac >= 1.0 {
-                                *prev = st.playback_buffer.pop_front().unwrap_or(0.0);
+                                *prev = pop_mixed(&mut st.playback_buffers);
                                 *frac -= 1.0;
                             }
-                            // Interpolate between previous and next buffer sample
-                            let next = st.playback_buffer.front().copied().unwrap_or(*prev);
+                            // Interpolate between previous and next mixed sample
+                            let next = peek_mixed(&st.playback_buffers);
                             let t = *frac as f32;
                             let sample = *prev * (1.0 - t) + next * t;
                             for s in frame.iter_mut() {
@@ -1258,10 +1302,10 @@ fn setup_speaker_output(audio_state: Arc<Mutex<AudioState>>) -> Result<cpal::Str
                     // ── No resampling needed (device already at 48000 Hz) ──
                     for frame in data.chunks_mut(ch) {
                         let sample = if st.deafened {
-                            let _ = st.playback_buffer.pop_front();
+                            let _ = pop_mixed(&mut st.playback_buffers);
                             0.0
                         } else {
-                            st.playback_buffer.pop_front().unwrap_or(0.0)
+                            pop_mixed(&mut st.playback_buffers)
                         };
                         for s in frame.iter_mut() {
                             *s = sample;
