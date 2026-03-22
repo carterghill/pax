@@ -17,8 +17,6 @@ pub struct SavedSession {
 #[derive(Debug, Serialize, Deserialize)]
 pub struct SavedCredentials {
     pub homeserver: String,
-    pub username: String,
-    pub password: String,
     #[serde(default)]
     pub session: Option<SavedSession>,
 }
@@ -67,18 +65,16 @@ pub fn save_session_to_credentials(app: &tauri::AppHandle, session: SavedSession
     Ok(())
 }
 
+/// Persist the homeserver URL (no password). Session tokens are patched in
+/// later by `save_session_to_credentials` after a successful login.
 #[tauri::command]
 pub fn save_credentials(
     app: tauri::AppHandle,
     homeserver: String,
-    username: String,
-    password: String,
 ) -> Result<(), String> {
     let path = credentials_path(&app)?;
     let creds = SavedCredentials {
         homeserver,
-        username,
-        password,
         session: None,
     };
     let json = serde_json::to_string_pretty(&creds)

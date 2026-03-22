@@ -28,7 +28,9 @@ function App() {
       }
       setUserId(id);
       if (remember) {
-        await invoke("save_credentials", { homeserver, username, password });
+        // Only persist the homeserver URL — session tokens are saved
+        // separately by the Rust backend after successful login.
+        await invoke("save_credentials", { homeserver });
       }
     } catch (e) {
       setError(String(e));
@@ -53,7 +55,8 @@ function App() {
     autoLoginAttemptedRef.current = true;
 
     (async () => {
-      // Fast path: restore a previous session from SQLite store (no auth, no full sync)
+      // Restore a previous session from SQLite store (no password needed).
+      // If the token has expired, the user will see the login screen.
       try {
         const id = await invoke<string>("restore_session");
         if (!syncStartedRef.current) {
@@ -63,30 +66,18 @@ function App() {
         setUserId(id);
         return;
       } catch {
-        // No saved session or token expired — fall through to password login
+        // No saved session or token expired — show login screen
       }
 
-      // Slow path: load saved credentials and do a full login + sync_once
+      // Pre-fill the homeserver field if we have saved credentials
       try {
-        const creds = await invoke<{ homeserver: string; username: string; password: string } | null>("load_credentials");
+        const creds = await invoke<{ homeserver: string } | null>("load_credentials");
         if (creds) {
           setHomeserver(creds.homeserver);
-          setUsername(creds.username);
-          setPassword(creds.password);
           setRememberMe(true);
-          const id = await invoke<string>("login", {
-            homeserver: creds.homeserver,
-            username: creds.username,
-            password: creds.password,
-          });
-          if (!syncStartedRef.current) {
-            syncStartedRef.current = true;
-            invoke("start_sync");
-          }
-          setUserId(id);
         }
       } catch {
-        // No saved credentials or login failed
+        // No saved credentials
       }
     })().finally(() => {
       setAutoLoggingIn(false);
