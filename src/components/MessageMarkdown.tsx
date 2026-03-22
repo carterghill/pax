@@ -58,6 +58,27 @@ function isExternalHref(href: string | undefined): boolean {
   return /^https?:\/\//i.test(href) || href.startsWith("//");
 }
 
+/** Absolute https URL suitable for `<img src>` (protocol-relative → https). */
+function normalizeImageSrcHref(href: string): string | null {
+  const t = href.trim();
+  if (t.startsWith("//")) return `https:${t}`;
+  if (/^https?:\/\//i.test(t)) return t;
+  return null;
+}
+
+/** Path ends in a common static image extension (direct file URLs, not HTML pages). */
+function hrefLooksLikeDirectImageUrl(href: string): boolean {
+  const abs = normalizeImageSrcHref(href);
+  if (!abs) return false;
+  try {
+    const u = new URL(abs);
+    if (!/^https?:$/i.test(u.protocol)) return false;
+    return /\.(gif|jpe?g|png|webp|avif|bmp|svg)(?:$|[?#])/i.test(u.pathname);
+  } catch {
+    return false;
+  }
+}
+
 function E({ children }: { children: ReactNode }) {
   return <>{emojifyMarkdownChildren(children)}</>;
 }
@@ -120,6 +141,35 @@ export default function MessageMarkdown({ children, edited = false }: MessageMar
         </del>
       ),
       a: ({ href, children: c }) => {
+        const src = href ? normalizeImageSrcHref(href) : null;
+        if (src && href && hrefLooksLikeDirectImageUrl(href)) {
+          const alt = flattenTextNode(c).trim() || "Image";
+          const imgStyle = {
+            maxWidth: "100%",
+            height: "auto" as const,
+            borderRadius: spacing.unit,
+            display: "block" as const,
+            marginTop: spacing.unit,
+            marginBottom: spacing.unit,
+          };
+          return (
+            <a
+              href={href}
+              target="_blank"
+              rel="noopener noreferrer"
+              style={{
+                display: "inline-block",
+                maxWidth: "100%",
+                lineHeight: 0,
+                textDecoration: "none",
+                verticalAlign: "bottom",
+              }}
+            >
+              <img src={src} alt={alt} loading="lazy" decoding="async" style={imgStyle} />
+            </a>
+          );
+        }
+
         const external = isExternalHref(href);
         const LinkIcon = external ? ExternalLink : Link2;
         return (
