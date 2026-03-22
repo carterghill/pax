@@ -3,6 +3,11 @@ import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
 import type { Components } from "react-markdown";
 import {
+  emojifyMarkdownChildren,
+  EMOJI_ONLY_DISPLAY_SCALE,
+  isOnlyEmojisAndWhitespace,
+} from "../utils/emojifyTwemoji";
+import {
   Braces,
   ExternalLink,
   Heading1,
@@ -53,6 +58,10 @@ function isExternalHref(href: string | undefined): boolean {
   return /^https?:\/\//i.test(href) || href.startsWith("//");
 }
 
+function E({ children }: { children: ReactNode }) {
+  return <>{emojifyMarkdownChildren(children)}</>;
+}
+
 export default function MessageMarkdown({ children, edited = false }: MessageMarkdownProps) {
   const { palette, typography, spacing, name: themeName } = useTheme();
 
@@ -60,6 +69,8 @@ export default function MessageMarkdown({ children, edited = false }: MessageMar
     if (!edited) return children;
     return `${children.trimEnd()}${EDITED_EMPHASIS}`;
   }, [children, edited]);
+
+  const emojiOnlyBody = useMemo(() => isOnlyEmojisAndWhitespace(children), [children]);
 
   const components = useMemo<Components>(
     () => ({
@@ -74,11 +85,13 @@ export default function MessageMarkdown({ children, edited = false }: MessageMar
             whiteSpace: "pre-wrap",
           }}
         >
-          {c}
+          <E>{c}</E>
         </p>
       ),
       strong: ({ children: c }) => (
-        <strong style={{ fontWeight: typography.fontWeightBold }}>{c}</strong>
+        <strong style={{ fontWeight: typography.fontWeightBold }}>
+          <E>{c}</E>
+        </strong>
       ),
       em: ({ children: c }) => {
         if (edited && isEditedEmphasisContent(c)) {
@@ -95,8 +108,17 @@ export default function MessageMarkdown({ children, edited = false }: MessageMar
             </span>
           );
         }
-        return <em style={{ fontStyle: "italic" }}>{c}</em>;
+        return (
+          <em style={{ fontStyle: "italic" }}>
+            <E>{c}</E>
+          </em>
+        );
       },
+      del: ({ children: c }) => (
+        <del style={{ textDecoration: "line-through" }}>
+          <E>{c}</E>
+        </del>
+      ),
       a: ({ href, children: c }) => {
         const external = isExternalHref(href);
         const LinkIcon = external ? ExternalLink : Link2;
@@ -115,7 +137,7 @@ export default function MessageMarkdown({ children, edited = false }: MessageMar
               wordBreak: "break-all",
             }}
           >
-            {c}
+            <E>{c}</E>
             <LinkIcon
               size={Math.round(typography.fontSizeSmall)}
               strokeWidth={2}
@@ -248,7 +270,7 @@ export default function MessageMarkdown({ children, edited = false }: MessageMar
               lineHeight: typography.lineHeight,
             }}
           >
-            {c}
+            <E>{c}</E>
           </ul>
         </div>
       ),
@@ -279,12 +301,14 @@ export default function MessageMarkdown({ children, edited = false }: MessageMar
               lineHeight: typography.lineHeight,
             }}
           >
-            {c}
+            <E>{c}</E>
           </ol>
         </div>
       ),
       li: ({ children: c }) => (
-        <li style={{ margin: `${spacing.unit / 2}px 0` }}>{c}</li>
+        <li style={{ margin: `${spacing.unit / 2}px 0` }}>
+          <E>{c}</E>
+        </li>
       ),
       blockquote: ({ children: c }) => (
         <blockquote
@@ -306,7 +330,9 @@ export default function MessageMarkdown({ children, edited = false }: MessageMar
             style={{ flexShrink: 0, marginTop: 2, opacity: 0.9 }}
             aria-hidden
           />
-          <div style={{ flex: 1, minWidth: 0 }}>{c}</div>
+          <div style={{ flex: 1, minWidth: 0 }}>
+            <E>{c}</E>
+          </div>
         </blockquote>
       ),
       h1: ({ children: c }) => (
@@ -329,7 +355,7 @@ export default function MessageMarkdown({ children, edited = false }: MessageMar
             style={{ flexShrink: 0, opacity: 0.95 }}
             aria-hidden
           />
-          {c}
+          <E>{c}</E>
         </h1>
       ),
       h2: ({ children: c }) => (
@@ -352,7 +378,7 @@ export default function MessageMarkdown({ children, edited = false }: MessageMar
             style={{ flexShrink: 0, opacity: 0.95 }}
             aria-hidden
           />
-          {c}
+          <E>{c}</E>
         </h2>
       ),
       h3: ({ children: c }) => (
@@ -375,7 +401,7 @@ export default function MessageMarkdown({ children, edited = false }: MessageMar
             style={{ flexShrink: 0, opacity: 0.95 }}
             aria-hidden
           />
-          {c}
+          <E>{c}</E>
         </h3>
       ),
       hr: () => (
@@ -460,7 +486,7 @@ export default function MessageMarkdown({ children, edited = false }: MessageMar
             fontWeight: typography.fontWeightMedium,
           }}
         >
-          {c}
+          <E>{c}</E>
         </th>
       ),
       td: ({ children: c }) => (
@@ -472,7 +498,7 @@ export default function MessageMarkdown({ children, edited = false }: MessageMar
             verticalAlign: "top",
           }}
         >
-          {c}
+          <E>{c}</E>
         </td>
       ),
       img: ({ src, alt }) => (
@@ -503,6 +529,7 @@ export default function MessageMarkdown({ children, edited = false }: MessageMar
         fontSize: typography.fontSizeBase,
         lineHeight: typography.lineHeight,
         wordBreak: "break-word",
+        ...(emojiOnlyBody ? { zoom: EMOJI_ONLY_DISPLAY_SCALE } : {}),
       }}
     >
       <ReactMarkdown remarkPlugins={[remarkGfm]} components={components}>

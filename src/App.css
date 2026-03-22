@@ -1,3 +1,19 @@
+/* Twemoji as COLR font under the name emoji-mart uses first in its native emoji stack. */
+@font-face {
+  font-family: "EmojiMart";
+  src: url("https://cdn.jsdelivr.net/npm/twemoji-colr-font@15.0.3/twemoji.woff2") format("woff2");
+  font-display: swap;
+}
+
+:root {
+  --pax-twemoji-font-stack: "EmojiMart", "Segoe UI Emoji", "Segoe UI Symbol", "Segoe UI",
+    "Apple Color Emoji", "Twemoji Mozilla", "Noto Color Emoji", sans-serif;
+}
+
+.pax-twemoji-glyph {
+  font-family: var(--pax-twemoji-font-stack);
+}
+
 * {
   margin: 0;
   padding: 0;

@@ -1,4 +1,12 @@
-import { useState, useRef, useCallback, useEffect, Fragment } from "react";
+import {
+  useState,
+  useRef,
+  useCallback,
+  useEffect,
+  useLayoutEffect,
+  useMemo,
+  Fragment,
+} from "react";
 import { invoke } from "@tauri-apps/api/core";
 import {
   Type,
@@ -14,8 +22,12 @@ import {
   Heading1,
   Heading2,
   Minus,
+  Smile,
 } from "lucide-react";
+import { Picker } from "emoji-mart";
+import data from "@emoji-mart/data";
 import { useTheme } from "../theme/ThemeContext";
+import { EMOJI_ONLY_DISPLAY_SCALE, isOnlyEmojisAndWhitespace } from "../utils/emojifyTwemoji";
 
 export interface EditingMessageRef {
   eventId: string;
@@ -59,11 +71,16 @@ export default function MessageInput({
   const [text, setText] = useState("");
   const [sending, setSending] = useState(false);
   const [formatMenuOpen, setFormatMenuOpen] = useState(false);
+  const [emojiMenuOpen, setEmojiMenuOpen] = useState(false);
   const inputRef = useRef<HTMLTextAreaElement>(null);
   const rootRef = useRef<HTMLDivElement>(null);
+  const emojiPickerMountRef = useRef<HTMLDivElement>(null);
+  const insertEmojiFromPickerRef = useRef<(native: string) => void>(() => {});
   const typingTimeout = useRef<ReturnType<typeof setTimeout> | null>(null);
   const isTyping = useRef(false);
   const { palette, typography, spacing, name: themeName } = useTheme();
+
+  const emojiOnlyComposer = useMemo(() => isOnlyEmojisAndWhitespace(text), [text]);
 
   const sendTyping = useCallback(
     (typing: boolean) => {
@@ -101,13 +118,18 @@ export default function MessageInput({
   }, [roomId]);
 
   useEffect(() => {
-    if (!formatMenuOpen) return;
+    if (!formatMenuOpen && !emojiMenuOpen) return;
     const onDocDown = (e: MouseEvent) => {
-      if (rootRef.current?.contains(e.target as Node)) return;
+      const root = rootRef.current;
+      if (root && e.composedPath().includes(root)) return;
       setFormatMenuOpen(false);
+      setEmojiMenuOpen(false);
     };
     const onKey = (e: KeyboardEvent) => {
-      if (e.key === "Escape") setFormatMenuOpen(false);
+      if (e.key === "Escape") {
+        setFormatMenuOpen(false);
+        setEmojiMenuOpen(false);
+      }
     };
     document.addEventListener("mousedown", onDocDown);
     document.addEventListener("keydown", onKey);
@@ -115,7 +137,37 @@ export default function MessageInput({
       document.removeEventListener("mousedown", onDocDown);
       document.removeEventListener("keydown", onKey);
     };
-  }, [formatMenuOpen]);
+  }, [formatMenuOpen, emojiMenuOpen]);
+
+  insertEmojiFromPickerRef.current = (native: string) => {
+    insertAtCursor(native, native.length, native.length);
+    setEmojiMenuOpen(false);
+  };
+
+  useLayoutEffect(() => {
+    if (!emojiMenuOpen) return;
+    const mount = emojiPickerMountRef.current;
+    if (!mount) return;
+    mount.innerHTML = "";
+    const theme = themeName === "light" ? "light" : "dark";
+    // Imperative parent mount avoids @emoji-mart/react + ref timing issues (e.g. React 19).
+    new Picker({
+      parent: mount,
+      data,
+      theme,
+      set: "native",
+      maxFrequentRows: 4,
+      skinTonePosition: "search",
+      previewPosition: "bottom",
+      searchPosition: "sticky",
+      onEmojiSelect: (emoji: { native: string }) => {
+        insertEmojiFromPickerRef.current(emoji.native);
+      },
+    });
+    return () => {
+      mount.innerHTML = "";
+    };
+  }, [emojiMenuOpen, themeName]);
 
   useEffect(() => {
     if (!editingMessage) return;
@@ -317,6 +369,10 @@ export default function MessageInput({
       return;
     }
     if (e.key === "Escape") {
+      if (emojiMenuOpen) {
+        setEmojiMenuOpen(false);
+        return;
+      }
       if (formatMenuOpen) {
         setFormatMenuOpen(false);
         return;
@@ -461,8 +517,10 @@ export default function MessageInput({
             border: "none",
             outline: "none",
             color: palette.textPrimary,
-            fontSize: typography.fontSizeBase,
-            fontFamily: typography.fontFamily,
+            fontSize: emojiOnlyComposer
+              ? typography.fontSizeBase * EMOJI_ONLY_DISPLAY_SCALE
+              : typography.fontSizeBase,
+            fontFamily: `${typography.fontFamily}, var(--pax-twemoji-font-stack)`,
             lineHeight: typography.lineHeight,
             padding: `${spacing.unit * 3}px ${spacing.unit * 2}px ${spacing.unit * 3}px ${spacing.unit * 4}px`,
             resize: "none",
@@ -470,13 +528,88 @@ export default function MessageInput({
             overflowY: "auto",
           }}
         />
+        <div
+          style={{
+            position: "relative",
+            flexShrink: 0,
+            alignSelf: "stretch",
+            display: "flex",
+            flexDirection: "column",
+            justifyContent: "stretch",
+          }}
+        >
+          {emojiMenuOpen && (
+            <div
+              style={{
+                position: "absolute",
+                bottom: "100%",
+                left: 0,
+                marginBottom: spacing.unit * 2,
+                zIndex: 21,
+                borderRadius: spacing.unit * 2,
+                overflow: "hidden",
+                border: `1px solid ${palette.border}`,
+                boxShadow:
+                  themeName === "light"
+                    ? `0 8px 28px rgba(0,0,0,0.12), 0 0 0 1px ${palette.border} inset`
+                    : `0 12px 44px rgba(0,0,0,0.55), 0 0 0 1px rgba(255,255,255,0.06) inset`,
+              }}
+            >
+              <div ref={emojiPickerMountRef} />
+            </div>
+          )}
+          <button
+            type="button"
+            title="Emoji"
+            aria-label="Insert emoji"
+            aria-expanded={emojiMenuOpen}
+            aria-haspopup="dialog"
+            onMouseDown={(e) => e.preventDefault()}
+            onClick={() => {
+              setFormatMenuOpen(false);
+              setEmojiMenuOpen((o) => !o);
+            }}
+            style={{
+              flex: 1,
+              minHeight: 0,
+              display: "flex",
+              alignItems: "center",
+              justifyContent: "center",
+              width: spacing.unit * 11,
+              margin: spacing.unit,
+              marginRight: spacing.unit * 0.75,
+              border: "none",
+              borderRadius: spacing.unit,
+              backgroundColor: emojiMenuOpen ? palette.bgHover : "transparent",
+              color: emojiMenuOpen ? palette.textPrimary : palette.textSecondary,
+              cursor: "pointer",
+            }}
+            onMouseEnter={(e) => {
+              if (!emojiMenuOpen) {
+                e.currentTarget.style.backgroundColor = palette.bgHover;
+                e.currentTarget.style.color = palette.textPrimary;
+              }
+            }}
+            onMouseLeave={(e) => {
+              if (!emojiMenuOpen) {
+                e.currentTarget.style.backgroundColor = "transparent";
+                e.currentTarget.style.color = palette.textSecondary;
+              }
+            }}
+          >
+            <Smile size={20} strokeWidth={2} />
+          </button>
+        </div>
         <button
           type="button"
           title="Text formatting"
           aria-expanded={formatMenuOpen}
           aria-haspopup="menu"
           onMouseDown={(e) => e.preventDefault()}
-          onClick={() => setFormatMenuOpen((o) => !o)}
+          onClick={() => {
+            setEmojiMenuOpen(false);
+            setFormatMenuOpen((o) => !o);
+          }}
           style={{
             flexShrink: 0,
             alignSelf: "stretch",
