@@ -186,7 +186,6 @@ export default function MessageInput({
   useLayoutEffect(() => {
     const margin = spacing.unit * 2;
     const anchorFor = (p: typeof openPopover) => {
-      if (p === "format") return rootRef.current;
       if (p === "emoji") return emojiAnchorRef.current;
       if (p === "gif") return gifAnchorRef.current;
       return null;
@@ -465,9 +464,6 @@ export default function MessageInput({
     }
   }
 
-  const iconBtnSize = 22;
-  const formatBtnPx = spacing.unit * 10;
-  const formatBtnRadius = Math.max(3, spacing.unit * 0.55);
   const formatBtnGap = spacing.unit * 0.75;
   const groupGap = spacing.unit * 1.5;
   /** Square chrome controls next to the textarea (emoji + markdown + send). */
@@ -481,106 +477,6 @@ export default function MessageInput({
     e.currentTarget.style.color = enter ? palette.textPrimary : palette.textSecondary;
   };
   const canSend = text.trim().length > 0 && !sending;
-
-  const formatMenuPortal =
-    openPopover === "format" &&
-    popoverPos &&
-    createPortal(
-      <div
-        data-pax-composer-popover
-        role="menu"
-        aria-label="Markdown formatting"
-        style={{
-          ...fixedPopoverStyle(popoverPos.bottom, popoverPos.right),
-          padding: `${spacing.unit * 2}px ${spacing.unit * 2.5}px`,
-          display: "flex",
-          flexDirection: "row",
-          flexWrap: "wrap",
-          alignItems: "center",
-          justifyContent: "flex-end",
-          rowGap: spacing.unit * 1.25,
-          columnGap: groupGap,
-          width: "max-content",
-          maxWidth: "min(100%, calc(100vw - 24px))",
-          backgroundColor: palette.bgTertiary,
-          border: `1px solid ${palette.border}`,
-          borderRadius: spacing.unit * 2,
-          boxShadow:
-            themeName === "light"
-              ? `0 8px 28px rgba(0,0,0,0.1), 0 0 0 1px ${palette.border} inset`
-              : `0 12px 44px rgba(0,0,0,0.5), 0 0 0 1px rgba(255,255,255,0.06) inset`,
-        }}
-      >
-        {formatGroups.map((group, groupIndex) => (
-          <Fragment key={groupIndex}>
-            {groupIndex > 0 && (
-              <div
-                aria-hidden
-                role="separator"
-                style={{
-                  width: 1,
-                  height: formatBtnPx - spacing.unit * 0.75,
-                  flexShrink: 0,
-                  alignSelf: "center",
-                  borderRadius: 1,
-                  backgroundColor: palette.border,
-                  opacity: 0.9,
-                }}
-              />
-            )}
-            <div
-              style={{
-                display: "flex",
-                flexDirection: "row",
-                flexWrap: "nowrap",
-                alignItems: "center",
-                gap: formatBtnGap,
-              }}
-            >
-              {group.map(({ icon: Icon, label, run }) => (
-                <button
-                  key={label}
-                  type="button"
-                  role="menuitem"
-                  title={label}
-                  aria-label={label}
-                  onMouseDown={(e) => e.preventDefault()}
-                  onClick={() => {
-                    run();
-                    setOpenPopover(null);
-                  }}
-                  style={{
-                    display: "flex",
-                    alignItems: "center",
-                    justifyContent: "center",
-                    width: formatBtnPx,
-                    height: formatBtnPx,
-                    padding: 0,
-                    border: "none",
-                    borderRadius: formatBtnRadius,
-                    backgroundColor: palette.bgSecondary,
-                    color: palette.textSecondary,
-                    cursor: "pointer",
-                    boxShadow: `0 0 0 1px ${palette.border}`,
-                  }}
-                  onMouseEnter={(e) => {
-                    e.currentTarget.style.backgroundColor = palette.bgHover;
-                    e.currentTarget.style.color = palette.textHeading;
-                  }}
-                  onMouseLeave={(e) => {
-                    e.currentTarget.style.backgroundColor = palette.bgSecondary;
-                    e.currentTarget.style.color = palette.textSecondary;
-                  }}
-                >
-                  <Icon size={iconBtnSize} strokeWidth={2} />
-                </button>
-              ))}
-            </div>
-          </Fragment>
-        ))}
-      </div>,
-      document.body,
-    );
 
   const emojiPickerPortal =
     openPopover === "emoji" &&
@@ -670,13 +566,21 @@ export default function MessageInput({
           backgroundColor: palette.bgActive,
           borderRadius: spacing.unit * 1.5,
           display: "flex",
-          alignItems: "center",
-          minHeight: spacing.unit * 11,
+          flexDirection: "column",
           minWidth: 0,
-          flexWrap: "nowrap",
-          overflowX: "auto",
         }}
       >
+        {/* Top row: editor + toolbar buttons */}
+        <div
+          style={{
+            display: "flex",
+            alignItems: "center",
+            minHeight: spacing.unit * 11,
+            minWidth: 0,
+            flexWrap: "nowrap",
+            overflowX: "auto",
+          }}
+        >
         <div
           style={{
             position: "relative",
@@ -902,9 +806,105 @@ export default function MessageInput({
         >
           <Send size={inputToolIconSize} strokeWidth={2} />
         </button>
+        </div>
+
+        {/* Inline format toolbar */}
+        {openPopover === "format" && (
+          <>
+            <div
+              aria-hidden
+              style={{
+                height: 1,
+                marginLeft: spacing.unit * 2,
+                marginRight: spacing.unit * 2,
+                backgroundColor: palette.border,
+                opacity: 0.25,
+              }}
+            />
+            <div
+              role="toolbar"
+              aria-label="Markdown formatting"
+              style={{
+                padding: `${spacing.unit * 1.5}px ${spacing.unit * 2}px`,
+                display: "flex",
+                flexDirection: "row",
+                flexWrap: "wrap",
+                alignItems: "center",
+                gap: formatBtnGap,
+                columnGap: groupGap,
+              }}
+            >
+              {formatGroups.map((group, groupIndex) => (
+                <Fragment key={groupIndex}>
+                  {groupIndex > 0 && (
+                    <div
+                      aria-hidden
+                      role="separator"
+                      style={{
+                        width: 1,
+                        height: inputToolBtnSize - spacing.unit * 0.75,
+                        flexShrink: 0,
+                        alignSelf: "center",
+                        borderRadius: 1,
+                        backgroundColor: palette.border,
+                        opacity: 0.3,
+                      }}
+                    />
+                  )}
+                  <div
+                    style={{
+                      display: "flex",
+                      flexDirection: "row",
+                      flexWrap: "nowrap",
+                      alignItems: "center",
+                      gap: formatBtnGap,
+                    }}
+                  >
+                    {group.map(({ icon: Icon, label, run }) => (
+                      <button
+                        key={label}
+                        type="button"
+                        role="menuitem"
+                        title={label}
+                        aria-label={label}
+                        onMouseDown={(e) => e.preventDefault()}
+                        onClick={() => {
+                          run();
+                          setOpenPopover(null);
+                        }}
+                        style={{
+                          display: "flex",
+                          alignItems: "center",
+                          justifyContent: "center",
+                          width: inputToolBtnSize,
+                          height: inputToolBtnSize,
+                          padding: 0,
+                          border: "none",
+                          borderRadius: inputToolBtnRadius,
+                          backgroundColor: "transparent",
+                          color: palette.textSecondary,
+                          cursor: "pointer",
+                        }}
+                        onMouseEnter={(e) => {
+                          e.currentTarget.style.backgroundColor = palette.bgHover;
+                          e.currentTarget.style.color = palette.textHeading;
+                        }}
+                        onMouseLeave={(e) => {
+                          e.currentTarget.style.backgroundColor = "transparent";
+                          e.currentTarget.style.color = palette.textSecondary;
+                        }}
+                      >
+                        <Icon size={inputToolIconSize} strokeWidth={2} />
+                      </button>
+                    ))}
+                  </div>
+                </Fragment>
+              ))}
+            </div>
+          </>
+        )}
       </div>
     </div>
-      {formatMenuPortal}
       {emojiPickerPortal}
       {gifPickerPortal}
     </>
