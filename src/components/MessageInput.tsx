@@ -65,7 +65,6 @@ function getSelectedLineSpan(value: string, start: number, end: number): { lineS
 function leadingSpaceBeforeBareUrl(raw: string, insertAt: number): string {
   if (insertAt === 0) return "";
   const prev = raw[insertAt - 1]!;
-  if (/\s/.test(prev)) return "";
   if (/[\s([{<'"`]/.test(prev)) return "";
   if (!/[\w/]/.test(prev)) return "";
   return " ";
@@ -91,18 +90,14 @@ export default function MessageInput({
 }: MessageInputProps) {
   const [text, setText] = useState("");
   const [sending, setSending] = useState(false);
-  const [formatMenuOpen, setFormatMenuOpen] = useState(false);
-  const [emojiMenuOpen, setEmojiMenuOpen] = useState(false);
-  const [gifMenuOpen, setGifMenuOpen] = useState(false);
+  const [openPopover, setOpenPopover] = useState<"format" | "emoji" | "gif" | null>(null);
   const editorRef = useRef<HTMLDivElement>(null);
   const restoreSelectionRef = useRef<{ start: number; end: number } | null>(null);
   const rootRef = useRef<HTMLDivElement>(null);
   const emojiAnchorRef = useRef<HTMLButtonElement>(null);
   const gifAnchorRef = useRef<HTMLButtonElement>(null);
   const emojiPickerMountRef = useRef<HTMLDivElement>(null);
-  const [formatPopoverPos, setFormatPopoverPos] = useState<{ bottom: number; right: number } | null>(null);
-  const [emojiPopoverPos, setEmojiPopoverPos] = useState<{ bottom: number; right: number } | null>(null);
-  const [gifPopoverPos, setGifPopoverPos] = useState<{ bottom: number; right: number } | null>(null);
+  const [popoverPos, setPopoverPos] = useState<{ bottom: number; right: number } | null>(null);
   const insertEmojiFromPickerRef = useRef<(native: string) => void>(() => {});
   const typingTimeout = useRef<ReturnType<typeof setTimeout> | null>(null);
   const isTyping = useRef(false);
@@ -190,57 +185,37 @@ export default function MessageInput({
 
   useLayoutEffect(() => {
     const margin = spacing.unit * 2;
+    const anchorFor = (p: typeof openPopover) => {
+      if (p === "format") return rootRef.current;
+      if (p === "emoji") return emojiAnchorRef.current;
+      if (p === "gif") return gifAnchorRef.current;
+      return null;
+    };
     const update = () => {
-      if (formatMenuOpen && rootRef.current) {
-        const root = rootRef.current.getBoundingClientRect();
-        setFormatPopoverPos({
-          bottom: window.innerHeight - root.top + margin,
-          right: window.innerWidth - root.right,
-        });
-      } else {
-        setFormatPopoverPos(null);
-      }
-      if (emojiMenuOpen && emojiAnchorRef.current) {
-        const r = emojiAnchorRef.current.getBoundingClientRect();
-        setEmojiPopoverPos({
-          bottom: window.innerHeight - r.top + margin,
-          right: window.innerWidth - r.right,
-        });
-      } else {
-        setEmojiPopoverPos(null);
-      }
-      if (gifMenuOpen && gifAnchorRef.current) {
-        const r = gifAnchorRef.current.getBoundingClientRect();
-        setGifPopoverPos({
-          bottom: window.innerHeight - r.top + margin,
-          right: window.innerWidth - r.right,
-        });
-      } else {
-        setGifPopoverPos(null);
-      }
+      const anchor = anchorFor(openPopover);
+      if (!openPopover || !anchor) { setPopoverPos(null); return; }
+      const r = anchor.getBoundingClientRect();
+      setPopoverPos({
+        bottom: window.innerHeight - r.top + margin,
+        right: window.innerWidth - r.right,
+      });
     };
     update();
     window.addEventListener("resize", update);
     return () => window.removeEventListener("resize", update);
-  }, [formatMenuOpen, emojiMenuOpen, gifMenuOpen, spacing.unit]);
+  }, [openPopover, spacing.unit]);
 
   useEffect(() => {
-    if (!formatMenuOpen && !emojiMenuOpen && !gifMenuOpen) return;
+    if (!openPopover) return;
     const onDocDown = (e: MouseEvent) => {
       const t = e.target;
       if (t instanceof Element && t.closest("[data-pax-composer-popover]")) return;
       const root = rootRef.current;
       if (root && e.composedPath().includes(root)) return;
-      setFormatMenuOpen(false);
-      setEmojiMenuOpen(false);
-      setGifMenuOpen(false);
+      setOpenPopover(null);
     };
     const onKey = (e: KeyboardEvent) => {
-      if (e.key === "Escape") {
-        setFormatMenuOpen(false);
-        setEmojiMenuOpen(false);
-        setGifMenuOpen(false);
-      }
+      if (e.key === "Escape") setOpenPopover(null);
     };
     document.addEventListener("mousedown", onDocDown);
     document.addEventListener("keydown", onKey);
@@ -248,15 +223,15 @@ export default function MessageInput({
       document.removeEventListener("mousedown", onDocDown);
       document.removeEventListener("keydown", onKey);
     };
-  }, [formatMenuOpen, emojiMenuOpen, gifMenuOpen]);
+  }, [openPopover]);
 
   insertEmojiFromPickerRef.current = (native: string) => {
     insertAtCursor(native, native.length, native.length);
-    setEmojiMenuOpen(false);
+    setOpenPopover(null);
   };
 
   useLayoutEffect(() => {
-    if (!emojiMenuOpen) return;
+    if (openPopover !== "emoji") return;
     const mount = emojiPickerMountRef.current;
     if (!mount) return;
     mount.innerHTML = "";
@@ -278,7 +253,7 @@ export default function MessageInput({
     return () => {
       mount.innerHTML = "";
     };
-  }, [emojiMenuOpen, emojiPopoverPos, themeName]);
+  }, [openPopover, popoverPos, themeName]);
 
   useEffect(() => {
     if (!editingMessage) return;
@@ -445,9 +420,7 @@ export default function MessageInput({
     const trimmed = text.trim();
     if (!trimmed || sending) return;
 
-    setEmojiMenuOpen(false);
-    setGifMenuOpen(false);
-    setFormatMenuOpen(false);
+    setOpenPopover(null);
     sendTyping(false);
     if (typingTimeout.current) clearTimeout(typingTimeout.current);
 
@@ -480,16 +453,8 @@ export default function MessageInput({
       return;
     }
     if (e.key === "Escape") {
-      if (gifMenuOpen) {
-        setGifMenuOpen(false);
-        return;
-      }
-      if (emojiMenuOpen) {
-        setEmojiMenuOpen(false);
-        return;
-      }
-      if (formatMenuOpen) {
-        setFormatMenuOpen(false);
+      if (openPopover) {
+        setOpenPopover(null);
         return;
       }
       if (editingMessage && onCancelEdit) {
@@ -510,18 +475,23 @@ export default function MessageInput({
   /** Outer edge length; icon is centered with minimal inset (no extra CSS padding). */
   const inputToolBtnSize = inputToolIconSize + spacing.unit * 3;
   const inputToolBtnRadius = Math.max(3, spacing.unit * 0.55);
+  const hoverToolBtn = (e: React.MouseEvent<HTMLButtonElement>, active: boolean, enter: boolean) => {
+    if (active) return;
+    e.currentTarget.style.backgroundColor = enter ? palette.bgHover : "transparent";
+    e.currentTarget.style.color = enter ? palette.textPrimary : palette.textSecondary;
+  };
   const canSend = text.trim().length > 0 && !sending;
 
   const formatMenuPortal =
-    formatMenuOpen &&
-    formatPopoverPos &&
+    openPopover === "format" &&
+    popoverPos &&
     createPortal(
       <div
         data-pax-composer-popover
         role="menu"
         aria-label="Markdown formatting"
         style={{
-          ...fixedPopoverStyle(formatPopoverPos.bottom, formatPopoverPos.right),
+          ...fixedPopoverStyle(popoverPos.bottom, popoverPos.right),
           padding: `${spacing.unit * 2}px ${spacing.unit * 2.5}px`,
           display: "flex",
           flexDirection: "row",
@@ -577,7 +547,7 @@ export default function MessageInput({
                   onMouseDown={(e) => e.preventDefault()}
                   onClick={() => {
                     run();
-                    setFormatMenuOpen(false);
+                    setOpenPopover(null);
                   }}
                   style={{
                     display: "flex",
@@ -613,13 +583,13 @@ export default function MessageInput({
     );
 
   const emojiPickerPortal =
-    emojiMenuOpen &&
-    emojiPopoverPos &&
+    openPopover === "emoji" &&
+    popoverPos &&
     createPortal(
       <div
         data-pax-composer-popover
         style={{
-          ...fixedPopoverStyle(emojiPopoverPos.bottom, emojiPopoverPos.right),
+          ...fixedPopoverStyle(popoverPos.bottom, popoverPos.right),
           borderRadius: spacing.unit * 2,
           overflow: "hidden",
           border: `1px solid ${palette.border}`,
@@ -635,13 +605,13 @@ export default function MessageInput({
     );
 
   const gifPickerPortal =
-    gifMenuOpen &&
-    gifPopoverPos &&
+    openPopover === "gif" &&
+    popoverPos &&
     createPortal(
       <div
         data-pax-composer-popover
         style={{
-          ...fixedPopoverStyle(gifPopoverPos.bottom, gifPopoverPos.right),
+          ...fixedPopoverStyle(popoverPos.bottom, popoverPos.right),
           borderRadius: spacing.unit * 2,
           overflow: "hidden",
           border: `1px solid ${palette.border}`,
@@ -666,7 +636,7 @@ export default function MessageInput({
               const prefix = leadingSpaceBeforeBareUrl(text, start);
               const insertion = `${prefix}${gif.url}`;
               insertAtCursor(insertion, insertion.length, insertion.length);
-              setGifMenuOpen(false);
+              setOpenPopover(null);
               requestAnimationFrame(() => editorRef.current?.focus());
             }}
           />
@@ -790,14 +760,10 @@ export default function MessageInput({
               type="button"
               title={tenorApiKey ? "GIF" : "GIF (configure Tenor API key)"}
               aria-label="Insert GIF"
-              aria-expanded={gifMenuOpen}
+              aria-expanded={openPopover === "gif"}
               aria-haspopup="dialog"
               onMouseDown={(e) => e.preventDefault()}
-              onClick={() => {
-                setFormatMenuOpen(false);
-                setEmojiMenuOpen(false);
-                setGifMenuOpen((o) => !o);
-              }}
+              onClick={() => setOpenPopover((o) => (o === "gif" ? null : "gif"))}
               style={{
                 flexShrink: 0,
                 display: "flex",
@@ -814,23 +780,13 @@ export default function MessageInput({
                 marginRight: spacing.unit * 0.5,
                 border: "none",
                 borderRadius: inputToolBtnRadius,
-                backgroundColor: gifMenuOpen ? palette.bgHover : "transparent",
-                color: gifMenuOpen ? palette.textPrimary : palette.textSecondary,
+                backgroundColor: openPopover === "gif" ? palette.bgHover : "transparent",
+                color: openPopover === "gif" ? palette.textPrimary : palette.textSecondary,
                 cursor: "pointer",
                 fontFamily: typography.fontFamily,
               }}
-              onMouseEnter={(e) => {
-                if (!gifMenuOpen) {
-                  e.currentTarget.style.backgroundColor = palette.bgHover;
-                  e.currentTarget.style.color = palette.textPrimary;
-                }
-              }}
-              onMouseLeave={(e) => {
-                if (!gifMenuOpen) {
-                  e.currentTarget.style.backgroundColor = "transparent";
-                  e.currentTarget.style.color = palette.textSecondary;
-                }
-              }}
+              onMouseEnter={(e) => hoverToolBtn(e, openPopover === "gif", true)}
+              onMouseLeave={(e) => hoverToolBtn(e, openPopover === "gif", false)}
             >
               <Clapperboard size={inputToolIconSize - 2} strokeWidth={2} aria-hidden />
               <span
@@ -851,14 +807,10 @@ export default function MessageInput({
               type="button"
               title="Emoji"
               aria-label="Insert emoji"
-              aria-expanded={emojiMenuOpen}
+              aria-expanded={openPopover === "emoji"}
               aria-haspopup="dialog"
               onMouseDown={(e) => e.preventDefault()}
-              onClick={() => {
-                setFormatMenuOpen(false);
-                setGifMenuOpen(false);
-                setEmojiMenuOpen((o) => !o);
-              }}
+              onClick={() => setOpenPopover((o) => (o === "emoji" ? null : "emoji"))}
               style={{
                 flexShrink: 0,
                 display: "flex",
@@ -872,22 +824,12 @@ export default function MessageInput({
                 marginRight: spacing.unit * 0.75,
                 border: "none",
                 borderRadius: inputToolBtnRadius,
-                backgroundColor: emojiMenuOpen ? palette.bgHover : "transparent",
-                color: emojiMenuOpen ? palette.textPrimary : palette.textSecondary,
+                backgroundColor: openPopover === "emoji" ? palette.bgHover : "transparent",
+                color: openPopover === "emoji" ? palette.textPrimary : palette.textSecondary,
                 cursor: "pointer",
               }}
-              onMouseEnter={(e) => {
-                if (!emojiMenuOpen) {
-                  e.currentTarget.style.backgroundColor = palette.bgHover;
-                  e.currentTarget.style.color = palette.textPrimary;
-                }
-              }}
-              onMouseLeave={(e) => {
-                if (!emojiMenuOpen) {
-                  e.currentTarget.style.backgroundColor = "transparent";
-                  e.currentTarget.style.color = palette.textSecondary;
-                }
-              }}
+              onMouseEnter={(e) => hoverToolBtn(e, openPopover === "emoji", true)}
+              onMouseLeave={(e) => hoverToolBtn(e, openPopover === "emoji", false)}
             >
               <Smile size={inputToolIconSize} strokeWidth={2} />
             </button>
@@ -896,14 +838,10 @@ export default function MessageInput({
         <button
           type="button"
           title="Text formatting"
-          aria-expanded={formatMenuOpen}
+          aria-expanded={openPopover === "format"}
           aria-haspopup="menu"
           onMouseDown={(e) => e.preventDefault()}
-          onClick={() => {
-            setEmojiMenuOpen(false);
-            setGifMenuOpen(false);
-            setFormatMenuOpen((o) => !o);
-          }}
+          onClick={() => setOpenPopover((o) => (o === "format" ? null : "format"))}
           style={{
             flexShrink: 0,
             display: "flex",
@@ -916,22 +854,12 @@ export default function MessageInput({
             marginLeft: 0,
             border: "none",
             borderRadius: inputToolBtnRadius,
-            backgroundColor: formatMenuOpen ? palette.bgHover : "transparent",
-            color: formatMenuOpen ? palette.textPrimary : palette.textSecondary,
+            backgroundColor: openPopover === "format" ? palette.bgHover : "transparent",
+            color: openPopover === "format" ? palette.textPrimary : palette.textSecondary,
             cursor: "pointer",
           }}
-          onMouseEnter={(e) => {
-            if (!formatMenuOpen) {
-              e.currentTarget.style.backgroundColor = palette.bgHover;
-              e.currentTarget.style.color = palette.textPrimary;
-            }
-          }}
-          onMouseLeave={(e) => {
-            if (!formatMenuOpen) {
-              e.currentTarget.style.backgroundColor = "transparent";
-              e.currentTarget.style.color = palette.textSecondary;
-            }
-          }}
+          onMouseEnter={(e) => hoverToolBtn(e, openPopover === "format", true)}
+          onMouseLeave={(e) => hoverToolBtn(e, openPopover === "format", false)}
         >
           <Type size={inputToolIconSize} strokeWidth={2} />
         </button>

@@ -61,7 +61,7 @@ function messageAllowsDelete(msg: Message, userId: string, policy: RoomRedaction
   return policy.canRedactOther;
 }
 
-/** Above composer (z-index 20) and other overlays; must escape message column stacking. */
+/** Portaled to document.body — high z-index keeps the menu above everything. */
 const MESSAGE_ACTIONS_MENU_Z = 10_000;
 
 export default function MessageList({

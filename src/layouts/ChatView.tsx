@@ -228,60 +228,35 @@ export default function ChatView({
           minWidth: 0,
           minHeight: 0,
         }}>
-          <div
-            style={{
-              flex: 1,
-              minHeight: 0,
-              overflow: "hidden",
-              position: "relative",
-              zIndex: 0,
-              isolation: "isolate",
-              display: "flex",
-              flexDirection: "column",
-            }}
-          >
-            <MessageList
-              messages={messages}
-              loading={loading}
-              initialLoading={initialLoading}
-              refreshing={refreshing}
-              hasMore={hasMore}
-              onLoadMore={loadMore}
-              roomId={room.id}
-              userId={userId}
-              redactionPolicy={redactionPolicy}
-              onRequestEdit={handleRequestEdit}
-              onMessagesMutated={refresh}
-              onMessageRemoved={removeMessageById}
-            />
-          </div>
+          <MessageList
+            messages={messages}
+            loading={loading}
+            initialLoading={initialLoading}
+            refreshing={refreshing}
+            hasMore={hasMore}
+            onLoadMore={loadMore}
+            roomId={room.id}
+            userId={userId}
+            redactionPolicy={redactionPolicy}
+            onRequestEdit={handleRequestEdit}
+            onMessagesMutated={refresh}
+            onMessageRemoved={removeMessageById}
+          />
 
-          {/* Solid strip above messages in paint order; flex minHeight:0 keeps the list from overlapping this. */}
-          <div
-            style={{
-              flexShrink: 0,
-              position: "relative",
-              zIndex: 100,
-              isolation: "isolate",
-              backgroundColor: palette.bgPrimary,
-              boxShadow: `0 -1px 0 ${palette.border}`,
-            }}
-          >
-            <TypingIndicator
-              names={typingNames}
-              palette={palette}
-              typography={typography}
-              spacing={spacing}
-            />
-            <MessageInput
-              key={room.id}
-              roomId={room.id}
-              roomName={room.name}
-              onMessageSent={refresh}
-              editingMessage={editingMessage}
-              onCancelEdit={() => setEditingMessage(null)}
-            />
-          </div>
+          <TypingIndicator
+            names={typingNames}
+            palette={palette}
+            typography={typography}
+            spacing={spacing}
+          />
+          <MessageInput
+            key={room.id}
+            roomId={room.id}
+            roomName={room.name}
+            onMessageSent={refresh}
+            editingMessage={editingMessage}
+            onCancelEdit={() => setEditingMessage(null)}
+          />
         </div>
 
         {/* User menu panel with resizable inside border */}
