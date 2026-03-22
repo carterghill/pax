@@ -38,7 +38,7 @@ pub async fn login(
         let _ = std::fs::remove_dir_all(&sp);
     }
 
-    eprintln!("[Pax] login: building client for {}", homeserver);
+    log::info!("login: building client for {}", homeserver);
     let client = Client::builder()
         .homeserver_url(&homeserver)
         .sqlite_store(&sp, None)
@@ -46,7 +46,7 @@ pub async fn login(
         .await
         .map_err(|e| format!("Failed to create client: {}", fmt_error_chain(&e)))?;
 
-    eprintln!("[Pax] login: authenticating...");
+    log::info!("login: authenticating...");
     client
         .matrix_auth()
         .login_username(&username, &password)
@@ -55,7 +55,7 @@ pub async fn login(
         .await
         .map_err(|e| format!("Login failed: {}", fmt_error_chain(&e)))?;
 
-    eprintln!("[Pax] login: running initial sync...");
+    log::info!("login: running initial sync...");
     tokio::time::timeout(
         Duration::from_secs(30),
         client.sync_once(SyncSettings::default().set_presence(matrix_sdk::ruma::presence::PresenceState::Offline)),
@@ -64,7 +64,7 @@ pub async fn login(
     .map_err(|_| "Initial sync timed out (30s) — is the homeserver responsive?".to_string())?
     .map_err(|e| format!("Initial sync failed: {}", fmt_error_chain(&e)))?;
 
-    eprintln!("[Pax] login: sync complete, saving session...");
+    log::info!("login: sync complete, saving session...");
     if let Some(session) = client.matrix_auth().session() {
         let _ = save_session_to_credentials(
             &app,
@@ -84,7 +84,7 @@ pub async fn login(
     *state.client.lock().await = Some(client);
     *state.sync_running.lock().await = false;
     state.avatar_cache.lock().await.clear();
-    eprintln!("[Pax] login: done — user_id={}", user_id);
+    log::info!("login: done — user_id={}", user_id);
     Ok(user_id)
 }
 
@@ -101,7 +101,7 @@ pub async fn restore_session(
     let sd = creds.session.ok_or("No saved session")?;
     let sp = store_path(&app)?;
 
-    eprintln!("[Pax] restore_session: building client for {}", creds.homeserver);
+    log::info!("restore_session: building client for {}", creds.homeserver);
     let client = Client::builder()
         .homeserver_url(&creds.homeserver)
         .sqlite_store(&sp, None)
@@ -112,7 +112,7 @@ pub async fn restore_session(
     let user_id = matrix_sdk::ruma::UserId::parse(&sd.user_id)
         .map_err(|e| format!("Invalid user ID: {e}"))?;
 
-    eprintln!("[Pax] restore_session: restoring session...");
+    log::info!("restore_session: restoring session...");
     client
         .restore_session(MatrixSession {
             meta: SessionMeta {
@@ -133,7 +133,7 @@ pub async fn restore_session(
         .map_err(|_| "Token check timed out".to_string())?
         .map_err(|e| format!("Session expired: {e}"))?;
 
-    eprintln!("[Pax] restore_session: valid — user_id={}", user_id);
+    log::info!("restore_session: valid — user_id={}", user_id);
 
     *state.client.lock().await = Some(client);
     *state.sync_running.lock().await = false;

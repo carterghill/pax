@@ -253,7 +253,7 @@ pub async fn start_sync(state: State<'_, Arc<AppState>>, app: tauri::AppHandle) 
     {
         let mut sync_running = state.sync_running.lock().await;
         if *sync_running {
-            eprintln!("[Pax] start_sync: sync loop already running, skipping");
+            log::warn!("start_sync: sync loop already running, skipping");
             return Ok(());
         }
         *sync_running = true;
@@ -436,7 +436,7 @@ pub async fn start_sync(state: State<'_, Arc<AppState>>, app: tauri::AppHandle) 
             .await;
 
         if let Err(e) = result {
-            eprintln!("Sync loop error: {e}");
+            log::warn!("Sync loop error: {e}");
         }
 
         *sync_running.lock().await = false;

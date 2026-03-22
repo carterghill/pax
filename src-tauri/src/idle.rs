@@ -37,7 +37,7 @@ pub async fn run_idle_monitor(app: Arc<AppHandle>, display_server: DisplayServer
         match zbus::Connection::session().await {
             Ok(c) => Some(c),
             Err(e) => {
-                eprintln!("[idle] failed to connect to session D-Bus: {e}");
+                log::warn!("failed to connect to session D-Bus: {e}");
                 None
             }
         }

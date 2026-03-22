@@ -94,9 +94,9 @@ pub fn run() {
         url: std::env::var("LIVEKIT_URL").ok().filter(|s| !s.is_empty()),
     };
     if livekit.api_key.is_some() {
-        eprintln!("[Pax] LiveKit admin credentials loaded from .env");
+        log::info!("LiveKit admin credentials loaded from .env");
     } else {
-        eprintln!("[Pax] No LiveKit admin credentials — multi-device kick disabled");
+        log::info!("No LiveKit admin credentials — multi-device kick disabled");
     }
 
     // Detect best video codec based on GPU before any screen share publishes
@@ -116,6 +116,11 @@ pub fn run() {
     });
 
     tauri::Builder::default()
+        .plugin(
+            tauri_plugin_log::Builder::new()
+                .level(log::LevelFilter::Info)
+                .build(),
+        )
         .manage(state)
         .manage(voice::VoiceManager::new())
         .register_uri_scheme_protocol("paxvideo", |_app, request| {
@@ -219,6 +224,6 @@ fn detect_codec_early() {
     if let Ok(adapter) = adapter {
         codec::detect_best_codec(&adapter.get_info().name);
     } else {
-        eprintln!("[Pax] GPU adapter probe failed — defaulting to H264");
+        log::warn!("GPU adapter probe failed — defaulting to H264");
     }
 }

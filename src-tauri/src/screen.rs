@@ -133,7 +133,7 @@ pub async fn start_screen_capture(
         // Try windows-capture (Graphics Capture API) first - avoids DXGI/COM conflicts with audio
         match start_screen_capture_windows_graphics(room.clone(), mode, window_title.clone()).await {
             Ok(handle) => return Ok(handle),
-            Err(e) => eprintln!("[Pax] windows-capture failed ({}), falling back to DesktopCapturer", e),
+            Err(e) => log::warn!("windows-capture failed ({}), falling back to DesktopCapturer", e),
         }
         start_screen_capture_libwebrtc_or_fallback(room, mode, window_title).await
     }
@@ -178,8 +178,8 @@ async fn start_screen_capture_windows_graphics(
 
     let bitrate = preset.max_bitrate();
     let capture_interval_ms = (1000.0 / preset.fps() as f64).round() as u64;
-    eprintln!(
-        "[Pax] start_screen_capture_windows_graphics: mode={:?} preset={} fps={}",
+    log::info!(
+        "start_screen_capture_windows_graphics: mode={:?} preset={} fps={}",
         mode,
         preset.label(),
         preset.fps()
@@ -187,7 +187,7 @@ async fn start_screen_capture_windows_graphics(
 
     let (capture_control, target_audio_pid) = match mode {
         ScreenShareMode::Screen => {
-            eprintln!("[Pax] Using Monitor::primary()");
+            log::debug!("Using Monitor::primary()");
             let monitor = Monitor::primary().map_err(|e| format!("Monitor::primary: {}", e))?;
             let settings = Settings::new(
                 monitor,
@@ -203,17 +203,17 @@ async fn start_screen_capture_windows_graphics(
         }
         ScreenShareMode::Window => {
             let window = if let Some(ref title) = window_title {
-                eprintln!("[Pax] Looking up window by title: {}", title);
+                log::debug!("Looking up window by title: {}", title);
                 Window::from_name(title)
                     .or_else(|_| Window::from_contains_name(title))
                     .map_err(|e| format!("Window '{}': {}", title, e))?
             } else {
-                eprintln!("[Pax] Using Window::foreground() (no title specified)");
+                log::debug!("Using Window::foreground() (no title specified)");
                 Window::foreground().map_err(|e| format!("Window::foreground: {}", e))?
             };
             let win_title = window.title().unwrap_or_else(|_| String::new());
             let target_audio_pid = window.process_id().ok();
-            eprintln!("[Pax] Capturing window: {} (audio PID: {:?})", win_title, target_audio_pid);
+            log::debug!("Capturing window: {} (audio PID: {:?})", win_title, target_audio_pid);
             let settings = Settings::new(
                 window,
                 CursorCaptureSettings::Default,
@@ -232,16 +232,16 @@ async fn start_screen_capture_windows_graphics(
     let capturer_thread = capture_control.into_thread_handle();
 
     // Wait for first frame before publishing - LiveKit needs media flowing for proper SDP negotiation
-    eprintln!("[Pax] Waiting for first capture frame before publishing...");
+    log::debug!("Waiting for first capture frame before publishing...");
     for i in 0..100 {
         if first_frame.load(Ordering::Relaxed) {
-            eprintln!("[Pax] First frame received after {}ms", i * 50);
+            log::debug!("First frame received after {}ms", i * 50);
             break;
         }
         thread::sleep(Duration::from_millis(50));
     }
     if !first_frame.load(Ordering::Relaxed) {
-        eprintln!("[Pax] WARNING: No frame received in 5s, publishing anyway");
+        log::warn!(" No frame received in 5s, publishing anyway");
     }
 
     let track = LocalVideoTrack::create_video_track(
@@ -251,8 +251,8 @@ async fn start_screen_capture_windows_graphics(
 
     let framerate = preset.fps() as f64;
     let codec = crate::codec::resolve_codec();
-    eprintln!(
-        "[Pax] Publishing screen track to LiveKit ({:?}, {}, {}fps)",
+    log::info!(
+        "Publishing screen track to LiveKit ({:?}, {}, {}fps)",
         codec,
         preset.label(),
         preset.fps()
@@ -273,7 +273,7 @@ async fn start_screen_capture_windows_graphics(
         )
         .await
         .map_err(|e| format!("Failed to publish screen track: {}", e))?;
-    eprintln!("[Pax] Screen track published successfully");
+    log::info!("Screen track published successfully");
 
     let (audio_track, loopback_stream, audio_capture_thread) =
         setup_screen_share_audio_process_loopback(mode, target_audio_pid, shutdown.clone());
@@ -315,7 +315,7 @@ impl windows_capture::capture::GraphicsCaptureApiHandler for ScreenCaptureHandle
 
     fn new(ctx: windows_capture::capture::Context<Self::Flags>) -> Result<Self, Self::Error> {
         let (video_source, shutdown, first_frame, preset) = ctx.flags;
-        eprintln!("[Pax] ScreenCaptureHandler::new - capture starting");
+        log::debug!("ScreenCaptureHandler::new - capture starting");
         Ok(Self { video_source, shutdown, first_frame, preset, frame_count: 0 })
     }
 
@@ -325,7 +325,7 @@ impl windows_capture::capture::GraphicsCaptureApiHandler for ScreenCaptureHandle
         capture_control: windows_capture::graphics_capture_api::InternalCaptureControl,
     ) -> Result<(), Self::Error> {
         if self.shutdown.load(Ordering::Relaxed) {
-            eprintln!("[Pax] Screen capture: shutdown requested, stopping");
+            log::debug!("Screen capture: shutdown requested, stopping");
             capture_control.stop();
             return Ok(());
         }
@@ -380,9 +380,9 @@ impl windows_capture::capture::GraphicsCaptureApiHandler for ScreenCaptureHandle
         self.frame_count += 1;
         if self.frame_count == 1 {
             self.first_frame.store(true, Ordering::Relaxed);
-            eprintln!("[Pax] Screen capture: first frame ({}x{})", w, h);
+            log::debug!("Screen capture: first frame ({}x{})", w, h);
         } else if self.frame_count % 100 == 0 {
-            eprintln!("[Pax] Screen capture: frame {} ({}x{})", self.frame_count, w, h);
+            log::trace!("Screen capture: frame {} ({}x{})", self.frame_count, w, h);
         }
         Ok(())
     }
@@ -410,19 +410,19 @@ async fn start_screen_capture_libwebrtc_or_fallback(
         ScreenShareMode::Window => DesktopCaptureSourceType::Window,
     };
 
-    eprintln!("[Pax] start_screen_capture_libwebrtc: mode={:?}", mode);
+    log::info!("start_screen_capture_libwebrtc: mode={:?}", mode);
     let mut capturer_opt = None;
     for attempt in 0..3 {
         let mut options = DesktopCapturerOptions::new(source_type);
         options.set_include_cursor(true);
         capturer_opt = DesktopCapturer::new(options);
         if capturer_opt.is_some() {
-            eprintln!("[Pax] DesktopCapturer::new succeeded on attempt {}", attempt + 1);
+            log::debug!("DesktopCapturer::new succeeded on attempt {}", attempt + 1);
             break;
         }
         if attempt < 2 {
             let delay_ms = if attempt == 0 { 1000 } else { 500 };
-            eprintln!("[Pax] DesktopCapturer::new failed (attempt {}), retrying in {}ms", attempt + 1, delay_ms);
+            log::warn!("DesktopCapturer::new failed (attempt {}), retrying in {}ms", attempt + 1, delay_ms);
             thread::sleep(Duration::from_millis(delay_ms));
         }
     }
@@ -430,9 +430,9 @@ async fn start_screen_capture_libwebrtc_or_fallback(
     let mut capturer = match capturer_opt {
         Some(c) => c,
         None => {
-            eprintln!("[Pax] DesktopCapturer::new failed after retries");
+            log::warn!("DesktopCapturer::new failed after retries");
             if mode == ScreenShareMode::Screen {
-                eprintln!("[Pax] Falling back to screenshots crate");
+                log::warn!("Falling back to screenshots crate");
                 return start_screen_capture_screenshots_fallback(room).await;
             }
             return Err("Failed to create desktop capturer. Try selecting \"Entire screen\" instead of a window.".to_string());
@@ -442,7 +442,7 @@ async fn start_screen_capture_libwebrtc_or_fallback(
     let sources = capturer.get_source_list();
     let source: Option<CaptureSource> = sources.into_iter().next();
     if source.is_none() {
-        eprintln!("[Pax] get_source_list returned empty, trying without explicit source");
+        log::debug!("get_source_list returned empty, trying without explicit source");
     }
 
     let resolution = VideoResolution {
@@ -464,7 +464,7 @@ async fn start_screen_capture_libwebrtc_or_fallback(
         let frame = match result {
             Ok(f) => f,
             Err(e) => {
-                eprintln!("[Pax] Screen capture frame error: {:?}", e);
+                log::warn!("Screen capture frame error: {:?}", e);
                 return;
             }
         };
@@ -575,8 +575,8 @@ async fn start_screen_capture_screenshots_fallback(
     let preset = get_screen_share_preset();
     let bitrate = preset.max_bitrate();
     let capture_interval_ms = (1000.0 / preset.fps() as f64).round() as u64;
-    eprintln!(
-        "[Pax] start_screen_capture_screenshots_fallback: preset={} fps={}",
+    log::warn!(
+        "start_screen_capture_screenshots_fallback: preset={} fps={}",
         preset.label(),
         preset.fps()
     );
@@ -643,7 +643,7 @@ async fn start_screen_capture_screenshots_fallback(
                     video_source_clone.capture_frame(&vf);
                 }
                 Err(e) => {
-                    eprintln!("[Pax] screenshots capture: {}", e);
+                    log::warn!("screenshots capture: {}", e);
                 }
             }
             thread::sleep(Duration::from_millis(capture_interval_ms));
@@ -738,11 +738,11 @@ fn setup_screen_share_audio_process_loopback(
     // Window mode (target_audio_pid=Some(pid)): INCLUDE that app → only that window's audio
     let (process_id, include_tree) = match target_audio_pid {
         None => {
-            eprintln!("[Pax] Screen share audio: EXCLUDE mode (all system audio except Pax)");
+            log::debug!("Screen share audio: EXCLUDE mode (all system audio except Pax)");
             (std::process::id(), false)
         }
         Some(pid) => {
-            eprintln!("[Pax] Screen share audio: INCLUDE mode (only PID {})", pid);
+            log::debug!("Screen share audio: INCLUDE mode (only PID {})", pid);
             (pid, true)
         }
     };
@@ -759,17 +759,17 @@ fn setup_screen_share_audio_process_loopback(
                 return;
             }
             if wasapi::initialize_mta().is_err() {
-                eprintln!("[Pax] Screen share process loopback: COM init failed");
+                log::warn!("Screen share process loopback: COM init failed");
                 return;
             }
-            eprintln!("[Pax] Screen share audio: initializing WASAPI process loopback");
+            log::debug!("Screen share audio: initializing WASAPI process loopback");
             let mut audio_client = match AudioClient::new_application_loopback_client(
                 process_id,
                 include_tree,
             ) {
                 Ok(c) => c,
                 Err(e) => {
-                    eprintln!("[Pax] Screen share process loopback: {}", e);
+                    log::warn!("Screen share process loopback: {}", e);
                     return;
                 }
             };
@@ -782,25 +782,25 @@ fn setup_screen_share_audio_process_loopback(
                 .initialize_client(&format, &Direction::Capture, &stream_mode)
                 .is_err()
             {
-                eprintln!("[Pax] Screen share process loopback: init failed");
+                log::warn!("Screen share process loopback: init failed");
                 return;
             }
             let h_event = match audio_client.set_get_eventhandle() {
                 Ok(h) => h,
                 Err(e) => {
-                    eprintln!("[Pax] Screen share process loopback event: {}", e);
+                    log::warn!("Screen share process loopback event: {}", e);
                     return;
                 }
             };
             let capture_client = match audio_client.get_audiocaptureclient() {
                 Ok(c) => c,
                 Err(e) => {
-                    eprintln!("[Pax] Screen share process loopback capture client: {}", e);
+                    log::warn!("Screen share process loopback capture client: {}", e);
                     return;
                 }
             };
             if audio_client.start_stream().is_err() {
-                eprintln!("[Pax] Screen share process loopback: start failed");
+                log::warn!("Screen share process loopback: start failed");
                 return;
             }
 
@@ -843,7 +843,7 @@ fn setup_screen_share_audio_process_loopback(
             let _ = audio_client.stop_stream();
         })
         .map_err(|e| {
-            eprintln!("[Pax] Screen share process loopback thread spawn failed: {}", e);
+            log::warn!("Screen share process loopback thread spawn failed: {}", e);
             e
         })
         .ok();
@@ -858,7 +858,7 @@ fn setup_screen_share_audio_process_loopback(
                 samples_per_channel: SAMPLES_PER_10MS as u32,
             };
             if let Err(e) = audio_source_clone.capture_frame(&frame).await {
-                eprintln!("[Pax] Screen share audio capture: {}", e);
+                log::warn!("Screen share audio capture: {}", e);
             }
         }
     });
@@ -868,7 +868,7 @@ fn setup_screen_share_audio_process_loopback(
         RtcAudioSource::Native(audio_source),
     );
 
-    eprintln!("[Pax] Screen share audio (process loopback) enabled");
+    log::info!("Screen share audio (process loopback) enabled");
     (Some(track), None, capture_thread)
 }
 
@@ -934,7 +934,7 @@ fn setup_screen_share_audio_device_loopback() -> (Option<LocalAudioTrack>, Optio
                     let _ = frame_tx.try_send(samples);
                 }
             },
-            |e| eprintln!("[Pax] Screen share loopback error: {}", e),
+            |e| log::warn!("Screen share loopback error: {}", e),
             None,
         ),
         cpal::SampleFormat::I16 => device.build_input_stream(
@@ -949,7 +949,7 @@ fn setup_screen_share_audio_device_loopback() -> (Option<LocalAudioTrack>, Optio
                     let _ = frame_tx.try_send(samples);
                 }
             },
-            |e| eprintln!("[Pax] Screen share loopback error: {}", e),
+            |e| log::warn!("Screen share loopback error: {}", e),
             None,
         ),
         _ => return (None, None),
@@ -957,13 +957,13 @@ fn setup_screen_share_audio_device_loopback() -> (Option<LocalAudioTrack>, Optio
     let stream = match stream_result {
         Ok(s) => s,
         Err(e) => {
-            eprintln!("[Pax] Screen share loopback: {}", e);
+            log::warn!("Screen share loopback: {}", e);
             return (None, None);
         }
     };
 
     if stream.play().is_err() {
-        eprintln!("[Pax] Screen share loopback: failed to play");
+        log::warn!("Screen share loopback: failed to play");
         return (None, None);
     }
 
@@ -977,7 +977,7 @@ fn setup_screen_share_audio_device_loopback() -> (Option<LocalAudioTrack>, Optio
                 samples_per_channel: samples_per_channel as u32,
             };
             if let Err(e) = audio_source_clone.capture_frame(&frame).await {
-                eprintln!("[Pax] Screen share audio capture: {}", e);
+                log::warn!("Screen share audio capture: {}", e);
             }
         }
     });
@@ -987,7 +987,7 @@ fn setup_screen_share_audio_device_loopback() -> (Option<LocalAudioTrack>, Optio
         RtcAudioSource::Native(audio_source),
     );
 
-    eprintln!("[Pax] Screen share audio (loopback) enabled");
+    log::info!("Screen share audio (loopback) enabled");
     (Some(track), Some(stream))
 }
 
@@ -1001,7 +1001,7 @@ fn setup_screen_share_audio() -> (Option<LocalAudioTrack>, Option<cpal::Stream>)
 pub fn enumerate_screen_share_windows() -> Result<Vec<(String, String)>, String> {
     use windows_capture::window::Window;
 
-    eprintln!("[Pax] enumerate_screen_share_windows");
+    log::debug!("enumerate_screen_share_windows");
     let windows = Window::enumerate().map_err(|e| format!("Window::enumerate: {}", e))?;
     let mut out = Vec::new();
     for w in windows {
@@ -1014,7 +1014,7 @@ pub fn enumerate_screen_share_windows() -> Result<Vec<(String, String)>, String>
             out.push((title, process));
         }
     }
-    eprintln!("[Pax] Found {} capturable windows", out.len());
+    log::info!("Found {} capturable windows", out.len());
     Ok(out)
 }
 

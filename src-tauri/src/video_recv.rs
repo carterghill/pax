@@ -77,12 +77,12 @@ pub fn spawn_video_receiver(
                 if let Some(phwnd) = parent_hwnd {
                     match crate::native_overlay::GpuRenderer::new(phwnd, id.clone()).await {
                         Ok(renderer) => {
-                            eprintln!("[Pax VideoRecv] Native GPU renderer initialized for '{}'", id);
+                            log::info!("Native GPU renderer initialized for '{}'", id);
                             gpu_renderer = Some(renderer);
                         }
                         Err(e) => {
-                            eprintln!(
-                                "[Pax VideoRecv] GPU init failed for '{}': {} — falling back to protocol",
+                            log::warn!(
+                                "GPU init failed for '{}': {} — falling back to protocol",
                                 id, e
                             );
                             // Fall through to protocol path
@@ -102,8 +102,8 @@ pub fn spawn_video_receiver(
                     entry.receiving = true;
                 }
 
-                eprintln!(
-                    "[Pax VideoRecv] Dedicated thread started for '{}' (native_gpu={})",
+                log::info!(
+                    "Dedicated thread started for '{}' (native_gpu={})",
                     id, use_native
                 );
 
@@ -138,7 +138,7 @@ pub fn spawn_video_receiver(
 
                 loop {
                     if shutdown.load(Ordering::Relaxed) {
-                        eprintln!("[Pax VideoRecv] Shutdown for '{}'", id);
+                        log::debug!("Shutdown for '{}'", id);
                         break;
                     }
 
@@ -167,12 +167,12 @@ pub fn spawn_video_receiver(
                                 }
                                 first = stream.next() => {
                                     let Some(mut latest_frame) = first else {
-                                        eprintln!("[Pax VideoRecv] Stream ended for '{}'", id);
+                                        log::debug!("Stream ended for '{}'", id);
                                         break;
                                     };
 
                                     if shutdown.load(Ordering::Relaxed) {
-                                        eprintln!("[Pax VideoRecv] Shutdown for '{}'", id);
+                                        log::debug!("Shutdown for '{}'", id);
                                         break;
                                     }
 
@@ -197,8 +197,8 @@ pub fn spawn_video_receiver(
                                     frame_number += 1;
 
                                     if frame_number == 1 {
-                                        eprintln!(
-                                            "[Pax VideoRecv] First frame decoded for '{}': {}x{}",
+                                        log::debug!(
+                                            "First frame decoded for '{}': {}x{}",
                                             id, src_w, src_h
                                         );
                                     }
@@ -230,8 +230,8 @@ pub fn spawn_video_receiver(
 
                                     if frame_number % 300 == 0 {
                                         let avg_us = total_process_us / frame_number;
-                                        eprintln!(
-                                            "[Pax VideoRecv] '{}' stats: frame={} avg_process={}µs drained={} last={}µs",
+                                        log::info!(
+                                            "'{}' stats: frame={} avg_process={}µs drained={} last={}µs",
                                             id, frame_number, avg_us, drained_count, elapsed_us
                                         );
                                     }
@@ -244,12 +244,12 @@ pub fn spawn_video_receiver(
                     } else {
                         let first = stream.next().await;
                         let Some(mut latest_frame) = first else {
-                            eprintln!("[Pax VideoRecv] Stream ended for '{}'", id);
+                            log::debug!("Stream ended for '{}'", id);
                             break;
                         };
 
                         if shutdown.load(Ordering::Relaxed) {
-                            eprintln!("[Pax VideoRecv] Shutdown for '{}'", id);
+                            log::debug!("Shutdown for '{}'", id);
                             break;
                         }
 
@@ -272,8 +272,8 @@ pub fn spawn_video_receiver(
                         frame_number += 1;
 
                         if frame_number == 1 {
-                            eprintln!(
-                                "[Pax VideoRecv] First frame decoded for '{}': {}x{}",
+                            log::debug!(
+                                "First frame decoded for '{}': {}x{}",
                                 id, src_w, src_h
                             );
                         }
@@ -360,7 +360,7 @@ pub fn spawn_video_receiver(
                     let mut streams = STREAMS.lock();
                     streams.remove(&id);
                 }
-                eprintln!("[Pax VideoRecv] Thread exiting for '{}'", id);
+                log::debug!("Thread exiting for '{}'", id);
             });
         })
         .expect("[Pax VideoRecv] Failed to spawn thread");

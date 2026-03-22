@@ -133,8 +133,8 @@ fn notify_overlay_clip_changed(identity: &str) {
 /// is owned by the video thread so all subsequent Win32 calls are thread-local.
 pub fn create_overlay(identity: &str, parent_hwnd: isize) -> Result<isize, String> {
     let hwnd = platform::create_child_hwnd(parent_hwnd)?;
-    eprintln!(
-        "[Pax NativeOverlay] Created overlay HWND {:?} for '{}' (parent={:?})",
+    log::info!(
+        "Created overlay HWND {:?} for '{}' (parent={:?})",
         hwnd, identity, parent_hwnd
     );
     // Default letterbox ≈ dark theme `#313338` until the frontend sends `bgPrimary`.
@@ -163,7 +163,7 @@ pub fn destroy_overlay(identity: &str) {
     if let Some(entry) = OVERLAYS.lock().remove(identity) {
         // Mark as not visible so render_frame stops drawing
         entry.visible.store(false, Ordering::Relaxed);
-        eprintln!("[Pax NativeOverlay] Unregistered overlay for '{}' (HWND destruction deferred to video thread)", identity);
+        log::debug!("Unregistered overlay for '{}' (HWND destruction deferred to video thread)", identity);
     }
 }
 
@@ -260,7 +260,7 @@ pub fn destroy_all_overlays() {
     let mut overlays = OVERLAYS.lock();
     for (id, entry) in overlays.drain() {
         entry.visible.store(false, Ordering::Relaxed);
-        eprintln!("[Pax NativeOverlay] Unregistered overlay for '{}'", id);
+        log::debug!("Unregistered overlay for '{}'", id);
     }
 }
 
@@ -365,7 +365,7 @@ impl Drop for GpuRenderer {
         platform::destroy_hwnd(self.hwnd);
         // Also remove from registry if it wasn't already removed
         OVERLAYS.lock().remove(&self.identity);
-        eprintln!("[Pax GpuRenderer] Dropped — HWND destroyed for '{}'", self.identity);
+        log::debug!("Dropped — HWND destroyed for '{}'", self.identity);
     }
 }
 
@@ -410,8 +410,8 @@ impl GpuRenderer {
             .await
             .map_err(|e| format!("No suitable GPU adapter: {}", e))?;
 
-        eprintln!(
-            "[Pax GpuRenderer] Using adapter: {} ({:?})",
+        log::info!(
+            "Using adapter: {} ({:?})",
             adapter.get_info().name,
             adapter.get_info().backend
         );
@@ -560,8 +560,8 @@ impl GpuRenderer {
             ..Default::default()
         });
 
-        eprintln!(
-            "[Pax GpuRenderer] Initialized: format={:?} (surface config deferred until HWND resize)",
+        log::info!(
+            "Initialized: format={:?} (surface config deferred until HWND resize)",
             format
         );
 
@@ -803,12 +803,12 @@ impl GpuRenderer {
 
         self.frame_count += 1;
         if self.frame_count == 1 {
-            eprintln!(
-                "[Pax GpuRenderer] First frame rendered ({}x{} in {}x{} surface)",
+            log::debug!(
+                "First frame rendered ({}x{} in {}x{} surface)",
                 width, height, self.surface_w, self.surface_h
             );
         } else if self.frame_count % 300 == 0 {
-            eprintln!("[Pax GpuRenderer] Frame {}", self.frame_count);
+            log::trace!("Frame {}", self.frame_count);
         }
     }
 
@@ -873,8 +873,8 @@ impl GpuRenderer {
         self.staging_u.resize(aligned_uv * ch as usize, 0);
         self.staging_v.resize(aligned_uv * ch as usize, 0);
 
-        eprintln!(
-            "[Pax GpuRenderer] Textures recreated: Y={}x{} UV={}x{}",
+        log::info!(
+            "Textures recreated: Y={}x{} UV={}x{}",
             w, h, cw, ch
         );
     }
@@ -1114,9 +1114,9 @@ mod platform {
             let webview = find_webview_input_hwnd(to_hwnd(parent), hwnd);
             if !webview.is_null() {
                 SetWindowLongPtrW(hwnd, GWLP_USERDATA, webview as isize);
-                eprintln!("[Pax NativeOverlay] Cached Chromium input HWND for mouse forwarding");
+                log::debug!("Cached Chromium input HWND for mouse forwarding");
             } else {
-                eprintln!("[Pax NativeOverlay] WARNING: Could not find Chromium input HWND");
+                log::warn!("WARNING: Could not find Chromium input HWND");
             }
 
             SetWindowPos(

@@ -4,7 +4,7 @@ use tauri::command;
 #[command]
 pub fn overlay_is_supported() -> bool {
     let supported = crate::native_overlay::is_supported();
-    eprintln!("[Pax Overlay] overlay_is_supported called → {}", supported);
+    log::debug!("overlay_is_supported called → {}", supported);
     supported
 }
 
@@ -23,7 +23,7 @@ pub fn overlay_set_letterbox_color(identity: String, r: f32, g: f32, b: f32) {
 /// Show or hide a native overlay.
 #[command]
 pub fn overlay_set_visible(identity: String, visible: bool) {
-    eprintln!("[Pax Overlay] overlay_set_visible '{}' → {}", identity, visible);
+    log::debug!("overlay_set_visible '{}' → {}", identity, visible);
     crate::native_overlay::set_overlay_visible(&identity, visible);
 }
 

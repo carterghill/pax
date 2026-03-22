@@ -436,11 +436,11 @@ impl VoiceManager {
                 let _ = lp.unpublish_track(&sid).await;
             }
         }
-        eprintln!("[Pax] voice::start_screen_share: mode={:?} window_title={:?}", mode, window_title);
+        log::info!("voice::start_screen_share: mode={:?} window_title={:?}", mode, window_title);
         let handle = crate::screen::start_screen_capture(room.clone(), mode, window_title).await?;
         // Video is published inside start_screen_capture (after capture is hot)
         if let Some(audio_track) = &handle.audio_track {
-            eprintln!("[Pax] Publishing screen share audio track (ScreenshareAudio)");
+            log::info!("Publishing screen share audio track (ScreenshareAudio)");
             room.local_participant()
                 .publish_track(
                     LocalTrack::Audio(audio_track.clone()),
@@ -467,7 +467,7 @@ impl VoiceManager {
 
     /// Stop sharing screen.
     pub async fn stop_screen_share(&self, app_handle: &AppHandle) -> Result<(), String> {
-        eprintln!("[Pax] voice::stop_screen_share");
+        log::info!("voice::stop_screen_share");
         let (room, audio_state, handle, room_id, local_identity) = {
             let mut guard = self.session.lock();
             let session = guard.as_mut().ok_or("Not in a voice call")?;
@@ -668,7 +668,7 @@ async fn run_event_loop(
                         } else if let RemoteTrack::Video(video_track) = track {
                             if source == TrackSource::Screenshare {
                                 let identity_clone = identity.clone();
-                                eprintln!("[Pax] TrackSubscribed: Video/Screenshare from '{}' (local='{}')", identity_clone, local_identity);
+                                log::info!("TrackSubscribed: Video/Screenshare from '{}' (local='{}')", identity_clone, local_identity);
                                 let mut st = audio_state.lock();
 
                                 // Add to owners list (if not already present)
@@ -684,7 +684,7 @@ async fn run_event_loop(
                                     }
                                     crate::native_overlay::destroy_overlay(&identity_clone);
 
-                                    eprintln!("[Pax] Spawning video receiver for '{}'", identity_clone);
+                                    log::info!("Spawning video receiver for '{}'", identity_clone);
                                     let shutdown = Arc::new(AtomicBool::new(false));
                                     st.video_recv_shutdowns.insert(identity_clone.clone(), shutdown.clone());
                                     drop(st);
@@ -700,7 +700,7 @@ async fn run_event_loop(
                                         parent_hwnd,
                                     );
                                 } else {
-                                    eprintln!("[Pax] Skipping video receiver (local screen share)");
+                                    log::info!("Skipping video receiver (local screen share)");
                                     drop(st);
                                 }
 
@@ -749,7 +749,7 @@ async fn run_event_loop(
                     }
                     Some(RoomEvent::ParticipantConnected(participant)) => {
                         let identity = participant.identity().to_string();
-                        println!("[Pax] Participant connected: {}", identity);
+                        log::info!("Participant connected: {}", identity);
                         {
                             let mut st = audio_state.lock();
                             if !st.remote_participants.contains(&identity) {
@@ -786,7 +786,7 @@ async fn run_event_loop(
                     }
                     Some(RoomEvent::ParticipantDisconnected(participant)) => {
                         let identity = participant.identity().to_string();
-                        println!("[Pax] Participant disconnected: {}", identity);
+                        log::info!("Participant disconnected: {}", identity);
                         {
                             let mut st = audio_state.lock();
                             st.remote_participants.retain(|id| id != &identity);
@@ -816,12 +816,12 @@ async fn run_event_loop(
                         emit_state(app_handle.as_ref(), &room_id, &local_identity, &audio_state, false, true, None);
                     }
                     Some(RoomEvent::Disconnected { reason }) => {
-                        log::info!("[Pax] Disconnected from LiveKit room: {:?}", reason);
+                        log::info!("Disconnected from LiveKit room: {:?}", reason);
                         emit_state(app_handle.as_ref(), &room_id, &local_identity, &audio_state, false, false, Some("Disconnected from voice".into()));
                         break;
                     }
                     None => {
-                        log::info!("[Pax] LiveKit event channel closed");
+                        log::info!("LiveKit event channel closed");
                         break;
                     }
                     _ => {}
@@ -888,7 +888,7 @@ fn update_local_status_attributes(room: Arc<livekit::Room>, mic_enabled: bool, d
         attrs.insert("pax.muted".to_string(), (!mic_enabled).to_string());
         attrs.insert("pax.deafened".to_string(), deafened.to_string());
         if let Err(e) = lp.set_attributes(attrs).await {
-            log::warn!("[Pax] Failed to set participant attributes: {}", e);
+            log::warn!("Failed to set participant attributes: {}", e);
         }
     });
 }
@@ -1069,7 +1069,7 @@ fn setup_mic_input(
     let device = host
         .default_input_device()
         .ok_or("No microphone found")?;
-    log::info!("[Pax] Using input device: {:?}", device.name());
+    log::info!("Using input device: {:?}", device.name());
     let default_config = device.default_input_config()
         .map_err(|e| format!("Failed to get default input config: {}", e))?;
     let channels = default_config.channels();
@@ -1079,10 +1079,10 @@ fn setup_mic_input(
         sample_rate: default_config.sample_rate(),
         buffer_size: cpal::BufferSize::Default,
     };
-    log::info!("[Pax] Mic config: {}ch @ {}Hz (target {}Hz)", channels, device_rate, SAMPLE_RATE);
+    log::info!("Mic config: {}ch @ {}Hz (target {}Hz)", channels, device_rate, SAMPLE_RATE);
     let needs_resample = device_rate != SAMPLE_RATE;
     if needs_resample {
-        log::info!("[Pax] Mic resampling enabled: {}Hz → {}Hz", device_rate, SAMPLE_RATE);
+        log::info!("Mic resampling enabled: {}Hz → {}Hz", device_rate, SAMPLE_RATE);
     }
     // Pre-resample accumulator (f32 mono at device rate) — only used when resampling
     let raw_buf: Arc<Mutex<Vec<f32>>> = Arc::new(Mutex::new(
@@ -1182,7 +1182,7 @@ fn setup_mic_input(
                 }
             },
             move |err| {
-                log::error!("[Pax] Mic input error: {}", err);
+                log::error!("Mic input error: {}", err);
             },
             None,
         )
@@ -1194,7 +1194,7 @@ fn setup_speaker_output(audio_state: Arc<Mutex<AudioState>>) -> Result<cpal::Str
     let device = host
         .default_output_device()
         .ok_or("No audio output found")?;
-    log::info!("[Pax] Using output device: {:?}", device.name());
+    log::info!("Using output device: {:?}", device.name());
     // Use the device's preferred config (Windows typically requires stereo)
     let default_config = device.default_output_config()
         .map_err(|e| format!("Failed to get default output config: {}", e))?;
@@ -1205,10 +1205,10 @@ fn setup_speaker_output(audio_state: Arc<Mutex<AudioState>>) -> Result<cpal::Str
         sample_rate: default_config.sample_rate(),
         buffer_size: cpal::BufferSize::Default,
     };
-    log::info!("[Pax] Speaker config: {}ch @ {}Hz (buffer at {}Hz)", channels, device_rate, SAMPLE_RATE);
+    log::info!("Speaker config: {}ch @ {}Hz (buffer at {}Hz)", channels, device_rate, SAMPLE_RATE);
     let needs_resample = device_rate != SAMPLE_RATE;
     if needs_resample {
-        log::info!("[Pax] Speaker resampling enabled: {}Hz → {}Hz", SAMPLE_RATE, device_rate);
+        log::info!("Speaker resampling enabled: {}Hz → {}Hz", SAMPLE_RATE, device_rate);
     }
     let state = audio_state.clone();
     // Persistent resampling state: fractional position in the 48000 Hz buffer
@@ -1270,7 +1270,7 @@ fn setup_speaker_output(audio_state: Arc<Mutex<AudioState>>) -> Result<cpal::Str
                 }
             },
             move |err| {
-                log::error!("[Pax] Speaker output error: {}", err);
+                log::error!("Speaker output error: {}", err);
             },
             None,
         )

@@ -583,7 +583,7 @@ async fn kick_other_devices_from_livekit(
     let (api_key, api_secret, lk_url) = match livekit_credentials(config) {
         Some(creds) => creds,
         None => {
-            eprintln!("[Pax] kick: no LiveKit credentials configured, skipping");
+            log::warn!("kick: no LiveKit credentials configured, skipping");
             return;
         }
     };
@@ -591,7 +591,7 @@ async fn kick_other_devices_from_livekit(
     let admin_jwt = match make_livekit_admin_jwt(api_key, api_secret, "") {
         Ok(t) => t,
         Err(e) => {
-            eprintln!("[Pax] kick: {e}");
+            log::warn!("kick: {e}");
             return;
         }
     };
@@ -599,12 +599,12 @@ async fn kick_other_devices_from_livekit(
     let rooms = match livekit_list_rooms(http, lk_url, &admin_jwt).await {
         Ok(r) => r,
         Err(e) => {
-            eprintln!("[Pax] kick: {e}");
+            log::warn!("kick: {e}");
             return;
         }
     };
 
-    eprintln!("[Pax] kick: found {} LiveKit rooms", rooms.len());
+    log::debug!("kick: found {} LiveKit rooms", rooms.len());
     let our_prefix = format!("{}:", user_id);
     let our_identity = format!("{}:{}", user_id, our_device_id);
 
@@ -622,16 +622,16 @@ async fn kick_other_devices_from_livekit(
         let participants = match livekit_list_participants_for_room(http, lk_url, &room_jwt, room_name).await {
             Ok(p) => p,
             Err(e) => {
-                eprintln!("[Pax] kick: {e}");
+                log::warn!("kick: {e}");
                 continue;
             }
         };
 
         for p in &participants {
             if p.identity.starts_with(&our_prefix) && p.identity != our_identity {
-                eprintln!("[Pax] Kicking stale LiveKit participant: {} (room={})", p.identity, room_name);
+                log::info!("Kicking stale LiveKit participant: {} (room={})", p.identity, room_name);
                 if let Err(e) = livekit_remove_participant(http, lk_url, &room_jwt, room_name, &p.identity).await {
-                    eprintln!("[Pax] {e}");
+                    log::warn!("{e}");
                 }
             }
         }
@@ -666,7 +666,7 @@ fn start_call_member_refresh_loop(state: Arc<AppState>, room_id: String) {
             if let Err(e) =
                 matrix_voice_refresh_call_member(c, &st.http_client, &room_id_clone).await
             {
-                log::warn!("[Pax] m.call.member refresh failed: {}", e);
+                log::warn!("m.call.member refresh failed: {}", e);
             }
         }
     });
@@ -682,7 +682,7 @@ pub async fn voice_connect(
     app_handle: tauri::AppHandle,
     room_id: String,
 ) -> Result<(), String> {
-    eprintln!("[Pax] voice_connect called for room {}", room_id);
+    log::debug!("voice_connect called for room {}", room_id);
     let state_arc: Arc<AppState> = (*state).clone();
     state_arc.stop_call_member_refresh_loop();
     let client = super::get_client(&state).await?;
@@ -700,7 +700,7 @@ pub async fn voice_connect(
     // remove any that match our userId but have a different deviceId.
     let user_id_str = client.user_id().ok_or("No user ID")?.to_string();
     let device_id_str = client.device_id().ok_or("No device ID")?.to_string();
-    eprintln!("[Pax] About to kick other devices (user={}, device={})", user_id_str, device_id_str);
+    log::debug!("About to kick other devices (user={}, device={})", user_id_str, device_id_str);
     kick_other_devices_from_livekit(
         &http_client,
         &user_id_str,
@@ -708,7 +708,7 @@ pub async fn voice_connect(
         &state.livekit,
     )
     .await;
-    eprintln!("[Pax] Kick check complete, proceeding with join");
+    log::debug!("Kick check complete, proceeding with join");
 
     // Optimistic join: start the Matrix join + LiveKit connect immediately.
     // Run leave-all-rooms cleanup in parallel as fire-and-forget so the user
@@ -804,8 +804,8 @@ pub async fn voice_start_screen_share(
     mode: String,
     window_title: Option<String>,
 ) -> Result<(), String> {
-    eprintln!(
-        "[Pax] voice_start_screen_share: mode={} window_title={:?}",
+    log::info!(
+        "voice_start_screen_share: mode={} window_title={:?}",
         mode, window_title
     );
     let screen_mode = match mode.as_str() {
