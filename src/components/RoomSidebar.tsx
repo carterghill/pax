@@ -5,28 +5,24 @@ import { useTheme } from "../theme/ThemeContext";
 import StatusDropdown from "./StatusDropdown";
 import VolumeContextMenu from "./VolumeContextMenu";
 import { useUserVolume } from "../hooks/useUserVolume";
-import { VOICE_ROOM_TYPE, localpartFromUserId, normalizeUserId } from "../utils/matrix";
-const resolveVoiceState = (
+import {
+  VOICE_ROOM_TYPE,
+  voiceStateLookupKeysForParticipant,
+} from "../utils/matrix";
+
+function resolveVoiceStateForRoom(
   participant: VoiceParticipant,
-  voiceCallParticipantStates: Record<
+  roomStateMap: Record<
     string,
     { isMuted: boolean; isDeafened: boolean; isSpeaking: boolean }
   >
-) => {
-  const candidates = [
-    participant.userId,
-    localpartFromUserId(participant.userId),
-    participant.displayName ?? "",
-  ]
-    .map(normalizeUserId)
-    .filter(Boolean);
-
-  for (const key of candidates) {
-    const state = voiceCallParticipantStates[key];
+) {
+  for (const key of voiceStateLookupKeysForParticipant(participant)) {
+    const state = roomStateMap[key];
     if (state) return state;
   }
   return undefined;
-};
+}
 
 interface RoomSidebarProps {
   width: number;
@@ -40,9 +36,10 @@ interface RoomSidebarProps {
   isVoiceConnecting: boolean;
   disconnectingFromRoomId: string | null;
   screenSharingOwners: string[];
-  voiceCallParticipantStates: Record<
+  /** Per Matrix voice room id: lookup keys → mute/deafen/speaking (LiveKit snapshot + in-call overlay). */
+  voiceParticipantStatesByRoom: Record<
     string,
-    { isMuted: boolean; isDeafened: boolean; isSpeaking: boolean }
+    Record<string, { isMuted: boolean; isDeafened: boolean; isSpeaking: boolean }>
   >;
   onSetParticipantVolume: (identity: string, volume: number) => void;
 }
@@ -139,23 +136,20 @@ function VoiceParticipantRow({
         gap: spacing.unit,
         flexShrink: 0,
       }}>
-        {isConnecting ? (
+        {isConnecting && (
           <Loader2
             size={12}
             color={palette.textSecondary}
             style={{ animation: "spin 1s linear infinite" }}
           />
-        ) : (
-          <>
-            {isSharingScreen && <Monitor size={12} color="#23a55a" />}
-            {isMuted && <MicOff size={12} color={palette.textSecondary} />}
-            {isDeafened && (
-              <span style={{ position: "relative", width: 12, height: 12, display: "inline-flex", alignItems: "center", justifyContent: "center" }}>
-                <Headphones size={12} color={palette.textSecondary} />
-                <Slash size={10} color={palette.textSecondary} style={{ position: "absolute" }} />
-              </span>
-            )}
-          </>
+        )}
+        {isSharingScreen && <Monitor size={12} color="#23a55a" />}
+        {isMuted && <MicOff size={12} color={palette.textSecondary} />}
+        {isDeafened && (
+          <span style={{ position: "relative", width: 12, height: 12, display: "inline-flex", alignItems: "center", justifyContent: "center" }}>
+            <Headphones size={12} color={palette.textSecondary} />
+            <Slash size={10} color={palette.textSecondary} style={{ position: "absolute" }} />
+          </span>
         )}
       </span>
     </div>
@@ -174,7 +168,7 @@ export default function RoomSidebar({
   isVoiceConnecting,
   disconnectingFromRoomId,
   screenSharingOwners,
-  voiceCallParticipantStates,
+  voiceParticipantStatesByRoom,
   onSetParticipantVolume,
 }: RoomSidebarProps) {
   const { palette, spacing, typography } = useTheme();
@@ -273,7 +267,10 @@ export default function RoomSidebar({
                 <div style={{ paddingBottom: spacing.unit }}>
                   <style>{`@keyframes spin { from { transform: rotate(0deg); } to { transform: rotate(360deg); } }`}</style>
                   {participants.map((p) => {
-                    const state = resolveVoiceState(p, voiceCallParticipantStates);
+                    const state = resolveVoiceStateForRoom(
+                      p,
+                      voiceParticipantStatesByRoom[room.id] ?? {}
+                    );
                     // Local user: connecting (joining) or disconnecting (left LiveKit but still in Matrix list)
                     const isLocalConnecting = isConnectedHere && p.userId === userId && isVoiceConnecting;
                     const isLocalDisconnecting = room.id === disconnectingFromRoomId && p.userId === userId;

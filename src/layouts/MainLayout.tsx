@@ -12,9 +12,7 @@ import { useTheme } from "../theme/ThemeContext";
 import SettingsMenu from "../components/SettingsMenu";
 import {
   VOICE_ROOM_TYPE,
-  extractMatrixUserId,
-  localpartFromUserId,
-  normalizeUserId,
+  voiceStateLookupKeysForLiveKitIdentity,
 } from "../utils/matrix";
 import { useLivekitVoiceSnapshots } from "../hooks/useLivekitVoiceSnapshots";
 
@@ -119,45 +117,49 @@ export default function MainLayout({ userId, onSignOut }: MainLayoutProps) {
   );
   const voiceParticipants = useVoiceParticipants(voiceRoomIds);
   const livekitByRoom = useLivekitVoiceSnapshots(voiceRoomIds);
-  const voiceCallParticipantStates = useMemo(() => {
-    const stateMap: Record<
-      string,
-      { isMuted: boolean; isDeafened: boolean; isSpeaking: boolean }
-    > = {};
-
+  const voiceParticipantStatesByRoom = useMemo(() => {
+    type VoiceRowState = {
+      isMuted: boolean;
+      isDeafened: boolean;
+      isSpeaking: boolean;
+    };
+    const byRoom: Record<string, Record<string, VoiceRowState>> = {};
     for (const rid of voiceRoomIds) {
+      byRoom[rid] = {};
       for (const lp of livekitByRoom[rid] ?? []) {
-        const mxid = extractMatrixUserId(lp.identity);
-        const st = {
+        const st: VoiceRowState = {
           isMuted: lp.isMuted,
           isDeafened: lp.isDeafened,
           isSpeaking: lp.isSpeaking,
         };
-        const keys = [lp.identity, mxid, localpartFromUserId(mxid)]
-          .map(normalizeUserId)
-          .filter(Boolean);
-        for (const key of keys) {
-          stateMap[key] = st;
+        for (const key of voiceStateLookupKeysForLiveKitIdentity(lp.identity)) {
+          byRoom[rid][key] = st;
         }
       }
     }
-
-    for (const p of voiceCall.participants) {
-      const state = {
-        isMuted: p.isMuted,
-        isDeafened: p.isDeafened,
-        isSpeaking: p.isSpeaking,
-      };
-      const mxid = extractMatrixUserId(p.identity);
-      const keys = [p.identity, mxid, localpartFromUserId(mxid)]
-        .map(normalizeUserId)
-        .filter(Boolean);
-      for (const key of keys) {
-        stateMap[key] = state;
+    const cr = voiceCall.connectedRoomId;
+    if (cr) {
+      if (!byRoom[cr]) {
+        byRoom[cr] = {};
+      }
+      for (const p of voiceCall.participants) {
+        const st: VoiceRowState = {
+          isMuted: p.isMuted,
+          isDeafened: p.isDeafened,
+          isSpeaking: p.isSpeaking,
+        };
+        for (const key of voiceStateLookupKeysForLiveKitIdentity(p.identity)) {
+          byRoom[cr][key] = st;
+        }
       }
     }
-    return stateMap;
-  }, [voiceCall.participants, livekitByRoom, voiceRoomIds]);
+    return byRoom;
+  }, [
+    voiceRoomIds,
+    livekitByRoom,
+    voiceCall.participants,
+    voiceCall.connectedRoomId,
+  ]);
 
   const { connect: connectVoiceCall, connectedRoomId: connectedVoiceRoomId } = voiceCall;
 
@@ -222,7 +224,7 @@ export default function MainLayout({ userId, onSignOut }: MainLayoutProps) {
             isVoiceConnecting={voiceCall.isConnecting}
             disconnectingFromRoomId={voiceCall.disconnectingFromRoomId}
             screenSharingOwners={voiceCall.screenSharingOwners}
-            voiceCallParticipantStates={voiceCallParticipantStates}
+            voiceParticipantStatesByRoom={voiceParticipantStatesByRoom}
             onSetParticipantVolume={voiceCall.setParticipantVolume}
           />
           <div

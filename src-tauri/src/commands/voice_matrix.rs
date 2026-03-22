@@ -826,6 +826,12 @@ pub async fn voice_connect(
         )
         .await?;
 
+    if let Some((mid, lk_name)) = voice_mgr.current_matrix_room_and_livekit_sfu_name() {
+        if let Ok(mut m) = state_arc.livekit_matrix_to_sfu_room.lock() {
+            m.insert(mid, lk_name);
+        }
+    }
+
     start_call_member_refresh_loop(state_arc, room_id);
 
     Ok(())
@@ -970,19 +976,68 @@ fn pick_livekit_room_name(rooms: &[serde_json::Value], matrix_room_id: &str) -> 
     None
 }
 
-fn track_is_microphone(track: &serde_json::Value) -> bool {
+fn track_is_microphone_or_voice_audio(track: &serde_json::Value) -> bool {
     if let Some(s) = track.get("source").and_then(|v| v.as_str()) {
         let u = s.to_ascii_uppercase();
-        return u.contains("MICROPHONE") || s.eq_ignore_ascii_case("microphone");
+        if u.contains("MICROPHONE") || u.contains("SCREEN_SHARE_AUDIO") {
+            return true;
+        }
     }
-    if let Some(n) = track.get("source").and_then(|v| v.as_u64()) {
-        return n == 2;
+    let src_num = track
+        .get("source")
+        .and_then(|v| v.as_u64())
+        .or_else(|| track.get("source").and_then(|v| v.as_i64()).map(|i| i as u64));
+    if let Some(n) = src_num {
+        if n == 2 || n == 4 {
+            return true;
+        }
     }
-    if let Some(n) = track.get("source").and_then(|v| v.as_i64()) {
-        return n == 2;
+    // TrackType::Audio = 0 in LiveKit protos
+    if let Some(s) = track.get("type").and_then(|v| v.as_str()) {
+        let u = s.to_ascii_uppercase();
+        if u == "AUDIO" || s.eq_ignore_ascii_case("audio") {
+            return true;
+        }
     }
-    if let Some(mime) = track.get("mimeType").and_then(|v| v.as_str()) {
-        return mime.to_ascii_lowercase().starts_with("audio/");
+    let ty_num = track
+        .get("type")
+        .and_then(|v| v.as_u64())
+        .or_else(|| track.get("type").and_then(|v| v.as_i64()).map(|i| i as u64));
+    if ty_num == Some(0) {
+        return true;
+    }
+    let mime = track
+        .get("mimeType")
+        .or_else(|| track.get("mime_type"))
+        .and_then(|v| v.as_str());
+    if let Some(mime) = mime {
+        if mime.to_ascii_lowercase().starts_with("audio/") {
+            return true;
+        }
+    }
+    false
+}
+
+fn participant_track_nodes(p: &serde_json::Value) -> Vec<serde_json::Value> {
+    let mut out = Vec::new();
+    for key in ["tracks", "trackPublications", "publications"] {
+        if let Some(arr) = p.get(key).and_then(|t| t.as_array()) {
+            for t in arr {
+                out.push(t.clone());
+            }
+        }
+    }
+    out
+}
+
+fn track_muted_flag(track: &serde_json::Value) -> bool {
+    if track.get("muted").and_then(|m| m.as_bool()).unwrap_or(false) {
+        return true;
+    }
+    if let Some(inner) = track.get("track") {
+        if inner.get("muted").and_then(|m| m.as_bool()).unwrap_or(false) {
+            return true;
+        }
     }
     false
 }
@@ -996,13 +1051,11 @@ fn parse_livekit_participant_json(p: &serde_json::Value) -> Option<LivekitVoiceP
         .unwrap_or(false);
     let mut mic_muted_from_track = false;
     let mut saw_mic = false;
-    if let Some(tracks) = p.get("tracks").and_then(|t| t.as_array()) {
-        for t in tracks {
-            if track_is_microphone(t) {
-                saw_mic = true;
-                if t.get("muted").and_then(|m| m.as_bool()).unwrap_or(false) {
-                    mic_muted_from_track = true;
-                }
+    for t in participant_track_nodes(p) {
+        if track_is_microphone_or_voice_audio(&t) {
+            saw_mic = true;
+            if track_muted_flag(&t) {
+                mic_muted_from_track = true;
             }
         }
     }
@@ -1016,12 +1069,13 @@ fn parse_livekit_participant_json(p: &serde_json::Value) -> Option<LivekitVoiceP
             pax_muted = Some(v == "true");
         }
     }
+    // Unknown layout: do not assume muted (avoids wrong sidebar icons).
     let is_muted = if let Some(pm) = pax_muted {
         pm
     } else if saw_mic {
         mic_muted_from_track
     } else {
-        true
+        false
     };
     Some(LivekitVoiceParticipantInfo {
         identity,
@@ -1098,14 +1152,16 @@ async fn livekit_list_participants_for_room(
         .collect())
 }
 
+/// Second value: SFU room name to persist when it was discovered (not read from cache).
 async fn fetch_livekit_voice_snapshot_for_matrix_room(
     http: &reqwest::Client,
     config: &LivekitConfig,
     matrix_room_id: &str,
-) -> Result<Vec<LivekitVoiceParticipantInfo>, String> {
+    cached_sfu_room_name: Option<&str>,
+) -> Result<(Vec<LivekitVoiceParticipantInfo>, Option<String>), String> {
     let (api_key, api_secret, lk_url) = match (&config.api_key, &config.api_secret, &config.url) {
         (Some(k), Some(s), Some(u)) => (k.as_str(), s.as_str(), u.as_str()),
-        _ => return Ok(vec![]),
+        _ => return Ok((vec![], None)),
     };
     let now = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -1130,10 +1186,16 @@ async fn fetch_livekit_voice_snapshot_for_matrix_room(
     )
     .map_err(|e| format!("LiveKit admin JWT: {e}"))?;
 
-    let rooms = livekit_list_rooms(http, lk_url, &token).await?;
-    let Some(lk_room) = pick_livekit_room_name(&rooms, matrix_room_id) else {
-        return Ok(vec![]);
-    };
+    let (lk_room, discovered_sfu_name) =
+        if let Some(name) = cached_sfu_room_name.map(str::trim).filter(|s| !s.is_empty()) {
+            (name.to_string(), None)
+        } else {
+            let rooms = livekit_list_rooms(http, lk_url, &token).await?;
+            let Some(picked) = pick_livekit_room_name(&rooms, matrix_room_id) else {
+                return Ok((vec![], None));
+            };
+            (picked.clone(), Some(picked))
+        };
 
     let room_claims = LivekitAdminClaims {
         iss: api_key.to_string(),
@@ -1154,7 +1216,9 @@ async fn fetch_livekit_voice_snapshot_for_matrix_room(
     )
     .map_err(|e| format!("LiveKit room JWT: {e}"))?;
 
-    livekit_list_participants_for_room(http, lk_url, &room_token, &lk_room).await
+    let participants =
+        livekit_list_participants_for_room(http, lk_url, &room_token, &lk_room).await?;
+    Ok((participants, discovered_sfu_name))
 }
 
 /// Best-effort LiveKit participant mute/deafen/speaking (requires `LIVEKIT_*` admin env vars).
@@ -1164,14 +1228,30 @@ pub async fn get_livekit_voice_room_snapshot(
     state: State<'_, Arc<AppState>>,
     room_id: String,
 ) -> Result<Vec<LivekitVoiceParticipantInfo>, String> {
+    let cached = state
+        .livekit_matrix_to_sfu_room
+        .lock()
+        .ok()
+        .and_then(|g| g.get(&room_id).cloned());
+    let cached_ref = cached.as_deref();
     match fetch_livekit_voice_snapshot_for_matrix_room(
         &state.http_client,
         &state.livekit,
         &room_id,
+        cached_ref,
     )
     .await
     {
-        Ok(v) => Ok(v),
+        Ok((participants, discovered)) => {
+            if cached_ref.is_none() {
+                if let Some(sfu) = discovered {
+                    if let Ok(mut g) = state.livekit_matrix_to_sfu_room.lock() {
+                        g.insert(room_id.clone(), sfu);
+                    }
+                }
+            }
+            Ok(participants)
+        }
         Err(e) => {
             log::debug!("LiveKit voice snapshot ({}): {}", room_id, e);
             Ok(vec![])

@@ -38,6 +38,8 @@ pub struct AppState {
     pub sync_running: Arc<Mutex<bool>>,
     pub display_server: DisplayServer,
     pub livekit: LivekitConfig,
+    /// Matrix voice room id → LiveKit SFU room name (learned on connect; used for admin ListParticipants).
+    pub livekit_matrix_to_sfu_room: StdMutex<HashMap<String, String>>,
     /// Stops the periodic `m.call.member` refresh task (see `voice_matrix`).
     pub call_member_refresh_stop: Arc<AtomicBool>,
     pub call_member_refresh_task: StdMutex<Option<tauri::async_runtime::JoinHandle<()>>>,
@@ -108,6 +110,7 @@ pub fn run() {
         sync_running: Arc::new(Mutex::new(false)),
         display_server,
         livekit,
+        livekit_matrix_to_sfu_room: StdMutex::new(HashMap::new()),
         call_member_refresh_stop: Arc::new(AtomicBool::new(true)),
         call_member_refresh_task: StdMutex::new(None),
     });

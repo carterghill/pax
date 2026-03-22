@@ -391,6 +391,13 @@ impl VoiceManager {
         guard.as_ref().map(|s| s.room_id.clone())
     }
 
+    /// Matrix room id + LiveKit SFU room name (from the joined room; used for admin ListParticipants).
+    pub fn current_matrix_room_and_livekit_sfu_name(&self) -> Option<(String, String)> {
+        let guard = self.session.lock();
+        let s = guard.as_ref()?;
+        Some((s.room_id.clone(), s.room.name()))
+    }
+
     /// Start sharing screen. Returns error if not in a call or capture fails.
     /// For Window mode, window_title selects which window (None = foreground).
     pub async fn start_screen_share(
