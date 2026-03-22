@@ -142,10 +142,7 @@ pub async fn restore_session(
 
 #[tauri::command]
 pub async fn get_rooms(state: State<'_, Arc<AppState>>) -> Result<Vec<RoomInfo>, String> {
-    let client = {
-        let guard = state.client.lock().await;
-        guard.as_ref().ok_or("Not logged in")?.clone()
-    };
+    let client = super::get_client(&state).await?;
 
     let all_rooms = client.joined_rooms();
     let avatar_cache = state.avatar_cache.clone();

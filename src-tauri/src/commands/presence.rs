@@ -4,6 +4,8 @@ use tauri::State;
 
 use crate::{idle, AppState};
 
+use super::get_client;
+
 #[tauri::command]
 pub async fn set_presence(
     state: State<'_, Arc<AppState>>,
@@ -16,12 +18,8 @@ pub async fn set_presence(
         _ => return Err(format!("Invalid presence state: {presence}")),
     };
 
-    let (client, user_id) = {
-        let guard = state.client.lock().await;
-        let c = guard.as_ref().ok_or("Not logged in")?.clone();
-        let uid = c.user_id().ok_or("No user ID")?.to_owned();
-        (c, uid)
-    };
+    let client = get_client(&state).await?;
+    let user_id = client.user_id().ok_or("No user ID")?.to_owned();
 
     let request = matrix_sdk::ruma::api::client::presence::set_presence::v3::Request::new(
         user_id,

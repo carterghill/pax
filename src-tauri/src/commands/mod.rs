@@ -11,8 +11,10 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 use data_encoding::BASE64;
-use matrix_sdk::{media::MediaFormat, room::RoomMember, Room};
+use matrix_sdk::{media::MediaFormat, room::RoomMember, Client, Room};
 use tokio::sync::Mutex;
+
+use crate::AppState;
 
 /// Format an error with its full source chain so we see the real cause (e.g. TLS, timeout).
 pub(crate) fn fmt_error_chain(e: &dyn std::error::Error) -> String {
@@ -24,6 +26,26 @@ pub(crate) fn fmt_error_chain(e: &dyn std::error::Error) -> String {
         current = source;
     }
     s
+}
+
+/// Clone the Matrix client out of AppState, or error if not logged in.
+pub(crate) async fn get_client(state: &AppState) -> Result<Client, String> {
+    state
+        .client
+        .lock()
+        .await
+        .as_ref()
+        .ok_or_else(|| "Not logged in".to_string())
+        .cloned()
+}
+
+/// Parse a room ID string and look it up on the client.
+pub(crate) fn resolve_room(client: &Client, room_id: &str) -> Result<Room, String> {
+    let parsed =
+        matrix_sdk::ruma::RoomId::parse(room_id).map_err(|e| format!("Invalid room ID: {e}"))?;
+    client
+        .get_room(&parsed)
+        .ok_or_else(|| "Room not found".to_string())
 }
 
 fn encode_avatar_data_url(bytes: &[u8]) -> String {

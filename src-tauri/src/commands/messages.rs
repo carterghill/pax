@@ -21,7 +21,7 @@ use crate::types::{
 };
 use crate::AppState;
 
-use super::get_or_fetch_member_avatar;
+use super::{get_client, get_or_fetch_member_avatar, resolve_room};
 use super::voice_matrix::collect_voice_participants_for_joined_voice_rooms;
 
 #[tauri::command]
@@ -31,15 +31,8 @@ pub async fn get_messages(
     from: Option<String>,
     limit: u32,
 ) -> Result<MessageBatch, String> {
-    let client = {
-        let guard = state.client.lock().await;
-        guard.as_ref().ok_or("Not logged in")?.clone()
-    };
-
-    let room_id_parsed =
-        matrix_sdk::ruma::RoomId::parse(&room_id).map_err(|e| format!("Invalid room ID: {e}"))?;
-
-    let room = client.get_room(&room_id_parsed).ok_or("Room not found")?;
+    let client = get_client(&state).await?;
+    let room = resolve_room(&client, &room_id)?;
 
     let mut options = MessagesOptions::backward();
     if let Some(token) = &from {
@@ -161,15 +154,8 @@ pub async fn send_message(
     room_id: String,
     body: String,
 ) -> Result<(), String> {
-    let client = {
-        let guard = state.client.lock().await;
-        guard.as_ref().ok_or("Not logged in")?.clone()
-    };
-
-    let room_id_parsed =
-        matrix_sdk::ruma::RoomId::parse(&room_id).map_err(|e| format!("Invalid room ID: {e}"))?;
-
-    let room = client.get_room(&room_id_parsed).ok_or("Room not found")?;
+    let client = get_client(&state).await?;
+    let room = resolve_room(&client, &room_id)?;
 
     let content = matrix_sdk::ruma::events::room::message::RoomMessageEventContent::text_plain(&body);
 
@@ -185,15 +171,8 @@ pub async fn get_room_redaction_policy(
     state: State<'_, Arc<AppState>>,
     room_id: String,
 ) -> Result<RoomRedactionPolicy, String> {
-    let client = {
-        let guard = state.client.lock().await;
-        guard.as_ref().ok_or("Not logged in")?.clone()
-    };
-
-    let room_id_parsed =
-        matrix_sdk::ruma::RoomId::parse(&room_id).map_err(|e| format!("Invalid room ID: {e}"))?;
-
-    let room = client.get_room(&room_id_parsed).ok_or("Room not found")?;
+    let client = get_client(&state).await?;
+    let room = resolve_room(&client, &room_id)?;
 
     let pl = room
         .power_levels()
@@ -215,15 +194,8 @@ pub async fn edit_message(
     event_id: String,
     body: String,
 ) -> Result<(), String> {
-    let client = {
-        let guard = state.client.lock().await;
-        guard.as_ref().ok_or("Not logged in")?.clone()
-    };
-
-    let room_id_parsed =
-        matrix_sdk::ruma::RoomId::parse(&room_id).map_err(|e| format!("Invalid room ID: {e}"))?;
-
-    let room = client.get_room(&room_id_parsed).ok_or("Room not found")?;
+    let client = get_client(&state).await?;
+    let room = resolve_room(&client, &room_id)?;
 
     let event_id_parsed =
         EventId::parse(&event_id).map_err(|e| format!("Invalid event ID: {e}"))?;
@@ -254,15 +226,8 @@ pub async fn redact_message(
     room_id: String,
     event_id: String,
 ) -> Result<(), String> {
-    let client = {
-        let guard = state.client.lock().await;
-        guard.as_ref().ok_or("Not logged in")?.clone()
-    };
-
-    let room_id_parsed =
-        matrix_sdk::ruma::RoomId::parse(&room_id).map_err(|e| format!("Invalid room ID: {e}"))?;
-
-    let room = client.get_room(&room_id_parsed).ok_or("Room not found")?;
+    let client = get_client(&state).await?;
+    let room = resolve_room(&client, &room_id)?;
 
     let event_id_parsed =
         EventId::parse(&event_id).map_err(|e| format!("Invalid event ID: {e}"))?;
@@ -277,9 +242,7 @@ pub async fn redact_message(
 
 #[tauri::command]
 pub async fn start_sync(state: State<'_, Arc<AppState>>, app: tauri::AppHandle) -> Result<(), String> {
-    let guard = state.client.lock().await;
-    let client = guard.as_ref().ok_or("Not logged in")?.clone();
-    drop(guard);
+    let client = get_client(&state).await?;
 
     // `AppHandle::clone` bumps Tao's `Rc<EventLoopRunner>` — `Rc` is not thread-safe.
     // Matrix runs `sync_with_callback` and event handlers on tokio worker threads; cloning
@@ -488,15 +451,8 @@ pub async fn send_typing_notice(
     room_id: String,
     typing: bool,
 ) -> Result<(), String> {
-    let client = {
-        let guard = state.client.lock().await;
-        guard.as_ref().ok_or("Not logged in")?.clone()
-    };
-
-    let room_id_parsed =
-        matrix_sdk::ruma::RoomId::parse(&room_id).map_err(|e| format!("Invalid room ID: {e}"))?;
-
-    let room = client.get_room(&room_id_parsed).ok_or("Room not found")?;
+    let client = get_client(&state).await?;
+    let room = resolve_room(&client, &room_id)?;
 
     room.typing_notice(typing)
         .await

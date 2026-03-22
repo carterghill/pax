@@ -6,22 +6,15 @@ use tauri::State;
 use crate::types::RoomMemberInfo;
 use crate::AppState;
 
-use super::get_or_fetch_member_avatar;
+use super::{get_client, get_or_fetch_member_avatar, resolve_room};
 
 #[tauri::command]
 pub async fn get_room_members(
     state: State<'_, Arc<AppState>>,
     room_id: String,
 ) -> Result<Vec<RoomMemberInfo>, String> {
-    let client = {
-        let guard = state.client.lock().await;
-        guard.as_ref().ok_or("Not logged in")?.clone()
-    };
-
-    let room_id_parsed =
-        matrix_sdk::ruma::RoomId::parse(&room_id).map_err(|e| format!("Invalid room ID: {e}"))?;
-
-    let room = client.get_room(&room_id_parsed).ok_or("Room not found")?;
+    let client = get_client(&state).await?;
+    let room = resolve_room(&client, &room_id)?;
 
     let members = room
         .members(matrix_sdk::RoomMemberships::JOIN)
