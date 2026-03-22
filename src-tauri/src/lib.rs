@@ -11,7 +11,8 @@ pub mod video_recv;
 mod voice;
 
 use std::collections::HashMap;
-use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Mutex as StdMutex};
 
 use matrix_sdk::Client;
 use tokio::sync::Mutex;
@@ -37,6 +38,21 @@ pub struct AppState {
     pub sync_running: Arc<Mutex<bool>>,
     pub display_server: DisplayServer,
     pub livekit: LivekitConfig,
+    /// Stops the periodic `m.call.member` refresh task (see `voice_matrix`).
+    pub call_member_refresh_stop: Arc<AtomicBool>,
+    pub call_member_refresh_task: StdMutex<Option<tauri::async_runtime::JoinHandle<()>>>,
+}
+
+impl AppState {
+    /// Abort the background task that re-sends `m.call.member` to extend `expires`.
+    pub fn stop_call_member_refresh_loop(&self) {
+        self.call_member_refresh_stop.store(true, Ordering::SeqCst);
+        if let Ok(mut guard) = self.call_member_refresh_task.lock() {
+            if let Some(h) = guard.take() {
+                h.abort();
+            }
+        }
+    }
 }
 
 /// Ensure the system CA certificate store is used for TLS on Linux.
@@ -92,6 +108,8 @@ pub fn run() {
         sync_running: Arc::new(Mutex::new(false)),
         display_server,
         livekit,
+        call_member_refresh_stop: Arc::new(AtomicBool::new(true)),
+        call_member_refresh_task: StdMutex::new(None),
     });
 
     tauri::Builder::default()
@@ -112,6 +130,7 @@ pub fn run() {
             commands::members::get_room_members,
             commands::voice_matrix::get_voice_participants,
             commands::voice_matrix::get_all_voice_participants,
+            commands::voice_matrix::get_livekit_voice_room_snapshot,
             commands::voice_matrix::voice_connect,
             commands::voice_matrix::voice_disconnect,
             commands::voice_matrix::voice_toggle_mic,

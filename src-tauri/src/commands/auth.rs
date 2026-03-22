@@ -34,6 +34,7 @@ fn credentials_path(app: &tauri::AppHandle) -> Result<std::path::PathBuf, String
 
 #[tauri::command]
 pub async fn logout(state: State<'_, Arc<AppState>>, app: tauri::AppHandle) -> Result<(), String> {
+    state.stop_call_member_refresh_loop();
     *state.client.lock().await = None;
     state.avatar_cache.lock().await.clear();
     state.presence_map.lock().await.clear();

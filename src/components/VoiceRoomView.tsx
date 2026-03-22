@@ -1,9 +1,9 @@
 import { useState, useCallback, useEffect, useMemo, useRef } from "react";
 import { Volume2, Mic, MicOff, PhoneOff, Loader2, AudioLines, Monitor, MonitorUp, Headphones, Settings, Slash } from "lucide-react";
 import { useTheme } from "../theme/ThemeContext";
-import { Room, VoiceParticipant as MatrixVoiceParticipant } from "../types/matrix";
+import { LivekitVoiceParticipantInfo, Room, VoiceParticipant as MatrixVoiceParticipant } from "../types/matrix";
 import { VoiceCallState } from "../hooks/useVoiceCall";
-import { normalizeUserId } from "../utils/matrix";
+import { extractMatrixUserId, normalizeUserId } from "../utils/matrix";
 import { useUserVolume } from "../hooks/useUserVolume";
 import VolumeContextMenu from "./VolumeContextMenu";
 import ScreenShareGrid from "./ScreenShareGrid";
@@ -13,7 +13,10 @@ interface VoiceRoomViewProps {
   room: Room;
   callState: VoiceCallState;
   voiceParticipants: MatrixVoiceParticipant[];
+  /** LiveKit Room Service snapshot (mute/deafen/speaking) when not connected */
+  livekitInRoom: LivekitVoiceParticipantInfo[];
   userId: string;
+  onJoinVoice: () => void;
   onDisconnect: () => void;
   onToggleMic: () => void;
   onToggleDeafen: () => void;
@@ -32,7 +35,9 @@ export default function VoiceRoomView({
   room,
   callState,
   voiceParticipants,
+  livekitInRoom,
   userId,
+  onJoinVoice,
   onDisconnect,
   onToggleMic,
   onToggleDeafen,
@@ -234,6 +239,62 @@ export default function VoiceRoomView({
     return result;
   }, [callState.participants, callState.connectedRoomId, callState.isConnecting, room.id, voiceParticipants, userId, liveKitIdentitySet]);
 
+  const showLobby = !isConnected && !isConnecting && !callState.error;
+
+  const lobbyParticipants = useMemo(() => {
+    if (!showLobby) return [];
+    type Row = {
+      identity: string;
+      displayName: string;
+      isLocal: boolean;
+      isMuted: boolean;
+      isDeafened: boolean;
+      isSpeaking: boolean;
+    };
+    const result: Row[] = [];
+    const liveByMxid = new Map<string, LivekitVoiceParticipantInfo>();
+    for (const lp of livekitInRoom) {
+      const mxid = extractMatrixUserId(lp.identity);
+      liveByMxid.set(normalizeUserId(mxid), lp);
+      liveByMxid.set(normalizeUserId(lp.identity), lp);
+    }
+    const covered = new Set<string>();
+    for (const p of voiceParticipants) {
+      const nk = normalizeUserId(p.userId);
+      covered.add(nk);
+      const lp = liveByMxid.get(nk);
+      const displayName = p.displayName ?? p.userId;
+      const localDisplayName = displayName.startsWith("@")
+        ? displayName.slice(1).split(":")[0]
+        : displayName;
+      result.push({
+        identity: p.userId,
+        displayName: localDisplayName,
+        isLocal: p.userId === userId,
+        isMuted: lp?.isMuted ?? false,
+        isDeafened: lp?.isDeafened ?? false,
+        isSpeaking: lp?.isSpeaking ?? false,
+      });
+    }
+    for (const lp of livekitInRoom) {
+      const mxid = extractMatrixUserId(lp.identity);
+      const nk = normalizeUserId(mxid);
+      if (covered.has(nk)) continue;
+      const localDisplayName = mxid.startsWith("@")
+        ? mxid.slice(1).split(":")[0]
+        : mxid;
+      result.push({
+        identity: lp.identity,
+        displayName: localDisplayName,
+        isLocal: nk === normalizeUserId(userId),
+        isMuted: lp.isMuted,
+        isDeafened: lp.isDeafened,
+        isSpeaking: lp.isSpeaking,
+      });
+    }
+    return result;
+  }, [showLobby, voiceParticipants, livekitInRoom, userId]);
+
   // Display names for screen share header
   const remoteSharers = callState.screenSharingOwners.filter(id => {
     // Filter out local identity (we show "You are sharing" separately)
@@ -347,6 +408,71 @@ export default function VoiceRoomView({
             <span style={{ fontSize: typography.fontSizeBase, color: "#f23f43" }}>
               {callState.error}
             </span>
+          </div>
+        )}
+
+        {showLobby && lobbyParticipants.map((p) => (
+          <div
+            key={p.identity}
+            style={{
+              display: "flex",
+              flexDirection: "column",
+              alignItems: "center",
+              gap: spacing.unit * 2,
+              width: 120,
+            }}
+          >
+            <div style={{
+              width: 80,
+              height: 80,
+              borderRadius: "50%",
+              backgroundColor: palette.bgActive,
+              display: "flex",
+              alignItems: "center",
+              justifyContent: "center",
+              fontSize: 28,
+              fontWeight: typography.fontWeightBold,
+              color: palette.textHeading,
+              border: `3px solid ${p.isSpeaking ? "#23a55a" : "transparent"}`,
+              transition: "border-color 0.15s ease",
+            }}>
+              {p.displayName.charAt(0).toUpperCase()}
+            </div>
+            <span style={{
+              fontSize: typography.fontSizeSmall,
+              color: palette.textPrimary,
+              textAlign: "center",
+              overflow: "hidden",
+              textOverflow: "ellipsis",
+              whiteSpace: "nowrap",
+              maxWidth: "100%",
+              display: "flex",
+              alignItems: "center",
+              justifyContent: "center",
+              gap: spacing.unit,
+            }}>
+              {p.displayName}{p.isLocal ? " (you)" : ""}
+              <span style={{ marginLeft: spacing.unit, display: "inline-flex", alignItems: "center", gap: spacing.unit }}>
+                {p.isMuted && <MicOff size={12} color={palette.textSecondary} />}
+                {p.isDeafened && (
+                  <span style={{ position: "relative", width: 12, height: 12, display: "inline-flex", alignItems: "center", justifyContent: "center" }}>
+                    <Headphones size={12} color={palette.textSecondary} />
+                    <Slash size={10} color={palette.textSecondary} style={{ position: "absolute" }} />
+                  </span>
+                )}
+              </span>
+            </span>
+          </div>
+        ))}
+
+        {showLobby && lobbyParticipants.length === 0 && (
+          <div style={{
+            color: palette.textSecondary,
+            fontSize: typography.fontSizeBase,
+            textAlign: "center",
+            maxWidth: 360,
+          }}>
+            No one is listed in this call yet. Join to connect, or wait for Matrix roster updates.
           </div>
         )}
 
@@ -466,6 +592,33 @@ export default function VoiceRoomView({
         )}
       </div>
       </div>
+
+      {/* Lobby: join call */}
+      {showLobby && (
+        <div style={{
+          padding: `${spacing.unit * 4}px`,
+          borderTop: `1px solid ${palette.border}`,
+          display: "flex",
+          justifyContent: "center",
+        }}>
+          <button
+            type="button"
+            onClick={() => onJoinVoice()}
+            style={{
+              padding: `${spacing.unit * 2}px ${spacing.unit * 5}px`,
+              borderRadius: spacing.unit * 2,
+              border: "none",
+              cursor: "pointer",
+              fontSize: typography.fontSizeBase,
+              fontWeight: typography.fontWeightBold,
+              backgroundColor: "#23a55a",
+              color: "#fff",
+            }}
+          >
+            Join voice
+          </button>
+        </div>
+      )}
 
       {/* Controls bar */}
       {isConnected && (

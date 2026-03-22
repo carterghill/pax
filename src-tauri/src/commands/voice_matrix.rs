@@ -1,4 +1,5 @@
 use std::collections::HashMap;
+use std::sync::atomic::Ordering;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -9,12 +10,17 @@ use matrix_sdk::{Client, Room};
 use serde::Serialize;
 use tauri::State;
 
-use crate::types::{VoiceJoinResult, VoiceParticipant};
+use crate::types::{LivekitVoiceParticipantInfo, VoiceJoinResult, VoiceParticipant};
 use crate::{screen, voice, AppState, LivekitConfig};
 
 use super::{fmt_error_chain, get_or_fetch_member_avatar};
 
 const VOICE_ROOM_TYPE: &str = "org.matrix.msc3417.call";
+
+/// `m.call.member` `expires` field (ms). Membership is inactive after `origin_server_ts + expires`.
+const VOICE_CALL_MEMBER_EXPIRES_MS: u64 = 7_200_000;
+/// Re-send `m.call.member` on this interval so the roster stays valid while connected.
+const CALL_MEMBER_REFRESH_INTERVAL_SECS: u64 = 45 * 60;
 
 /// Check whether a call.member state event JSON represents an active participant.
 /// Handles both MSC4143 (per-device content) and MSC3401 (memberships array) formats,
@@ -222,31 +228,36 @@ pub async fn get_voice_participants(
     Ok(participants)
 }
 
-/// Internal helper: do the Matrix state event + JWT exchange.
-/// Returns (jwt, livekit_url).
-pub(crate) async fn matrix_voice_join(
+/// Re-send `m.call.member` so `origin_server_ts` advances and roster expiry stays valid while connected.
+pub(crate) async fn matrix_voice_refresh_call_member(
     client: &Client,
     http: &reqwest::Client,
     room_id: &str,
-) -> Result<VoiceJoinResult, String> {
+) -> Result<(), String> {
+    matrix_voice_put_call_member(client, http, room_id)
+        .await
+        .map(|_| ())
+}
+
+/// PUT `org.matrix.msc3401.call.member` for this device. Returns the LiveKit JWT service URL.
+async fn matrix_voice_put_call_member(
+    client: &Client,
+    http: &reqwest::Client,
+    room_id: &str,
+) -> Result<String, String> {
     let room_id_parsed =
         matrix_sdk::ruma::RoomId::parse(room_id).map_err(|e| format!("Invalid room ID: {e}"))?;
-
     let room = client.get_room(&room_id_parsed).ok_or("Room not found")?;
-
     let user_id = client.user_id().ok_or("No user ID")?;
     let device_id = client.device_id().ok_or("No device ID")?;
 
-    // 1. Discover LiveKit service URL from existing call member events
     let livekit_service_url = discover_livekit_service_url(&room).await?;
-
-    // 2. Build call.member state event content
     let state_key = format!("_{}_{}_{}", user_id, device_id, "m.call");
     let content = serde_json::json!({
         "application": "m.call",
         "call_id": "",
         "device_id": device_id.as_str(),
-        "expires": 7200000,
+        "expires": VOICE_CALL_MEMBER_EXPIRES_MS,
         "foci_preferred": [{
             "livekit_alias": room_id,
             "livekit_service_url": &livekit_service_url,
@@ -260,10 +271,8 @@ pub(crate) async fn matrix_voice_join(
         "scope": "m.room"
     });
 
-    // 3. Send state event via Matrix CS API
     let homeserver = client.homeserver().to_string();
     let access_token = client.access_token().ok_or("No access token")?;
-
     let state_url = format!(
         "{}/_matrix/client/v3/rooms/{}/state/{}/{}",
         homeserver.trim_end_matches('/'),
@@ -281,13 +290,26 @@ pub(crate) async fn matrix_voice_join(
         .await
         .map_err(|e| format!("Failed to send state event (join): {}", fmt_error_chain(&e)))?;
 
-    {
-        let status = resp.status();
-        if !status.is_success() {
-            let body = resp.text().await.unwrap_or_default();
-            return Err(format!("Failed to send state event ({}): {}", status, body));
-        }
+    let status = resp.status();
+    if !status.is_success() {
+        let body = resp.text().await.unwrap_or_default();
+        return Err(format!("Failed to send state event ({}): {}", status, body));
     }
+
+    Ok(livekit_service_url)
+}
+
+/// Internal helper: do the Matrix state event + JWT exchange.
+/// Returns (jwt, livekit_url).
+pub(crate) async fn matrix_voice_join(
+    client: &Client,
+    http: &reqwest::Client,
+    room_id: &str,
+) -> Result<VoiceJoinResult, String> {
+    let livekit_service_url = matrix_voice_put_call_member(client, http, room_id).await?;
+
+    let user_id = client.user_id().ok_or("No user ID")?;
+    let device_id = client.device_id().ok_or("No device ID")?;
 
     // 4. Get OpenID token for authenticating with lk-jwt-service
     let openid_request = matrix_sdk::ruma::api::client::account::request_openid_token::v3::Request::new(
@@ -693,6 +715,43 @@ async fn kick_other_devices_from_livekit(
     }
 }
 
+fn start_call_member_refresh_loop(state: Arc<AppState>, room_id: String) {
+    state.stop_call_member_refresh_loop();
+    state
+        .call_member_refresh_stop
+        .store(false, Ordering::SeqCst);
+    let stop = state.call_member_refresh_stop.clone();
+    let st = state.clone();
+    let room_id_clone = room_id.clone();
+    let handle = tauri::async_runtime::spawn(async move {
+        let mut interval =
+            tokio::time::interval(Duration::from_secs(CALL_MEMBER_REFRESH_INTERVAL_SECS));
+        interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+        interval.tick().await;
+        loop {
+            interval.tick().await;
+            if stop.load(Ordering::SeqCst) {
+                break;
+            }
+            let client = {
+                let guard = st.client.lock().await;
+                guard.clone()
+            };
+            let Some(ref c) = client else {
+                break;
+            };
+            if let Err(e) =
+                matrix_voice_refresh_call_member(c, &st.http_client, &room_id_clone).await
+            {
+                log::warn!("[Pax] m.call.member refresh failed: {}", e);
+            }
+        }
+    });
+    if let Ok(mut g) = state.call_member_refresh_task.lock() {
+        *g = Some(handle);
+    }
+}
+
 #[tauri::command]
 pub async fn voice_connect(
     state: State<'_, Arc<AppState>>,
@@ -701,6 +760,8 @@ pub async fn voice_connect(
     room_id: String,
 ) -> Result<(), String> {
     eprintln!("[Pax] voice_connect called for room {}", room_id);
+    let state_arc: Arc<AppState> = (*state).clone();
+    state_arc.stop_call_member_refresh_loop();
     let (client, http_client) = {
         let guard = state.client.lock().await;
         let client = guard.as_ref().ok_or("Not logged in")?.clone();
@@ -765,6 +826,8 @@ pub async fn voice_connect(
         )
         .await?;
 
+    start_call_member_refresh_loop(state_arc, room_id);
+
     Ok(())
 }
 
@@ -774,6 +837,7 @@ pub async fn voice_disconnect(
     voice_mgr: State<'_, voice::VoiceManager>,
     room_id: String,
 ) -> Result<(), String> {
+    state.stop_call_member_refresh_loop();
     // 1. Disconnect from LiveKit (blocks until room is closed)
     voice_mgr.disconnect().await;
 
@@ -874,4 +938,243 @@ pub async fn voice_set_participant_volume(
 ) -> Result<(), String> {
     voice_mgr.set_participant_volume(identity, volume);
     Ok(())
+}
+
+fn livekit_room_name_candidates(matrix_room_id: &str) -> Vec<String> {
+    let mut v = vec![matrix_room_id.to_string()];
+    if let Some(s) = matrix_room_id.strip_prefix('!') {
+        v.push(s.to_string());
+    }
+    v.push(urlencoding::encode(matrix_room_id).to_string());
+    v
+}
+
+fn pick_livekit_room_name(rooms: &[serde_json::Value], matrix_room_id: &str) -> Option<String> {
+    let cands = livekit_room_name_candidates(matrix_room_id);
+    for r in rooms {
+        let name = r.get("name").and_then(|n| n.as_str()).unwrap_or("");
+        if name.is_empty() {
+            continue;
+        }
+        if cands.iter().any(|c| c == name) {
+            return Some(name.to_string());
+        }
+    }
+    let short = matrix_room_id.trim_start_matches('!');
+    for r in rooms {
+        let name = r.get("name").and_then(|n| n.as_str()).unwrap_or("");
+        if !short.is_empty() && name.contains(short) {
+            return Some(name.to_string());
+        }
+    }
+    None
+}
+
+fn track_is_microphone(track: &serde_json::Value) -> bool {
+    if let Some(s) = track.get("source").and_then(|v| v.as_str()) {
+        let u = s.to_ascii_uppercase();
+        return u.contains("MICROPHONE") || s.eq_ignore_ascii_case("microphone");
+    }
+    if let Some(n) = track.get("source").and_then(|v| v.as_u64()) {
+        return n == 2;
+    }
+    if let Some(n) = track.get("source").and_then(|v| v.as_i64()) {
+        return n == 2;
+    }
+    if let Some(mime) = track.get("mimeType").and_then(|v| v.as_str()) {
+        return mime.to_ascii_lowercase().starts_with("audio/");
+    }
+    false
+}
+
+fn parse_livekit_participant_json(p: &serde_json::Value) -> Option<LivekitVoiceParticipantInfo> {
+    let identity = p.get("identity").and_then(|v| v.as_str())?.to_string();
+    let is_speaking = p
+        .get("isSpeaking")
+        .or_else(|| p.get("is_speaking"))
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false);
+    let mut mic_muted_from_track = false;
+    let mut saw_mic = false;
+    if let Some(tracks) = p.get("tracks").and_then(|t| t.as_array()) {
+        for t in tracks {
+            if track_is_microphone(t) {
+                saw_mic = true;
+                if t.get("muted").and_then(|m| m.as_bool()).unwrap_or(false) {
+                    mic_muted_from_track = true;
+                }
+            }
+        }
+    }
+    let mut is_deafened = false;
+    let mut pax_muted: Option<bool> = None;
+    if let Some(attrs) = p.get("attributes").and_then(|a| a.as_object()) {
+        if let Some(v) = attrs.get("pax.deafened").and_then(|x| x.as_str()) {
+            is_deafened = v == "true";
+        }
+        if let Some(v) = attrs.get("pax.muted").and_then(|x| x.as_str()) {
+            pax_muted = Some(v == "true");
+        }
+    }
+    let is_muted = if let Some(pm) = pax_muted {
+        pm
+    } else if saw_mic {
+        mic_muted_from_track
+    } else {
+        true
+    };
+    Some(LivekitVoiceParticipantInfo {
+        identity,
+        is_muted,
+        is_deafened,
+        is_speaking,
+    })
+}
+
+async fn livekit_list_rooms(
+    http: &reqwest::Client,
+    lk_url: &str,
+    admin_jwt: &str,
+) -> Result<Vec<serde_json::Value>, String> {
+    let list_rooms_url = format!(
+        "{}/twirp/livekit.RoomService/ListRooms",
+        lk_url.trim_end_matches('/')
+    );
+    let resp = http
+        .post(&list_rooms_url)
+        .timeout(Duration::from_secs(8))
+        .bearer_auth(admin_jwt)
+        .json(&serde_json::json!({}))
+        .send()
+        .await
+        .map_err(|e| format!("ListRooms: {}", fmt_error_chain(&e)))?;
+    if !resp.status().is_success() {
+        return Err(format!("ListRooms status {}", resp.status()));
+    }
+    let json = resp
+        .json::<serde_json::Value>()
+        .await
+        .map_err(|e| format!("ListRooms JSON: {e}"))?;
+    Ok(json
+        .get("rooms")
+        .and_then(|r| r.as_array())
+        .cloned()
+        .unwrap_or_default())
+}
+
+async fn livekit_list_participants_for_room(
+    http: &reqwest::Client,
+    lk_url: &str,
+    room_admin_jwt: &str,
+    livekit_room_name: &str,
+) -> Result<Vec<LivekitVoiceParticipantInfo>, String> {
+    let list_url = format!(
+        "{}/twirp/livekit.RoomService/ListParticipants",
+        lk_url.trim_end_matches('/')
+    );
+    let resp = http
+        .post(&list_url)
+        .timeout(Duration::from_secs(8))
+        .bearer_auth(room_admin_jwt)
+        .json(&serde_json::json!({ "room": livekit_room_name }))
+        .send()
+        .await
+        .map_err(|e| format!("ListParticipants: {}", fmt_error_chain(&e)))?;
+    if !resp.status().is_success() {
+        return Err(format!("ListParticipants status {}", resp.status()));
+    }
+    let json = resp
+        .json::<serde_json::Value>()
+        .await
+        .map_err(|e| format!("ListParticipants JSON: {e}"))?;
+    let parts = json
+        .get("participants")
+        .and_then(|p| p.as_array())
+        .cloned()
+        .unwrap_or_default();
+    Ok(parts
+        .iter()
+        .filter_map(|p| parse_livekit_participant_json(p))
+        .collect())
+}
+
+async fn fetch_livekit_voice_snapshot_for_matrix_room(
+    http: &reqwest::Client,
+    config: &LivekitConfig,
+    matrix_room_id: &str,
+) -> Result<Vec<LivekitVoiceParticipantInfo>, String> {
+    let (api_key, api_secret, lk_url) = match (&config.api_key, &config.api_secret, &config.url) {
+        (Some(k), Some(s), Some(u)) => (k.as_str(), s.as_str(), u.as_str()),
+        _ => return Ok(vec![]),
+    };
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs();
+    let claims = LivekitAdminClaims {
+        iss: api_key.to_string(),
+        sub: String::new(),
+        iat: now,
+        nbf: now,
+        exp: now + 60,
+        video: LivekitVideoGrant {
+            room_admin: true,
+            room_list: true,
+            room: String::new(),
+        },
+    };
+    let token = encode(
+        &Header::default(),
+        &claims,
+        &EncodingKey::from_secret(api_secret.as_bytes()),
+    )
+    .map_err(|e| format!("LiveKit admin JWT: {e}"))?;
+
+    let rooms = livekit_list_rooms(http, lk_url, &token).await?;
+    let Some(lk_room) = pick_livekit_room_name(&rooms, matrix_room_id) else {
+        return Ok(vec![]);
+    };
+
+    let room_claims = LivekitAdminClaims {
+        iss: api_key.to_string(),
+        sub: String::new(),
+        iat: now,
+        nbf: now,
+        exp: now + 60,
+        video: LivekitVideoGrant {
+            room_admin: true,
+            room_list: false,
+            room: lk_room.clone(),
+        },
+    };
+    let room_token = encode(
+        &Header::default(),
+        &room_claims,
+        &EncodingKey::from_secret(api_secret.as_bytes()),
+    )
+    .map_err(|e| format!("LiveKit room JWT: {e}"))?;
+
+    livekit_list_participants_for_room(http, lk_url, &room_token, &lk_room).await
+}
+
+/// Best-effort LiveKit participant mute/deafen/speaking (requires `LIVEKIT_*` admin env vars).
+/// Returns an empty list when credentials are missing or the SFU room name cannot be matched.
+#[tauri::command]
+pub async fn get_livekit_voice_room_snapshot(
+    state: State<'_, Arc<AppState>>,
+    room_id: String,
+) -> Result<Vec<LivekitVoiceParticipantInfo>, String> {
+    match fetch_livekit_voice_snapshot_for_matrix_room(
+        &state.http_client,
+        &state.livekit,
+        &room_id,
+    )
+    .await
+    {
+        Ok(v) => Ok(v),
+        Err(e) => {
+            log::debug!("LiveKit voice snapshot ({}): {}", room_id, e);
+            Ok(vec![])
+        }
+    }
 }

@@ -285,9 +285,9 @@ export default function RoomSidebar({
                       participant={p}
                       isLocalUser={p.userId === userId}
                       isSharingScreen={screenSharingOwners.includes(p.userId)}
-                      isMuted={isConnectedHere ? !!state?.isMuted : false}
-                      isDeafened={isConnectedHere ? !!state?.isDeafened : false}
-                      isSpeaking={isConnectedHere ? !!state?.isSpeaking : false}
+                      isMuted={!!state?.isMuted}
+                      isDeafened={!!state?.isDeafened}
+                      isSpeaking={!!state?.isSpeaking}
                       isConnecting={isParticipantConnecting}
                       onContextMenu={(e) => {
                         // Map userId to the identity format used by LiveKit

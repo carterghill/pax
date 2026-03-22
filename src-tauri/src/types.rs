@@ -94,6 +94,16 @@ pub struct VoiceJoinResult {
     pub livekit_url: String,
 }
 
+/// LiveKit participant row from Room Service API (mute/deafen/speaking) for UI when not in the SFU.
+#[derive(Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct LivekitVoiceParticipantInfo {
+    pub identity: String,
+    pub is_muted: bool,
+    pub is_deafened: bool,
+    pub is_speaking: bool,
+}
+
 #[derive(Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct VoiceParticipantsChangedPayload {

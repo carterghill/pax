@@ -41,6 +41,14 @@ export interface VoiceParticipant {
   avatarUrl: string | null;
 }
 
+/** From LiveKit Room Service when LIVEKIT_* admin credentials are set */
+export interface LivekitVoiceParticipantInfo {
+  identity: string;
+  isMuted: boolean;
+  isDeafened: boolean;
+  isSpeaking: boolean;
+}
+
 export interface VoiceJoinResult {
   jwt: string;
   livekitUrl: string;

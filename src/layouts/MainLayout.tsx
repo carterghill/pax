@@ -10,7 +10,13 @@ import { PresenceContext } from "../hooks/PresenceContext";
 import { useState, useCallback, useMemo, useRef, useEffect } from "react";
 import { useTheme } from "../theme/ThemeContext";
 import SettingsMenu from "../components/SettingsMenu";
-import { VOICE_ROOM_TYPE, localpartFromUserId, normalizeUserId } from "../utils/matrix";
+import {
+  VOICE_ROOM_TYPE,
+  extractMatrixUserId,
+  localpartFromUserId,
+  normalizeUserId,
+} from "../utils/matrix";
+import { useLivekitVoiceSnapshots } from "../hooks/useLivekitVoiceSnapshots";
 
 const ROOM_SIDEBAR_WIDTH_KEY = "pax-room-sidebar-width";
 const USER_MENU_WIDTH_KEY = "pax-user-menu-width";
@@ -65,15 +71,6 @@ function storeUserMenuWidth(width: number) {
   }
 }
 
-const extractMatrixUserId = (identity: string) => {
-  const trimmed = identity.trim();
-  if (!trimmed.startsWith("@")) return trimmed;
-  // LiveKit identities can include transport/device suffixes (e.g. "|device"),
-  // while the room sidebar list uses plain Matrix user IDs.
-  const match = trimmed.match(/^@[^|/\s]+/);
-  return match ? match[0] : trimmed;
-};
-
 interface MainLayoutProps {
   userId: string;
   onSignOut: () => void;
@@ -121,34 +118,46 @@ export default function MainLayout({ userId, onSignOut }: MainLayoutProps) {
     [visibleRooms]
   );
   const voiceParticipants = useVoiceParticipants(voiceRoomIds);
-  const voiceCallParticipantStates = useMemo(
-    () => {
-      const stateMap: Record<
-        string,
-        { isMuted: boolean; isDeafened: boolean; isSpeaking: boolean }
-      > = {};
-      for (const p of voiceCall.participants) {
-        const state = {
-          isMuted: p.isMuted,
-          isDeafened: p.isDeafened,
-          isSpeaking: p.isSpeaking,
+  const livekitByRoom = useLivekitVoiceSnapshots(voiceRoomIds);
+  const voiceCallParticipantStates = useMemo(() => {
+    const stateMap: Record<
+      string,
+      { isMuted: boolean; isDeafened: boolean; isSpeaking: boolean }
+    > = {};
+
+    for (const rid of voiceRoomIds) {
+      for (const lp of livekitByRoom[rid] ?? []) {
+        const mxid = extractMatrixUserId(lp.identity);
+        const st = {
+          isMuted: lp.isMuted,
+          isDeafened: lp.isDeafened,
+          isSpeaking: lp.isSpeaking,
         };
-        const mxid = extractMatrixUserId(p.identity);
-        const keys = [
-          p.identity,
-          mxid,
-          localpartFromUserId(mxid),
-        ]
+        const keys = [lp.identity, mxid, localpartFromUserId(mxid)]
           .map(normalizeUserId)
           .filter(Boolean);
         for (const key of keys) {
-          stateMap[key] = state;
+          stateMap[key] = st;
         }
       }
-      return stateMap;
-    },
-    [voiceCall.participants]
-  );
+    }
+
+    for (const p of voiceCall.participants) {
+      const state = {
+        isMuted: p.isMuted,
+        isDeafened: p.isDeafened,
+        isSpeaking: p.isSpeaking,
+      };
+      const mxid = extractMatrixUserId(p.identity);
+      const keys = [p.identity, mxid, localpartFromUserId(mxid)]
+        .map(normalizeUserId)
+        .filter(Boolean);
+      for (const key of keys) {
+        stateMap[key] = state;
+      }
+    }
+    return stateMap;
+  }, [voiceCall.participants, livekitByRoom, voiceRoomIds]);
 
   const { connect: connectVoiceCall, connectedRoomId: connectedVoiceRoomId } = voiceCall;
 
@@ -246,7 +255,9 @@ export default function MainLayout({ userId, onSignOut }: MainLayoutProps) {
               room={activeRoom}
               callState={voiceCall}
               voiceParticipants={voiceParticipants[activeRoom.id] ?? []}
+              livekitInRoom={livekitByRoom[activeRoom.id] ?? []}
               userId={userId}
+              onJoinVoice={() => connectVoiceCall(activeRoom.id)}
               onDisconnect={voiceCall.disconnect}
               onToggleMic={voiceCall.toggleMic}
               onToggleDeafen={voiceCall.toggleDeafen}

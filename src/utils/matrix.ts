@@ -9,3 +9,11 @@ export const localpartFromUserId = (id: string): string => {
   const idx = withoutAt.indexOf(":");
   return idx === -1 ? withoutAt : withoutAt.slice(0, idx);
 };
+
+/** LiveKit identities may include device suffixes; Matrix roster uses plain MXIDs. */
+export const extractMatrixUserId = (identity: string): string => {
+  const trimmed = identity.trim();
+  if (!trimmed.startsWith("@")) return trimmed;
+  const match = trimmed.match(/^@[^|/\s]+/);
+  return match ? match[0] : trimmed;
+};
