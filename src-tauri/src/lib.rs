@@ -139,6 +139,7 @@ pub fn run() {
             commands::voice_matrix::get_voice_participants,
             commands::voice_matrix::get_all_voice_participants,
             commands::voice_matrix::get_livekit_voice_room_snapshot,
+            commands::voice_matrix::get_all_livekit_voice_snapshots,
             commands::voice_matrix::voice_connect,
             commands::voice_matrix::voice_disconnect,
             commands::voice_matrix::voice_toggle_mic,

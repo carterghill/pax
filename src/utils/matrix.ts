@@ -12,21 +12,32 @@ export const localpartFromUserId = (id: string): string => {
 
 /**
  * Normalize a LiveKit / SFU identity toward a Matrix MXID for lookups.
- * Strips `|device` suffixes and adds `@` for `localpart:server` forms.
+ *
+ * LiveKit identities use the format `@localpart:server:deviceId` (the Rust
+ * backend joins `userId:deviceId`).  Matrix MXIDs are `@localpart:server`.
+ * We need to strip the trailing `:deviceId` to get a matchable MXID.
+ *
+ * Also handles `|device` suffixes (older format) and bare `localpart:server`.
  */
 export const extractMatrixUserId = (identity: string): string => {
+  // Strip |device suffix (older format)
   const trimmed = identity.trim().split("|")[0].trim();
+
   if (trimmed.startsWith("@")) {
-    const rest = trimmed.slice(1);
-    const idx = rest.indexOf(":");
-    if (idx >= 0) {
-      return normalizeUserId(`@${rest.slice(0, idx)}:${rest.slice(idx + 1)}`);
+    // Split into parts: ["", "localpart", "server", ...deviceId...]
+    // We want @localpart:server — the first two colon-separated segments after @
+    const rest = trimmed.slice(1); // remove @
+    const parts = rest.split(":");
+    if (parts.length >= 2) {
+      return normalizeUserId(`@${parts[0]}:${parts[1]}`);
     }
     return normalizeUserId(trimmed);
   }
-  const idx = trimmed.indexOf(":");
-  if (idx >= 0) {
-    return normalizeUserId(`@${trimmed.slice(0, idx)}:${trimmed.slice(idx + 1)}`);
+
+  // Bare localpart:server or localpart:server:device
+  const parts = trimmed.split(":");
+  if (parts.length >= 2) {
+    return normalizeUserId(`@${parts[0]}:${parts[1]}`);
   }
   return normalizeUserId(trimmed);
 };

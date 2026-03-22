@@ -1138,3 +1138,88 @@ pub async fn get_livekit_voice_room_snapshot(
         }
     }
 }
+
+/// Batched version: fetch LiveKit participant state for multiple Matrix voice rooms
+/// in a single call. Calls `ListRooms` once and `ListParticipants` per matched room.
+#[tauri::command]
+pub async fn get_all_livekit_voice_snapshots(
+    state: State<'_, Arc<AppState>>,
+    room_ids: Vec<String>,
+) -> Result<HashMap<String, Vec<LivekitVoiceParticipantInfo>>, String> {
+    let (api_key, api_secret, lk_url) = match livekit_credentials(&state.livekit) {
+        Some(creds) => creds,
+        _ => {
+            // No credentials — return empty for all rooms
+            return Ok(room_ids.into_iter().map(|id| (id, vec![])).collect());
+        }
+    };
+
+    // Read the SFU room name cache
+    let sfu_cache: HashMap<String, String> = state
+        .livekit_matrix_to_sfu_room
+        .lock()
+        .ok()
+        .map(|g| g.clone())
+        .unwrap_or_default();
+
+    // Figure out which rooms need a ListRooms lookup (not in cache)
+    let needs_discovery: Vec<&String> = room_ids
+        .iter()
+        .filter(|id| !sfu_cache.contains_key(id.as_str()))
+        .collect();
+
+    // Only call ListRooms if at least one room needs discovery
+    let discovered_rooms: Vec<serde_json::Value> = if needs_discovery.is_empty() {
+        vec![]
+    } else {
+        let admin_jwt = make_livekit_admin_jwt(api_key, api_secret, "")?;
+        livekit_list_rooms(&state.http_client, lk_url, &admin_jwt)
+            .await
+            .unwrap_or_default()
+    };
+
+    let mut result: HashMap<String, Vec<LivekitVoiceParticipantInfo>> = HashMap::new();
+
+    for matrix_room_id in &room_ids {
+        // Resolve SFU room name: cache first, then discovery
+        let sfu_room_name = if let Some(cached) = sfu_cache.get(matrix_room_id) {
+            Some(cached.clone())
+        } else {
+            pick_livekit_room_name(&discovered_rooms, matrix_room_id)
+        };
+
+        let Some(sfu_name) = sfu_room_name else {
+            result.insert(matrix_room_id.clone(), vec![]);
+            continue;
+        };
+
+        // Cache newly discovered SFU room names
+        if !sfu_cache.contains_key(matrix_room_id) {
+            if let Ok(mut g) = state.livekit_matrix_to_sfu_room.lock() {
+                g.insert(matrix_room_id.clone(), sfu_name.clone());
+            }
+        }
+
+        // Fetch participants for this room
+        let room_jwt = match make_livekit_admin_jwt(api_key, api_secret, &sfu_name) {
+            Ok(t) => t,
+            Err(e) => {
+                log::debug!("LiveKit snapshot JWT for {}: {}", matrix_room_id, e);
+                result.insert(matrix_room_id.clone(), vec![]);
+                continue;
+            }
+        };
+
+        match livekit_list_participants_for_room(&state.http_client, lk_url, &room_jwt, &sfu_name).await {
+            Ok(participants) => {
+                result.insert(matrix_room_id.clone(), participants);
+            }
+            Err(e) => {
+                log::debug!("LiveKit snapshot for {}: {}", matrix_room_id, e);
+                result.insert(matrix_room_id.clone(), vec![]);
+            }
+        }
+    }
+
+    Ok(result)
+}
