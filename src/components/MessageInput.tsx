@@ -33,12 +33,17 @@ import { Picker } from "emoji-mart";
 import data from "@emoji-mart/data";
 import { useTheme } from "../theme/ThemeContext";
 import { EMOJI_ONLY_DISPLAY_SCALE, isOnlyEmojisAndWhitespace } from "../utils/emojifyTwemoji";
+import { hrefLooksLikeDirectImageUrl } from "../utils/directImageUrl";
 import {
-  fillComposerEditor,
-  getPlainTextOffsetsFromSelection,
-  insertPlainTextAtSelection,
   serializeComposerEditor,
-  setSelectionPlainTextOffsets,
+  fillComposerEditorFromMarkdown,
+  getEditorPlainText,
+  insertPlainTextAtSelection,
+  insertImageAtSelection,
+  getActiveFormats,
+  toggleInlineCode,
+  toggleCodeBlock,
+  toggleLink,
 } from "../utils/composerEditorDom";
 
 export interface EditingMessageRef {
@@ -52,22 +57,6 @@ interface MessageInputProps {
   onMessageSent: () => void;
   editingMessage?: EditingMessageRef | null;
   onCancelEdit?: () => void;
-}
-
-function getSelectedLineSpan(value: string, start: number, end: number): { lineStart: number; lineEnd: number } {
-  const lineStart = value.lastIndexOf("\n", start - 1) + 1;
-  const nextNl = value.indexOf("\n", end);
-  const lineEnd = nextNl === -1 ? value.length : nextNl;
-  return { lineStart, lineEnd };
-}
-
-/** Space before a bare image URL when needed so `splitTextWithDirectImageEmbeds` recognizes it (matches paste behavior). */
-function leadingSpaceBeforeBareUrl(raw: string, insertAt: number): string {
-  if (insertAt === 0) return "";
-  const prev = raw[insertAt - 1]!;
-  if (/[\s([{<'"`]/.test(prev)) return "";
-  if (!/[\w/]/.test(prev)) return "";
-  return " ";
 }
 
 const COMPOSER_POPOVER_Z = 12_000;
@@ -88,11 +77,11 @@ export default function MessageInput({
   editingMessage = null,
   onCancelEdit,
 }: MessageInputProps) {
-  const [text, setText] = useState("");
+  const [plainText, setPlainText] = useState("");
   const [sending, setSending] = useState(false);
   const [openPopover, setOpenPopover] = useState<"format" | "emoji" | "gif" | null>(null);
+  const [activeFormats, setActiveFormats] = useState<Set<string>>(new Set());
   const editorRef = useRef<HTMLDivElement>(null);
-  const restoreSelectionRef = useRef<{ start: number; end: number } | null>(null);
   const rootRef = useRef<HTMLDivElement>(null);
   const emojiAnchorRef = useRef<HTMLButtonElement>(null);
   const gifAnchorRef = useRef<HTMLButtonElement>(null);
@@ -104,14 +93,13 @@ export default function MessageInput({
   const { palette, typography, spacing, name: themeName } = useTheme();
   const tenorApiKey = import.meta.env.VITE_TENOR_API_KEY ?? "";
 
-  const emojiOnlyComposer = useMemo(() => isOnlyEmojisAndWhitespace(text), [text]);
+  const emojiOnlyComposer = useMemo(() => isOnlyEmojisAndWhitespace(plainText), [plainText]);
 
   const composerImgStyle = useMemo(
     () => ({ borderRadius: spacing.unit, maxWidth: "100%" }),
     [spacing.unit],
   );
 
-  /** Grow with typing up to this many lines, then keep height fixed and scroll. */
   const COMPOSER_MAX_AUTO_LINES = 3;
   const composerMaxHeightPx = useMemo(() => {
     const fontSize = emojiOnlyComposer
@@ -122,24 +110,24 @@ export default function MessageInput({
     return Math.ceil(padV + COMPOSER_MAX_AUTO_LINES * linePx);
   }, [emojiOnlyComposer, typography.fontSizeBase, typography.lineHeight, spacing.unit]);
 
-  useLayoutEffect(() => {
+  // ─── Height sync ──────────────────────────────────────────────────────────
+
+  const syncHeight = useCallback(() => {
     const el = editorRef.current;
     if (!el) return;
-    fillComposerEditor(el, text, composerImgStyle);
-    const r = restoreSelectionRef.current;
-    if (r) {
-      setSelectionPlainTextOffsets(el, r.start, r.end);
-      restoreSelectionRef.current = null;
-    }
-    const syncHeight = () => {
-      el.style.height = "auto";
-      el.style.height = `${Math.min(el.scrollHeight, composerMaxHeightPx)}px`;
-    };
-    syncHeight();
-    const ro = new ResizeObserver(syncHeight);
-    ro.observe(el);
-    return () => ro.disconnect();
-  }, [text, composerImgStyle, composerMaxHeightPx]);
+    el.style.height = "auto";
+    el.style.height = `${Math.min(el.scrollHeight, composerMaxHeightPx)}px`;
+  }, [composerMaxHeightPx]);
+
+  // Sync height on mount and when max changes (emoji-only toggle).
+  useLayoutEffect(syncHeight, [syncHeight]);
+
+  // Set default paragraph separator so Enter produces <div> consistently.
+  useEffect(() => {
+    document.execCommand("defaultParagraphSeparator", false, "div");
+  }, []);
+
+  // ─── Typing indicator ─────────────────────────────────────────────────────
 
   const sendTyping = useCallback(
     (typing: boolean) => {
@@ -150,29 +138,6 @@ export default function MessageInput({
     [roomId],
   );
 
-  function handleEditorInput() {
-    const el = editorRef.current;
-    if (!el) return;
-    const { start, end } = getPlainTextOffsetsFromSelection(el);
-    const next = serializeComposerEditor(el);
-    setText((prev) => {
-      if (next === prev) return prev;
-      restoreSelectionRef.current = { start, end };
-      return next;
-    });
-
-    if (editingMessage) return;
-
-    if (next.trim().length > 0) {
-      sendTyping(true);
-      if (typingTimeout.current) clearTimeout(typingTimeout.current);
-      typingTimeout.current = setTimeout(() => sendTyping(false), 3000);
-    } else {
-      sendTyping(false);
-      if (typingTimeout.current) clearTimeout(typingTimeout.current);
-    }
-  }
-
   useEffect(() => {
     return () => {
       if (typingTimeout.current) clearTimeout(typingTimeout.current);
@@ -182,6 +147,47 @@ export default function MessageInput({
       }
     };
   }, [roomId]);
+
+  // ─── Editor input handler (uncontrolled – DOM is source of truth) ─────────
+
+  function handleEditorInput() {
+    const el = editorRef.current;
+    if (!el) return;
+    const text = getEditorPlainText(el);
+    setPlainText(text);
+    syncHeight();
+
+    if (editingMessage) return;
+    if (text.trim().length > 0) {
+      sendTyping(true);
+      if (typingTimeout.current) clearTimeout(typingTimeout.current);
+      typingTimeout.current = setTimeout(() => sendTyping(false), 3000);
+    } else {
+      sendTyping(false);
+      if (typingTimeout.current) clearTimeout(typingTimeout.current);
+    }
+  }
+
+  // ─── Active format tracking ───────────────────────────────────────────────
+
+  useEffect(() => {
+    const update = () => {
+      const el = editorRef.current;
+      if (!el) return;
+      setActiveFormats(getActiveFormats(el));
+    };
+    document.addEventListener("selectionchange", update);
+    // Also refresh on keyup to catch Ctrl+B / Ctrl+I / Ctrl+S browser hotkeys
+    // which toggle formatting via execCommand but don't fire selectionchange.
+    const el = editorRef.current;
+    el?.addEventListener("keyup", update);
+    return () => {
+      document.removeEventListener("selectionchange", update);
+      el?.removeEventListener("keyup", update);
+    };
+  }, []);
+
+  // ─── Popover positioning (emoji + GIF only; format toolbar is inline) ─────
 
   useLayoutEffect(() => {
     const margin = spacing.unit * 2;
@@ -204,6 +210,7 @@ export default function MessageInput({
     return () => window.removeEventListener("resize", update);
   }, [openPopover, spacing.unit]);
 
+  // Close popovers on outside click / Escape.
   useEffect(() => {
     if (!openPopover) return;
     const onDocDown = (e: MouseEvent) => {
@@ -224,8 +231,13 @@ export default function MessageInput({
     };
   }, [openPopover]);
 
+  // ─── Emoji picker mount ───────────────────────────────────────────────────
+
   insertEmojiFromPickerRef.current = (native: string) => {
-    insertAtCursor(native, native.length, native.length);
+    const el = editorRef.current;
+    if (!el) return;
+    el.focus();
+    document.execCommand("insertText", false, native);
     setOpenPopover(null);
   };
 
@@ -235,7 +247,6 @@ export default function MessageInput({
     if (!mount) return;
     mount.innerHTML = "";
     const theme = themeName === "light" ? "light" : "dark";
-    // Imperative parent mount avoids @emoji-mart/react + ref timing issues (e.g. React 19).
     new Picker({
       parent: mount,
       data,
@@ -254,172 +265,80 @@ export default function MessageInput({
     };
   }, [openPopover, popoverPos, themeName]);
 
+  // ─── Edit message loading ─────────────────────────────────────────────────
+
   useEffect(() => {
     if (!editingMessage) return;
-    const body = editingMessage.body;
-    setText(body);
-    const len = body.length;
-    restoreSelectionRef.current = { start: len, end: len };
-    requestAnimationFrame(() => editorRef.current?.focus());
+    const el = editorRef.current;
+    if (!el) return;
+    fillComposerEditorFromMarkdown(el, editingMessage.body, composerImgStyle);
+    setPlainText(getEditorPlainText(el));
+    syncHeight();
+    requestAnimationFrame(() => {
+      el.focus();
+      const sel = window.getSelection();
+      if (sel) {
+        sel.selectAllChildren(el);
+        sel.collapseToEnd();
+      }
+    });
   }, [editingMessage?.eventId]);
 
-  const wrapSelection = useCallback(
-    (before: string, after: string, emptyPlaceholder: string) => {
-      const el = editorRef.current;
-      if (!el) return;
-      const { start, end } = getPlainTextOffsetsFromSelection(el);
-      const sel = text.slice(start, end);
-      const middle = sel || emptyPlaceholder;
-      const next = text.slice(0, start) + before + middle + after + text.slice(end);
-      const a = start + before.length;
-      const b = a + middle.length;
-      restoreSelectionRef.current = { start: a, end: b };
-      setText(next);
-    },
-    [text],
-  );
+  // ─── Format actions ───────────────────────────────────────────────────────
 
-  const insertAtCursor = useCallback(
-    (insertion: string, selectStartOffset: number, selectEndOffset: number) => {
-      const el = editorRef.current;
-      if (!el) return;
-      const { start, end } = getPlainTextOffsetsFromSelection(el);
-      const next = text.slice(0, start) + insertion + text.slice(end);
-      restoreSelectionRef.current = {
-        start: start + selectStartOffset,
-        end: start + selectEndOffset,
-      };
-      setText(next);
-    },
-    [text],
-  );
-
-  const prefixLines = useCallback(
-    (prefix: string, ordered = false) => {
-      const el = editorRef.current;
-      if (!el) return;
-      const { start, end } = getPlainTextOffsetsFromSelection(el);
-      const { lineStart, lineEnd } = getSelectedLineSpan(text, start, end);
-      const block = text.slice(lineStart, lineEnd);
-      const lines = block.split("\n");
-      const newLines = ordered
-        ? lines.map((line, i) => {
-            const stripped = line.replace(/^(\d+\.\s|-\s)/, "");
-            return `${i + 1}. ${stripped}`;
-          })
-        : lines.map((line) => {
-            if (line.startsWith(prefix)) return line.slice(prefix.length);
-            return prefix + line;
-          });
-      const newBlock = newLines.join("\n");
-      const next = text.slice(0, lineStart) + newBlock + text.slice(lineEnd);
-      const delta = newBlock.length - block.length;
-      restoreSelectionRef.current = { start: start + delta, end: end + delta };
-      setText(next);
-    },
-    [text],
-  );
-
-  const toggleHeadingPrefix = useCallback(
-    (hashes: string) => {
-      const el = editorRef.current;
-      if (!el) return;
-      const { start, end } = getPlainTextOffsetsFromSelection(el);
-      const { lineStart, lineEnd } = getSelectedLineSpan(text, start, end);
-      const block = text.slice(lineStart, lineEnd);
-      const lines = block.split("\n");
-      const re = /^#{1,6}\s/;
-      const newLines = lines.map((line) => {
-        if (re.test(line)) {
-          const rest = line.replace(re, "");
-          return `${hashes} ${rest}`;
-        }
-        return `${hashes} ${line}`;
-      });
-      const newBlock = newLines.join("\n");
-      const next = text.slice(0, lineStart) + newBlock + text.slice(lineEnd);
-      const delta = newBlock.length - block.length;
-      restoreSelectionRef.current = { start: start + delta, end: end + delta };
-      setText(next);
-    },
-    [text],
-  );
-
-  const insertBlockCode = useCallback(() => {
+  const refreshFormats = useCallback(() => {
     const el = editorRef.current;
-    if (!el) return;
-    const { start, end } = getPlainTextOffsetsFromSelection(el);
-    const sel = text.slice(start, end);
-    const fence = "```";
-    let next: string;
-    let selStart: number;
-    let selEnd: number;
-    if (sel) {
-      next = text.slice(0, start) + `${fence}\n${sel}\n${fence}` + text.slice(end);
-      selStart = start + fence.length + 1;
-      selEnd = selStart + sel.length;
-    } else {
-      next = text.slice(0, start) + `${fence}\n\n${fence}` + text.slice(end);
-      selStart = start + fence.length + 1;
-      selEnd = selStart;
-    }
-    restoreSelectionRef.current = { start: selStart, end: selEnd };
-    setText(next);
-  }, [text]);
+    if (el) setActiveFormats(getActiveFormats(el));
+  }, []);
 
-  const insertLink = useCallback(() => {
-    const el = editorRef.current;
-    if (!el) return;
-    const { start, end } = getPlainTextOffsetsFromSelection(el);
-    const sel = text.slice(start, end);
-    const label = sel || "text";
-    const insertion = `[${label}](https://)`;
-    const next = text.slice(0, start) + insertion + text.slice(end);
-    const urlStart = start + insertion.indexOf("https://");
-    const urlEnd = urlStart + "https://".length;
-    restoreSelectionRef.current = { start: urlStart, end: urlEnd };
-    setText(next);
-  }, [text]);
+  const execFormat = useCallback((cmd: string) => {
+    editorRef.current?.focus();
+    document.execCommand(cmd);
+    refreshFormats();
+  }, [refreshFormats]);
 
-  const insertHorizontalRule = useCallback(() => {
-    const el = editorRef.current;
-    if (!el) return;
-    const { start } = getPlainTextOffsetsFromSelection(el);
-    const padBefore = start > 0 && text[start - 1] !== "\n" ? "\n\n" : "\n";
-    const insertion = `${padBefore}---\n`;
-    insertAtCursor(insertion, insertion.length, insertion.length);
-  }, [text, insertAtCursor]);
+  const toggleFormatBlock = useCallback((tag: string, key: string) => {
+    editorRef.current?.focus();
+    document.execCommand("formatBlock", false, activeFormats.has(key) ? "div" : tag);
+    refreshFormats();
+  }, [activeFormats, refreshFormats]);
 
-  type FormatItem = { icon: typeof Bold; label: string; run: () => void };
+  type FormatItem = { icon: typeof Bold; label: string; run: () => void; formatKey?: string };
 
   const formatGroups: FormatItem[][] = [
     [
-      { icon: Bold, label: "Bold", run: () => wrapSelection("**", "**", "bold") },
-      { icon: Italic, label: "Italic", run: () => wrapSelection("_", "_", "italic") },
-      { icon: Strikethrough, label: "Strikethrough", run: () => wrapSelection("~~", "~~", "text") },
+      { icon: Bold, label: "Bold", formatKey: "bold", run: () => execFormat("bold") },
+      { icon: Italic, label: "Italic", formatKey: "italic", run: () => execFormat("italic") },
+      { icon: Strikethrough, label: "Strikethrough", formatKey: "strikethrough", run: () => execFormat("strikeThrough") },
     ],
     [
-      { icon: Code, label: "Inline code", run: () => wrapSelection("`", "`", "code") },
-      { icon: Braces, label: "Code block", run: () => insertBlockCode() },
+      { icon: Code, label: "Inline code", formatKey: "code", run: () => { editorRef.current?.focus(); toggleInlineCode(editorRef.current!); refreshFormats(); } },
+      { icon: Braces, label: "Code block", formatKey: "codeblock", run: () => { editorRef.current?.focus(); toggleCodeBlock(editorRef.current!); refreshFormats(); } },
     ],
-    [{ icon: Link, label: "Link", run: () => insertLink() }],
+    [{ icon: Link, label: "Link", formatKey: "link", run: () => { editorRef.current?.focus(); toggleLink(editorRef.current!); refreshFormats(); } }],
     [
-      { icon: List, label: "Bullet list", run: () => prefixLines("- ") },
-      { icon: ListOrdered, label: "Numbered list", run: () => prefixLines("", true) },
-      { icon: TextQuote, label: "Quote", run: () => prefixLines("> ") },
+      { icon: List, label: "Bullet list", formatKey: "ul", run: () => execFormat("insertUnorderedList") },
+      { icon: ListOrdered, label: "Numbered list", formatKey: "ol", run: () => execFormat("insertOrderedList") },
+      { icon: TextQuote, label: "Quote", formatKey: "quote", run: () => toggleFormatBlock("blockquote", "quote") },
     ],
     [
-      { icon: Heading1, label: "Heading 1", run: () => toggleHeadingPrefix("#") },
-      { icon: Heading2, label: "Heading 2", run: () => toggleHeadingPrefix("##") },
+      { icon: Heading1, label: "Heading 1", formatKey: "h1", run: () => toggleFormatBlock("h1", "h1") },
+      { icon: Heading2, label: "Heading 2", formatKey: "h2", run: () => toggleFormatBlock("h2", "h2") },
     ],
-    [{ icon: Minus, label: "Horizontal rule", run: () => insertHorizontalRule() }],
+    [{ icon: Minus, label: "Horizontal rule", run: () => execFormat("insertHorizontalRule") }],
   ];
 
+  // ─── Send / key handling ──────────────────────────────────────────────────
+
   async function handleSend() {
-    const trimmed = text.trim();
+    const el = editorRef.current;
+    if (!el) return;
+    const markdown = serializeComposerEditor(el);
+    const trimmed = markdown.trim();
     if (!trimmed || sending) return;
 
-    setOpenPopover(null);
+    // Close emoji/gif but keep format toolbar open across sends.
+    setOpenPopover((o) => (o === "format" ? o : null));
     sendTyping(false);
     if (typingTimeout.current) clearTimeout(typingTimeout.current);
 
@@ -432,13 +351,31 @@ export default function MessageInput({
           body: trimmed,
         });
         onCancelEdit?.();
-        setText("");
       } else {
         await invoke("send_message", { roomId, body: trimmed });
-        setText("");
       }
+      // Snapshot which inline formats were active so we can restore them.
+      const prevFormats = getActiveFormats(el);
+      el.innerHTML = "";
+      setPlainText("");
       onMessageSent();
-      editorRef.current?.focus();
+      el.focus();
+      // Re-apply inline formats: insert a zero-width space first so execCommand
+      // can wrap it in <b>/<i>/<s> elements, giving the cursor a styled home.
+      if (prevFormats.has("bold") || prevFormats.has("italic") || prevFormats.has("strikethrough")) {
+        document.execCommand("insertText", false, "\u200b");
+        // Select the ZWS so the format commands wrap it.
+        const sel = window.getSelection();
+        if (sel) { sel.selectAllChildren(el); }
+        for (const fmt of prevFormats) {
+          if (fmt === "bold") document.execCommand("bold");
+          else if (fmt === "italic") document.execCommand("italic");
+          else if (fmt === "strikethrough") document.execCommand("strikeThrough");
+        }
+        // Collapse to end so typing appends inside the wrappers.
+        if (sel) { sel.collapseToEnd(); }
+      }
+      refreshFormats();
     } catch (e) {
       console.error(editingMessage ? "Failed to edit:" : "Failed to send:", e);
     }
@@ -458,17 +395,19 @@ export default function MessageInput({
       }
       if (editingMessage && onCancelEdit) {
         e.preventDefault();
-        setText("");
+        const el = editorRef.current;
+        if (el) el.innerHTML = "";
+        setPlainText("");
         onCancelEdit();
       }
     }
   }
 
+  // ─── Layout constants ─────────────────────────────────────────────────────
+
   const formatBtnGap = spacing.unit * 0.75;
   const groupGap = spacing.unit * 1.5;
-  /** Square chrome controls next to the textarea (emoji + markdown + send). */
   const inputToolIconSize = 20;
-  /** Outer edge length; icon is centered with minimal inset (no extra CSS padding). */
   const inputToolBtnSize = inputToolIconSize + spacing.unit * 3;
   const inputToolBtnRadius = Math.max(3, spacing.unit * 0.55);
   const hoverToolBtn = (e: React.MouseEvent<HTMLButtonElement>, active: boolean, enter: boolean) => {
@@ -476,7 +415,9 @@ export default function MessageInput({
     e.currentTarget.style.backgroundColor = enter ? palette.bgHover : "transparent";
     e.currentTarget.style.color = enter ? palette.textPrimary : palette.textSecondary;
   };
-  const canSend = text.trim().length > 0 && !sending;
+  const canSend = plainText.trim().length > 0 && !sending;
+
+  // ─── Portals ──────────────────────────────────────────────────────────────
 
   const emojiPickerPortal =
     openPopover === "emoji" &&
@@ -528,12 +469,14 @@ export default function MessageInput({
             onGifClick={(gif) => {
               const el = editorRef.current;
               if (!el) return;
-              const { start } = getPlainTextOffsetsFromSelection(el);
-              const prefix = leadingSpaceBeforeBareUrl(text, start);
-              const insertion = `${prefix}${gif.url}`;
-              insertAtCursor(insertion, insertion.length, insertion.length);
+              el.focus();
+              if (hrefLooksLikeDirectImageUrl(gif.url)) {
+                insertImageAtSelection(el, gif.url, composerImgStyle);
+              } else {
+                document.execCommand("insertText", false, gif.url);
+              }
               setOpenPopover(null);
-              requestAnimationFrame(() => editorRef.current?.focus());
+              requestAnimationFrame(() => el.focus());
             }}
           />
         ) : (
@@ -555,8 +498,47 @@ export default function MessageInput({
       document.body,
     );
 
+  // ─── Render ───────────────────────────────────────────────────────────────
+
   return (
     <>
+      {/* Scoped rich-text styles for the composer editor */}
+      <style>{`
+        [data-pax-composer] strong, [data-pax-composer] b { font-weight: bold; }
+        [data-pax-composer] em, [data-pax-composer] i { font-style: italic; }
+        [data-pax-composer] del, [data-pax-composer] s, [data-pax-composer] strike { text-decoration: line-through; }
+        [data-pax-composer] code:not(pre code) {
+          background: ${palette.bgHover};
+          padding: 0.1em 0.35em;
+          border-radius: 3px;
+          font-family: 'Consolas', 'Courier New', monospace;
+          font-size: 0.9em;
+        }
+        [data-pax-composer] pre {
+          background: ${palette.bgHover};
+          padding: ${spacing.unit * 2}px;
+          border-radius: ${spacing.unit}px;
+          font-family: 'Consolas', 'Courier New', monospace;
+          font-size: 0.9em;
+          white-space: pre-wrap;
+          margin: ${spacing.unit}px 0;
+        }
+        [data-pax-composer] a {
+          color: #5b9bd5;
+          text-decoration: underline;
+        }
+        [data-pax-composer] blockquote {
+          border-left: 3px solid ${palette.border};
+          padding-left: ${spacing.unit * 2}px;
+          margin: ${spacing.unit}px 0;
+          color: ${palette.textSecondary};
+        }
+        [data-pax-composer] h1 { font-size: 1.4em; font-weight: bold; margin: 0; }
+        [data-pax-composer] h2 { font-size: 1.2em; font-weight: bold; margin: 0; }
+        [data-pax-composer] hr { border: none; border-top: 1px solid ${palette.border}; margin: ${spacing.unit}px 0; }
+        [data-pax-composer] ul, [data-pax-composer] ol { margin: 0; padding-left: ${spacing.unit * 5}px; }
+      `}</style>
+
       <div
         ref={rootRef}
         style={{ padding: `0 ${spacing.unit * 3}px ${spacing.unit * 3}px`, position: "relative" }}
@@ -589,7 +571,7 @@ export default function MessageInput({
             alignSelf: "stretch",
           }}
         >
-          {!text.trim() && (
+          {!plainText.trim() && (
             <div
               aria-hidden
               style={{
@@ -614,6 +596,7 @@ export default function MessageInput({
           )}
           <div
             ref={editorRef}
+            data-pax-composer
             contentEditable
             role="textbox"
             aria-multiline="true"
@@ -623,9 +606,15 @@ export default function MessageInput({
             onKeyDown={handleKeyDown}
             onPaste={(e) => {
               e.preventDefault();
-              const t = e.clipboardData.getData("text/plain");
+              const text = e.clipboardData.getData("text/plain");
               const el = editorRef.current;
-              if (el) insertPlainTextAtSelection(el, t);
+              if (!el) return;
+              const trimmed = text.trim();
+              if (hrefLooksLikeDirectImageUrl(trimmed)) {
+                insertImageAtSelection(el, trimmed, composerImgStyle);
+              } else {
+                insertPlainTextAtSelection(el, text);
+              }
             }}
             style={{
               minWidth: 0,
@@ -860,43 +849,44 @@ export default function MessageInput({
                       gap: formatBtnGap,
                     }}
                   >
-                    {group.map(({ icon: Icon, label, run }) => (
-                      <button
-                        key={label}
-                        type="button"
-                        role="menuitem"
-                        title={label}
-                        aria-label={label}
-                        onMouseDown={(e) => e.preventDefault()}
-                        onClick={() => {
-                          run();
-                          setOpenPopover(null);
-                        }}
-                        style={{
-                          display: "flex",
-                          alignItems: "center",
-                          justifyContent: "center",
-                          width: inputToolBtnSize,
-                          height: inputToolBtnSize,
-                          padding: 0,
-                          border: "none",
-                          borderRadius: inputToolBtnRadius,
-                          backgroundColor: "transparent",
-                          color: palette.textSecondary,
-                          cursor: "pointer",
-                        }}
-                        onMouseEnter={(e) => {
-                          e.currentTarget.style.backgroundColor = palette.bgHover;
-                          e.currentTarget.style.color = palette.textHeading;
-                        }}
-                        onMouseLeave={(e) => {
-                          e.currentTarget.style.backgroundColor = "transparent";
-                          e.currentTarget.style.color = palette.textSecondary;
-                        }}
-                      >
-                        <Icon size={inputToolIconSize} strokeWidth={2} />
-                      </button>
-                    ))}
+                    {group.map(({ icon: Icon, label, run, formatKey }) => {
+                      const isActive = formatKey ? activeFormats.has(formatKey) : false;
+                      return (
+                        <button
+                          key={label}
+                          type="button"
+                          role="menuitem"
+                          title={label}
+                          aria-label={label}
+                          aria-pressed={isActive}
+                          onMouseDown={(e) => e.preventDefault()}
+                          onClick={run}
+                          style={{
+                            display: "flex",
+                            alignItems: "center",
+                            justifyContent: "center",
+                            width: inputToolBtnSize,
+                            height: inputToolBtnSize,
+                            padding: 0,
+                            border: "none",
+                            borderRadius: inputToolBtnRadius,
+                            backgroundColor: isActive ? palette.bgHover : "transparent",
+                            color: isActive ? palette.textHeading : palette.textSecondary,
+                            cursor: "pointer",
+                          }}
+                          onMouseEnter={(e) => {
+                            e.currentTarget.style.backgroundColor = palette.bgHover;
+                            e.currentTarget.style.color = palette.textHeading;
+                          }}
+                          onMouseLeave={(e) => {
+                            e.currentTarget.style.backgroundColor = isActive ? palette.bgHover : "transparent";
+                            e.currentTarget.style.color = isActive ? palette.textHeading : palette.textSecondary;
+                          }}
+                        >
+                          <Icon size={inputToolIconSize} strokeWidth={2} />
+                        </button>
+                      );
+                    })}
                   </div>
                 </Fragment>
               ))}

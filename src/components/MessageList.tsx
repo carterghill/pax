@@ -96,12 +96,29 @@ export default function MessageList({
     return distanceFromBottom < AUTO_SCROLL_THRESHOLD_PX;
   }
 
-  useEffect(() => {
+  // Scroll to bottom before paint so the user never sees the top-first flash.
+  useLayoutEffect(() => {
     if (!containerRef.current) return;
-    if (initialLoading || shouldAutoScrollRef.current) {
+    if (shouldAutoScrollRef.current) {
       bottomRef.current?.scrollIntoView();
     }
-  }, [messages.length, initialLoading]);
+  }, [messages.length]);
+
+  // When the container shrinks (input grew, format menu opened), keep bottom anchored.
+  useEffect(() => {
+    const el = containerRef.current;
+    if (!el) return;
+    let prevHeight = el.clientHeight;
+    const ro = new ResizeObserver(() => {
+      const h = el.clientHeight;
+      if (h < prevHeight && shouldAutoScrollRef.current) {
+        bottomRef.current?.scrollIntoView();
+      }
+      prevHeight = h;
+    });
+    ro.observe(el);
+    return () => ro.disconnect();
+  }, []);
 
   useEffect(() => {
     if (!openMenuEventId) return;
