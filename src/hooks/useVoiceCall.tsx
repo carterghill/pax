@@ -230,14 +230,24 @@ export function useVoiceCall() {
     []
   );
 
-  // Send stored volumes to backend when participants change
+  // Send stored volumes to backend only when new participants join
+  const volumeSentRef = useRef<Set<string>>(new Set());
   useEffect(() => {
-    for (const p of state.participants) {
-      if (!p.isLocal) {
-        const stored = getStoredVolume(p.identity);
+    const currentIds = new Set(
+      state.participants.filter((p) => !p.isLocal).map((p) => p.identity)
+    );
+    // Prune departed participants so they get re-sent if they rejoin
+    for (const id of volumeSentRef.current) {
+      if (!currentIds.has(id)) volumeSentRef.current.delete(id);
+    }
+    // Send stored volumes only for newly-joined participants
+    for (const id of currentIds) {
+      if (!volumeSentRef.current.has(id)) {
+        volumeSentRef.current.add(id);
+        const stored = getStoredVolume(id);
         if (stored !== 1.0) {
           invoke("voice_set_participant_volume", {
-            identity: p.identity,
+            identity: id,
             volume: stored,
           }).catch(() => {});
         }
