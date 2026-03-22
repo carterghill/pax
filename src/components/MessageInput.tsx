@@ -22,6 +22,7 @@ import {
   Heading1,
   Heading2,
   Minus,
+  Send,
   Smile,
 } from "lucide-react";
 import { Picker } from "emoji-mart";
@@ -361,6 +362,8 @@ export default function MessageInput({
     const trimmed = text.trim();
     if (!trimmed || sending) return;
 
+    setEmojiMenuOpen(false);
+    setFormatMenuOpen(false);
     sendTyping(false);
     if (typingTimeout.current) clearTimeout(typingTimeout.current);
 
@@ -414,9 +417,12 @@ export default function MessageInput({
   const formatBtnRadius = Math.max(3, spacing.unit * 0.55);
   const formatBtnGap = spacing.unit * 0.75;
   const groupGap = spacing.unit * 1.5;
-  /** Square chrome controls next to the textarea (emoji + markdown). */
-  const inputToolBtnSize = spacing.unit * 10;
+  /** Square chrome controls next to the textarea (emoji + markdown + send). */
+  const inputToolIconSize = 20;
+  /** Outer edge length; icon is centered with minimal inset (no extra CSS padding). */
+  const inputToolBtnSize = inputToolIconSize + spacing.unit * 3;
   const inputToolBtnRadius = Math.max(3, spacing.unit * 0.55);
+  const canSend = text.trim().length > 0 && !sending;
 
   return (
     <div
@@ -527,7 +533,7 @@ export default function MessageInput({
           backgroundColor: palette.bgActive,
           borderRadius: spacing.unit * 1.5,
           display: "flex",
-          alignItems: "flex-end",
+          alignItems: "center",
           minHeight: spacing.unit * 11,
         }}
       >
@@ -541,7 +547,6 @@ export default function MessageInput({
           style={{
             flex: 1,
             minWidth: 0,
-            alignSelf: "flex-end",
             background: "none",
             border: "none",
             outline: "none",
@@ -562,10 +567,9 @@ export default function MessageInput({
           style={{
             position: "relative",
             flexShrink: 0,
-            alignSelf: "flex-end",
             display: "flex",
             flexDirection: "column",
-            justifyContent: "flex-end",
+            justifyContent: "center",
           }}
         >
           {emojiMenuOpen && (
@@ -606,6 +610,7 @@ export default function MessageInput({
               justifyContent: "center",
               width: inputToolBtnSize,
               height: inputToolBtnSize,
+              padding: 0,
               margin: spacing.unit,
               marginRight: spacing.unit * 0.75,
               border: "none",
@@ -627,7 +632,7 @@ export default function MessageInput({
               }
             }}
           >
-            <Smile size={20} strokeWidth={2} />
+            <Smile size={inputToolIconSize} strokeWidth={2} />
           </button>
         </div>
         <button
@@ -642,12 +647,12 @@ export default function MessageInput({
           }}
           style={{
             flexShrink: 0,
-            alignSelf: "flex-end",
             display: "flex",
             alignItems: "center",
             justifyContent: "center",
             width: inputToolBtnSize,
             height: inputToolBtnSize,
+            padding: 0,
             margin: spacing.unit,
             marginLeft: 0,
             border: "none",
@@ -669,7 +674,46 @@ export default function MessageInput({
             }
           }}
         >
-          <Type size={20} strokeWidth={2} />
+          <Type size={inputToolIconSize} strokeWidth={2} />
+        </button>
+        <button
+          type="button"
+          title={editingMessage ? "Save edit" : "Send message"}
+          aria-label={editingMessage ? "Save edit" : "Send message"}
+          disabled={!canSend}
+          onMouseDown={(e) => e.preventDefault()}
+          onClick={() => void handleSend()}
+          style={{
+            flexShrink: 0,
+            display: "flex",
+            alignItems: "center",
+            justifyContent: "center",
+            width: inputToolBtnSize,
+            height: inputToolBtnSize,
+            padding: 0,
+            marginTop: spacing.unit,
+            marginBottom: spacing.unit,
+            marginLeft: 0,
+            marginRight: spacing.unit * 2,
+            border: "none",
+            borderRadius: inputToolBtnRadius,
+            backgroundColor: "transparent",
+            color: palette.textSecondary,
+            cursor: canSend ? "pointer" : "not-allowed",
+            opacity: canSend ? 1 : 0.45,
+          }}
+          onMouseEnter={(e) => {
+            if (!canSend) return;
+            e.currentTarget.style.backgroundColor = palette.bgHover;
+            e.currentTarget.style.color = palette.textPrimary;
+          }}
+          onMouseLeave={(e) => {
+            if (!canSend) return;
+            e.currentTarget.style.backgroundColor = "transparent";
+            e.currentTarget.style.color = palette.textSecondary;
+          }}
+        >
+          <Send size={inputToolIconSize} strokeWidth={2} />
         </button>
       </div>
     </div>
