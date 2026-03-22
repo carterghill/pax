@@ -29,6 +29,13 @@ import { Picker } from "emoji-mart";
 import data from "@emoji-mart/data";
 import { useTheme } from "../theme/ThemeContext";
 import { EMOJI_ONLY_DISPLAY_SCALE, isOnlyEmojisAndWhitespace } from "../utils/emojifyTwemoji";
+import {
+  fillComposerEditor,
+  getPlainTextOffsetsFromSelection,
+  insertPlainTextAtSelection,
+  serializeComposerEditor,
+  setSelectionPlainTextOffsets,
+} from "../utils/composerEditorDom";
 
 export interface EditingMessageRef {
   eventId: string;
@@ -50,18 +57,6 @@ function getSelectedLineSpan(value: string, start: number, end: number): { lineS
   return { lineStart, lineEnd };
 }
 
-function afterTextUpdate(
-  el: HTMLTextAreaElement,
-  start: number,
-  end: number,
-  focus = true,
-) {
-  requestAnimationFrame(() => {
-    if (focus) el.focus();
-    el.setSelectionRange(start, end);
-  });
-}
-
 export default function MessageInput({
   roomId,
   roomName,
@@ -73,7 +68,8 @@ export default function MessageInput({
   const [sending, setSending] = useState(false);
   const [formatMenuOpen, setFormatMenuOpen] = useState(false);
   const [emojiMenuOpen, setEmojiMenuOpen] = useState(false);
-  const inputRef = useRef<HTMLTextAreaElement>(null);
+  const editorRef = useRef<HTMLDivElement>(null);
+  const restoreSelectionRef = useRef<{ start: number; end: number } | null>(null);
   const rootRef = useRef<HTMLDivElement>(null);
   const emojiPickerMountRef = useRef<HTMLDivElement>(null);
   const insertEmojiFromPickerRef = useRef<(native: string) => void>(() => {});
@@ -82,6 +78,11 @@ export default function MessageInput({
   const { palette, typography, spacing, name: themeName } = useTheme();
 
   const emojiOnlyComposer = useMemo(() => isOnlyEmojisAndWhitespace(text), [text]);
+
+  const composerImgStyle = useMemo(
+    () => ({ borderRadius: spacing.unit, maxWidth: "100%" }),
+    [spacing.unit],
+  );
 
   /** Grow with typing up to this many lines, then keep height fixed and scroll. */
   const COMPOSER_MAX_AUTO_LINES = 3;
@@ -95,17 +96,23 @@ export default function MessageInput({
   }, [emojiOnlyComposer, typography.fontSizeBase, typography.lineHeight, spacing.unit]);
 
   useLayoutEffect(() => {
-    const el = inputRef.current;
+    const el = editorRef.current;
     if (!el) return;
-    const sync = () => {
+    fillComposerEditor(el, text, composerImgStyle);
+    const r = restoreSelectionRef.current;
+    if (r) {
+      setSelectionPlainTextOffsets(el, r.start, r.end);
+      restoreSelectionRef.current = null;
+    }
+    const syncHeight = () => {
       el.style.height = "auto";
       el.style.height = `${Math.min(el.scrollHeight, composerMaxHeightPx)}px`;
     };
-    sync();
-    const ro = new ResizeObserver(sync);
+    syncHeight();
+    const ro = new ResizeObserver(syncHeight);
     ro.observe(el);
     return () => ro.disconnect();
-  }, [text, composerMaxHeightPx]);
+  }, [text, composerImgStyle, composerMaxHeightPx]);
 
   const sendTyping = useCallback(
     (typing: boolean) => {
@@ -116,13 +123,20 @@ export default function MessageInput({
     [roomId],
   );
 
-  function handleChange(e: React.ChangeEvent<HTMLTextAreaElement>) {
-    const val = e.target.value;
-    setText(val);
+  function handleEditorInput() {
+    const el = editorRef.current;
+    if (!el) return;
+    const { start, end } = getPlainTextOffsetsFromSelection(el);
+    const next = serializeComposerEditor(el);
+    setText((prev) => {
+      if (next === prev) return prev;
+      restoreSelectionRef.current = { start, end };
+      return next;
+    });
 
     if (editingMessage) return;
 
-    if (val.trim().length > 0) {
+    if (next.trim().length > 0) {
       sendTyping(true);
       if (typingTimeout.current) clearTimeout(typingTimeout.current);
       typingTimeout.current = setTimeout(() => sendTyping(false), 3000);
@@ -196,49 +210,49 @@ export default function MessageInput({
 
   useEffect(() => {
     if (!editingMessage) return;
-    setText(editingMessage.body);
-    requestAnimationFrame(() => {
-      inputRef.current?.focus();
-      const len = editingMessage.body.length;
-      inputRef.current?.setSelectionRange(len, len);
-    });
+    const body = editingMessage.body;
+    setText(body);
+    const len = body.length;
+    restoreSelectionRef.current = { start: len, end: len };
+    requestAnimationFrame(() => editorRef.current?.focus());
   }, [editingMessage?.eventId]);
 
   const wrapSelection = useCallback(
     (before: string, after: string, emptyPlaceholder: string) => {
-      const el = inputRef.current;
+      const el = editorRef.current;
       if (!el) return;
-      const start = el.selectionStart;
-      const end = el.selectionEnd;
+      const { start, end } = getPlainTextOffsetsFromSelection(el);
       const sel = text.slice(start, end);
       const middle = sel || emptyPlaceholder;
       const next = text.slice(0, start) + before + middle + after + text.slice(end);
-      setText(next);
       const a = start + before.length;
       const b = a + middle.length;
-      afterTextUpdate(el, a, b);
+      restoreSelectionRef.current = { start: a, end: b };
+      setText(next);
     },
     [text],
   );
 
   const insertAtCursor = useCallback(
     (insertion: string, selectStartOffset: number, selectEndOffset: number) => {
-      const el = inputRef.current;
+      const el = editorRef.current;
       if (!el) return;
-      const start = el.selectionStart;
-      const next = text.slice(0, start) + insertion + text.slice(el.selectionEnd);
+      const { start, end } = getPlainTextOffsetsFromSelection(el);
+      const next = text.slice(0, start) + insertion + text.slice(end);
+      restoreSelectionRef.current = {
+        start: start + selectStartOffset,
+        end: start + selectEndOffset,
+      };
       setText(next);
-      afterTextUpdate(el, start + selectStartOffset, start + selectEndOffset);
     },
     [text],
   );
 
   const prefixLines = useCallback(
     (prefix: string, ordered = false) => {
-      const el = inputRef.current;
+      const el = editorRef.current;
       if (!el) return;
-      const start = el.selectionStart;
-      const end = el.selectionEnd;
+      const { start, end } = getPlainTextOffsetsFromSelection(el);
       const { lineStart, lineEnd } = getSelectedLineSpan(text, start, end);
       const block = text.slice(lineStart, lineEnd);
       const lines = block.split("\n");
@@ -253,19 +267,18 @@ export default function MessageInput({
           });
       const newBlock = newLines.join("\n");
       const next = text.slice(0, lineStart) + newBlock + text.slice(lineEnd);
-      setText(next);
       const delta = newBlock.length - block.length;
-      afterTextUpdate(el, start + delta, end + delta);
+      restoreSelectionRef.current = { start: start + delta, end: end + delta };
+      setText(next);
     },
     [text],
   );
 
   const toggleHeadingPrefix = useCallback(
     (hashes: string) => {
-      const el = inputRef.current;
+      const el = editorRef.current;
       if (!el) return;
-      const start = el.selectionStart;
-      const end = el.selectionEnd;
+      const { start, end } = getPlainTextOffsetsFromSelection(el);
       const { lineStart, lineEnd } = getSelectedLineSpan(text, start, end);
       const block = text.slice(lineStart, lineEnd);
       const lines = block.split("\n");
@@ -279,18 +292,17 @@ export default function MessageInput({
       });
       const newBlock = newLines.join("\n");
       const next = text.slice(0, lineStart) + newBlock + text.slice(lineEnd);
-      setText(next);
       const delta = newBlock.length - block.length;
-      afterTextUpdate(el, start + delta, end + delta);
+      restoreSelectionRef.current = { start: start + delta, end: end + delta };
+      setText(next);
     },
     [text],
   );
 
   const insertBlockCode = useCallback(() => {
-    const el = inputRef.current;
+    const el = editorRef.current;
     if (!el) return;
-    const start = el.selectionStart;
-    const end = el.selectionEnd;
+    const { start, end } = getPlainTextOffsetsFromSelection(el);
     const sel = text.slice(start, end);
     const fence = "```";
     let next: string;
@@ -305,29 +317,28 @@ export default function MessageInput({
       selStart = start + fence.length + 1;
       selEnd = selStart;
     }
+    restoreSelectionRef.current = { start: selStart, end: selEnd };
     setText(next);
-    afterTextUpdate(el, selStart, selEnd);
   }, [text]);
 
   const insertLink = useCallback(() => {
-    const el = inputRef.current;
+    const el = editorRef.current;
     if (!el) return;
-    const start = el.selectionStart;
-    const end = el.selectionEnd;
+    const { start, end } = getPlainTextOffsetsFromSelection(el);
     const sel = text.slice(start, end);
     const label = sel || "text";
     const insertion = `[${label}](https://)`;
     const next = text.slice(0, start) + insertion + text.slice(end);
-    setText(next);
     const urlStart = start + insertion.indexOf("https://");
     const urlEnd = urlStart + "https://".length;
-    afterTextUpdate(el, urlStart, urlEnd);
+    restoreSelectionRef.current = { start: urlStart, end: urlEnd };
+    setText(next);
   }, [text]);
 
   const insertHorizontalRule = useCallback(() => {
-    const el = inputRef.current;
+    const el = editorRef.current;
     if (!el) return;
-    const start = el.selectionStart;
+    const { start } = getPlainTextOffsetsFromSelection(el);
     const padBefore = start > 0 && text[start - 1] !== "\n" ? "\n\n" : "\n";
     const insertion = `${padBefore}---\n`;
     insertAtCursor(insertion, insertion.length, insertion.length);
@@ -382,7 +393,7 @@ export default function MessageInput({
         setText("");
       }
       onMessageSent();
-      inputRef.current?.focus();
+      editorRef.current?.focus();
     } catch (e) {
       console.error(editingMessage ? "Failed to edit:" : "Failed to send:", e);
     }
@@ -537,32 +548,73 @@ export default function MessageInput({
           minHeight: spacing.unit * 11,
         }}
       >
-        <textarea
-          ref={inputRef}
-          value={text}
-          onChange={handleChange}
-          onKeyDown={handleKeyDown}
-          placeholder={editingMessage ? "Edit message" : `Message #${roomName}`}
-          rows={1}
+        <div
           style={{
+            position: "relative",
             flex: 1,
             minWidth: 0,
-            background: "none",
-            border: "none",
-            outline: "none",
-            color: palette.textPrimary,
-            fontSize: emojiOnlyComposer
-              ? typography.fontSizeBase * EMOJI_ONLY_DISPLAY_SCALE
-              : typography.fontSizeBase,
-            fontFamily: `${typography.fontFamily}, var(--pax-twemoji-font-stack)`,
-            lineHeight: typography.lineHeight,
-            padding: `${spacing.unit * 3}px ${spacing.unit * 2}px ${spacing.unit * 3}px ${spacing.unit * 4}px`,
-            resize: "none",
-            maxHeight: composerMaxHeightPx,
-            overflowY: "auto",
-            boxSizing: "border-box",
+            alignSelf: "stretch",
           }}
-        />
+        >
+          {!text.trim() && (
+            <div
+              aria-hidden
+              style={{
+                position: "absolute",
+                left: 0,
+                top: 0,
+                right: 0,
+                padding: `${spacing.unit * 3}px ${spacing.unit * 2}px ${spacing.unit * 3}px ${spacing.unit * 4}px`,
+                pointerEvents: "none",
+                color: palette.textSecondary,
+                fontSize: emojiOnlyComposer
+                  ? typography.fontSizeBase * EMOJI_ONLY_DISPLAY_SCALE
+                  : typography.fontSizeBase,
+                fontFamily: `${typography.fontFamily}, var(--pax-twemoji-font-stack)`,
+                lineHeight: typography.lineHeight,
+                whiteSpace: "pre-wrap",
+                wordBreak: "break-word",
+              }}
+            >
+              {editingMessage ? "Edit message" : `Message #${roomName}`}
+            </div>
+          )}
+          <div
+            ref={editorRef}
+            contentEditable
+            role="textbox"
+            aria-multiline="true"
+            aria-label={editingMessage ? "Edit message" : `Message ${roomName}`}
+            suppressContentEditableWarning
+            onInput={handleEditorInput}
+            onKeyDown={handleKeyDown}
+            onPaste={(e) => {
+              e.preventDefault();
+              const t = e.clipboardData.getData("text/plain");
+              const el = editorRef.current;
+              if (el) insertPlainTextAtSelection(el, t);
+            }}
+            style={{
+              minWidth: 0,
+              width: "100%",
+              background: "none",
+              border: "none",
+              outline: "none",
+              color: palette.textPrimary,
+              fontSize: emojiOnlyComposer
+                ? typography.fontSizeBase * EMOJI_ONLY_DISPLAY_SCALE
+                : typography.fontSizeBase,
+              fontFamily: `${typography.fontFamily}, var(--pax-twemoji-font-stack)`,
+              lineHeight: typography.lineHeight,
+              padding: `${spacing.unit * 3}px ${spacing.unit * 2}px ${spacing.unit * 3}px ${spacing.unit * 4}px`,
+              maxHeight: composerMaxHeightPx,
+              overflowY: "auto",
+              boxSizing: "border-box",
+              whiteSpace: "pre-wrap",
+              wordBreak: "break-word",
+            }}
+          />
+        </div>
         <div
           style={{
             position: "relative",

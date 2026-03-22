@@ -21,6 +21,7 @@ import {
   Table2,
 } from "lucide-react";
 import { useTheme } from "../theme/ThemeContext";
+import { hrefLooksLikeDirectImageUrl, normalizeImageSrcHref } from "../utils/directImageUrl";
 
 /** Word joiner–wrapped `(edited)` inside markdown emphasis so we can style it without matching user italics. */
 const EDITED_EMPHASIS = ` *\u2060(edited)\u2060*`;
@@ -56,27 +57,6 @@ function codeBlockLabel(children: ReactNode): string {
 function isExternalHref(href: string | undefined): boolean {
   if (!href) return false;
   return /^https?:\/\//i.test(href) || href.startsWith("//");
-}
-
-/** Absolute https URL suitable for `<img src>` (protocol-relative → https). */
-function normalizeImageSrcHref(href: string): string | null {
-  const t = href.trim();
-  if (t.startsWith("//")) return `https:${t}`;
-  if (/^https?:\/\//i.test(t)) return t;
-  return null;
-}
-
-/** Path ends in a common static image extension (direct file URLs, not HTML pages). */
-function hrefLooksLikeDirectImageUrl(href: string): boolean {
-  const abs = normalizeImageSrcHref(href);
-  if (!abs) return false;
-  try {
-    const u = new URL(abs);
-    if (!/^https?:$/i.test(u.protocol)) return false;
-    return /\.(gif|jpe?g|png|webp|avif|bmp|svg)(?:$|[?#])/i.test(u.pathname);
-  } catch {
-    return false;
-  }
 }
 
 function E({ children }: { children: ReactNode }) {
