@@ -155,6 +155,7 @@ export default function ChatView({
   return (
     <div ref={containerRef} style={{
       flex: 1,
+      minHeight: 0,
       display: "flex",
       flexDirection: "column",
       height: "100vh",
@@ -215,6 +216,7 @@ export default function ChatView({
       {/* Content area: messages + optional user menu */}
       <div style={{
         flex: 1,
+        minHeight: 0,
         display: "flex",
         overflow: "hidden",
       }}>
@@ -224,39 +226,62 @@ export default function ChatView({
           display: "flex",
           flexDirection: "column",
           minWidth: 0,
+          minHeight: 0,
         }}>
-          <MessageList
-            messages={messages}
-            loading={loading}
-            initialLoading={initialLoading}
-            refreshing={refreshing}
-            hasMore={hasMore}
-            onLoadMore={loadMore}
-            roomId={room.id}
-            userId={userId}
-            redactionPolicy={redactionPolicy}
-            onRequestEdit={handleRequestEdit}
-            onMessagesMutated={refresh}
-            onMessageRemoved={removeMessageById}
-          />
+          <div
+            style={{
+              flex: 1,
+              minHeight: 0,
+              overflow: "hidden",
+              position: "relative",
+              zIndex: 0,
+              isolation: "isolate",
+              display: "flex",
+              flexDirection: "column",
+            }}
+          >
+            <MessageList
+              messages={messages}
+              loading={loading}
+              initialLoading={initialLoading}
+              refreshing={refreshing}
+              hasMore={hasMore}
+              onLoadMore={loadMore}
+              roomId={room.id}
+              userId={userId}
+              redactionPolicy={redactionPolicy}
+              onRequestEdit={handleRequestEdit}
+              onMessagesMutated={refresh}
+              onMessageRemoved={removeMessageById}
+            />
+          </div>
 
-          {/* Typing indicator */}
-          <TypingIndicator
-            names={typingNames}
-            palette={palette}
-            typography={typography}
-            spacing={spacing}
-          />
-
-          {/* Message input */}
-          <MessageInput
-            key={room.id}
-            roomId={room.id}
-            roomName={room.name}
-            onMessageSent={refresh}
-            editingMessage={editingMessage}
-            onCancelEdit={() => setEditingMessage(null)}
-          />
+          {/* Solid strip above messages in paint order; flex minHeight:0 keeps the list from overlapping this. */}
+          <div
+            style={{
+              flexShrink: 0,
+              position: "relative",
+              zIndex: 100,
+              isolation: "isolate",
+              backgroundColor: palette.bgPrimary,
+              boxShadow: `0 -1px 0 ${palette.border}`,
+            }}
+          >
+            <TypingIndicator
+              names={typingNames}
+              palette={palette}
+              typography={typography}
+              spacing={spacing}
+            />
+            <MessageInput
+              key={room.id}
+              roomId={room.id}
+              roomName={room.name}
+              onMessageSent={refresh}
+              editingMessage={editingMessage}
+              onCancelEdit={() => setEditingMessage(null)}
+            />
+          </div>
         </div>
 
         {/* User menu panel with resizable inside border */}

@@ -171,6 +171,7 @@ export default function MessageList({
     return (
       <div style={{
         flex: 1,
+        minHeight: 0,
         display: "flex",
         alignItems: "center",
         justifyContent: "center",
@@ -190,6 +191,7 @@ export default function MessageList({
       onScroll={handleScroll}
       style={{
         flex: 1,
+        minHeight: 0,
         overflowY: "auto",
         paddingTop: spacing.unit * 6,
         paddingBottom: spacing.unit * 4,

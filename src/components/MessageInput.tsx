@@ -6,7 +6,9 @@ import {
   useLayoutEffect,
   useMemo,
   Fragment,
+  type CSSProperties,
 } from "react";
+import { createPortal } from "react-dom";
 import { invoke } from "@tauri-apps/api/core";
 import {
   Type,
@@ -24,7 +26,9 @@ import {
   Minus,
   Send,
   Smile,
+  Clapperboard,
 } from "lucide-react";
+import GifPicker, { Theme as GifPickerTheme } from "react-gif-picker";
 import { Picker } from "emoji-mart";
 import data from "@emoji-mart/data";
 import { useTheme } from "../theme/ThemeContext";
@@ -57,6 +61,27 @@ function getSelectedLineSpan(value: string, start: number, end: number): { lineS
   return { lineStart, lineEnd };
 }
 
+/** Space before a bare image URL when needed so `splitTextWithDirectImageEmbeds` recognizes it (matches paste behavior). */
+function leadingSpaceBeforeBareUrl(raw: string, insertAt: number): string {
+  if (insertAt === 0) return "";
+  const prev = raw[insertAt - 1]!;
+  if (/\s/.test(prev)) return "";
+  if (/[\s([{<'"`]/.test(prev)) return "";
+  if (!/[\w/]/.test(prev)) return "";
+  return " ";
+}
+
+const COMPOSER_POPOVER_Z = 12_000;
+
+function fixedPopoverStyle(bottom: number, right: number): CSSProperties {
+  return {
+    position: "fixed",
+    bottom,
+    right,
+    zIndex: COMPOSER_POPOVER_Z,
+  };
+}
+
 export default function MessageInput({
   roomId,
   roomName,
@@ -68,14 +93,21 @@ export default function MessageInput({
   const [sending, setSending] = useState(false);
   const [formatMenuOpen, setFormatMenuOpen] = useState(false);
   const [emojiMenuOpen, setEmojiMenuOpen] = useState(false);
+  const [gifMenuOpen, setGifMenuOpen] = useState(false);
   const editorRef = useRef<HTMLDivElement>(null);
   const restoreSelectionRef = useRef<{ start: number; end: number } | null>(null);
   const rootRef = useRef<HTMLDivElement>(null);
+  const emojiAnchorRef = useRef<HTMLButtonElement>(null);
+  const gifAnchorRef = useRef<HTMLButtonElement>(null);
   const emojiPickerMountRef = useRef<HTMLDivElement>(null);
+  const [formatPopoverPos, setFormatPopoverPos] = useState<{ bottom: number; right: number } | null>(null);
+  const [emojiPopoverPos, setEmojiPopoverPos] = useState<{ bottom: number; right: number } | null>(null);
+  const [gifPopoverPos, setGifPopoverPos] = useState<{ bottom: number; right: number } | null>(null);
   const insertEmojiFromPickerRef = useRef<(native: string) => void>(() => {});
   const typingTimeout = useRef<ReturnType<typeof setTimeout> | null>(null);
   const isTyping = useRef(false);
   const { palette, typography, spacing, name: themeName } = useTheme();
+  const tenorApiKey = import.meta.env.VITE_TENOR_API_KEY ?? "";
 
   const emojiOnlyComposer = useMemo(() => isOnlyEmojisAndWhitespace(text), [text]);
 
@@ -156,18 +188,58 @@ export default function MessageInput({
     };
   }, [roomId]);
 
+  useLayoutEffect(() => {
+    const margin = spacing.unit * 2;
+    const update = () => {
+      if (formatMenuOpen && rootRef.current) {
+        const root = rootRef.current.getBoundingClientRect();
+        setFormatPopoverPos({
+          bottom: window.innerHeight - root.top + margin,
+          right: window.innerWidth - root.right,
+        });
+      } else {
+        setFormatPopoverPos(null);
+      }
+      if (emojiMenuOpen && emojiAnchorRef.current) {
+        const r = emojiAnchorRef.current.getBoundingClientRect();
+        setEmojiPopoverPos({
+          bottom: window.innerHeight - r.top + margin,
+          right: window.innerWidth - r.right,
+        });
+      } else {
+        setEmojiPopoverPos(null);
+      }
+      if (gifMenuOpen && gifAnchorRef.current) {
+        const r = gifAnchorRef.current.getBoundingClientRect();
+        setGifPopoverPos({
+          bottom: window.innerHeight - r.top + margin,
+          right: window.innerWidth - r.right,
+        });
+      } else {
+        setGifPopoverPos(null);
+      }
+    };
+    update();
+    window.addEventListener("resize", update);
+    return () => window.removeEventListener("resize", update);
+  }, [formatMenuOpen, emojiMenuOpen, gifMenuOpen, spacing.unit]);
+
   useEffect(() => {
-    if (!formatMenuOpen && !emojiMenuOpen) return;
+    if (!formatMenuOpen && !emojiMenuOpen && !gifMenuOpen) return;
     const onDocDown = (e: MouseEvent) => {
+      const t = e.target;
+      if (t instanceof Element && t.closest("[data-pax-composer-popover]")) return;
       const root = rootRef.current;
       if (root && e.composedPath().includes(root)) return;
       setFormatMenuOpen(false);
       setEmojiMenuOpen(false);
+      setGifMenuOpen(false);
     };
     const onKey = (e: KeyboardEvent) => {
       if (e.key === "Escape") {
         setFormatMenuOpen(false);
         setEmojiMenuOpen(false);
+        setGifMenuOpen(false);
       }
     };
     document.addEventListener("mousedown", onDocDown);
@@ -176,7 +248,7 @@ export default function MessageInput({
       document.removeEventListener("mousedown", onDocDown);
       document.removeEventListener("keydown", onKey);
     };
-  }, [formatMenuOpen, emojiMenuOpen]);
+  }, [formatMenuOpen, emojiMenuOpen, gifMenuOpen]);
 
   insertEmojiFromPickerRef.current = (native: string) => {
     insertAtCursor(native, native.length, native.length);
@@ -206,7 +278,7 @@ export default function MessageInput({
     return () => {
       mount.innerHTML = "";
     };
-  }, [emojiMenuOpen, themeName]);
+  }, [emojiMenuOpen, emojiPopoverPos, themeName]);
 
   useEffect(() => {
     if (!editingMessage) return;
@@ -374,6 +446,7 @@ export default function MessageInput({
     if (!trimmed || sending) return;
 
     setEmojiMenuOpen(false);
+    setGifMenuOpen(false);
     setFormatMenuOpen(false);
     sendTyping(false);
     if (typingTimeout.current) clearTimeout(typingTimeout.current);
@@ -407,6 +480,10 @@ export default function MessageInput({
       return;
     }
     if (e.key === "Escape") {
+      if (gifMenuOpen) {
+        setGifMenuOpen(false);
+        return;
+      }
       if (emojiMenuOpen) {
         setEmojiMenuOpen(false);
         return;
@@ -435,110 +512,189 @@ export default function MessageInput({
   const inputToolBtnRadius = Math.max(3, spacing.unit * 0.55);
   const canSend = text.trim().length > 0 && !sending;
 
-  return (
-    <div
-      ref={rootRef}
-      style={{ padding: `0 ${spacing.unit * 3}px ${spacing.unit * 3}px`, position: "relative" }}
-    >
-      {formatMenuOpen && (
-        <div
-          role="menu"
-          aria-label="Markdown formatting"
-          style={{
-            position: "absolute",
-            bottom: "100%",
-            right: 0,
-            marginBottom: spacing.unit * 2,
-            padding: `${spacing.unit * 2}px ${spacing.unit * 2.5}px`,
-            display: "flex",
-            flexDirection: "row",
-            flexWrap: "wrap",
-            alignItems: "center",
-            justifyContent: "flex-end",
-            rowGap: spacing.unit * 1.25,
-            columnGap: groupGap,
-            width: "max-content",
-            maxWidth: "min(100%, calc(100vw - 24px))",
-            backgroundColor: palette.bgTertiary,
-            border: `1px solid ${palette.border}`,
-            borderRadius: spacing.unit * 2,
-            boxShadow:
-              themeName === "light"
-                ? `0 8px 28px rgba(0,0,0,0.1), 0 0 0 1px ${palette.border} inset`
-                : `0 12px 44px rgba(0,0,0,0.5), 0 0 0 1px rgba(255,255,255,0.06) inset`,
-            zIndex: 20,
-          }}
-        >
-          {formatGroups.map((group, groupIndex) => (
-            <Fragment key={groupIndex}>
-              {groupIndex > 0 && (
-                <div
-                  aria-hidden
-                  role="separator"
-                  style={{
-                    width: 1,
-                    height: formatBtnPx - spacing.unit * 0.75,
-                    flexShrink: 0,
-                    alignSelf: "center",
-                    borderRadius: 1,
-                    backgroundColor: palette.border,
-                    opacity: 0.9,
-                  }}
-                />
-              )}
+  const formatMenuPortal =
+    formatMenuOpen &&
+    formatPopoverPos &&
+    createPortal(
+      <div
+        data-pax-composer-popover
+        role="menu"
+        aria-label="Markdown formatting"
+        style={{
+          ...fixedPopoverStyle(formatPopoverPos.bottom, formatPopoverPos.right),
+          padding: `${spacing.unit * 2}px ${spacing.unit * 2.5}px`,
+          display: "flex",
+          flexDirection: "row",
+          flexWrap: "wrap",
+          alignItems: "center",
+          justifyContent: "flex-end",
+          rowGap: spacing.unit * 1.25,
+          columnGap: groupGap,
+          width: "max-content",
+          maxWidth: "min(100%, calc(100vw - 24px))",
+          backgroundColor: palette.bgTertiary,
+          border: `1px solid ${palette.border}`,
+          borderRadius: spacing.unit * 2,
+          boxShadow:
+            themeName === "light"
+              ? `0 8px 28px rgba(0,0,0,0.1), 0 0 0 1px ${palette.border} inset`
+              : `0 12px 44px rgba(0,0,0,0.5), 0 0 0 1px rgba(255,255,255,0.06) inset`,
+        }}
+      >
+        {formatGroups.map((group, groupIndex) => (
+          <Fragment key={groupIndex}>
+            {groupIndex > 0 && (
               <div
+                aria-hidden
+                role="separator"
                 style={{
-                  display: "flex",
-                  flexDirection: "row",
-                  flexWrap: "nowrap",
-                  alignItems: "center",
-                  gap: formatBtnGap,
+                  width: 1,
+                  height: formatBtnPx - spacing.unit * 0.75,
+                  flexShrink: 0,
+                  alignSelf: "center",
+                  borderRadius: 1,
+                  backgroundColor: palette.border,
+                  opacity: 0.9,
                 }}
-              >
-                {group.map(({ icon: Icon, label, run }) => (
-                  <button
-                    key={label}
-                    type="button"
-                    role="menuitem"
-                    title={label}
-                    aria-label={label}
-                    onMouseDown={(e) => e.preventDefault()}
-                    onClick={() => {
-                      run();
-                      setFormatMenuOpen(false);
-                    }}
-                    style={{
-                      display: "flex",
-                      alignItems: "center",
-                      justifyContent: "center",
-                      width: formatBtnPx,
-                      height: formatBtnPx,
-                      padding: 0,
-                      border: "none",
-                      borderRadius: formatBtnRadius,
-                      backgroundColor: palette.bgSecondary,
-                      color: palette.textSecondary,
-                      cursor: "pointer",
-                      boxShadow: `0 0 0 1px ${palette.border}`,
-                    }}
-                    onMouseEnter={(e) => {
-                      e.currentTarget.style.backgroundColor = palette.bgHover;
-                      e.currentTarget.style.color = palette.textHeading;
-                    }}
-                    onMouseLeave={(e) => {
-                      e.currentTarget.style.backgroundColor = palette.bgSecondary;
-                      e.currentTarget.style.color = palette.textSecondary;
-                    }}
-                  >
-                    <Icon size={iconBtnSize} strokeWidth={2} />
-                  </button>
-                ))}
-              </div>
-            </Fragment>
-          ))}
-        </div>
-      )}
+              />
+            )}
+            <div
+              style={{
+                display: "flex",
+                flexDirection: "row",
+                flexWrap: "nowrap",
+                alignItems: "center",
+                gap: formatBtnGap,
+              }}
+            >
+              {group.map(({ icon: Icon, label, run }) => (
+                <button
+                  key={label}
+                  type="button"
+                  role="menuitem"
+                  title={label}
+                  aria-label={label}
+                  onMouseDown={(e) => e.preventDefault()}
+                  onClick={() => {
+                    run();
+                    setFormatMenuOpen(false);
+                  }}
+                  style={{
+                    display: "flex",
+                    alignItems: "center",
+                    justifyContent: "center",
+                    width: formatBtnPx,
+                    height: formatBtnPx,
+                    padding: 0,
+                    border: "none",
+                    borderRadius: formatBtnRadius,
+                    backgroundColor: palette.bgSecondary,
+                    color: palette.textSecondary,
+                    cursor: "pointer",
+                    boxShadow: `0 0 0 1px ${palette.border}`,
+                  }}
+                  onMouseEnter={(e) => {
+                    e.currentTarget.style.backgroundColor = palette.bgHover;
+                    e.currentTarget.style.color = palette.textHeading;
+                  }}
+                  onMouseLeave={(e) => {
+                    e.currentTarget.style.backgroundColor = palette.bgSecondary;
+                    e.currentTarget.style.color = palette.textSecondary;
+                  }}
+                >
+                  <Icon size={iconBtnSize} strokeWidth={2} />
+                </button>
+              ))}
+            </div>
+          </Fragment>
+        ))}
+      </div>,
+      document.body,
+    );
 
+  const emojiPickerPortal =
+    emojiMenuOpen &&
+    emojiPopoverPos &&
+    createPortal(
+      <div
+        data-pax-composer-popover
+        style={{
+          ...fixedPopoverStyle(emojiPopoverPos.bottom, emojiPopoverPos.right),
+          borderRadius: spacing.unit * 2,
+          overflow: "hidden",
+          border: `1px solid ${palette.border}`,
+          boxShadow:
+            themeName === "light"
+              ? `0 8px 28px rgba(0,0,0,0.12), 0 0 0 1px ${palette.border} inset`
+              : `0 12px 44px rgba(0,0,0,0.55), 0 0 0 1px rgba(255,255,255,0.06) inset`,
+        }}
+      >
+        <div ref={emojiPickerMountRef} />
+      </div>,
+      document.body,
+    );
+
+  const gifPickerPortal =
+    gifMenuOpen &&
+    gifPopoverPos &&
+    createPortal(
+      <div
+        data-pax-composer-popover
+        style={{
+          ...fixedPopoverStyle(gifPopoverPos.bottom, gifPopoverPos.right),
+          borderRadius: spacing.unit * 2,
+          overflow: "hidden",
+          border: `1px solid ${palette.border}`,
+          boxShadow:
+            themeName === "light"
+              ? `0 8px 28px rgba(0,0,0,0.12), 0 0 0 1px ${palette.border} inset`
+              : `0 12px 44px rgba(0,0,0,0.55), 0 0 0 1px rgba(255,255,255,0.06) inset`,
+          backgroundColor: palette.bgTertiary,
+        }}
+      >
+        {tenorApiKey ? (
+          <GifPicker
+            tenorApiKey={tenorApiKey}
+            clientKey="pax"
+            theme={themeName === "light" ? GifPickerTheme.LIGHT : GifPickerTheme.DARK}
+            width={320}
+            height={380}
+            onGifClick={(gif) => {
+              const el = editorRef.current;
+              if (!el) return;
+              const { start } = getPlainTextOffsetsFromSelection(el);
+              const prefix = leadingSpaceBeforeBareUrl(text, start);
+              const insertion = `${prefix}${gif.url}`;
+              insertAtCursor(insertion, insertion.length, insertion.length);
+              setGifMenuOpen(false);
+              requestAnimationFrame(() => editorRef.current?.focus());
+            }}
+          />
+        ) : (
+          <div
+            style={{
+              width: 280,
+              padding: spacing.unit * 3,
+              color: palette.textSecondary,
+              fontSize: typography.fontSizeBase * 0.9,
+              lineHeight: typography.lineHeight,
+            }}
+          >
+            Add{" "}
+            <code style={{ color: palette.textPrimary }}>VITE_TENOR_API_KEY</code> to your env to search Tenor GIFs (free key
+            from Google Cloud → Tenor API).
+          </div>
+        )}
+      </div>,
+      document.body,
+    );
+
+  return (
+    <>
+      <div
+        ref={rootRef}
+        style={{ padding: `0 ${spacing.unit * 3}px ${spacing.unit * 3}px`, position: "relative" }}
+      >
       <div
         style={{
           backgroundColor: palette.bgActive,
@@ -546,6 +702,9 @@ export default function MessageInput({
           display: "flex",
           alignItems: "center",
           minHeight: spacing.unit * 11,
+          minWidth: 0,
+          flexWrap: "nowrap",
+          overflowX: "auto",
         }}
       >
         <div
@@ -617,75 +776,122 @@ export default function MessageInput({
         </div>
         <div
           style={{
-            position: "relative",
             flexShrink: 0,
             display: "flex",
-            flexDirection: "column",
+            flexDirection: "row",
+            alignItems: "center",
             justifyContent: "center",
+            position: "relative",
           }}
         >
-          {emojiMenuOpen && (
-            <div
+          <div style={{ position: "relative", flexShrink: 0 }}>
+            <button
+              ref={gifAnchorRef}
+              type="button"
+              title={tenorApiKey ? "GIF" : "GIF (configure Tenor API key)"}
+              aria-label="Insert GIF"
+              aria-expanded={gifMenuOpen}
+              aria-haspopup="dialog"
+              onMouseDown={(e) => e.preventDefault()}
+              onClick={() => {
+                setFormatMenuOpen(false);
+                setEmojiMenuOpen(false);
+                setGifMenuOpen((o) => !o);
+              }}
               style={{
-                position: "absolute",
-                bottom: "100%",
-                right: 0,
-                marginBottom: spacing.unit * 2,
-                zIndex: 21,
-                borderRadius: spacing.unit * 2,
-                overflow: "hidden",
-                border: `1px solid ${palette.border}`,
-                boxShadow:
-                  themeName === "light"
-                    ? `0 8px 28px rgba(0,0,0,0.12), 0 0 0 1px ${palette.border} inset`
-                    : `0 12px 44px rgba(0,0,0,0.55), 0 0 0 1px rgba(255,255,255,0.06) inset`,
+                flexShrink: 0,
+                display: "flex",
+                flexDirection: "row",
+                alignItems: "center",
+                justifyContent: "center",
+                gap: spacing.unit * 0.35,
+                width: "auto",
+                minWidth: inputToolBtnSize,
+                height: inputToolBtnSize,
+                paddingLeft: spacing.unit * 1.25,
+                paddingRight: spacing.unit * 1.25,
+                margin: spacing.unit,
+                marginRight: spacing.unit * 0.5,
+                border: "none",
+                borderRadius: inputToolBtnRadius,
+                backgroundColor: gifMenuOpen ? palette.bgHover : "transparent",
+                color: gifMenuOpen ? palette.textPrimary : palette.textSecondary,
+                cursor: "pointer",
+                fontFamily: typography.fontFamily,
+              }}
+              onMouseEnter={(e) => {
+                if (!gifMenuOpen) {
+                  e.currentTarget.style.backgroundColor = palette.bgHover;
+                  e.currentTarget.style.color = palette.textPrimary;
+                }
+              }}
+              onMouseLeave={(e) => {
+                if (!gifMenuOpen) {
+                  e.currentTarget.style.backgroundColor = "transparent";
+                  e.currentTarget.style.color = palette.textSecondary;
+                }
               }}
             >
-              <div ref={emojiPickerMountRef} />
-            </div>
-          )}
-          <button
-            type="button"
-            title="Emoji"
-            aria-label="Insert emoji"
-            aria-expanded={emojiMenuOpen}
-            aria-haspopup="dialog"
-            onMouseDown={(e) => e.preventDefault()}
-            onClick={() => {
-              setFormatMenuOpen(false);
-              setEmojiMenuOpen((o) => !o);
-            }}
-            style={{
-              flexShrink: 0,
-              display: "flex",
-              alignItems: "center",
-              justifyContent: "center",
-              width: inputToolBtnSize,
-              height: inputToolBtnSize,
-              padding: 0,
-              margin: spacing.unit,
-              marginRight: spacing.unit * 0.75,
-              border: "none",
-              borderRadius: inputToolBtnRadius,
-              backgroundColor: emojiMenuOpen ? palette.bgHover : "transparent",
-              color: emojiMenuOpen ? palette.textPrimary : palette.textSecondary,
-              cursor: "pointer",
-            }}
-            onMouseEnter={(e) => {
-              if (!emojiMenuOpen) {
-                e.currentTarget.style.backgroundColor = palette.bgHover;
-                e.currentTarget.style.color = palette.textPrimary;
-              }
-            }}
-            onMouseLeave={(e) => {
-              if (!emojiMenuOpen) {
-                e.currentTarget.style.backgroundColor = "transparent";
-                e.currentTarget.style.color = palette.textSecondary;
-              }
-            }}
-          >
-            <Smile size={inputToolIconSize} strokeWidth={2} />
-          </button>
+              <Clapperboard size={inputToolIconSize - 2} strokeWidth={2} aria-hidden />
+              <span
+                style={{
+                  fontSize: typography.fontSizeSmall - 1,
+                  fontWeight: typography.fontWeightBold,
+                  letterSpacing: "0.04em",
+                  lineHeight: 1,
+                }}
+              >
+                GIF
+              </span>
+            </button>
+          </div>
+          <div style={{ position: "relative", flexShrink: 0 }}>
+            <button
+              ref={emojiAnchorRef}
+              type="button"
+              title="Emoji"
+              aria-label="Insert emoji"
+              aria-expanded={emojiMenuOpen}
+              aria-haspopup="dialog"
+              onMouseDown={(e) => e.preventDefault()}
+              onClick={() => {
+                setFormatMenuOpen(false);
+                setGifMenuOpen(false);
+                setEmojiMenuOpen((o) => !o);
+              }}
+              style={{
+                flexShrink: 0,
+                display: "flex",
+                alignItems: "center",
+                justifyContent: "center",
+                width: inputToolBtnSize,
+                height: inputToolBtnSize,
+                padding: 0,
+                margin: spacing.unit,
+                marginLeft: 0,
+                marginRight: spacing.unit * 0.75,
+                border: "none",
+                borderRadius: inputToolBtnRadius,
+                backgroundColor: emojiMenuOpen ? palette.bgHover : "transparent",
+                color: emojiMenuOpen ? palette.textPrimary : palette.textSecondary,
+                cursor: "pointer",
+              }}
+              onMouseEnter={(e) => {
+                if (!emojiMenuOpen) {
+                  e.currentTarget.style.backgroundColor = palette.bgHover;
+                  e.currentTarget.style.color = palette.textPrimary;
+                }
+              }}
+              onMouseLeave={(e) => {
+                if (!emojiMenuOpen) {
+                  e.currentTarget.style.backgroundColor = "transparent";
+                  e.currentTarget.style.color = palette.textSecondary;
+                }
+              }}
+            >
+              <Smile size={inputToolIconSize} strokeWidth={2} />
+            </button>
+          </div>
         </div>
         <button
           type="button"
@@ -695,6 +901,7 @@ export default function MessageInput({
           onMouseDown={(e) => e.preventDefault()}
           onClick={() => {
             setEmojiMenuOpen(false);
+            setGifMenuOpen(false);
             setFormatMenuOpen((o) => !o);
           }}
           style={{
@@ -769,5 +976,9 @@ export default function MessageInput({
         </button>
       </div>
     </div>
+      {formatMenuPortal}
+      {emojiPickerPortal}
+      {gifPickerPortal}
+    </>
   );
 }
