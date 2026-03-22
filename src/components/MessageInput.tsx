@@ -82,6 +82,30 @@ export default function MessageInput({
 
   const emojiOnlyComposer = useMemo(() => isOnlyEmojisAndWhitespace(text), [text]);
 
+  /** Grow with typing up to this many lines, then keep height fixed and scroll. */
+  const COMPOSER_MAX_AUTO_LINES = 3;
+  const composerMaxHeightPx = useMemo(() => {
+    const fontSize = emojiOnlyComposer
+      ? typography.fontSizeBase * EMOJI_ONLY_DISPLAY_SCALE
+      : typography.fontSizeBase;
+    const linePx = fontSize * typography.lineHeight;
+    const padV = spacing.unit * 3 * 2;
+    return Math.ceil(padV + COMPOSER_MAX_AUTO_LINES * linePx);
+  }, [emojiOnlyComposer, typography.fontSizeBase, typography.lineHeight, spacing.unit]);
+
+  useLayoutEffect(() => {
+    const el = inputRef.current;
+    if (!el) return;
+    const sync = () => {
+      el.style.height = "auto";
+      el.style.height = `${Math.min(el.scrollHeight, composerMaxHeightPx)}px`;
+    };
+    sync();
+    const ro = new ResizeObserver(sync);
+    ro.observe(el);
+    return () => ro.disconnect();
+  }, [text, composerMaxHeightPx]);
+
   const sendTyping = useCallback(
     (typing: boolean) => {
       if (typing === isTyping.current) return;
@@ -517,6 +541,7 @@ export default function MessageInput({
           style={{
             flex: 1,
             minWidth: 0,
+            alignSelf: "flex-end",
             background: "none",
             border: "none",
             outline: "none",
@@ -528,8 +553,9 @@ export default function MessageInput({
             lineHeight: typography.lineHeight,
             padding: `${spacing.unit * 3}px ${spacing.unit * 2}px ${spacing.unit * 3}px ${spacing.unit * 4}px`,
             resize: "none",
-            maxHeight: 200,
+            maxHeight: composerMaxHeightPx,
             overflowY: "auto",
+            boxSizing: "border-box",
           }}
         />
         <div
