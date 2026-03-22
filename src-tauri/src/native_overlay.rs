@@ -792,7 +792,17 @@ impl GpuRenderer {
                 occlusion_query_set: None,
             });
 
-            pass.set_viewport(vp_x as f32, vp_y as f32, width.max(1) as f32, height.max(1) as f32, 0.0, 1.0);
+            pass.set_viewport(
+                vp_x as f32,
+                vp_y as f32,
+                // Clamp so vp_x+w ≤ surface_w and vp_y+h ≤ surface_h — during
+                // resize the frame may have been pre-scaled to a slightly larger
+                // target, and the surface has since shrunk.
+                width.min(self.surface_w.saturating_sub(vp_x)).max(1) as f32,
+                height.min(self.surface_h.saturating_sub(vp_y)).max(1) as f32,
+                0.0,
+                1.0,
+            );
             pass.set_pipeline(&self.pipeline);
             pass.set_bind_group(0, self.bind_group.as_ref().unwrap(), &[]);
             pass.draw(0..3, 0..1);
@@ -873,7 +883,7 @@ impl GpuRenderer {
         self.staging_u.resize(aligned_uv * ch as usize, 0);
         self.staging_v.resize(aligned_uv * ch as usize, 0);
 
-        log::info!(
+        log::debug!(
             "Textures recreated: Y={}x{} UV={}x{}",
             w, h, cw, ch
         );
