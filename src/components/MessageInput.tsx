@@ -387,8 +387,12 @@ export default function MessageInput({
 
   const iconBtnSize = 22;
   const formatBtnPx = spacing.unit * 10;
+  const formatBtnRadius = Math.max(3, spacing.unit * 0.55);
   const formatBtnGap = spacing.unit * 0.75;
   const groupGap = spacing.unit * 1.5;
+  /** Square chrome controls next to the textarea (emoji + markdown). */
+  const inputToolBtnSize = spacing.unit * 10;
+  const inputToolBtnRadius = Math.max(3, spacing.unit * 0.55);
 
   return (
     <div
@@ -432,7 +436,7 @@ export default function MessageInput({
                   role="separator"
                   style={{
                     width: 1,
-                    height: formatBtnPx - spacing.unit,
+                    height: formatBtnPx - spacing.unit * 0.75,
                     flexShrink: 0,
                     alignSelf: "center",
                     borderRadius: 1,
@@ -470,7 +474,7 @@ export default function MessageInput({
                       height: formatBtnPx,
                       padding: 0,
                       border: "none",
-                      borderRadius: spacing.unit * 1.25,
+                      borderRadius: formatBtnRadius,
                       backgroundColor: palette.bgSecondary,
                       color: palette.textSecondary,
                       cursor: "pointer",
@@ -532,10 +536,10 @@ export default function MessageInput({
           style={{
             position: "relative",
             flexShrink: 0,
-            alignSelf: "stretch",
+            alignSelf: "flex-end",
             display: "flex",
             flexDirection: "column",
-            justifyContent: "stretch",
+            justifyContent: "flex-end",
           }}
         >
           {emojiMenuOpen && (
@@ -543,7 +547,7 @@ export default function MessageInput({
               style={{
                 position: "absolute",
                 bottom: "100%",
-                left: 0,
+                right: 0,
                 marginBottom: spacing.unit * 2,
                 zIndex: 21,
                 borderRadius: spacing.unit * 2,
@@ -570,16 +574,16 @@ export default function MessageInput({
               setEmojiMenuOpen((o) => !o);
             }}
             style={{
-              flex: 1,
-              minHeight: 0,
+              flexShrink: 0,
               display: "flex",
               alignItems: "center",
               justifyContent: "center",
-              width: spacing.unit * 11,
+              width: inputToolBtnSize,
+              height: inputToolBtnSize,
               margin: spacing.unit,
               marginRight: spacing.unit * 0.75,
               border: "none",
-              borderRadius: spacing.unit,
+              borderRadius: inputToolBtnRadius,
               backgroundColor: emojiMenuOpen ? palette.bgHover : "transparent",
               color: emojiMenuOpen ? palette.textPrimary : palette.textSecondary,
               cursor: "pointer",
@@ -612,15 +616,16 @@ export default function MessageInput({
           }}
           style={{
             flexShrink: 0,
-            alignSelf: "stretch",
+            alignSelf: "flex-end",
             display: "flex",
             alignItems: "center",
             justifyContent: "center",
-            width: spacing.unit * 11,
+            width: inputToolBtnSize,
+            height: inputToolBtnSize,
             margin: spacing.unit,
             marginLeft: 0,
             border: "none",
-            borderRadius: spacing.unit,
+            borderRadius: inputToolBtnRadius,
             backgroundColor: formatMenuOpen ? palette.bgHover : "transparent",
             color: formatMenuOpen ? palette.textPrimary : palette.textSecondary,
             cursor: "pointer",
