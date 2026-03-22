@@ -49,15 +49,26 @@ pub async fn logout(state: State<'_, Arc<AppState>>, app: tauri::AppHandle) -> R
     Ok(())
 }
 
-pub fn save_session_to_credentials(app: &tauri::AppHandle, session: SavedSession) -> Result<(), String> {
+pub fn save_session_to_credentials(
+    app: &tauri::AppHandle,
+    homeserver: &str,
+    session: SavedSession,
+) -> Result<(), String> {
     let path = credentials_path(app)?;
-    if !path.exists() {
-        return Ok(());
-    }
-    let contents = std::fs::read_to_string(&path)
-        .map_err(|e| format!("Failed to read credentials: {e}"))?;
-    let mut creds: SavedCredentials = serde_json::from_str(&contents)
-        .map_err(|e| format!("Failed to parse credentials: {e}"))?;
+
+    // Read the existing file or start with a fresh credentials struct.
+    let mut creds = if path.exists() {
+        let contents = std::fs::read_to_string(&path)
+            .map_err(|e| format!("Failed to read credentials: {e}"))?;
+        serde_json::from_str(&contents)
+            .map_err(|e| format!("Failed to parse credentials: {e}"))?
+    } else {
+        SavedCredentials {
+            homeserver: homeserver.to_string(),
+            session: None,
+        }
+    };
+
     creds.session = Some(session);
     let json = serde_json::to_string_pretty(&creds)
         .map_err(|e| format!("Failed to serialize credentials: {e}"))?;

@@ -68,6 +68,7 @@ pub async fn login(
     if let Some(session) = client.matrix_auth().session() {
         let _ = save_session_to_credentials(
             &app,
+            &homeserver,
             SavedSession {
                 user_id: session.meta.user_id.to_string(),
                 device_id: session.meta.device_id.to_string(),

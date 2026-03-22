@@ -21,17 +21,17 @@ function App() {
     setLoading(true);
     setError(null);
     try {
+      if (remember) {
+        // Persist homeserver URL before login so save_session_to_credentials
+        // can patch the session tokens into the same file after login succeeds.
+        await invoke("save_credentials", { homeserver });
+      }
       const id = await invoke<string>("login", { homeserver, username, password });
       if (!syncStartedRef.current) {
         syncStartedRef.current = true;
         await invoke("start_sync");
       }
       setUserId(id);
-      if (remember) {
-        // Only persist the homeserver URL — session tokens are saved
-        // separately by the Rust backend after successful login.
-        await invoke("save_credentials", { homeserver });
-      }
     } catch (e) {
       setError(String(e));
     }
