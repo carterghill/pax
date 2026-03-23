@@ -1,4 +1,4 @@
-import { useState, useEffect, useCallback, useRef } from "react";
+import { useState, useEffect, useRef, useCallback } from "react";
 import { useRoomRedactionPolicy } from "../hooks/useRoomRedactionPolicy";
 import { listen } from "@tauri-apps/api/event";
 import { Hash, Users } from "lucide-react";
@@ -8,6 +8,7 @@ import UserMenu from "../components/UserMenu";
 import { useMessages } from "../hooks/useMessages";
 import { useTheme } from "../theme/ThemeContext";
 import { Message, Room } from "../types/matrix";
+import { useResizeHandle } from "../hooks/useResizeHandle";
 
 const USER_MENU_DEFAULT_WIDTH = 240;
 const MIN_USER_MENU_WIDTH = 180;
@@ -66,6 +67,12 @@ function TypingIndicator({ names }: { names: string[] }) {
         ))}
       </span>
       <span>{text}</span>
+      <style>{`
+        @keyframes typingDot {
+          0%, 60%, 100% { opacity: 0.3; transform: translateY(0); }
+          30% { opacity: 1; transform: translateY(-2px); }
+        }
+      `}</style>
     </div>
   );
 }
@@ -92,31 +99,14 @@ export default function ChatView({
   const [showUsers, setShowUsers] = useState(true);
   const [editingMessage, setEditingMessage] = useState<EditingMessageRef | null>(null);
 
-  const startXRef = useRef(0);
-  const startWidthRef = useRef(0);
   const containerRef = useRef<HTMLDivElement>(null);
-  const [isUserMenuResizeHovered, setIsUserMenuResizeHovered] = useState(false);
-
-  const handleUserMenuResizeStart = useCallback((e: React.MouseEvent) => {
-    e.preventDefault();
-    startXRef.current = e.clientX;
-    startWidthRef.current = userMenuWidth;
-
-    const onMove = (ev: MouseEvent) => {
-      const dx = ev.clientX - startXRef.current;
-      // Clamp so the chat column never goes below ~200px
-      const containerW = containerRef.current?.offsetWidth ?? 600;
-      const maxW = Math.min(MAX_USER_MENU_WIDTH, containerW - 200 - 6); // 6 = handle
-      const next = Math.max(MIN_USER_MENU_WIDTH, Math.min(maxW, startWidthRef.current - dx));
-      onUserMenuWidthChange(next);
-    };
-    const onUp = () => {
-      window.removeEventListener("mousemove", onMove);
-      window.removeEventListener("mouseup", onUp);
-    };
-    window.addEventListener("mousemove", onMove);
-    window.addEventListener("mouseup", onUp);
-  }, [userMenuWidth, onUserMenuWidthChange]);
+  const userMenuResize = useResizeHandle({
+    width: userMenuWidth,
+    onWidthChange: onUserMenuWidthChange,
+    min: MIN_USER_MENU_WIDTH,
+    max: () => Math.min(MAX_USER_MENU_WIDTH, (containerRef.current?.offsetWidth ?? 600) - 200 - 6),
+    direction: -1,
+  });
 
   // Listen for typing events in this room
   useEffect(() => {
@@ -250,15 +240,15 @@ export default function ChatView({
         {showUsers && (
           <>
             <div
-              onMouseDown={handleUserMenuResizeStart}
+              onMouseDown={userMenuResize.onMouseDown}
               onDoubleClick={() => onUserMenuWidthChange(USER_MENU_DEFAULT_WIDTH)}
-              onMouseEnter={() => setIsUserMenuResizeHovered(true)}
-              onMouseLeave={() => setIsUserMenuResizeHovered(false)}
+              onMouseEnter={() => userMenuResize.setIsHovered(true)}
+              onMouseLeave={() => userMenuResize.setIsHovered(false)}
               style={{
                 width: 6,
                 flexShrink: 0,
                 cursor: "col-resize",
-                backgroundColor: isUserMenuResizeHovered ? palette.border : "transparent",
+                backgroundColor: userMenuResize.isHovered ? palette.border : "transparent",
                 transition: "background-color 0.15s",
               }}
               title="Drag to resize, double-click to reset"

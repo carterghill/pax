@@ -105,11 +105,11 @@ export function useMessages(roomId: string | null) {
       });
   }, [roomId]);
 
-  // Listen for live messages from the sync loop
+  // Listen for live message events from the sync loop (new, edit, redact)
   useEffect(() => {
     if (!roomId) return;
 
-    const unlisten = listen<RoomMessagePayload>("room-message", (event) => {
+    const unlistenMsg = listen<RoomMessagePayload>("room-message", (event) => {
       const { roomId: msgRoomId, message } = event.payload;
       if (msgRoomId !== roomId) return;
 
@@ -123,15 +123,7 @@ export function useMessages(roomId: string | null) {
       });
     });
 
-    return () => {
-      unlisten.then((fn) => fn());
-    };
-  }, [roomId]);
-
-  useEffect(() => {
-    if (!roomId) return;
-
-    const unlisten = listen<MessageEditPayload>("room-message-edit", (event) => {
+    const unlistenEdit = listen<MessageEditPayload>("room-message-edit", (event) => {
       const { roomId: rid, targetEventId, body } = event.payload;
       if (rid !== roomId) return;
 
@@ -147,15 +139,7 @@ export function useMessages(roomId: string | null) {
       });
     });
 
-    return () => {
-      unlisten.then((fn) => fn());
-    };
-  }, [roomId]);
-
-  useEffect(() => {
-    if (!roomId) return;
-
-    const unlisten = listen<MessageRedactedPayload>("room-message-redacted", (event) => {
+    const unlistenRedact = listen<MessageRedactedPayload>("room-message-redacted", (event) => {
       const { roomId: rid, redactedEventId } = event.payload;
       if (rid !== roomId) return;
 
@@ -170,7 +154,9 @@ export function useMessages(roomId: string | null) {
     });
 
     return () => {
-      unlisten.then((fn) => fn());
+      unlistenMsg.then((fn) => fn());
+      unlistenEdit.then((fn) => fn());
+      unlistenRedact.then((fn) => fn());
     };
   }, [roomId]);
 
