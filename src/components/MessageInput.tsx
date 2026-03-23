@@ -5,6 +5,7 @@ import {
   useEffect,
   useLayoutEffect,
   useMemo,
+  useContext,
   Fragment,
   type CSSProperties,
 } from "react";
@@ -27,7 +28,12 @@ import {
   Send,
   Smile,
 } from "lucide-react";
-import GifPicker, { Theme as GifPickerTheme } from "react-gif-picker";
+import {
+  Grid as GiphyGrid,
+  SearchBar as GiphySearchBar,
+  SearchContext,
+  SearchContextManager,
+} from "@giphy/react-components";
 import { Picker } from "emoji-mart";
 import data from "@emoji-mart/data";
 import { useTheme } from "../theme/ThemeContext";
@@ -91,10 +97,10 @@ export default function MessageInput({
   const typingTimeout = useRef<ReturnType<typeof setTimeout> | null>(null);
   const isTyping = useRef(false);
   const { palette, typography, spacing, name: themeName } = useTheme();
-  const [tenorApiKey, setTenorApiKey] = useState("");
+  const [giphyApiKey, setGiphyApiKey] = useState("");
 
   useEffect(() => {
-    invoke<string>("get_tenor_api_key").then(setTenorApiKey).catch(() => {});
+    invoke<string>("get_giphy_api_key").then(setGiphyApiKey).catch(() => {});
   }, []);
 
   const emojiOnlyComposer = useMemo(() => isOnlyEmojisAndWhitespace(plainText), [plainText]);
@@ -481,26 +487,27 @@ export default function MessageInput({
         {/* Tab content — both always mounted to avoid React vs imperative DOM conflicts */}
         <div ref={emojiPickerMountRef} style={{ display: pickerTab === "emoji" ? "block" : "none" }} />
         <div style={{ display: pickerTab === "gif" ? "block" : "none" }}>
-          {tenorApiKey ? (
-            <GifPicker
-              tenorApiKey={tenorApiKey}
-              clientKey="pax"
-              theme={themeName === "light" ? GifPickerTheme.LIGHT : GifPickerTheme.DARK}
-              width={350}
-              height={380}
-              onGifClick={(gif) => {
-                const el = editorRef.current;
-                if (!el) return;
-                el.focus();
-                if (hrefLooksLikeDirectImageUrl(gif.url)) {
-                  insertImageAtSelection(el, gif.url, composerImgStyle);
-                } else {
-                  document.execCommand("insertText", false, gif.url);
-                }
-                setPickerOpen(false);
-                requestAnimationFrame(() => el.focus());
-              }}
-            />
+          {giphyApiKey ? (
+            <SearchContextManager apiKey={giphyApiKey}>
+              <GiphyPickerInner
+                palette={palette}
+                typography={typography}
+                spacing={spacing}
+                themeName={themeName}
+                onGifSelect={(gifUrl) => {
+                  const el = editorRef.current;
+                  if (!el) return;
+                  el.focus();
+                  if (hrefLooksLikeDirectImageUrl(gifUrl)) {
+                    insertImageAtSelection(el, gifUrl, composerImgStyle);
+                  } else {
+                    document.execCommand("insertText", false, gifUrl);
+                  }
+                  setPickerOpen(false);
+                  requestAnimationFrame(() => el.focus());
+                }}
+              />
+            </SearchContextManager>
           ) : (
             <div
               style={{
@@ -511,8 +518,8 @@ export default function MessageInput({
               }}
             >
               Add{" "}
-              <code style={{ color: palette.textPrimary }}>TENOR_API_KEY</code> to your .env to
-              search Tenor GIFs (free key from Google Cloud → Tenor API).
+              <code style={{ color: palette.textPrimary }}>GIPHY_API_KEY</code> to your .env to
+              search GIPHY GIFs (free key from developers.giphy.com).
             </div>
           )}
         </div>
@@ -870,5 +877,66 @@ export default function MessageInput({
     </div>
       {pickerPortal}
     </>
+  );
+}
+
+/* ─── GIPHY sub-component (must be a child of SearchContextManager) ──────── */
+
+interface GiphyPickerInnerProps {
+  palette: any;
+  typography: any;
+  spacing: any;
+  themeName: string;
+  onGifSelect: (gifUrl: string) => void;
+}
+
+function GiphyPickerInner({ palette, typography, spacing, themeName, onGifSelect }: GiphyPickerInnerProps) {
+  const { fetchGifs, searchKey } = useContext(SearchContext);
+
+  return (
+    <div
+      style={{
+        width: 350,
+        height: 380,
+        display: "flex",
+        flexDirection: "column",
+        overflow: "hidden",
+        background: palette.backgroundPrimary,
+      }}
+    >
+      <div style={{ padding: `${spacing.unit}px ${spacing.unit * 1.5}px` }}>
+        <GiphySearchBar
+          placeholder="Search GIPHY"
+          autoFocus
+        />
+      </div>
+      <div style={{ flex: 1, overflow: "auto" }}>
+        <GiphyGrid
+          key={searchKey}
+          columns={3}
+          width={350}
+          gutter={6}
+          fetchGifs={fetchGifs}
+          hideAttribution
+          noLink
+          onGifClick={(gif, e) => {
+            e.preventDefault();
+            const url = gif.images?.original?.url ?? gif.images?.fixed_height?.url;
+            if (url) onGifSelect(url);
+          }}
+        />
+      </div>
+      <div
+        style={{
+          padding: `${spacing.unit * 0.5}px ${spacing.unit}px`,
+          textAlign: "right",
+          fontSize: typography.fontSizeSmall * 0.85,
+          color: palette.textSecondary,
+          opacity: 0.7,
+        }}
+      >
+        Powered by GIPHY
+      </div>
+    </div>
   );
 }

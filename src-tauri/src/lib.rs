@@ -38,7 +38,7 @@ pub struct AppState {
     pub sync_running: Arc<Mutex<bool>>,
     pub display_server: DisplayServer,
     pub livekit: LivekitConfig,
-    pub tenor_api_key: Option<String>,
+    pub giphy_api_key: Option<String>,
     /// Matrix voice room id → LiveKit SFU room name (learned on connect; used for admin ListParticipants).
     pub livekit_matrix_to_sfu_room: StdMutex<HashMap<String, String>>,
     /// Stops the periodic `m.call.member` refresh task (see `voice_matrix`).
@@ -100,7 +100,7 @@ pub fn run() {
         log::info!("No LiveKit admin credentials — multi-device kick disabled");
     }
 
-    let tenor_api_key = std::env::var("TENOR_API_KEY").ok().filter(|s| !s.is_empty());
+    let giphy_api_key = std::env::var("GIPHY_API_KEY").ok().filter(|s| !s.is_empty());
 
     // Detect best video codec based on GPU before any screen share publishes
     detect_codec_early();
@@ -113,7 +113,7 @@ pub fn run() {
         sync_running: Arc::new(Mutex::new(false)),
         display_server,
         livekit,
-        tenor_api_key,
+        giphy_api_key,
         livekit_matrix_to_sfu_room: StdMutex::new(HashMap::new()),
         call_member_refresh_stop: Arc::new(AtomicBool::new(true)),
         call_member_refresh_task: StdMutex::new(None),
@@ -181,7 +181,7 @@ pub fn run() {
             commands::codec::get_codec_preference,
             commands::codec::set_codec_preference,
             commands::codec::get_resolved_codec,
-            commands::config::get_tenor_api_key,
+            commands::config::get_giphy_api_key,
             commands::profile::get_display_name,
             commands::profile::set_display_name,
             commands::profile::set_user_avatar,
