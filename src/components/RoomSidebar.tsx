@@ -89,14 +89,15 @@ function VoiceParticipantRow({
           src={participant.avatarUrl}
           alt={name}
           style={{
+            display: "block",
             width: 20,
             height: 20,
             borderRadius: "50%",
             objectFit: "cover",
             flexShrink: 0,
             boxSizing: "border-box",
-            border: isSpeaking ? "2px solid #23a55a" : "2px solid transparent",
-            transition: "border-color 0.15s ease",
+            boxShadow: isSpeaking ? "0 0 0 2px #23a55a" : "none",
+            transition: "box-shadow 0.15s ease",
           }}
         />
       ) : (
@@ -113,8 +114,8 @@ function VoiceParticipantRow({
           fontWeight: typography.fontWeightBold,
           flexShrink: 0,
           boxSizing: "border-box",
-          border: isSpeaking ? "2px solid #23a55a" : "2px solid transparent",
-          transition: "border-color 0.15s ease",
+          boxShadow: isSpeaking ? "0 0 0 2px #23a55a" : "none",
+          transition: "box-shadow 0.15s ease",
         }}>
           {name.charAt(0).toUpperCase()}
         </div>

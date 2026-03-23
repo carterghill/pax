@@ -38,6 +38,7 @@ function SpaceAvatar({ space, isActive }: { space: Room; isActive: boolean }) {
           src={space.avatarUrl}
           alt={space.name}
           style={{
+            display: "block",
             width: "100%",
             height: "100%",
             objectFit: "cover",

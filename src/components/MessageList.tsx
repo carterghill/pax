@@ -268,6 +268,7 @@ export default function MessageList({
                     src={msg.avatarUrl}
                     alt={msg.senderName ?? msg.sender}
                     style={{
+                      display: "block",
                       width: 40,
                       height: 40,
                       borderRadius: "50%",

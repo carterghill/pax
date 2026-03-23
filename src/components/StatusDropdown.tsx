@@ -89,6 +89,7 @@ export default function StatusDropdown({ displayName, avatarUrl }: StatusDropdow
               src={avatarUrl}
               alt={displayName}
               style={{
+                display: "block",
                 width: 32,
                 height: 32,
                 borderRadius: "50%",

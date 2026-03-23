@@ -3,7 +3,12 @@ import { Volume2, Mic, MicOff, PhoneOff, Loader2, AudioLines, Monitor, MonitorUp
 import { useTheme } from "../theme/ThemeContext";
 import { LivekitVoiceParticipantInfo, Room, VoiceParticipant as MatrixVoiceParticipant } from "../types/matrix";
 import { VoiceCall } from "../hooks/useVoiceCall";
-import { extractMatrixUserId, localpartFromUserId, normalizeUserId } from "../utils/matrix";
+import {
+  compareByDisplayThenKey,
+  extractMatrixUserId,
+  localpartFromUserId,
+  normalizeUserId,
+} from "../utils/matrix";
 import { useUserVolume } from "../hooks/useUserVolume";
 import VolumeContextMenu from "./VolumeContextMenu";
 import ScreenShareGrid from "./ScreenShareGrid";
@@ -236,6 +241,9 @@ export default function VoiceRoomView({
       }
     }
 
+    result.sort((a, b) =>
+      compareByDisplayThenKey(a.displayName, a.identity, b.displayName, b.identity)
+    );
     return result;
   }, [callState.participants, callState.connectedRoomId, callState.isConnecting, room.id, voiceParticipants, userId, liveKitIdentitySet, avatarByUserId]);
 
@@ -291,6 +299,9 @@ export default function VoiceRoomView({
         isSpeaking: lp.isSpeaking,
       });
     }
+    result.sort((a, b) =>
+      compareByDisplayThenKey(a.displayName, a.identity, b.displayName, b.identity)
+    );
     return result;
   }, [showLobby, voiceParticipants, livekitInRoom, userId, avatarByUserId]);
 
@@ -425,12 +436,13 @@ export default function VoiceRoomView({
                 src={p.avatarUrl}
                 alt={p.displayName}
                 style={{
+                  display: "block",
                   width: 80,
                   height: 80,
                   borderRadius: "50%",
                   objectFit: "cover",
-                  border: `3px solid ${p.isSpeaking ? "#23a55a" : "transparent"}`,
-                  transition: "border-color 0.15s ease",
+                  boxShadow: p.isSpeaking ? "0 0 0 3px #23a55a" : "none",
+                  transition: "box-shadow 0.15s ease",
                 }}
               />
             ) : (
@@ -445,8 +457,8 @@ export default function VoiceRoomView({
                 fontSize: 28,
                 fontWeight: typography.fontWeightBold,
                 color: palette.textHeading,
-                border: `3px solid ${p.isSpeaking ? "#23a55a" : "transparent"}`,
-                transition: "border-color 0.15s ease",
+                boxShadow: p.isSpeaking ? "0 0 0 3px #23a55a" : "none",
+                transition: "box-shadow 0.15s ease",
               }}>
                 {p.displayName.charAt(0).toUpperCase()}
               </div>
@@ -535,7 +547,6 @@ export default function VoiceRoomView({
                 display: "flex",
                 alignItems: "center",
                 justifyContent: "center",
-                border: "3px solid transparent",
               }}>
                 <Loader2
                   size={32}
@@ -548,12 +559,13 @@ export default function VoiceRoomView({
                 src={p.avatarUrl}
                 alt={p.displayName}
                 style={{
+                  display: "block",
                   width: 80,
                   height: 80,
                   borderRadius: "50%",
                   objectFit: "cover",
-                  border: `3px solid ${p.isSpeaking ? "#23a55a" : "transparent"}`,
-                  transition: "border-color 0.15s ease",
+                  boxShadow: p.isSpeaking ? "0 0 0 3px #23a55a" : "none",
+                  transition: "box-shadow 0.15s ease",
                 }}
               />
             ) : (
@@ -568,8 +580,8 @@ export default function VoiceRoomView({
                 fontSize: 28,
                 fontWeight: typography.fontWeightBold,
                 color: palette.textHeading,
-                border: `3px solid ${p.isSpeaking ? "#23a55a" : "transparent"}`,
-                transition: "border-color 0.15s ease",
+                boxShadow: p.isSpeaking ? "0 0 0 3px #23a55a" : "none",
+                transition: "box-shadow 0.15s ease",
               }}>
                 {p.displayName.charAt(0).toUpperCase()}
               </div>

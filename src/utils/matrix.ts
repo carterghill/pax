@@ -3,6 +3,18 @@
  export const VOICE_ROOM_TYPE = "org.matrix.msc3417.call";
 
  export const normalizeUserId = (id: string): string => id.trim().toLowerCase();
+
+ /** Case-insensitive display order; tie-break on stable id for deterministic lists. */
+ export function compareByDisplayThenKey(
+   aDisplay: string,
+   aKey: string,
+   bDisplay: string,
+   bKey: string
+ ): number {
+   const c = aDisplay.toLowerCase().localeCompare(bDisplay.toLowerCase());
+   if (c !== 0) return c;
+   return aKey.localeCompare(bKey);
+ }
  
  export const localpartFromUserId = (id: string): string => {
    const trimmed = id.trim();

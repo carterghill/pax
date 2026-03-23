@@ -182,6 +182,7 @@ export default function SettingsMenu({
                 src={userAvatarUrl}
                 alt="Your avatar"
                 style={{
+                  display: "block",
                   width: 64,
                   height: 64,
                   borderRadius: "50%",

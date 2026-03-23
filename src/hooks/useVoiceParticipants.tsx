@@ -2,6 +2,7 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { VoiceParticipant } from "../types/matrix";
+import { compareByDisplayThenKey } from "../utils/matrix";
 
 type ParticipantMap = Record<string, VoiceParticipant[]>;
 interface VoiceParticipantsChangedPayload {
@@ -55,7 +56,15 @@ export function useVoiceParticipants(voiceRoomIds: string[]) {
   const filtered = useMemo(() => {
     const result: ParticipantMap = {};
     for (const id of voiceRoomIds) {
-      result[id] = allParticipants[id] ?? [];
+      const list = allParticipants[id] ?? [];
+      result[id] = [...list].sort((a, b) =>
+        compareByDisplayThenKey(
+          a.displayName ?? a.userId,
+          a.userId,
+          b.displayName ?? b.userId,
+          b.userId
+        )
+      );
     }
     return result;
   }, [voiceRoomIds, allParticipants]);

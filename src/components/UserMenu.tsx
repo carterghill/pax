@@ -94,6 +94,7 @@ export default function UserMenu({ width, roomId, userId }: UserMenuProps) {
                       src={member.avatarUrl}
                       alt={member.displayName ?? member.userId}
                       style={{
+                        display: "block",
                         width: 32,
                         height: 32,
                         borderRadius: "50%",
