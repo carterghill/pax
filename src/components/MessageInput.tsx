@@ -91,7 +91,11 @@ export default function MessageInput({
   const typingTimeout = useRef<ReturnType<typeof setTimeout> | null>(null);
   const isTyping = useRef(false);
   const { palette, typography, spacing, name: themeName } = useTheme();
-  const tenorApiKey = import.meta.env.VITE_TENOR_API_KEY ?? "";
+  const [tenorApiKey, setTenorApiKey] = useState("");
+
+  useEffect(() => {
+    invoke<string>("get_tenor_api_key").then(setTenorApiKey).catch(() => {});
+  }, []);
 
   const emojiOnlyComposer = useMemo(() => isOnlyEmojisAndWhitespace(plainText), [plainText]);
 
@@ -507,7 +511,7 @@ export default function MessageInput({
               }}
             >
               Add{" "}
-              <code style={{ color: palette.textPrimary }}>VITE_TENOR_API_KEY</code> to your env to
+              <code style={{ color: palette.textPrimary }}>TENOR_API_KEY</code> to your .env to
               search Tenor GIFs (free key from Google Cloud → Tenor API).
             </div>
           )}

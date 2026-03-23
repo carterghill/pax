@@ -1,5 +1,6 @@
 pub mod auth;
 pub mod codec;
+pub mod config;
 pub mod members;
 pub mod messages;
 pub mod overlay;
