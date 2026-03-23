@@ -877,6 +877,8 @@ fn livekit_room_name_candidates(matrix_room_id: &str) -> Vec<String> {
 
 fn pick_livekit_room_name(rooms: &[serde_json::Value], matrix_room_id: &str) -> Option<String> {
     let cands = livekit_room_name_candidates(matrix_room_id);
+
+    // 1. Exact name match (room name IS the matrix room ID or a simple encoding)
     for r in rooms {
         let name = r.get("name").and_then(|n| n.as_str()).unwrap_or("");
         if name.is_empty() {
@@ -886,6 +888,8 @@ fn pick_livekit_room_name(rooms: &[serde_json::Value], matrix_room_id: &str) -> 
             return Some(name.to_string());
         }
     }
+
+    // 2. Substring match (room name contains the matrix room ID)
     let short = matrix_room_id.trim_start_matches('!');
     for r in rooms {
         let name = r.get("name").and_then(|n| n.as_str()).unwrap_or("");
@@ -893,6 +897,42 @@ fn pick_livekit_room_name(rooms: &[serde_json::Value], matrix_room_id: &str) -> 
             return Some(name.to_string());
         }
     }
+
+    // 3. Check room metadata — lk-jwt-service may store the original room alias there
+    for r in rooms {
+        let name = r.get("name").and_then(|n| n.as_str()).unwrap_or("");
+        if name.is_empty() {
+            continue;
+        }
+        let metadata = r.get("metadata").and_then(|m| m.as_str()).unwrap_or("");
+        if !metadata.is_empty() && cands.iter().any(|c| metadata.contains(c.as_str())) {
+            return Some(name.to_string());
+        }
+    }
+
+    // 4. Fallback: if there is exactly one active room (num_participants > 0), use it.
+    //    lk-jwt-service hashes the room name so we can't reverse-match, but with a
+    //    single active room the mapping is unambiguous.
+    let active: Vec<&str> = rooms
+        .iter()
+        .filter_map(|r| {
+            let name = r.get("name").and_then(|n| n.as_str()).unwrap_or("");
+            let count = r
+                .get("numParticipants")
+                .or_else(|| r.get("num_participants"))
+                .and_then(|n| n.as_u64())
+                .unwrap_or(0);
+            if !name.is_empty() && count > 0 {
+                Some(name)
+            } else {
+                None
+            }
+        })
+        .collect();
+    if active.len() == 1 {
+        return Some(active[0].to_string());
+    }
+
     None
 }
 
@@ -1091,8 +1131,13 @@ async fn fetch_livekit_voice_snapshot_for_matrix_room(
             let admin_jwt = make_livekit_admin_jwt(api_key, api_secret, "")?;
             let rooms = livekit_list_rooms(http, lk_url, &admin_jwt).await?;
             let Some(picked) = pick_livekit_room_name(&rooms, matrix_room_id) else {
+                log::debug!(
+                    "LiveKit snapshot ({}): no SFU room matched among {} rooms",
+                    matrix_room_id, rooms.len()
+                );
                 return Ok((vec![], None));
             };
+            log::debug!("LiveKit snapshot ({}): resolved SFU room '{}'", matrix_room_id, picked);
             (picked.clone(), Some(picked))
         };
 
