@@ -43,6 +43,7 @@ log = "0.4"
 tauri-plugin-log = "2"
 nnnoiseless = "0.5.2"
 screenshots = "0.8"
+mime = "0.3"
 
 # Native GPU overlay rendering (zero-IPC video)
 wgpu = "25"

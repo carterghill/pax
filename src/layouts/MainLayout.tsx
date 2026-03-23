@@ -92,7 +92,9 @@ export default function MainLayout({ userId, onSignOut }: MainLayoutProps) {
 
   const { palette, spacing } = useTheme();
   const activeSpace = activeSpaceId ? getRoom(activeSpaceId) : null;
-  const userAvatarUrl = useUserAvatar();
+  const fetchedAvatarUrl = useUserAvatar();
+  const [avatarOverride, setAvatarOverride] = useState<string | null | undefined>(undefined);
+  const userAvatarUrl = avatarOverride !== undefined ? avatarOverride : fetchedAvatarUrl;
 
   // Resizable room sidebar width, persisted to localStorage
   const [roomSidebarWidth, setRoomSidebarWidth] = useState(() =>
@@ -240,7 +242,11 @@ export default function MainLayout({ userId, onSignOut }: MainLayoutProps) {
           display: "flex",
         }}>
           {activeRoomId === "settings" ? (
-            <SettingsMenu onSignOut={onSignOut} />
+            <SettingsMenu
+              onSignOut={onSignOut}
+              userAvatarUrl={userAvatarUrl}
+              onAvatarChanged={setAvatarOverride}
+            />
           ) : activeRoom && activeRoom.roomType === VOICE_ROOM_TYPE ? (
             <VoiceRoomView
               room={activeRoom}

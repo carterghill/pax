@@ -177,6 +177,10 @@ pub fn run() {
             commands::codec::get_codec_preference,
             commands::codec::set_codec_preference,
             commands::codec::get_resolved_codec,
+            commands::profile::get_display_name,
+            commands::profile::set_display_name,
+            commands::profile::set_user_avatar,
+            commands::profile::remove_user_avatar,
         ])
         .setup(|app| {
             // Set window icon (taskbar + title bar) from our bundled icons

@@ -5276,6 +5276,7 @@ dependencies = [
  "livekit",
  "log",
  "matrix-sdk",
+ "mime",
  "nnnoiseless",
  "once_cell",
  "parking_lot",

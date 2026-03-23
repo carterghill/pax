@@ -4,6 +4,7 @@ pub mod members;
 pub mod messages;
 pub mod overlay;
 pub mod presence;
+pub mod profile;
 pub mod rooms;
 pub mod voice_matrix;
 
@@ -48,7 +49,7 @@ pub(crate) fn resolve_room(client: &Client, room_id: &str) -> Result<Room, Strin
         .ok_or_else(|| "Room not found".to_string())
 }
 
-fn encode_avatar_data_url(bytes: &[u8]) -> String {
+pub(crate) fn encode_avatar_data_url(bytes: &[u8]) -> String {
     let b64 = BASE64.encode(bytes);
     format!("data:image/png;base64,{}", b64)
 }
