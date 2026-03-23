@@ -3,7 +3,7 @@ import { Volume2, Mic, MicOff, PhoneOff, Loader2, AudioLines, Monitor, MonitorUp
 import { useTheme } from "../theme/ThemeContext";
 import { LivekitVoiceParticipantInfo, Room, VoiceParticipant as MatrixVoiceParticipant } from "../types/matrix";
 import { VoiceCallState } from "../hooks/useVoiceCall";
-import { extractMatrixUserId, normalizeUserId } from "../utils/matrix";
+import { extractMatrixUserId, localpartFromUserId, normalizeUserId } from "../utils/matrix";
 import { useUserVolume } from "../hooks/useUserVolume";
 import VolumeContextMenu from "./VolumeContextMenu";
 import ScreenShareGrid from "./ScreenShareGrid";
@@ -180,9 +180,7 @@ export default function VoiceRoomView({
     const set = new Set<string>();
     for (const p of callState.participants) {
       set.add(normalizeUserId(p.identity));
-      if (p.identity.startsWith("@")) {
-        set.add(normalizeUserId(p.identity.slice(1).split(":")[0]));
-      }
+      set.add(normalizeUserId(localpartFromUserId(p.identity)));
     }
     return set;
   }, [callState.participants]);
@@ -201,9 +199,7 @@ export default function VoiceRoomView({
 
     // Add connected LiveKit participants
     for (const p of callState.participants) {
-      const displayName = p.identity.startsWith("@")
-        ? p.identity.slice(1).split(":")[0]
-        : p.identity;
+      const displayName = localpartFromUserId(p.identity);
       result.push({
         identity: p.identity,
         displayName,
@@ -220,12 +216,12 @@ export default function VoiceRoomView({
     if (isConnectedToThisRoom && voiceParticipants) {
       for (const p of voiceParticipants) {
         const normalized = normalizeUserId(p.userId);
-        const localpart = p.userId.startsWith("@") ? p.userId.slice(1).split(":")[0] : p.userId;
+        const localpart = localpartFromUserId(p.userId);
         const inLiveKit = liveKitIdentitySet.has(normalized) || liveKitIdentitySet.has(normalizeUserId(localpart));
         if (inLiveKit) continue;
 
         const displayName = p.displayName ?? p.userId;
-        const localDisplayName = displayName.startsWith("@") ? displayName.slice(1).split(":")[0] : displayName;
+        const localDisplayName = localpartFromUserId(displayName);
         const isLocal = p.userId === userId;
         result.push({
           identity: p.userId,
@@ -264,9 +260,7 @@ export default function VoiceRoomView({
       covered.add(nk);
       const lp = liveByMxid.get(nk);
       const displayName = p.displayName ?? p.userId;
-      const localDisplayName = displayName.startsWith("@")
-        ? displayName.slice(1).split(":")[0]
-        : displayName;
+      const localDisplayName = localpartFromUserId(displayName);
       result.push({
         identity: p.userId,
         displayName: localDisplayName,
@@ -280,9 +274,7 @@ export default function VoiceRoomView({
       const mxid = extractMatrixUserId(lp.identity);
       const nk = normalizeUserId(mxid);
       if (covered.has(nk)) continue;
-      const localDisplayName = mxid.startsWith("@")
-        ? mxid.slice(1).split(":")[0]
-        : mxid;
+      const localDisplayName = localpartFromUserId(mxid);
       result.push({
         identity: lp.identity,
         displayName: localDisplayName,
@@ -298,8 +290,7 @@ export default function VoiceRoomView({
   // Display names for screen share header
   const remoteSharers = callState.screenSharingOwners.filter(id => {
     // Filter out local identity (we show "You are sharing" separately)
-    const localpart = id.startsWith("@") ? id.slice(1).split(":")[0] : id;
-    return localpart !== (userId.startsWith("@") ? userId.slice(1).split(":")[0] : userId);
+    return localpartFromUserId(id) !== localpartFromUserId(userId);
   });
   return (
     <div style={{
@@ -376,7 +367,6 @@ export default function VoiceRoomView({
           overflowY: "auto",
           width: hasScreenShare ? 180 : undefined,
         }}>
-        <style>{`@keyframes spin { from { transform: rotate(0deg); } to { transform: rotate(360deg); } }`}</style>
         {isConnecting && (
           <div style={{
             display: "flex",

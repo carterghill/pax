@@ -3,6 +3,7 @@ import { Grid2x2 } from "lucide-react";
 import { useTheme } from "../theme/ThemeContext";
 import ScreenShareViewer from "./ScreenShareViewer";
 import { useOverlayHover, useOverlayObstruction } from "../hooks/useOverlayObstruction";
+import { localpartFromUserId } from "../utils/matrix";
 
 /**
  * ScreenShareGrid — Multi-stream screen share layout.
@@ -22,14 +23,6 @@ interface ScreenShareGridProps {
   isLocalScreenSharing: boolean;
   /** Right-click a remote stream tile (e.g. volume menu over native overlay) */
   onStreamContextMenu?: (e: MouseEvent, identity: string, displayName: string) => void;
-}
-
-/** Extract a short display name from a Matrix-style identity */
-function displayName(identity: string): string {
-  if (identity.startsWith("@")) {
-    return identity.slice(1).split(":")[0];
-  }
-  return identity;
 }
 
 export default function ScreenShareGrid({
@@ -149,7 +142,7 @@ export default function ScreenShareGrid({
             Grid
           </button>
           <span style={{ fontSize: typography.fontSizeSmall, color: palette.textSecondary }}>
-            {displayName(effectiveFocusId)}'s screen
+            {localpartFromUserId(effectiveFocusId)}'s screen
           </span>
         </div>
 
@@ -162,7 +155,7 @@ export default function ScreenShareGrid({
                 identity={focusedStream.identity}
               />
               <TileLabel
-                name={displayName(focusedStream.identity)}
+                name={localpartFromUserId(focusedStream.identity)}
                 typography={typography}
                 spacing={spacing}
               />
@@ -267,7 +260,7 @@ function StreamTile({
       onClick={onClick}
       onContextMenu={(e) => {
         if (stream.isLocal || !onStreamContextMenu) return;
-        onStreamContextMenu(e, stream.identity, displayName(stream.identity));
+        onStreamContextMenu(e, stream.identity, localpartFromUserId(stream.identity));
       }}
       style={{
         borderRadius: spacing.unit,
@@ -297,7 +290,7 @@ function StreamTile({
       ) : (
         <LocalSharePlaceholder palette={palette} small={small} />
       )}
-      <TileLabel name={displayName(stream.identity)} typography={typography} spacing={spacing} />
+      <TileLabel name={localpartFromUserId(stream.identity)} typography={typography} spacing={spacing} />
     </div>
   );
 }

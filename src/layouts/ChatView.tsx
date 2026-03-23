@@ -66,12 +66,6 @@ function TypingIndicator({ names }: { names: string[] }) {
         ))}
       </span>
       <span>{text}</span>
-      <style>{`
-        @keyframes typingDot {
-          0%, 60%, 100% { opacity: 0.3; transform: translateY(0); }
-          30% { opacity: 1; transform: translateY(-2px); }
-        }
-      `}</style>
     </div>
   );
 }

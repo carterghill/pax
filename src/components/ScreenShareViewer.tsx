@@ -465,11 +465,10 @@ export default function ScreenShareViewer({ active, identity }: ScreenShareViewe
             color: palette.textSecondary,
           }}
         >
-          <style>{`@keyframes ssv-spin { from { transform: rotate(0deg); } to { transform: rotate(360deg); } }`}</style>
           <Loader2
             size={32}
             color={palette.textSecondary}
-            style={{ animation: "ssv-spin 1s linear infinite" }}
+            style={{ animation: "spin 1s linear infinite" }}
           />
           <span style={{ fontSize: typography.fontSizeSmall }}>
             {useNative === null

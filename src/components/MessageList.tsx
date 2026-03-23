@@ -492,12 +492,6 @@ export default function MessageList({
         </div>
       )}
 
-      <style>{`
-        @keyframes messageListSpinner {
-          to { transform: rotate(360deg); }
-        }
-      `}</style>
-
       <div ref={bottomRef} />
     </div>
   );

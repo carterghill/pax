@@ -7,6 +7,7 @@ import VolumeContextMenu from "./VolumeContextMenu";
 import { useUserVolume } from "../hooks/useUserVolume";
 import {
   VOICE_ROOM_TYPE,
+  localpartFromUserId,
   voiceStateLookupKeysForParticipant,
 } from "../utils/matrix";
 
@@ -181,9 +182,7 @@ export default function RoomSidebar({
   } | null>(null);
 
   // Extract local part of userId for display (e.g. @carter:matrix.org → carter)
-  const displayName = userId.startsWith("@")
-    ? userId.slice(1).split(":")[0]
-    : userId;
+  const displayName = localpartFromUserId(userId);
 
   return (
     <div style={{
@@ -265,7 +264,6 @@ export default function RoomSidebar({
               {/* Voice participants listed under the voice room */}
               {isVoice && participants.length > 0 && (
                 <div style={{ paddingBottom: spacing.unit }}>
-                  <style>{`@keyframes spin { from { transform: rotate(0deg); } to { transform: rotate(360deg); } }`}</style>
                   {participants.map((p) => {
                     const state = resolveVoiceStateForRoom(
                       p,

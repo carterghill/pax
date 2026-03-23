@@ -59,3 +59,19 @@ html, body, #root {
   height: 0 !important;
   padding: 0 !important;
 }
+
+/* ─── Shared keyframes (moved from inline <style> tags) ─── */
+
+@keyframes spin {
+  from { transform: rotate(0deg); }
+  to { transform: rotate(360deg); }
+}
+
+@keyframes messageListSpinner {
+  to { transform: rotate(360deg); }
+}
+
+@keyframes typingDot {
+  0%, 60%, 100% { opacity: 0.3; transform: translateY(0); }
+  30% { opacity: 1; transform: translateY(-2px); }
+}
