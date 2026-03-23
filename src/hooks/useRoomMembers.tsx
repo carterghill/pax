@@ -1,4 +1,4 @@
-import { useEffect, useState, useCallback, useRef } from "react";
+import { useEffect, useState, useCallback, useRef, useMemo } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { RoomMember } from "../types/matrix";
@@ -106,7 +106,7 @@ export function useRoomMembers(roomId: string) {
   }, []);
 
   // Sort members
-  const sorted = [...members].sort((a, b) => {
+  const sorted = useMemo(() => [...members].sort((a, b) => {
     const order: Record<string, number> = { online: 0, unavailable: 1, offline: 2 };
 
     const aOrder = order[a.presence] ?? 2;
@@ -118,7 +118,7 @@ export function useRoomMembers(roomId: string) {
     const bName = (b.displayName ?? b.userId).toLowerCase();
 
     return aName.localeCompare(bName);
-  });
+  }), [members]);
 
   return { members: sorted, loading };
 }

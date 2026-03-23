@@ -26,12 +26,8 @@ interface TypingPayload {
   displayNames: string[];
 }
 
-function TypingIndicator({ names, palette, typography, spacing }: {
-  names: string[];
-  palette: any;
-  typography: any;
-  spacing: any;
-}) {
+function TypingIndicator({ names }: { names: string[] }) {
+  const { palette, typography, spacing } = useTheme();
   if (names.length === 0) return null;
 
   let text: string;
@@ -245,9 +241,6 @@ export default function ChatView({
 
           <TypingIndicator
             names={typingNames}
-            palette={palette}
-            typography={typography}
-            spacing={spacing}
           />
           <MessageInput
             key={room.id}

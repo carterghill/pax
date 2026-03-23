@@ -21,7 +21,7 @@ use crate::types::{
 };
 use crate::AppState;
 
-use super::{get_client, get_or_fetch_member_avatar, resolve_room};
+use super::{fmt_error_chain, get_client, get_or_fetch_member_avatar, resolve_room};
 use super::voice_matrix::collect_voice_participants_for_joined_voice_rooms;
 
 #[tauri::command]
@@ -43,7 +43,7 @@ pub async fn get_messages(
     let response = room
         .messages(options)
         .await
-        .map_err(|e| format!("Failed to fetch messages: {e}"))?;
+        .map_err(|e| format!("Failed to fetch messages: {}", fmt_error_chain(&e)))?;
 
     let avatar_cache = state.avatar_cache.clone();
 
@@ -161,7 +161,7 @@ pub async fn send_message(
 
     room.send(content)
         .await
-        .map_err(|e| format!("Failed to send message: {e}"))?;
+        .map_err(|e| format!("Failed to send message: {}", fmt_error_chain(&e)))?;
 
     Ok(())
 }
@@ -177,7 +177,7 @@ pub async fn get_room_redaction_policy(
     let pl = room
         .power_levels()
         .await
-        .map_err(|e| format!("Failed to read power levels: {e}"))?;
+        .map_err(|e| format!("Failed to read power levels: {}", fmt_error_chain(&e)))?;
 
     let own = client.user_id().ok_or("Not logged in")?;
 
@@ -205,14 +205,14 @@ pub async fn edit_message(
     let edit_content = room
         .make_edit_event(&event_id_parsed, EditedContent::RoomMessage(new_content))
         .await
-        .map_err(|e| format!("Failed to prepare edit: {e}"))?;
+        .map_err(|e| format!("Failed to prepare edit: {}", fmt_error_chain(&e)))?;
 
     match edit_content {
         AnyMessageLikeEventContent::RoomMessage(content) => {
             room
                 .send(content)
                 .await
-                .map_err(|e| format!("Failed to send edit: {e}"))?;
+                .map_err(|e| format!("Failed to send edit: {}", fmt_error_chain(&e)))?;
         }
         _ => return Err("Unexpected edit content type".to_string()),
     }
@@ -235,7 +235,7 @@ pub async fn redact_message(
     room
         .redact(&event_id_parsed, None, None)
         .await
-        .map_err(|e| format!("Failed to redact message: {e}"))?;
+        .map_err(|e| format!("Failed to redact message: {}", fmt_error_chain(&e)))?;
 
     Ok(())
 }
@@ -456,7 +456,7 @@ pub async fn send_typing_notice(
 
     room.typing_notice(typing)
         .await
-        .map_err(|e| format!("Failed to send typing notice: {e}"))?;
+        .map_err(|e| format!("Failed to send typing notice: {}", fmt_error_chain(&e)))?;
 
     Ok(())
 }

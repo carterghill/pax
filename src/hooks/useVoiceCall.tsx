@@ -217,10 +217,6 @@ export function useVoiceCall() {
   const setParticipantVolume = useCallback(
     (identity: string, volume: number) => {
       const clamped = Math.max(0, Math.min(2, volume));
-      
-      // ←←← DEBUG LOGS (you will see these in DevTools)
-      console.log(`[Pax TS] setParticipantVolume called → identity="${identity}" volume=${clamped}`);
-      
       invoke("voice_set_participant_volume", { identity, volume: clamped }).catch(
         (e) => {
           console.error("[Pax TS] Failed to set volume in Rust:", e);

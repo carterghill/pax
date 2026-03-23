@@ -484,36 +484,12 @@ fn parse_query_param_str(uri: &str, key: &str) -> Option<String> {
     for pair in query.split('&') {
         let mut kv = pair.splitn(2, '=');
         if kv.next()? == key {
-            return Some(url_decode(kv.next()?));
+            return Some(
+                urlencoding::decode(kv.next()?)
+                    .unwrap_or_else(|_| std::borrow::Cow::Borrowed(""))
+                    .into_owned(),
+            );
         }
     }
     None
-}
-
-fn url_decode(s: &str) -> String {
-    let mut result = String::with_capacity(s.len());
-    let mut chars = s.bytes();
-    while let Some(b) = chars.next() {
-        if b == b'%' {
-            let hi = chars.next().and_then(hex_val);
-            let lo = chars.next().and_then(hex_val);
-            if let (Some(h), Some(l)) = (hi, lo) {
-                result.push((h << 4 | l) as char);
-            }
-        } else if b == b'+' {
-            result.push(' ');
-        } else {
-            result.push(b as char);
-        }
-    }
-    result
-}
-
-fn hex_val(b: u8) -> Option<u8> {
-    match b {
-        b'0'..=b'9' => Some(b - b'0'),
-        b'a'..=b'f' => Some(b - b'a' + 10),
-        b'A'..=b'F' => Some(b - b'A' + 10),
-        _ => None,
-    }
 }

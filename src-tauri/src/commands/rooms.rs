@@ -126,7 +126,7 @@ pub async fn restore_session(
             },
         })
         .await
-        .map_err(|e| format!("Failed to restore session: {e}"))?;
+        .map_err(|e| format!("Failed to restore session: {}", fmt_error_chain(&e)))?;
 
     // Quick token validity check (lightweight /account/whoami call)
     tokio::time::timeout(Duration::from_secs(5), client.whoami())

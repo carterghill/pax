@@ -6,7 +6,7 @@ use tauri::State;
 use crate::types::RoomMemberInfo;
 use crate::AppState;
 
-use super::{get_client, get_or_fetch_member_avatar, resolve_room};
+use super::{fmt_error_chain, get_client, get_or_fetch_member_avatar, resolve_room};
 
 #[tauri::command]
 pub async fn get_room_members(
@@ -19,7 +19,7 @@ pub async fn get_room_members(
     let members = room
         .members(matrix_sdk::RoomMemberships::JOIN)
         .await
-        .map_err(|e| format!("Failed to get members: {e}"))?;
+        .map_err(|e| format!("Failed to get members: {}", fmt_error_chain(&e)))?;
 
     let avatar_cache = state.avatar_cache.clone();
     let presence_map = state.presence_map.lock().await.clone();

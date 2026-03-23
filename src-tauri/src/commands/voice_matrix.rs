@@ -15,6 +15,8 @@ use crate::{screen, voice, AppState, LivekitConfig};
 
 use super::{fmt_error_chain, get_or_fetch_member_avatar};
 
+/// Matrix room type for voice channels (MSC3417).
+/// Also defined in the frontend at `src/utils/matrix.ts` — keep both in sync.
 const VOICE_ROOM_TYPE: &str = "org.matrix.msc3417.call";
 
 /// `m.call.member` `expires` field (ms). Membership is inactive after `origin_server_ts + expires`.
@@ -67,7 +69,7 @@ fn is_call_member_active(json: &serde_json::Value) -> bool {
 
 /// Scan a room's call.member state events and return the user IDs of active participants.
 async fn collect_active_call_users(room: &Room) -> Vec<String> {
-    let mut active: Vec<String> = Vec::new();
+    let mut seen = std::collections::HashSet::new();
 
     for event_type_str in &["org.matrix.msc3401.call.member", "m.call.member"] {
         let event_type: StateEventType = event_type_str.to_string().into();
@@ -84,15 +86,14 @@ async fn collect_active_call_users(room: &Room) -> Vec<String> {
                     .unwrap_or_default()
                     .to_string();
 
-                if !sender.is_empty() && !active.contains(&sender) && is_call_member_active(&json)
-                {
-                    active.push(sender);
+                if !sender.is_empty() && is_call_member_active(&json) {
+                    seen.insert(sender);
                 }
             }
         }
     }
 
-    active
+    seen.into_iter().collect()
 }
 
 async fn collect_room_voice_participants(

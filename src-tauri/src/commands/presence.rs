@@ -4,7 +4,7 @@ use tauri::State;
 
 use crate::{idle, AppState};
 
-use super::get_client;
+use super::{fmt_error_chain, get_client};
 
 #[tauri::command]
 pub async fn set_presence(
@@ -29,7 +29,7 @@ pub async fn set_presence(
     client
         .send(request)
         .await
-        .map_err(|e| format!("Failed to set presence: {e}"))?;
+        .map_err(|e| format!("Failed to set presence: {}", fmt_error_chain(&e)))?;
 
     Ok(())
 }
