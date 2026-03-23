@@ -46,6 +46,28 @@ export interface VoiceCallState {
   disconnectingFromRoomId: string | null;
 }
 
+export interface VoiceCallActions {
+  connect: (roomId: string) => void;
+  disconnect: () => void;
+  toggleMic: () => void;
+  toggleDeafen: () => void;
+  toggleNoiseSuppression: () => void;
+  startScreenShare: (mode: "screen" | "window", windowTitle?: string) => Promise<void>;
+  enumerateScreenShareWindows: () => Promise<[string, string][]>;
+  stopScreenShare: () => Promise<void>;
+  getScreenSharePreset: () => Promise<"720p" | "1080p">;
+  setScreenSharePreset: (preset: "720p" | "1080p") => Promise<void>;
+  getNoiseSuppressionConfig: () => Promise<{ extraAttenuation: number; agcTargetRms: number }>;
+  setNoiseSuppressionConfig: (config: { extraAttenuation: number; agcTargetRms: number }) => Promise<void>;
+  setParticipantVolume: (identity: string, volume: number) => void;
+}
+
+/** Full return type of useVoiceCall — state + actions. */
+export type VoiceCall = VoiceCallState & VoiceCallActions & {
+  remoteParticipants: VoiceParticipant[];
+  localParticipant: VoiceParticipant | null;
+};
+
 export function useVoiceCall() {
   const [state, setState] = useState<VoiceCallState>({
     connectedRoomId: null,

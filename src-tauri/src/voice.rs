@@ -1083,6 +1083,36 @@ impl NoiseProcessor {
     }
 }
 
+/// Drain completed 480-sample frames from `buf`, apply noise suppression + RMS, and send.
+/// Shared between the resampling and non-resampling mic input paths.
+fn drain_and_send_frames(
+    buf: &mut Vec<i16>,
+    frame_size: usize,
+    is_muted: bool,
+    noise_suppression_enabled: bool,
+    noise_proc: &Arc<Mutex<NoiseProcessor>>,
+    audio_state: &Arc<Mutex<AudioState>>,
+    frame_tx: &mpsc::Sender<Vec<i16>>,
+) {
+    while buf.len() >= frame_size {
+        let mut samples: Vec<i16> = buf.drain(..frame_size).collect();
+        if noise_suppression_enabled && !is_muted {
+            let mut np = noise_proc.lock();
+            np.set_enabled(true);
+            np.process_i16_in_place(&mut samples[..]);
+        } else {
+            let mut np = noise_proc.lock();
+            np.set_enabled(false);
+        }
+        {
+            let inst = rms_i16_normalized(&samples);
+            let mut st = audio_state.lock();
+            st.local_mic_level_smooth = ema_speaking_level(st.local_mic_level_smooth, inst);
+        }
+        let _ = frame_tx.try_send(samples);
+    }
+}
+
 fn setup_mic_input(
     audio_state: Arc<Mutex<AudioState>>,
     noise_proc: Arc<Mutex<NoiseProcessor>>,
@@ -1158,24 +1188,7 @@ fn setup_mic_input(
                     }
                     drop(frac);
                     // Send completed 480-sample frames
-                    while buf.len() >= frame_size {
-                        let mut samples: Vec<i16> = buf.drain(..frame_size).collect();
-                        if noise_suppression_enabled && !is_muted {
-                            let mut np = noise_proc.lock();
-                            np.set_enabled(true);
-                            np.process_i16_in_place(&mut samples[..]);
-                        } else {
-                            let mut np = noise_proc.lock();
-                            np.set_enabled(false);
-                        }
-                        {
-                            let inst = rms_i16_normalized(&samples);
-                            let mut st = audio_state.lock();
-                            st.local_mic_level_smooth =
-                                ema_speaking_level(st.local_mic_level_smooth, inst);
-                        }
-                        let _ = frame_tx.try_send(samples);
-                    }
+                    drain_and_send_frames(&mut buf, frame_size, is_muted, noise_suppression_enabled, &noise_proc, &audio_state, &frame_tx);
                 } else {
                     // ── No resampling needed (device already at 48000 Hz) ──
                     let mut buf = frame_buf.lock();
@@ -1184,24 +1197,7 @@ fn setup_mic_input(
                         let clamped = sample.clamp(-1.0, 1.0);
                         buf.push((clamped * 32767.0) as i16);
                     }
-                    while buf.len() >= frame_size {
-                        let mut samples: Vec<i16> = buf.drain(..frame_size).collect();
-                        if noise_suppression_enabled && !is_muted {
-                            let mut np = noise_proc.lock();
-                            np.set_enabled(true);
-                            np.process_i16_in_place(&mut samples[..]);
-                        } else {
-                            let mut np = noise_proc.lock();
-                            np.set_enabled(false);
-                        }
-                        {
-                            let inst = rms_i16_normalized(&samples);
-                            let mut st = audio_state.lock();
-                            st.local_mic_level_smooth =
-                                ema_speaking_level(st.local_mic_level_smooth, inst);
-                        }
-                        let _ = frame_tx.try_send(samples);
-                    }
+                    drain_and_send_frames(&mut buf, frame_size, is_muted, noise_suppression_enabled, &noise_proc, &audio_state, &frame_tx);
                 }
             },
             move |err| {

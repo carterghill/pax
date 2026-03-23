@@ -2,7 +2,7 @@ import { useState, useCallback, useEffect, useMemo, useRef } from "react";
 import { Volume2, Mic, MicOff, PhoneOff, Loader2, AudioLines, Monitor, MonitorUp, Headphones, Settings, Slash } from "lucide-react";
 import { useTheme } from "../theme/ThemeContext";
 import { LivekitVoiceParticipantInfo, Room, VoiceParticipant as MatrixVoiceParticipant } from "../types/matrix";
-import { VoiceCallState } from "../hooks/useVoiceCall";
+import { VoiceCall } from "../hooks/useVoiceCall";
 import { extractMatrixUserId, localpartFromUserId, normalizeUserId } from "../utils/matrix";
 import { useUserVolume } from "../hooks/useUserVolume";
 import VolumeContextMenu from "./VolumeContextMenu";
@@ -11,46 +11,37 @@ import { useOverlayObstruction } from "../hooks/useOverlayObstruction";
 
 interface VoiceRoomViewProps {
   room: Room;
-  callState: VoiceCallState;
+  voiceCall: VoiceCall;
   voiceParticipants: MatrixVoiceParticipant[];
   /** LiveKit Room Service snapshot (mute/deafen/speaking) when not connected */
   livekitInRoom: LivekitVoiceParticipantInfo[];
   userId: string;
-  onJoinVoice: () => void;
-  onDisconnect: () => void;
-  onToggleMic: () => void;
-  onToggleDeafen: () => void;
-  onToggleNoiseSuppression: () => void;
-  onStartScreenShare: (mode: "screen" | "window", windowTitle?: string) => Promise<void>;
-  onEnumerateScreenShareWindows: () => Promise<[string, string][]>;
-  onStopScreenShare: () => Promise<void>;
-  onGetScreenSharePreset: () => Promise<"720p" | "1080p">;
-  onSetScreenSharePreset: (preset: "720p" | "1080p") => Promise<void>;
-  onGetNoiseSuppressionConfig: () => Promise<{ extraAttenuation: number; agcTargetRms: number }>;
-  onSetNoiseSuppressionConfig: (config: { extraAttenuation: number; agcTargetRms: number }) => Promise<void>;
-  onSetParticipantVolume: (identity: string, volume: number) => void;
 }
 
 export default function VoiceRoomView({
   room,
-  callState,
+  voiceCall,
   voiceParticipants,
   livekitInRoom,
   userId,
-  onJoinVoice,
-  onDisconnect,
-  onToggleMic,
-  onToggleDeafen,
-  onToggleNoiseSuppression,
-  onStartScreenShare,
-  onEnumerateScreenShareWindows,
-  onStopScreenShare,
-  onGetScreenSharePreset,
-  onSetScreenSharePreset,
-  onGetNoiseSuppressionConfig,
-  onSetNoiseSuppressionConfig,
-  onSetParticipantVolume,
 }: VoiceRoomViewProps) {
+  // Destructure actions from voiceCall; use voiceCall directly as callState
+  // since VoiceCall extends VoiceCallState.
+  const callState = voiceCall;
+  const {
+    disconnect: onDisconnect,
+    toggleMic: onToggleMic,
+    toggleDeafen: onToggleDeafen,
+    toggleNoiseSuppression: onToggleNoiseSuppression,
+    startScreenShare: onStartScreenShare,
+    enumerateScreenShareWindows: onEnumerateScreenShareWindows,
+    stopScreenShare: onStopScreenShare,
+    getScreenSharePreset: onGetScreenSharePreset,
+    setScreenSharePreset: onSetScreenSharePreset,
+    getNoiseSuppressionConfig: onGetNoiseSuppressionConfig,
+    setNoiseSuppressionConfig: onSetNoiseSuppressionConfig,
+    setParticipantVolume: onSetParticipantVolume,
+  } = voiceCall;
   const { palette, spacing, typography } = useTheme();
   const { getVolume, setVolume } = useUserVolume();
   const [screenShareMenuOpen, setScreenShareMenuOpen] = useState(false);
@@ -176,15 +167,6 @@ export default function VoiceRoomView({
   const hasScreenShare = callState.screenSharingOwners.length > 0 || callState.isLocalScreenSharing;
 
   // Build set of LiveKit participant identities (normalized) for matching
-  const liveKitIdentitySet = useMemo(() => {
-    const set = new Set<string>();
-    for (const p of callState.participants) {
-      set.add(normalizeUserId(p.identity));
-      set.add(normalizeUserId(localpartFromUserId(p.identity)));
-    }
-    return set;
-  }, [callState.participants]);
-
   // Build avatar lookup from Matrix roster (keyed by normalized userId)
   const avatarByUserId = useMemo(() => {
     const map = new Map<string, string | null>();
@@ -193,6 +175,15 @@ export default function VoiceRoomView({
     }
     return map;
   }, [voiceParticipants]);
+
+  const liveKitIdentitySet = useMemo(() => {
+    const set = new Set<string>();
+    for (const p of callState.participants) {
+      set.add(normalizeUserId(p.identity));
+      set.add(normalizeUserId(localpartFromUserId(p.identity)));
+    }
+    return set;
+  }, [callState.participants]);
 
   // Merged participants: LiveKit-connected + room participants who are still connecting
   const allParticipants = useMemo(() => {
@@ -649,7 +640,7 @@ export default function VoiceRoomView({
         }}>
           <button
             type="button"
-            onClick={() => onJoinVoice()}
+            onClick={() => voiceCall.connect(room.id)}
             style={{
               padding: `${spacing.unit * 2}px ${spacing.unit * 5}px`,
               borderRadius: spacing.unit * 2,
