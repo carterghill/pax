@@ -13,7 +13,7 @@ use tauri::State;
 use crate::types::{LivekitVoiceParticipantInfo, VoiceJoinResult, VoiceParticipant};
 use crate::{screen, voice, AppState, LivekitConfig};
 
-use super::{fmt_error_chain, get_or_fetch_member_avatar};
+use super::{fmt_error_chain, get_or_fetch_avatar};
 
 /// Matrix room type for voice channels (MSC3417).
 /// Also defined in the frontend at `src/utils/matrix.ts` — keep both in sync.
@@ -108,7 +108,11 @@ async fn collect_room_voice_participants(
             match room.get_member_no_sync(&uid).await {
                 Ok(Some(member)) => {
                     let name = member.display_name().map(|n| n.to_string());
-                    let avatar = get_or_fetch_member_avatar(&member, avatar_cache).await;
+                    let avatar = get_or_fetch_avatar(
+                        member.avatar_url(),
+                        member.avatar(matrix_sdk::media::MediaFormat::File),
+                        avatar_cache,
+                    ).await;
                     (name, avatar)
                 }
                 _ => (None, None),

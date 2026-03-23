@@ -7,7 +7,7 @@ import { usePresence } from "../hooks/usePresence";
 import { useVoiceParticipants } from "../hooks/useVoiceParticipants";
 import { useVoiceCall } from "../hooks/useVoiceCall";
 import { PresenceContext } from "../hooks/PresenceContext";
-import { useState, useCallback, useMemo, useEffect } from "react";
+import { useState, useCallback, useMemo, useRef, useEffect } from "react";
 import { useTheme } from "../theme/ThemeContext";
 import SettingsMenu from "../components/SettingsMenu";
 import {
@@ -15,7 +15,7 @@ import {
   voiceStateLookupKeysForLiveKitIdentity,
 } from "../utils/matrix";
 import { useLivekitVoiceSnapshots } from "../hooks/useLivekitVoiceSnapshots";
-import { useResizeHandle } from "../hooks/useResizeHandle";
+import { useUserAvatar } from "../hooks/useUserAvatar";
 
 const ROOM_SIDEBAR_WIDTH_KEY = "pax-room-sidebar-width";
 const USER_MENU_WIDTH_KEY = "pax-user-menu-width";
@@ -91,22 +91,16 @@ export default function MainLayout({ userId, onSignOut }: MainLayoutProps) {
 
   const { palette, spacing } = useTheme();
   const activeSpace = activeSpaceId ? getRoom(activeSpaceId) : null;
+  const userAvatarUrl = useUserAvatar();
 
   // Resizable room sidebar width, persisted to localStorage
   const [roomSidebarWidth, setRoomSidebarWidth] = useState(() =>
     getStoredRoomSidebarWidth(spacing.sidebarWidth)
   );
   const [userMenuWidth, setUserMenuWidth] = useState(() => getStoredUserMenuWidth(240));
-
-  const sidebarResize = useResizeHandle({
-    width: roomSidebarWidth,
-    onWidthChange: setRoomSidebarWidth,
-    min: MIN_ROOM_SIDEBAR_WIDTH,
-    max: () => Math.min(
-      MAX_ROOM_SIDEBAR_WIDTH,
-      window.innerWidth - SPACE_SIDEBAR_WIDTH - RESIZE_HANDLE - MIN_CHAT_VIEW_WIDTH - USER_MENU_HANDLE - userMenuWidth
-    ),
-  });
+  const startXRef = useRef(0);
+  const startWidthRef = useRef(0);
+  const [isResizeHovered, setIsResizeHovered] = useState(false);
 
   useEffect(() => {
     storeRoomSidebarWidth(roomSidebarWidth);
@@ -182,6 +176,28 @@ export default function MainLayout({ userId, onSignOut }: MainLayoutProps) {
     }
   }, [setActiveRoomId, getRoom, connectedVoiceRoomId, connectVoiceCall]);
 
+  const handleResizeStart = useCallback((e: React.MouseEvent) => {
+    e.preventDefault();
+    startXRef.current = e.clientX;
+    startWidthRef.current = roomSidebarWidth;
+
+    const onMove = (ev: MouseEvent) => {
+      const dx = ev.clientX - startXRef.current;
+      const maxW = Math.max(
+        MIN_ROOM_SIDEBAR_WIDTH,
+        window.innerWidth - SPACE_SIDEBAR_WIDTH - RESIZE_HANDLE - MIN_CHAT_VIEW_WIDTH - USER_MENU_HANDLE - userMenuWidth
+      );
+      const next = Math.min(Math.min(maxW, MAX_ROOM_SIDEBAR_WIDTH), Math.max(MIN_ROOM_SIDEBAR_WIDTH, startWidthRef.current + dx));
+      setRoomSidebarWidth(next);
+    };
+    const onUp = () => {
+      window.removeEventListener("mousemove", onMove);
+      window.removeEventListener("mouseup", onUp);
+    };
+    window.addEventListener("mousemove", onMove);
+    window.addEventListener("mouseup", onUp);
+  }, [roomSidebarWidth, userMenuWidth]);
+
   return (
     <PresenceContext.Provider value={{ manualStatus, setManualStatus, effectivePresence }}>
       <div style={{
@@ -205,6 +221,7 @@ export default function MainLayout({ userId, onSignOut }: MainLayoutProps) {
             onSelectRoom={handleSelectRoom}
             spaceName={activeSpace?.name ?? "Home"}
             userId={userId}
+            userAvatarUrl={userAvatarUrl}
             voiceParticipants={voiceParticipants}
             connectedVoiceRoomId={voiceCall.connectedRoomId}
             isVoiceConnecting={voiceCall.isConnecting}
@@ -214,15 +231,15 @@ export default function MainLayout({ userId, onSignOut }: MainLayoutProps) {
             onSetParticipantVolume={voiceCall.setParticipantVolume}
           />
           <div
-            onMouseDown={sidebarResize.onMouseDown}
+            onMouseDown={handleResizeStart}
             onDoubleClick={() => setRoomSidebarWidth(spacing.sidebarWidth)}
-            onMouseEnter={() => sidebarResize.setIsHovered(true)}
-            onMouseLeave={() => sidebarResize.setIsHovered(false)}
+            onMouseEnter={() => setIsResizeHovered(true)}
+            onMouseLeave={() => setIsResizeHovered(false)}
             style={{
               width: 6,
               flexShrink: 0,
               cursor: "col-resize",
-              backgroundColor: sidebarResize.isHovered ? palette.border : "transparent",
+              backgroundColor: isResizeHovered ? palette.border : "transparent",
               transition: "background-color 0.15s",
             }}
             title="Drag to resize, double-click to reset"

@@ -21,7 +21,7 @@ use crate::types::{
 };
 use crate::AppState;
 
-use super::{fmt_error_chain, get_client, get_or_fetch_member_avatar, resolve_room};
+use super::{fmt_error_chain, get_client, get_or_fetch_avatar, resolve_room};
 use super::voice_matrix::collect_voice_participants_for_joined_voice_rooms;
 
 #[tauri::command]
@@ -109,7 +109,11 @@ pub async fn get_messages(
         let meta = match room.get_member_no_sync(uid).await {
             Ok(Some(member)) => {
                 let name = member.display_name().map(|n| n.to_string());
-                let avatar = get_or_fetch_member_avatar(&member, &avatar_cache).await;
+                let avatar = get_or_fetch_avatar(
+                    member.avatar_url(),
+                    member.avatar(matrix_sdk::media::MediaFormat::File),
+                    &avatar_cache,
+                ).await;
                 (name, avatar)
             }
             _ => (None, None),
@@ -285,7 +289,11 @@ pub async fn start_sync(state: State<'_, Arc<AppState>>, app: tauri::AppHandle) 
             let (sender_name, avatar_url) = match room.get_member_no_sync(&ev.sender).await {
                 Ok(Some(member)) => {
                     let name = member.display_name().map(|n| n.to_string());
-                    let avatar = get_or_fetch_member_avatar(&member, &avatar_cache).await;
+                    let avatar = get_or_fetch_avatar(
+                        member.avatar_url(),
+                        member.avatar(matrix_sdk::media::MediaFormat::File),
+                        &avatar_cache,
+                    ).await;
                     (name, avatar)
                 }
                 _ => (None, None),

@@ -11,7 +11,7 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 use data_encoding::BASE64;
-use matrix_sdk::{media::MediaFormat, room::RoomMember, Client, Room};
+use matrix_sdk::{Client, Room};
 use tokio::sync::Mutex;
 
 use crate::AppState;
@@ -53,11 +53,16 @@ fn encode_avatar_data_url(bytes: &[u8]) -> String {
     format!("data:image/png;base64,{}", b64)
 }
 
-pub(crate) async fn get_or_fetch_room_avatar(
-    room: &Room,
+/// Fetch an avatar by MXC URI, with cache.
+///
+/// `fetch_bytes` is a future that downloads the image — callers pass in
+/// `room.avatar(MediaFormat::File)` or `member.avatar(MediaFormat::File)`.
+pub(crate) async fn get_or_fetch_avatar(
+    mxc_uri: Option<&matrix_sdk::ruma::MxcUri>,
+    fetch_bytes: impl std::future::Future<Output = Result<Option<Vec<u8>>, matrix_sdk::Error>>,
     avatar_cache: &Arc<Mutex<HashMap<String, String>>>,
 ) -> Option<String> {
-    let mxc = room.avatar_url().map(|uri| uri.to_string())?;
+    let mxc = mxc_uri?.to_string();
 
     {
         let cache = avatar_cache.lock().await;
@@ -66,30 +71,8 @@ pub(crate) async fn get_or_fetch_room_avatar(
         }
     }
 
-    let bytes = room.avatar(MediaFormat::File).await.ok().flatten()?;
+    let bytes = fetch_bytes.await.ok().flatten()?;
     let data_url = encode_avatar_data_url(&bytes);
-    avatar_cache.lock().await.insert(mxc, data_url.clone());
-    Some(data_url)
-}
-
-pub(crate) async fn get_or_fetch_member_avatar(
-    member: &RoomMember,
-    avatar_cache: &Arc<Mutex<HashMap<String, String>>>,
-) -> Option<String> {
-    let mxc = member.avatar_url().map(|uri| uri.to_string())?;
-
-    // Fast path: check cache without holding the lock during the fetch
-    {
-        let cache = avatar_cache.lock().await;
-        if let Some(cached) = cache.get(&mxc) {
-            return Some(cached.clone());
-        }
-    }
-
-    let bytes = member.avatar(MediaFormat::File).await.ok().flatten()?;
-    let data_url = encode_avatar_data_url(&bytes);
-
-    // Insert (another task may have raced, but that's fine — same data)
     avatar_cache.lock().await.insert(mxc, data_url.clone());
     Some(data_url)
 }

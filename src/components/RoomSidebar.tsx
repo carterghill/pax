@@ -7,7 +7,6 @@ import VolumeContextMenu from "./VolumeContextMenu";
 import { useUserVolume } from "../hooks/useUserVolume";
 import {
   VOICE_ROOM_TYPE,
-  localpartFromUserId,
   voiceStateLookupKeysForParticipant,
 } from "../utils/matrix";
 
@@ -32,6 +31,7 @@ interface RoomSidebarProps {
   onSelectRoom: (roomId: string) => void;
   spaceName: string;
   userId: string;
+  userAvatarUrl: string | null;
   voiceParticipants: Record<string, VoiceParticipant[]>;
   connectedVoiceRoomId: string | null;
   isVoiceConnecting: boolean;
@@ -164,6 +164,7 @@ export default function RoomSidebar({
   onSelectRoom,
   spaceName,
   userId,
+  userAvatarUrl,
   voiceParticipants,
   connectedVoiceRoomId,
   isVoiceConnecting,
@@ -182,7 +183,9 @@ export default function RoomSidebar({
   } | null>(null);
 
   // Extract local part of userId for display (e.g. @carter:matrix.org → carter)
-  const displayName = localpartFromUserId(userId);
+  const displayName = userId.startsWith("@")
+    ? userId.slice(1).split(":")[0]
+    : userId;
 
   return (
     <div style={{
@@ -264,6 +267,7 @@ export default function RoomSidebar({
               {/* Voice participants listed under the voice room */}
               {isVoice && participants.length > 0 && (
                 <div style={{ paddingBottom: spacing.unit }}>
+                  <style>{`@keyframes spin { from { transform: rotate(0deg); } to { transform: rotate(360deg); } }`}</style>
                   {participants.map((p) => {
                     const state = resolveVoiceStateForRoom(
                       p,
@@ -314,7 +318,7 @@ export default function RoomSidebar({
 
       {/* User status at bottom — flexShrink: 0 so it stays full width */}
       <div style={{ flexShrink: 0 }}>
-        <StatusDropdown displayName={displayName} avatarUrl={null} />
+        <StatusDropdown displayName={displayName} avatarUrl={userAvatarUrl} />
       </div>
 
       {/* Volume context menu */}

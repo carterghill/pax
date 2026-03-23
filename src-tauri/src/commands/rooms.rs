@@ -11,7 +11,7 @@ use crate::types::RoomInfo;
 use crate::AppState;
 
 use super::auth::{save_session_to_credentials, SavedSession};
-use super::{fmt_error_chain, get_or_fetch_room_avatar};
+use super::{fmt_error_chain, get_or_fetch_avatar};
 
 fn store_path(app: &tauri::AppHandle) -> Result<std::path::PathBuf, String> {
     Ok(app
@@ -179,7 +179,11 @@ pub async fn get_rooms(state: State<'_, Arc<AppState>>) -> Result<Vec<RoomInfo>,
     let mut room_list = Vec::new();
 
     for room in &all_rooms {
-        let avatar_url = get_or_fetch_room_avatar(room, &avatar_cache).await;
+        let avatar_url = get_or_fetch_avatar(
+            room.avatar_url().as_deref(),
+            room.avatar(matrix_sdk::media::MediaFormat::File),
+            &avatar_cache,
+        ).await;
         let room_id_str = room.room_id().to_string();
 
         // Find which spaces contain this room

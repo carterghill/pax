@@ -185,11 +185,21 @@ export default function VoiceRoomView({
     return set;
   }, [callState.participants]);
 
+  // Build avatar lookup from Matrix roster (keyed by normalized userId)
+  const avatarByUserId = useMemo(() => {
+    const map = new Map<string, string | null>();
+    for (const p of voiceParticipants) {
+      map.set(normalizeUserId(p.userId), p.avatarUrl);
+    }
+    return map;
+  }, [voiceParticipants]);
+
   // Merged participants: LiveKit-connected + room participants who are still connecting
   const allParticipants = useMemo(() => {
     const result: Array<{
       identity: string;
       displayName: string;
+      avatarUrl?: string | null;
       isLocal: boolean;
       isConnecting: boolean;
       isSpeaking?: boolean;
@@ -199,10 +209,12 @@ export default function VoiceRoomView({
 
     // Add connected LiveKit participants
     for (const p of callState.participants) {
+      const mxid = extractMatrixUserId(p.identity);
       const displayName = localpartFromUserId(p.identity);
       result.push({
         identity: p.identity,
         displayName,
+        avatarUrl: avatarByUserId.get(normalizeUserId(mxid)) ?? null,
         isLocal: p.isLocal,
         isConnecting: false,
         isSpeaking: p.isSpeaking,
@@ -226,6 +238,7 @@ export default function VoiceRoomView({
         result.push({
           identity: p.userId,
           displayName: localDisplayName,
+          avatarUrl: p.avatarUrl,
           isLocal,
           isConnecting: true,
         });
@@ -233,7 +246,7 @@ export default function VoiceRoomView({
     }
 
     return result;
-  }, [callState.participants, callState.connectedRoomId, callState.isConnecting, room.id, voiceParticipants, userId, liveKitIdentitySet]);
+  }, [callState.participants, callState.connectedRoomId, callState.isConnecting, room.id, voiceParticipants, userId, liveKitIdentitySet, avatarByUserId]);
 
   const showLobby = !isConnected && !isConnecting && !callState.error;
 
@@ -242,6 +255,7 @@ export default function VoiceRoomView({
     type Row = {
       identity: string;
       displayName: string;
+      avatarUrl: string | null;
       isLocal: boolean;
       isMuted: boolean;
       isDeafened: boolean;
@@ -264,6 +278,7 @@ export default function VoiceRoomView({
       result.push({
         identity: p.userId,
         displayName: localDisplayName,
+        avatarUrl: p.avatarUrl,
         isLocal: p.userId === userId,
         isMuted: lp?.isMuted ?? false,
         isDeafened: lp?.isDeafened ?? false,
@@ -278,6 +293,7 @@ export default function VoiceRoomView({
       result.push({
         identity: lp.identity,
         displayName: localDisplayName,
+        avatarUrl: avatarByUserId.get(nk) ?? null,
         isLocal: nk === normalizeUserId(userId),
         isMuted: lp.isMuted,
         isDeafened: lp.isDeafened,
@@ -285,7 +301,7 @@ export default function VoiceRoomView({
       });
     }
     return result;
-  }, [showLobby, voiceParticipants, livekitInRoom, userId]);
+  }, [showLobby, voiceParticipants, livekitInRoom, userId, avatarByUserId]);
 
   // Display names for screen share header
   const remoteSharers = callState.screenSharingOwners.filter(id => {
@@ -367,6 +383,7 @@ export default function VoiceRoomView({
           overflowY: "auto",
           width: hasScreenShare ? 180 : undefined,
         }}>
+        <style>{`@keyframes spin { from { transform: rotate(0deg); } to { transform: rotate(360deg); } }`}</style>
         {isConnecting && (
           <div style={{
             display: "flex",
@@ -412,22 +429,37 @@ export default function VoiceRoomView({
               width: 120,
             }}
           >
-            <div style={{
-              width: 80,
-              height: 80,
-              borderRadius: "50%",
-              backgroundColor: palette.bgActive,
-              display: "flex",
-              alignItems: "center",
-              justifyContent: "center",
-              fontSize: 28,
-              fontWeight: typography.fontWeightBold,
-              color: palette.textHeading,
-              border: `3px solid ${p.isSpeaking ? "#23a55a" : "transparent"}`,
-              transition: "border-color 0.15s ease",
-            }}>
-              {p.displayName.charAt(0).toUpperCase()}
-            </div>
+            {p.avatarUrl ? (
+              <img
+                src={p.avatarUrl}
+                alt={p.displayName}
+                style={{
+                  width: 80,
+                  height: 80,
+                  borderRadius: "50%",
+                  objectFit: "cover",
+                  border: `3px solid ${p.isSpeaking ? "#23a55a" : "transparent"}`,
+                  transition: "border-color 0.15s ease",
+                }}
+              />
+            ) : (
+              <div style={{
+                width: 80,
+                height: 80,
+                borderRadius: "50%",
+                backgroundColor: palette.bgActive,
+                display: "flex",
+                alignItems: "center",
+                justifyContent: "center",
+                fontSize: 28,
+                fontWeight: typography.fontWeightBold,
+                color: palette.textHeading,
+                border: `3px solid ${p.isSpeaking ? "#23a55a" : "transparent"}`,
+                transition: "border-color 0.15s ease",
+              }}>
+                {p.displayName.charAt(0).toUpperCase()}
+              </div>
+            )}
             <span style={{
               fontSize: typography.fontSizeSmall,
               color: palette.textPrimary,
@@ -503,30 +535,54 @@ export default function VoiceRoomView({
             }}
           >
             {/* Avatar circle - circular progress when connecting */}
-            <div style={{
-              width: 80,
-              height: 80,
-              borderRadius: "50%",
-              backgroundColor: palette.bgActive,
-              display: "flex",
-              alignItems: "center",
-              justifyContent: "center",
-              fontSize: p.isConnecting ? 0 : 28,
-              fontWeight: typography.fontWeightBold,
-              color: palette.textHeading,
-              border: `3px solid ${p.isSpeaking ? "#23a55a" : "transparent"}`,
-              transition: "border-color 0.15s ease",
-            }}>
-              {p.isConnecting ? (
+            {p.isConnecting ? (
+              <div style={{
+                width: 80,
+                height: 80,
+                borderRadius: "50%",
+                backgroundColor: palette.bgActive,
+                display: "flex",
+                alignItems: "center",
+                justifyContent: "center",
+                border: "3px solid transparent",
+              }}>
                 <Loader2
                   size={32}
                   color={palette.textSecondary}
                   style={{ animation: "spin 1s linear infinite" }}
                 />
-              ) : (
-                p.displayName.charAt(0).toUpperCase()
-              )}
-            </div>
+              </div>
+            ) : p.avatarUrl ? (
+              <img
+                src={p.avatarUrl}
+                alt={p.displayName}
+                style={{
+                  width: 80,
+                  height: 80,
+                  borderRadius: "50%",
+                  objectFit: "cover",
+                  border: `3px solid ${p.isSpeaking ? "#23a55a" : "transparent"}`,
+                  transition: "border-color 0.15s ease",
+                }}
+              />
+            ) : (
+              <div style={{
+                width: 80,
+                height: 80,
+                borderRadius: "50%",
+                backgroundColor: palette.bgActive,
+                display: "flex",
+                alignItems: "center",
+                justifyContent: "center",
+                fontSize: 28,
+                fontWeight: typography.fontWeightBold,
+                color: palette.textHeading,
+                border: `3px solid ${p.isSpeaking ? "#23a55a" : "transparent"}`,
+                transition: "border-color 0.15s ease",
+              }}>
+                {p.displayName.charAt(0).toUpperCase()}
+              </div>
+            )}
             <span style={{
               fontSize: typography.fontSizeSmall,
               color: palette.textPrimary,

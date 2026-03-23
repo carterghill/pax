@@ -142,6 +142,7 @@ pub fn run() {
             commands::rooms::get_rooms,
             commands::messages::get_messages,
             commands::members::get_room_members,
+            commands::members::get_user_avatar,
             commands::voice_matrix::get_voice_participants,
             commands::voice_matrix::get_all_voice_participants,
             commands::voice_matrix::get_livekit_voice_room_snapshot,
