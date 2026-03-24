@@ -167,6 +167,15 @@ export default function VoiceRoomView({
     displayName: string;
   } | null>(null);
 
+  /** Shared volume change handler — persists to localStorage AND sends to Rust backend. */
+  const handleStreamVolumeChange = useCallback(
+    (identity: string, vol: number) => {
+      setVolume(identity, vol);
+      onSetParticipantVolume(identity, vol);
+    },
+    [setVolume, onSetParticipantVolume],
+  );
+
   const isConnected = callState.connectedRoomId === room.id && !callState.isConnecting;
   const isConnecting = callState.isConnecting && callState.connectedRoomId === room.id;
   const hasScreenShare = callState.screenSharingOwners.length > 0 || callState.isLocalScreenSharing;
@@ -363,6 +372,8 @@ export default function VoiceRoomView({
           <ScreenShareGrid
             remoteSharers={remoteSharers}
             isLocalScreenSharing={callState.isLocalScreenSharing}
+            getVolume={getVolume}
+            onVolumeChange={handleStreamVolumeChange}
             onStreamContextMenu={(e, identity, displayName) => {
               e.preventDefault();
               setContextMenu({

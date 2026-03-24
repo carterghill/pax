@@ -4,6 +4,7 @@ import { useTheme } from "../theme/ThemeContext";
 import ScreenShareViewer from "./ScreenShareViewer";
 import { useOverlayHover, useOverlayObstruction } from "../hooks/useOverlayObstruction";
 import { localpartFromUserId } from "../utils/matrix";
+import StreamVolumeControl from "./StreamVolumeControl";
 
 /**
  * ScreenShareGrid — Multi-stream screen share layout.
@@ -23,12 +24,18 @@ interface ScreenShareGridProps {
   isLocalScreenSharing: boolean;
   /** Right-click a remote stream tile (e.g. volume menu over native overlay) */
   onStreamContextMenu?: (e: MouseEvent, identity: string, displayName: string) => void;
+  /** Get the current volume for a participant (0–2) */
+  getVolume: (identity: string) => number;
+  /** Set volume for a participant (persists + applies to audio) */
+  onVolumeChange: (identity: string, volume: number) => void;
 }
 
 export default function ScreenShareGrid({
   remoteSharers,
   isLocalScreenSharing,
   onStreamContextMenu,
+  getVolume,
+  onVolumeChange,
 }: ScreenShareGridProps) {
   const { palette, spacing, typography } = useTheme();
   const [focusedId, setFocusedId] = useState<string | null>(null);
@@ -52,6 +59,15 @@ export default function ScreenShareGrid({
 
   // If the focused stream disappears, fall back to grid
   const effectiveFocusId = focusedId && remoteSharers.includes(focusedId) ? focusedId : null;
+
+  // Hover tracking for the focused stream (hooks must be unconditional)
+  const focusedHover = useOverlayHover(effectiveFocusId ?? "");
+  const handleFocusedVolumeChange = useCallback(
+    (vol: number) => {
+      if (effectiveFocusId) onVolumeChange(effectiveFocusId, vol);
+    },
+    [effectiveFocusId, onVolumeChange],
+  );
 
   // All streams to display (remote streams only — local shows a placeholder)
   const allStreams = useMemo(() => {
@@ -147,7 +163,7 @@ export default function ScreenShareGrid({
         </div>
 
         {/* Focused stream — takes most of the space */}
-        <div style={{ flex: 1, position: "relative", overflow: "hidden" }}>
+        <div style={{ flex: 1, position: "relative", overflow: "visible" }}>
           {focusedStream && !focusedStream.isLocal && (
             <>
               <ScreenShareViewer
@@ -158,6 +174,11 @@ export default function ScreenShareGrid({
                 name={localpartFromUserId(focusedStream.identity)}
                 typography={typography}
                 spacing={spacing}
+              />
+              <StreamVolumeControl
+                visible={focusedHover}
+                volume={getVolume(focusedStream.identity)}
+                onVolumeChange={handleFocusedVolumeChange}
               />
             </>
           )}
@@ -192,6 +213,8 @@ export default function ScreenShareGrid({
                   stream={stream}
                   onClick={() => handleTileClick(stream.identity)}
                   onStreamContextMenu={onStreamContextMenu}
+                  getVolume={getVolume}
+                  onVolumeChange={onVolumeChange}
                   palette={palette}
                   spacing={spacing}
                   typography={typography}
@@ -222,6 +245,8 @@ export default function ScreenShareGrid({
           stream={stream}
           onClick={() => handleTileClick(stream.identity)}
           onStreamContextMenu={onStreamContextMenu}
+          getVolume={getVolume}
+          onVolumeChange={onVolumeChange}
           palette={palette}
           spacing={spacing}
           typography={typography}
@@ -238,6 +263,8 @@ function StreamTile({
   stream,
   onClick,
   onStreamContextMenu,
+  getVolume,
+  onVolumeChange,
   palette,
   spacing,
   typography,
@@ -246,6 +273,8 @@ function StreamTile({
   stream: { identity: string; isLocal: boolean };
   onClick: () => void;
   onStreamContextMenu?: (e: MouseEvent, identity: string, displayName: string) => void;
+  getVolume: (identity: string) => number;
+  onVolumeChange: (identity: string, volume: number) => void;
   palette: any;
   spacing: any;
   typography: any;
@@ -254,6 +283,11 @@ function StreamTile({
   // Use native hover tracking — the HWND sets this via WM_MOUSEMOVE/WM_MOUSELEAVE
   const nativeHover = useOverlayHover(stream.identity);
   const showHover = !stream.isLocal && nativeHover;
+
+  const handleVolumeChange = useCallback(
+    (vol: number) => onVolumeChange(stream.identity, vol),
+    [stream.identity, onVolumeChange],
+  );
 
   return (
     <div
@@ -264,7 +298,7 @@ function StreamTile({
       }}
       style={{
         borderRadius: spacing.unit,
-        overflow: "hidden",
+        overflow: "visible",
         cursor: stream.isLocal ? "default" : "pointer",
         border: `2px solid ${showHover ? palette.accent : "transparent"}`,
         position: "relative",
@@ -291,6 +325,15 @@ function StreamTile({
         <LocalSharePlaceholder palette={palette} small={small} />
       )}
       <TileLabel name={localpartFromUserId(stream.identity)} typography={typography} spacing={spacing} />
+
+      {/* Volume control — visible on hover, uses punch-through for native overlay */}
+      {!stream.isLocal && (
+        <StreamVolumeControl
+          visible={showHover}
+          volume={getVolume(stream.identity)}
+          onVolumeChange={handleVolumeChange}
+        />
+      )}
     </div>
   );
 }
