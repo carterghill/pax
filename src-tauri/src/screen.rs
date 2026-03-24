@@ -2,10 +2,12 @@
 //!
 //! On Windows: uses windows-capture (Graphics Capture API) as primary; falls back to
 //! libwebrtc DesktopCapturer or screenshots crate if needed.
-//! On macOS/Linux: uses libwebrtc DesktopCapturer.
+//! On Linux: uses xdg-desktop-portal + PipeWire (video and audio).
+//! On macOS: uses libwebrtc DesktopCapturer.
 //!
 //! Converts frames to I420 and feeds them into a NativeVideoSource for publishing.
-//! On Windows, also captures system audio (WASAPI process loopback) for screen-share audio.
+//! On Windows, captures system audio via WASAPI process loopback.
+//! On Linux, captures system audio via PipeWire sink monitor.
 
 use std::sync::atomic::{AtomicBool, Ordering};
 use once_cell::sync::Lazy;
@@ -138,7 +140,18 @@ pub async fn start_screen_capture(
         start_screen_capture_libwebrtc_or_fallback(room, mode, window_title).await
     }
 
-    #[cfg(any(target_os = "macos", target_os = "linux"))]
+    #[cfg(target_os = "linux")]
+    {
+        match start_screen_capture_pipewire(room.clone(), mode).await {
+            Ok(handle) => return Ok(handle),
+            Err(e) => {
+                log::warn!("PipeWire capture failed ({}), falling back to libwebrtc", e);
+                start_screen_capture_libwebrtc_or_fallback(room, mode, window_title).await
+            }
+        }
+    }
+
+    #[cfg(target_os = "macos")]
     {
         start_screen_capture_libwebrtc_or_fallback(room, mode, window_title).await
     }
@@ -872,9 +885,741 @@ fn setup_screen_share_audio_process_loopback(
     (Some(track), None, capture_thread)
 }
 
-#[cfg(not(target_os = "windows"))]
+#[cfg(not(any(target_os = "windows", target_os = "linux")))]
 fn setup_screen_share_audio() -> (Option<LocalAudioTrack>, Option<cpal::Stream>) {
     (None, None)
+}
+
+/// Linux: xdg-desktop-portal + PipeWire screen capture with audio.
+///
+/// Flow:
+/// 1. ashpd opens the ScreenCast portal → native compositor dialog
+/// 2. User selects screen/window → portal returns PipeWire node_id + fd
+/// 3. Dedicated thread runs PipeWire MainLoop, connects to the portal stream
+/// 4. Frames arrive as SPA buffers → convert to I420 → feed NativeVideoSource
+/// 5. Separate PipeWire thread captures desktop audio from the default sink monitor
+#[cfg(target_os = "linux")]
+async fn start_screen_capture_pipewire(
+    room: Arc<livekit::Room>,
+    mode: ScreenShareMode,
+) -> Result<ScreenShareHandle, String> {
+    use ashpd::desktop::{
+        screencast::{CursorMode, Screencast, SourceType},
+        PersistMode,
+    };
+    use livekit::webrtc::video_source::native::NativeVideoSource;
+
+    let preset = get_screen_share_preset();
+    let bitrate = preset.max_bitrate();
+    log::info!("start_screen_capture_pipewire: mode={:?} preset={}", mode, preset.label());
+
+    // --- 1. Open xdg-desktop-portal ScreenCast session ---
+    log::info!("PipeWire: creating Screencast proxy...");
+    let proxy = tokio::time::timeout(
+        Duration::from_secs(5),
+        Screencast::new(),
+    ).await
+        .map_err(|_| "Screencast portal: D-Bus connection timed out (5s)".to_string())?
+        .map_err(|e| format!("Screencast portal unavailable: {}", e))?;
+
+    log::info!("PipeWire: creating session...");
+    let session = tokio::time::timeout(
+        Duration::from_secs(5),
+        proxy.create_session(),
+    ).await
+        .map_err(|_| "create_session timed out (5s)".to_string())?
+        .map_err(|e| format!("Failed to create screencast session: {}", e))?;
+
+    let source_type = match mode {
+        ScreenShareMode::Screen => SourceType::Monitor,
+        ScreenShareMode::Window => SourceType::Window,
+    };
+
+    log::info!("PipeWire: selecting sources ({:?})...", mode);
+    tokio::time::timeout(
+        Duration::from_secs(5),
+        proxy.select_sources(
+            &session,
+            CursorMode::Embedded,
+            source_type.into(),
+            true,  // multiple = true (portal may still show single-select)
+            None,  // no restore token
+            PersistMode::DoNot,
+        ),
+    ).await
+        .map_err(|_| "select_sources timed out (5s)".to_string())?
+        .map_err(|e| format!("select_sources: {}", e))?;
+
+    // This shows the compositor's native picker — user may take a while.
+    // 60s timeout so it doesn't hang forever if the portal backend is broken.
+    log::info!("PipeWire: starting portal (waiting for user to pick screen/window)...");
+    let start_response = tokio::time::timeout(
+        Duration::from_secs(60),
+        proxy.start(&session, None),
+    ).await
+        .map_err(|_| "Portal picker timed out after 60s — is xdg-desktop-portal-kde running?".to_string())?
+        .map_err(|e| format!("Portal start failed: {}", e))?;
+
+    let response = start_response.response()
+        .map_err(|e| format!("Portal response error: {}", e))?;
+
+    let streams = response.streams();
+    if streams.is_empty() {
+        return Err("No streams returned from portal (user cancelled?)".to_string());
+    }
+    let portal_stream = &streams[0];
+    let node_id = portal_stream.pipe_wire_node_id();
+    log::info!("Portal returned PipeWire node_id={}, size={:?}", node_id, portal_stream.size());
+
+    // Keep the session alive — dropping it ends the screencast.
+    // We leak the session handle; it gets cleaned up when the portal session
+    // is closed on disconnect or when the process exits.
+    // (ashpd sessions auto-close on Drop, so we must prevent that.)
+    let session_box = Box::new(session);
+    std::mem::forget(session_box);
+
+    // --- 2. Set up video source ---
+    let resolution = livekit::webrtc::video_source::VideoResolution {
+        width: preset.width(),
+        height: preset.height(),
+    };
+    let video_source = NativeVideoSource::new(resolution, true);
+    let shutdown = Arc::new(AtomicBool::new(false));
+
+    // --- 3. Spawn PipeWire video capture thread ---
+    // Connect to the regular PipeWire daemon (not portal fd) — Pax is a native
+    // app so the portal screencast node is visible on the main PipeWire instance.
+    // This is the same approach OBS, Firefox, and Chrome use.
+    let video_source_cap = video_source.clone();
+    let shutdown_video = shutdown.clone();
+
+    let capturer_thread = thread::Builder::new()
+        .name("pw-video-capture".into())
+        .spawn(move || {
+            log::info!("pw-video-capture thread started for node {}", node_id);
+            let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                pipewire_video_capture_loop(node_id, video_source_cap, shutdown_video, preset);
+            }));
+            if let Err(e) = result {
+                let msg = if let Some(s) = e.downcast_ref::<&str>() {
+                    s.to_string()
+                } else if let Some(s) = e.downcast_ref::<String>() {
+                    s.clone()
+                } else {
+                    "unknown panic".to_string()
+                };
+                log::error!("pw-video-capture thread panicked: {}", msg);
+            }
+            log::info!("pw-video-capture thread exited");
+        })
+        .map_err(|e| format!("Failed to spawn PipeWire video thread: {}", e))?;
+
+    // Brief delay for first frame to flow before publishing (non-blocking)
+    for _i in 0..6 {
+        if shutdown.load(Ordering::Relaxed) { break; }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+
+    // --- 4. Publish video track ---
+    log::info!("Creating and publishing screen track...");
+    let track = livekit::track::LocalVideoTrack::create_video_track(
+        "screenshare",
+        livekit::webrtc::video_source::RtcVideoSource::Native(video_source),
+    );
+
+    let codec = crate::codec::resolve_codec();
+    log::info!(
+        "Publishing screen track to LiveKit ({:?}, {}, {}fps)",
+        codec, preset.label(), preset.fps()
+    );
+    room.local_participant()
+        .publish_track(
+            livekit::track::LocalTrack::Video(track.clone()),
+            livekit::options::TrackPublishOptions {
+                source: livekit::track::TrackSource::Screenshare,
+                video_codec: codec,
+                simulcast: false,
+                video_encoding: Some(livekit::options::VideoEncoding {
+                    max_bitrate: bitrate,
+                    max_framerate: preset.fps() as f64,
+                }),
+                ..Default::default()
+            },
+        )
+        .await
+        .map_err(|e| format!("Failed to publish screen track: {}", e))?;
+    log::info!("Screen track published successfully");
+
+    // --- 5. Start PipeWire audio capture (desktop audio via sink monitor) ---
+    let shutdown_audio = shutdown.clone();
+    let (audio_track, audio_thread) = setup_screen_share_audio_pipewire(shutdown_audio);
+
+    Ok(ScreenShareHandle {
+        track,
+        audio_track,
+        _shutdown: shutdown,
+        _capturer_thread: Some(capturer_thread),
+        _audio_capture_thread: audio_thread,
+    })
+}
+
+/// PipeWire video capture main loop — runs on a dedicated OS thread.
+///
+/// Connects to the portal-provided PipeWire remote, creates a video stream
+/// targeting the screencast node, converts incoming frames to I420, and feeds
+/// them into the LiveKit NativeVideoSource.
+#[cfg(target_os = "linux")]
+fn pipewire_video_capture_loop(
+    node_id: u32,
+    video_source: livekit::webrtc::video_source::native::NativeVideoSource,
+    shutdown: Arc<AtomicBool>,
+    preset: ScreenSharePreset,
+) {
+    use pipewire as pw;
+    use pw::{properties::properties, spa};
+    use spa::pod::Pod;
+
+    log::info!("PipeWire video: calling pw::init()...");
+    pw::init();
+
+    log::info!("PipeWire video: creating MainLoop...");
+    let mainloop = match pw::main_loop::MainLoopRc::new(None) {
+        Ok(ml) => ml,
+        Err(e) => { log::error!("PipeWire MainLoop::new failed: {}", e); return; }
+    };
+    log::info!("PipeWire video: creating Context...");
+    let context = match pw::context::ContextRc::new(&mainloop, None) {
+        Ok(ctx) => ctx,
+        Err(e) => { log::error!("PipeWire Context::new failed: {}", e); return; }
+    };
+    log::info!("PipeWire video: connecting to PipeWire daemon...");
+    let core = match context.connect_rc(None) {
+        Ok(c) => c,
+        Err(e) => { log::error!("PipeWire connect failed: {}", e); return; }
+    };
+    log::info!("PipeWire video: connected to daemon, creating stream...");
+
+    // User data shared with the stream callbacks.
+    // MainLoopRc is !Send but safe here: created and used entirely on this thread.
+    struct PwVideoData {
+        format: spa::param::video::VideoInfoRaw,
+        video_source: livekit::webrtc::video_source::native::NativeVideoSource,
+        preset: ScreenSharePreset,
+        frame_count: u64,
+        mainloop: pw::main_loop::MainLoopRc,
+        shutdown: Arc<AtomicBool>,
+    }
+
+    let data = PwVideoData {
+        format: Default::default(),
+        video_source,
+        preset,
+        frame_count: 0,
+        mainloop: mainloop.clone(),
+        shutdown: shutdown.clone(),
+    };
+
+    let stream = match pw::stream::StreamBox::new(
+        &core,
+        "pax-screenshare",
+        properties! {
+            *pw::keys::MEDIA_TYPE => "Video",
+            *pw::keys::MEDIA_CATEGORY => "Capture",
+            *pw::keys::MEDIA_ROLE => "Screen",
+        },
+    ) {
+        Ok(s) => s,
+        Err(e) => { log::error!("PipeWire Stream::new failed: {}", e); return; }
+    };
+
+    let mainloop_err = mainloop.clone();
+
+    let _listener = stream
+        .add_local_listener_with_user_data(data)
+        .state_changed(move |_, _, old, new| {
+            log::debug!("PipeWire stream state: {:?} -> {:?}", old, new);
+            // Quit the main loop if the stream errors out
+            if matches!(new, pw::stream::StreamState::Error(_)) {
+                mainloop_err.quit();
+            }
+        })
+        .param_changed(|_, user_data, id, param| {
+            let Some(param) = param else { return; };
+            if id != pw::spa::param::ParamType::Format.as_raw() { return; }
+
+            let (media_type, media_subtype) =
+                match pw::spa::param::format_utils::parse_format(param) {
+                    Ok(v) => v,
+                    Err(_) => return,
+                };
+
+            if media_type != pw::spa::param::format::MediaType::Video
+                || media_subtype != pw::spa::param::format::MediaSubtype::Raw
+            {
+                return;
+            }
+
+            if let Err(e) = user_data.format.parse(param) {
+                log::warn!("Failed to parse video format: {:?}", e);
+                return;
+            }
+
+            log::info!(
+                "PipeWire negotiated video: format={:?} size={}x{} framerate={}/{}",
+                user_data.format.format(),
+                user_data.format.size().width,
+                user_data.format.size().height,
+                user_data.format.framerate().num,
+                user_data.format.framerate().denom,
+            );
+        })
+        .process(|stream_ref, user_data| {
+            // Check shutdown flag on every frame
+            if user_data.shutdown.load(Ordering::Relaxed) {
+                user_data.mainloop.quit();
+                return;
+            }
+            let Some(mut buffer) = stream_ref.dequeue_buffer() else {
+                return;
+            };
+            let datas = buffer.datas_mut();
+            if datas.is_empty() { return; }
+
+            let spa_data = &mut datas[0];
+            let chunk_size = spa_data.chunk().size() as usize;
+            let chunk_stride = spa_data.chunk().stride();
+            if chunk_size == 0 { return; }
+
+            let Some(raw_slice) = spa_data.data() else { return; };
+            let raw_slice = &raw_slice[..chunk_size];
+
+            let w = user_data.format.size().width as i32;
+            let h = user_data.format.size().height as i32;
+            if w <= 0 || h <= 0 { return; }
+
+            let src_stride = if chunk_stride > 0 { chunk_stride as u32 } else { (w * 4) as u32 };
+
+            // Convert to I420 based on negotiated pixel format
+            let mut i420 = livekit::webrtc::video_frame::I420Buffer::new(w as u32, h as u32);
+            let (dst_y, dst_u, dst_v) = i420.data_mut();
+
+            let fmt = user_data.format.format();
+            // libyuv naming: argb = [B,G,R,A] in memory (little-endian), abgr = [R,G,B,A]
+            let convert_ok = match fmt {
+                pw::spa::param::video::VideoFormat::BGRx
+                | pw::spa::param::video::VideoFormat::BGRA => {
+                    libwebrtc::native::yuv_helper::argb_to_i420(
+                        raw_slice, src_stride,
+                        dst_y, w as u32,
+                        dst_u, ((w + 1) / 2) as u32,
+                        dst_v, ((w + 1) / 2) as u32,
+                        w, h,
+                    );
+                    true
+                }
+                pw::spa::param::video::VideoFormat::RGBx
+                | pw::spa::param::video::VideoFormat::RGBA => {
+                    libwebrtc::native::yuv_helper::abgr_to_i420(
+                        raw_slice, src_stride,
+                        dst_y, w as u32,
+                        dst_u, ((w + 1) / 2) as u32,
+                        dst_v, ((w + 1) / 2) as u32,
+                        w, h,
+                    );
+                    true
+                }
+                _ => {
+                    if user_data.frame_count == 0 {
+                        log::warn!("Unsupported PipeWire video format: {:?}, frames will be skipped", fmt);
+                    }
+                    false
+                }
+            };
+
+            if !convert_ok { return; }
+
+            let (out_w, out_h) = (user_data.preset.width() as i32, user_data.preset.height() as i32);
+            let buffer = if w != out_w || h != out_h {
+                i420.scale(out_w, out_h)
+            } else {
+                i420
+            };
+
+            let now = SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_micros() as i64;
+            let vf = livekit::webrtc::video_frame::VideoFrame {
+                rotation: livekit::webrtc::video_frame::VideoRotation::VideoRotation0,
+                timestamp_us: now,
+                buffer,
+            };
+            user_data.video_source.capture_frame(&vf);
+            user_data.frame_count += 1;
+            if user_data.frame_count == 1 {
+                log::info!("PipeWire: first frame captured ({}x{})", w, h);
+            } else if user_data.frame_count % 300 == 0 {
+                log::trace!("PipeWire: frame {} ({}x{})", user_data.frame_count, w, h);
+            }
+        })
+        .register();
+
+    let _listener = match _listener {
+        Ok(l) => l,
+        Err(e) => { log::error!("PipeWire stream listener registration failed: {:?}", e); return; }
+    };
+
+    // Build SPA format pod: negotiate BGRx/BGRA/RGBx/RGBA
+    let obj = pw::spa::pod::object!(
+        pw::spa::utils::SpaTypes::ObjectParamFormat,
+        pw::spa::param::ParamType::EnumFormat,
+        pw::spa::pod::property!(
+            pw::spa::param::format::FormatProperties::MediaType,
+            Id,
+            pw::spa::param::format::MediaType::Video
+        ),
+        pw::spa::pod::property!(
+            pw::spa::param::format::FormatProperties::MediaSubtype,
+            Id,
+            pw::spa::param::format::MediaSubtype::Raw
+        ),
+        pw::spa::pod::property!(
+            pw::spa::param::format::FormatProperties::VideoFormat,
+            Choice,
+            Enum,
+            Id,
+            pw::spa::param::video::VideoFormat::BGRx,
+            pw::spa::param::video::VideoFormat::BGRx,
+            pw::spa::param::video::VideoFormat::BGRA,
+            pw::spa::param::video::VideoFormat::RGBx,
+            pw::spa::param::video::VideoFormat::RGBA,
+        ),
+        pw::spa::pod::property!(
+            pw::spa::param::format::FormatProperties::VideoSize,
+            Choice,
+            Range,
+            Rectangle,
+            pw::spa::utils::Rectangle {
+                width: preset.width(),
+                height: preset.height()
+            },
+            pw::spa::utils::Rectangle { width: 1, height: 1 },
+            pw::spa::utils::Rectangle { width: 4096, height: 4096 }
+        ),
+        pw::spa::pod::property!(
+            pw::spa::param::format::FormatProperties::VideoFramerate,
+            Choice,
+            Range,
+            Fraction,
+            pw::spa::utils::Fraction { num: preset.fps(), denom: 1 },
+            pw::spa::utils::Fraction { num: 0, denom: 1 },
+            pw::spa::utils::Fraction { num: 120, denom: 1 }
+        ),
+    );
+    log::info!("PipeWire video: serializing format pod...");
+    let values: Vec<u8> = match pw::spa::pod::serialize::PodSerializer::serialize(
+        std::io::Cursor::new(Vec::new()),
+        &pw::spa::pod::Value::Object(obj),
+    ) {
+        Ok(v) => v.0.into_inner(),
+        Err(e) => { log::error!("PipeWire PodSerializer failed: {:?}", e); return; }
+    };
+
+    let mut params = [Pod::from_bytes(&values).unwrap()];
+
+    log::info!("PipeWire video: connecting stream to node {}...", node_id);
+    if let Err(e) = stream.connect(
+        spa::utils::Direction::Input,
+        Some(node_id),
+        pw::stream::StreamFlags::AUTOCONNECT | pw::stream::StreamFlags::MAP_BUFFERS,
+        &mut params,
+    ) {
+        log::error!("PipeWire stream connect failed: {}", e);
+        return;
+    }
+
+    log::info!("PipeWire video stream connected to node {}", node_id);
+
+    // Add a timer to check the shutdown flag periodically
+    let mainloop_quit = mainloop.clone();
+    let timer = mainloop.loop_().add_timer(move |_| {
+        if shutdown.load(Ordering::Relaxed) {
+            mainloop_quit.quit();
+        }
+    });
+    timer.update_timer(
+        Some(Duration::from_millis(100)),
+        Some(Duration::from_millis(100)),
+    ).into_result().ok();
+
+    log::info!("PipeWire video: entering main loop...");
+    mainloop.run();
+    log::info!("PipeWire video capture loop exited");
+}
+
+/// Set up desktop audio capture via PipeWire sink monitor on Linux.
+///
+/// Captures all system audio by connecting to the default audio sink's monitor
+/// port. Converts stereo f32 → mono i16 in 10ms frames for LiveKit.
+#[cfg(target_os = "linux")]
+fn setup_screen_share_audio_pipewire(
+    shutdown: Arc<AtomicBool>,
+) -> (Option<LocalAudioTrack>, Option<std::thread::JoinHandle<()>>) {
+    use livekit::webrtc::{
+        audio_frame::AudioFrame,
+        audio_source::native::NativeAudioSource,
+        prelude::{AudioSourceOptions, RtcAudioSource},
+    };
+    use tokio::sync::mpsc;
+
+    const SAMPLE_RATE: u32 = 48000;
+    const NUM_CHANNELS: u32 = 1;
+    const SAMPLES_PER_10MS: usize = (SAMPLE_RATE / 100) as usize; // 480
+
+    let audio_source = NativeAudioSource::new(
+        AudioSourceOptions {
+            echo_cancellation: false,
+            noise_suppression: false,
+            auto_gain_control: false,
+        },
+        SAMPLE_RATE,
+        NUM_CHANNELS,
+        100,
+    );
+
+    let (frame_tx, mut frame_rx) = mpsc::channel::<Vec<i16>>(10);
+
+    let shutdown_cap = shutdown.clone();
+    let capture_thread = thread::Builder::new()
+        .name("pw-audio-capture".into())
+        .spawn(move || {
+            pipewire_audio_capture_loop(frame_tx, shutdown_cap);
+        })
+        .map_err(|e| {
+            log::warn!("Screen share PipeWire audio thread spawn failed: {}", e);
+            e
+        })
+        .ok();
+
+    if capture_thread.is_none() {
+        return (None, None);
+    }
+
+    // Async task to feed audio frames to LiveKit
+    let audio_source_clone = audio_source.clone();
+    tokio::spawn(async move {
+        while let Some(samples) = frame_rx.recv().await {
+            let frame = AudioFrame {
+                data: samples.into(),
+                sample_rate: SAMPLE_RATE,
+                num_channels: NUM_CHANNELS,
+                samples_per_channel: SAMPLES_PER_10MS as u32,
+            };
+            if let Err(e) = audio_source_clone.capture_frame(&frame).await {
+                log::warn!("Screen share PipeWire audio capture: {}", e);
+            }
+        }
+    });
+
+    let track = LocalAudioTrack::create_audio_track(
+        "screenshare-audio",
+        RtcAudioSource::Native(audio_source),
+    );
+
+    log::info!("Screen share audio (PipeWire sink monitor) enabled");
+    (Some(track), capture_thread)
+}
+
+/// PipeWire audio capture main loop — runs on a dedicated OS thread.
+///
+/// Connects to the default audio sink's monitor to capture all desktop audio.
+/// Converts stereo f32 to mono i16 and sends 10ms frames via channel.
+#[cfg(target_os = "linux")]
+fn pipewire_audio_capture_loop(
+    frame_tx: tokio::sync::mpsc::Sender<Vec<i16>>,
+    shutdown: Arc<AtomicBool>,
+) {
+    use pipewire as pw;
+    use pw::{properties::properties, spa};
+    use spa::pod::Pod;
+
+    const SAMPLE_RATE: u32 = 48000;
+    const CHANNELS: u32 = 2;
+    const SAMPLES_PER_10MS: usize = (SAMPLE_RATE / 100) as usize; // 480 mono samples
+
+    // Brief delay to let video capture start first
+    thread::sleep(Duration::from_millis(300));
+    if shutdown.load(Ordering::Relaxed) { return; }
+
+    pw::init();
+
+    let mainloop = match pw::main_loop::MainLoopRc::new(None) {
+        Ok(ml) => ml,
+        Err(e) => { log::warn!("PipeWire audio MainLoop failed: {}", e); return; }
+    };
+    let context = match pw::context::ContextRc::new(&mainloop, None) {
+        Ok(ctx) => ctx,
+        Err(e) => { log::warn!("PipeWire audio Context failed: {}", e); return; }
+    };
+    // Connect to the regular PipeWire daemon (not portal fd)
+    let core = match context.connect_rc(None) {
+        Ok(c) => c,
+        Err(e) => { log::warn!("PipeWire audio connect failed: {}", e); return; }
+    };
+
+    struct PwAudioData {
+        sample_buf: Vec<i16>,
+        frame_tx: tokio::sync::mpsc::Sender<Vec<i16>>,
+        mainloop: pw::main_loop::MainLoopRc,
+        shutdown: Arc<AtomicBool>,
+    }
+
+    let data = PwAudioData {
+        sample_buf: Vec::with_capacity(SAMPLES_PER_10MS * 2),
+        frame_tx,
+        mainloop: mainloop.clone(),
+        shutdown: shutdown.clone(),
+    };
+
+    let stream = match pw::stream::StreamBox::new(
+        &core,
+        "pax-screenshare-audio",
+        properties! {
+            *pw::keys::MEDIA_TYPE => "Audio",
+            *pw::keys::MEDIA_CATEGORY => "Capture",
+            *pw::keys::MEDIA_ROLE => "Screen",
+            // Capture from the default audio sink (all desktop audio)
+            "stream.capture.sink" => "true",
+        },
+    ) {
+        Ok(s) => s,
+        Err(e) => { log::warn!("PipeWire audio Stream::new failed: {}", e); return; }
+    };
+
+    let mainloop_err = mainloop.clone();
+
+    let _listener = stream
+        .add_local_listener_with_user_data(data)
+        .state_changed(move |_, _, old, new| {
+            log::debug!("PipeWire audio stream state: {:?} -> {:?}", old, new);
+            if matches!(new, pw::stream::StreamState::Error(_)) {
+                mainloop_err.quit();
+            }
+        })
+        .process(|stream_ref, user_data| {
+            if user_data.shutdown.load(Ordering::Relaxed) {
+                user_data.mainloop.quit();
+                return;
+            }
+            let Some(mut buffer) = stream_ref.dequeue_buffer() else { return; };
+            let datas = buffer.datas_mut();
+            if datas.is_empty() { return; }
+
+            let spa_data = &mut datas[0];
+            let chunk_size = spa_data.chunk().size() as usize;
+            if chunk_size == 0 { return; }
+
+            let Some(raw_bytes) = spa_data.data() else { return; };
+            let raw_bytes = &raw_bytes[..chunk_size];
+
+            // PipeWire delivers stereo f32 interleaved — reinterpret byte slice as f32
+            let float_samples = unsafe {
+                let ptr = raw_bytes.as_ptr() as *const f32;
+                let count = raw_bytes.len() / std::mem::size_of::<f32>();
+                std::slice::from_raw_parts(ptr, count)
+            };
+
+            // Convert stereo f32 to mono i16
+            for pair in float_samples.chunks(CHANNELS as usize) {
+                let mono = if pair.len() >= 2 {
+                    ((pair[0] + pair[1]) * 0.5).clamp(-1.0, 1.0) * 32767.0
+                } else if !pair.is_empty() {
+                    pair[0].clamp(-1.0, 1.0) * 32767.0
+                } else {
+                    0.0
+                };
+                user_data.sample_buf.push(mono as i16);
+            }
+
+            // Emit 10ms frames (480 mono samples at 48kHz)
+            while user_data.sample_buf.len() >= SAMPLES_PER_10MS {
+                let frame: Vec<i16> = user_data.sample_buf.drain(..SAMPLES_PER_10MS).collect();
+                let _ = user_data.frame_tx.try_send(frame);
+            }
+        })
+        .register();
+
+    let _listener = match _listener {
+        Ok(l) => l,
+        Err(e) => { log::warn!("PipeWire audio stream listener failed: {:?}", e); return; }
+    };
+
+    // Negotiate F32 stereo at 48kHz
+    let obj = pw::spa::pod::object!(
+        pw::spa::utils::SpaTypes::ObjectParamFormat,
+        pw::spa::param::ParamType::EnumFormat,
+        pw::spa::pod::property!(
+            pw::spa::param::format::FormatProperties::MediaType,
+            Id,
+            pw::spa::param::format::MediaType::Audio
+        ),
+        pw::spa::pod::property!(
+            pw::spa::param::format::FormatProperties::MediaSubtype,
+            Id,
+            pw::spa::param::format::MediaSubtype::Raw
+        ),
+        pw::spa::pod::property!(
+            pw::spa::param::format::FormatProperties::AudioFormat,
+            Id,
+            pw::spa::param::audio::AudioFormat::F32LE
+        ),
+        pw::spa::pod::property!(
+            pw::spa::param::format::FormatProperties::AudioRate,
+            Int,
+            SAMPLE_RATE as i32
+        ),
+        pw::spa::pod::property!(
+            pw::spa::param::format::FormatProperties::AudioChannels,
+            Int,
+            CHANNELS as i32
+        ),
+    );
+    let values: Vec<u8> = pw::spa::pod::serialize::PodSerializer::serialize(
+        std::io::Cursor::new(Vec::new()),
+        &pw::spa::pod::Value::Object(obj),
+    )
+    .expect("Audio PodSerializer failed")
+    .0
+    .into_inner();
+
+    let mut params = [Pod::from_bytes(&values).unwrap()];
+
+    if let Err(e) = stream.connect(
+        spa::utils::Direction::Input,
+        None, // no specific target — stream.capture.sink connects to default sink monitor
+        pw::stream::StreamFlags::AUTOCONNECT | pw::stream::StreamFlags::MAP_BUFFERS,
+        &mut params,
+    ) {
+        log::warn!("PipeWire audio stream connect failed: {}", e);
+        return;
+    }
+
+    log::info!("PipeWire audio stream connected (sink monitor capture)");
+
+    // Timer to check shutdown flag
+    let mainloop_quit = mainloop.clone();
+    let timer = mainloop.loop_().add_timer(move |_| {
+        if shutdown.load(Ordering::Relaxed) {
+            mainloop_quit.quit();
+        }
+    });
+    timer.update_timer(
+        Some(Duration::from_millis(100)),
+        Some(Duration::from_millis(100)),
+    ).into_result().ok();
+
+    mainloop.run();
+    log::info!("PipeWire audio capture loop exited");
 }
 
 /// Enumerate capturable windows (Windows only). Returns (title, process_name) for each.

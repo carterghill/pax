@@ -806,7 +806,15 @@ export default function VoiceRoomView({
                   Share entire screen
                 </button>
                 <button
-                  onClick={() => { setScreenShareMenuOpen(false); openWindowPicker(); }}
+                  onClick={() => {
+                    setScreenShareMenuOpen(false);
+                    // On Linux, the xdg-desktop-portal handles window selection natively
+                    if (navigator.userAgent.includes("Linux")) {
+                      void startShare("window");
+                    } else {
+                      openWindowPicker();
+                    }
+                  }}
                   style={{
                     padding: `${spacing.unit}px ${spacing.unit * 2}px`,
                     border: "none",
