@@ -273,7 +273,15 @@ function tick() {
       }
     }
 
-    const key = JSON.stringify(clipRects);
+    // Cheap numeric fingerprint — avoids allocating a full JSON string every frame.
+    // Collisions are theoretically possible but astronomically unlikely for small
+    // rect arrays, and a false-negative just means one extra IPC call.
+    let fingerprint = clipRects.length * 31;
+    for (let i = 0; i < clipRects.length; i++) {
+      const r = clipRects[i];
+      fingerprint = ((fingerprint * 31 + r.x) | 0) ^ ((r.y * 17 + r.w * 37 + r.h * 53 + (r.corner_radius ?? 0) * 71) | 0);
+    }
+    const key = String(fingerprint);
     if (key === lastSent.get(identity)) {
       obstructionPending.delete(identity);
     } else {

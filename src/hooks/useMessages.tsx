@@ -43,7 +43,40 @@ function mergeLatestServerWindow(prev: Message[], fetched: Message[]): Message[]
   return mergeMessagesByEventId(olderOnly, fetched);
 }
 
+/** Max messages kept in memory per room. Older messages are trimmed on insert. */
+const MAX_MESSAGES_PER_ROOM = 300;
+/** Max rooms held in the global cache. Least-recently-accessed rooms are evicted first. */
+const MAX_CACHED_ROOMS = 15;
+
 const globalCache = new Map<string, CachedRoom>();
+
+/** Touch a room to mark it most-recently-used (Map preserves insertion order). */
+function touchRoom(roomId: string) {
+  const entry = globalCache.get(roomId);
+  if (entry) {
+    globalCache.delete(roomId);
+    globalCache.set(roomId, entry);
+  }
+}
+
+/** Evict oldest rooms when the cache exceeds the limit. */
+function evictRoomsIfNeeded() {
+  while (globalCache.size > MAX_CACHED_ROOMS) {
+    const oldest = globalCache.keys().next().value;
+    if (oldest) globalCache.delete(oldest);
+    else break;
+  }
+}
+
+/** Store messages for a room, trimming to MAX_MESSAGES_PER_ROOM. */
+function setCachedRoom(roomId: string, messages: Message[], prevBatch: string | null) {
+  const trimmed =
+    messages.length > MAX_MESSAGES_PER_ROOM
+      ? messages.slice(messages.length - MAX_MESSAGES_PER_ROOM)
+      : messages;
+  globalCache.set(roomId, { messages: trimmed, prevBatch });
+  evictRoomsIfNeeded();
+}
 
 export function clearMessageCache() {
   globalCache.clear();
@@ -76,6 +109,7 @@ export function useMessages(roomId: string | null) {
 
     if (cached) {
       // Show cached messages immediately, then fetch new ones in background
+      touchRoom(roomId);
       setMessages(cached.messages);
       setPrevBatch(cached.prevBatch);
       setInitialLoading(false);
@@ -95,7 +129,7 @@ export function useMessages(roomId: string | null) {
 
         setMessages(merged);
         setPrevBatch(batch.prevBatch);
-        cacheRef.current.set(roomId, { messages: merged, prevBatch: batch.prevBatch });
+        setCachedRoom(roomId, merged, batch.prevBatch);
       })
       .catch((e) => console.error("Failed to load messages:", e))
       .finally(() => {
@@ -115,10 +149,7 @@ export function useMessages(roomId: string | null) {
 
       setMessages((prev) => {
         const next = mergeMessagesByEventId(prev, [message]);
-        cacheRef.current.set(roomId, {
-          messages: next,
-          prevBatch: cacheRef.current.get(roomId)?.prevBatch ?? null,
-        });
+        setCachedRoom(roomId, next, cacheRef.current.get(roomId)?.prevBatch ?? null);
         return next;
       });
     });
@@ -131,10 +162,7 @@ export function useMessages(roomId: string | null) {
         const next = prev.map((m) =>
           m.eventId === targetEventId ? { ...m, body, edited: true } : m,
         );
-        cacheRef.current.set(roomId, {
-          messages: next,
-          prevBatch: cacheRef.current.get(roomId)?.prevBatch ?? null,
-        });
+        setCachedRoom(roomId, next, cacheRef.current.get(roomId)?.prevBatch ?? null);
         return next;
       });
     });
@@ -145,10 +173,7 @@ export function useMessages(roomId: string | null) {
 
       setMessages((prev) => {
         const next = prev.filter((m) => m.eventId !== redactedEventId);
-        cacheRef.current.set(roomId, {
-          messages: next,
-          prevBatch: cacheRef.current.get(roomId)?.prevBatch ?? null,
-        });
+        setCachedRoom(roomId, next, cacheRef.current.get(roomId)?.prevBatch ?? null);
         return next;
       });
     });
@@ -173,10 +198,7 @@ export function useMessages(roomId: string | null) {
       const older = batch.messages.reverse();
       setMessages((prev) => {
         const merged = mergeMessagesByEventId(older, prev);
-        cacheRef.current.set(roomId, {
-          messages: merged,
-          prevBatch: batch.prevBatch,
-        });
+        setCachedRoom(roomId, merged, batch.prevBatch);
         return merged;
       });
       setPrevBatch(batch.prevBatch);
@@ -202,7 +224,7 @@ export function useMessages(roomId: string | null) {
 
       setMessages(merged);
       setPrevBatch(batch.prevBatch);
-      cacheRef.current.set(roomId, { messages: merged, prevBatch: batch.prevBatch });
+      setCachedRoom(roomId, merged, batch.prevBatch);
     } catch (e) {
       console.error("Failed to refresh messages:", e);
     }
@@ -213,10 +235,7 @@ export function useMessages(roomId: string | null) {
       if (!roomId) return;
       setMessages((prev) => {
         const next = prev.filter((m) => m.eventId !== eventId);
-        cacheRef.current.set(roomId, {
-          messages: next,
-          prevBatch: cacheRef.current.get(roomId)?.prevBatch ?? null,
-        });
+        setCachedRoom(roomId, next, cacheRef.current.get(roomId)?.prevBatch ?? null);
         return next;
       });
     },

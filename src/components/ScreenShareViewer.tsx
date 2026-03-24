@@ -95,6 +95,18 @@ interface GlState {
   currentH: number;
 }
 
+/** Properly release all WebGL resources to prevent GPU memory leaks. */
+function destroyGl(state: GlState) {
+  const { gl, texY, texU, texV, program } = state;
+  gl.deleteTexture(texY);
+  gl.deleteTexture(texU);
+  gl.deleteTexture(texV);
+  gl.deleteProgram(program);
+  // Lose the context entirely to reclaim all GPU-side memory immediately
+  const ext = gl.getExtension("WEBGL_lose_context");
+  if (ext) ext.loseContext();
+}
+
 function initGl(canvas: HTMLCanvasElement): GlState | null {
   const gl = canvas.getContext("webgl", {
     antialias: false,
@@ -377,8 +389,8 @@ export default function ScreenShareViewer({ active, identity }: ScreenShareViewe
       (async () => {
         try {
           const resp = await fetch(`${URL_PREFIX}/frame?id=${encodedId}`);
-          if (!mounted) return;
-          if (resp.status === 204 || !resp.ok) return;
+          if (!mounted) { resp.body?.cancel(); return; }
+          if (resp.status === 204 || !resp.ok) { resp.body?.cancel(); return; }
 
           const buf = await resp.arrayBuffer();
           if (!mounted) return;
@@ -431,6 +443,7 @@ export default function ScreenShareViewer({ active, identity }: ScreenShareViewe
       if (unlisten) unlisten();
       if (resizeObs) resizeObs.disconnect();
       if (resizeTimer) clearTimeout(resizeTimer);
+      if (glStateRef.current) destroyGl(glStateRef.current);
       glStateRef.current = null;
       loadingRef.current = true;
       fetch(`${URL_PREFIX}/resize?id=${encodeURIComponent(identity)}&w=0&h=0`).catch(() => {});
