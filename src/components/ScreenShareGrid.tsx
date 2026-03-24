@@ -61,7 +61,9 @@ export default function ScreenShareGrid({
   const effectiveFocusId = focusedId && remoteSharers.includes(focusedId) ? focusedId : null;
 
   // Hover tracking for the focused stream (hooks must be unconditional)
-  const focusedHover = useOverlayHover(effectiveFocusId ?? "");
+  const focusedNativeHover = useOverlayHover(effectiveFocusId ?? "");
+  const [focusedDomHover, setFocusedDomHover] = useState(false);
+  const focusedHover = focusedNativeHover || focusedDomHover;
   const handleFocusedVolumeChange = useCallback(
     (vol: number) => {
       if (effectiveFocusId) onVolumeChange(effectiveFocusId, vol);
@@ -163,7 +165,11 @@ export default function ScreenShareGrid({
         </div>
 
         {/* Focused stream — takes most of the space */}
-        <div style={{ flex: 1, position: "relative", overflow: "visible" }}>
+        <div
+          style={{ flex: 1, position: "relative", overflow: "visible" }}
+          onMouseEnter={() => setFocusedDomHover(true)}
+          onMouseLeave={() => setFocusedDomHover(false)}
+        >
           {focusedStream && !focusedStream.isLocal && (
             <>
               <ScreenShareViewer
@@ -282,9 +288,11 @@ function StreamTile({
   typography: any;
   small?: boolean;
 }) {
-  // Use native hover tracking — the HWND sets this via WM_MOUSEMOVE/WM_MOUSELEAVE
+  // Native hover: polled from the HWND (Windows only — always false on Linux)
   const nativeHover = useOverlayHover(stream.identity);
-  const showHover = !stream.isLocal && nativeHover;
+  // DOM hover: fallback for Linux where video is a WebGL canvas in the DOM
+  const [domHover, setDomHover] = useState(false);
+  const showHover = !stream.isLocal && (nativeHover || domHover);
 
   const handleVolumeChange = useCallback(
     (vol: number) => onVolumeChange(stream.identity, vol),
@@ -310,12 +318,11 @@ function StreamTile({
         minHeight: 0,
         minWidth: 0,
       }}
-      // Keep DOM hover as fallback for tiles without native overlay (local share)
-      onMouseEnter={(e) => {
-        if (!stream.isLocal) e.currentTarget.style.borderColor = palette.accent;
+      onMouseEnter={() => {
+        if (!stream.isLocal) setDomHover(true);
       }}
-      onMouseLeave={(e) => {
-        if (!showHover) e.currentTarget.style.borderColor = "transparent";
+      onMouseLeave={() => {
+        setDomHover(false);
       }}
     >
       {!stream.isLocal ? (
