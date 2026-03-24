@@ -44,7 +44,7 @@ export default function StreamVolumeControl({
   volume,
   onVolumeChange,
 }: StreamVolumeControlProps) {
-  const { palette, spacing } = useTheme();
+  const { palette } = useTheme();
 
   // ── Slider popup state ──────────────────────────────────────────────
   const [sliderOpen, setSliderOpen] = useState(false);
@@ -162,17 +162,17 @@ export default function StreamVolumeControl({
     <div
       ref={containerRef}
       style={{
-        position: "absolute",
-        bottom: spacing.unit * 0.5,
-        right: spacing.unit * 0.5,
-        zIndex: 5,
+        position: "relative",
         display: "flex",
         flexDirection: "column",
         alignItems: "center",
+        borderRadius: 6,
         // ── Fade transition ──
         opacity: visible ? 1 : 0,
         transition: `opacity ${FADE_MS}ms ease`,
         pointerEvents: visible ? "auto" : "none",
+        overflow: "visible",
+        flexShrink: 0,
       }}
       // Prevent tile click-through while interacting
       onClick={(e) => e.stopPropagation()}

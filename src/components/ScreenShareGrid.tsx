@@ -170,15 +170,17 @@ export default function ScreenShareGrid({
                 active={true}
                 identity={focusedStream.identity}
               />
-              <TileLabel
+              <TileBottomBar
                 name={localpartFromUserId(focusedStream.identity)}
                 typography={typography}
                 spacing={spacing}
-              />
-              <StreamVolumeControl
-                visible={focusedHover}
-                volume={getVolume(focusedStream.identity)}
-                onVolumeChange={handleFocusedVolumeChange}
+                volumeControl={
+                  <StreamVolumeControl
+                    visible={focusedHover}
+                    volume={getVolume(focusedStream.identity)}
+                    onVolumeChange={handleFocusedVolumeChange}
+                  />
+                }
               />
             </>
           )}
@@ -324,16 +326,20 @@ function StreamTile({
       ) : (
         <LocalSharePlaceholder palette={palette} small={small} />
       )}
-      <TileLabel name={localpartFromUserId(stream.identity)} typography={typography} spacing={spacing} />
-
-      {/* Volume control — visible on hover, uses punch-through for native overlay */}
-      {!stream.isLocal && (
-        <StreamVolumeControl
-          visible={showHover}
-          volume={getVolume(stream.identity)}
-          onVolumeChange={handleVolumeChange}
-        />
-      )}
+      <TileBottomBar
+        name={localpartFromUserId(stream.identity)}
+        typography={typography}
+        spacing={spacing}
+        volumeControl={
+          !stream.isLocal ? (
+            <StreamVolumeControl
+              visible={showHover}
+              volume={getVolume(stream.identity)}
+              onVolumeChange={handleVolumeChange}
+            />
+          ) : undefined
+        }
+      />
     </div>
   );
 }
@@ -355,35 +361,55 @@ function LocalSharePlaceholder({ palette, small }: { palette: any; small?: boole
   );
 }
 
-function TileLabel({ name, typography, spacing }: {
+/**
+ * TileBottomBar — label + optional volume control in a flex row at bottom-left.
+ * The label portion always punches through the native overlay.
+ * The volume control manages its own obstruction with fade logic.
+ */
+function TileBottomBar({ name, typography, spacing, volumeControl }: {
   name: string;
   typography: any;
   spacing: any;
+  volumeControl?: React.ReactNode;
 }) {
   const labelRef = useRef<HTMLDivElement>(null);
   useOverlayObstruction(labelRef, true);
 
   return (
     <div
-      ref={labelRef}
       style={{
         position: "absolute",
         bottom: spacing.unit,
         left: spacing.unit,
-        padding: `${spacing.unit * 0.5}px ${spacing.unit * 1.5}px`,
-        backgroundColor: "rgba(0,0,0,0.6)",
-        borderRadius: spacing.unit,
-        fontSize: typography.fontSizeSmall - 1,
-        color: "#fff",
-        pointerEvents: "none",
-        maxWidth: "80%",
-        overflow: "hidden",
-        textOverflow: "ellipsis",
-        whiteSpace: "nowrap",
+        display: "flex",
+        alignItems: "center",
+        gap: spacing.unit * 0.75,
         zIndex: 2,
+        maxWidth: "80%",
       }}
     >
-      {name}
+      {/* Label — always visible, punches through */}
+      <div
+        ref={labelRef}
+        style={{
+          padding: `${spacing.unit * 0.5}px ${spacing.unit * 1.5}px`,
+          backgroundColor: "rgba(0,0,0,0.6)",
+          borderRadius: spacing.unit,
+          fontSize: typography.fontSizeSmall - 1,
+          color: "#fff",
+          pointerEvents: "none",
+          overflow: "hidden",
+          textOverflow: "ellipsis",
+          whiteSpace: "nowrap",
+          flexShrink: 1,
+          minWidth: 0,
+        }}
+      >
+        {name}
+      </div>
+
+      {/* Volume control — fades in on hover, manages its own obstruction */}
+      {volumeControl}
     </div>
   );
 }
