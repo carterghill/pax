@@ -2,12 +2,11 @@
 //!
 //! On Windows: uses windows-capture (Graphics Capture API) as primary; falls back to
 //! libwebrtc DesktopCapturer or screenshots crate if needed.
-//! On Linux: uses xdg-desktop-portal + PipeWire (video and audio).
+//! On Linux: uses xdg-desktop-portal for picker + GStreamer pipewiresrc for capture.
 //! On macOS: uses libwebrtc DesktopCapturer.
 //!
 //! Converts frames to I420 and feeds them into a NativeVideoSource for publishing.
 //! On Windows, captures system audio via WASAPI process loopback.
-//! On Linux, captures system audio via PipeWire sink monitor.
 
 use std::sync::atomic::{AtomicBool, Ordering};
 use once_cell::sync::Lazy;
@@ -142,9 +141,10 @@ pub async fn start_screen_capture(
 
     #[cfg(target_os = "linux")]
     {
-        // Use portal for the native screen/window picker, then screenshots crate
-        // for actual frame capture. Raw PipeWire streaming requires pw_init() which
-        // conflicts with Tauri's GTK runtime, so we avoid it entirely.
+        let _ = window_title; // Portal handles window selection natively
+        // Use portal for the native screen/window picker, then GStreamer
+        // pipewiresrc for real-time frame capture. This avoids the pw_init()/GTK
+        // conflict by letting GStreamer manage its own PipeWire connection.
         start_screen_capture_linux(room, mode).await
     }
 
@@ -887,17 +887,16 @@ fn setup_screen_share_audio() -> (Option<LocalAudioTrack>, Option<cpal::Stream>)
     (None, None)
 }
 
-/// Linux: xdg-desktop-portal for screen/window picker + screenshots crate for capture.
+/// Linux: xdg-desktop-portal for screen/window picker + GStreamer pipewiresrc for capture.
 ///
 /// Flow:
 /// 1. ashpd opens the ScreenCast portal → native compositor picker dialog
-/// 2. User selects screen/window → portal grants permission
-/// 3. Dedicated thread captures frames via the screenshots crate
-/// 4. Frames converted to I420 → fed into LiveKit NativeVideoSource
+/// 2. User selects screen/window → portal returns PipeWire node_id
+/// 3. GStreamer pipeline: pipewiresrc path={node_id} ! videoconvert ! I420 ! appsink
+/// 4. Dedicated thread pulls frames from appsink → feeds LiveKit NativeVideoSource
 ///
-/// Note: raw PipeWire streaming would be more efficient but pw_init() conflicts
-/// with Tauri's GTK runtime. The screenshots approach polls frames at the target
-/// FPS, which is good enough for screen sharing.
+/// GStreamer manages its own PipeWire connection internally via pipewiresrc,
+/// so no pw_init() is needed (avoiding the GTK conflict).
 #[cfg(target_os = "linux")]
 async fn start_screen_capture_linux(
     room: Arc<livekit::Room>,
@@ -950,7 +949,6 @@ async fn start_screen_capture_linux(
         .map_err(|_| "select_sources timed out (5s)".to_string())?
         .map_err(|e| format!("select_sources: {}", e))?;
 
-    // This shows the compositor's native picker — user may take a while.
     log::info!("Linux capture: waiting for user to pick screen/window...");
     let start_response = tokio::time::timeout(
         Duration::from_secs(60),
@@ -967,108 +965,139 @@ async fn start_screen_capture_linux(
         return Err("No streams returned from portal (user cancelled?)".to_string());
     }
     let portal_stream = &streams[0];
+    let node_id = portal_stream.pipe_wire_node_id();
     log::info!(
         "Portal returned PipeWire node_id={}, size={:?}",
-        portal_stream.pipe_wire_node_id(),
+        node_id,
         portal_stream.size()
     );
 
-    // Keep the portal session alive so the screencast permission persists.
-    // Dropping it would end the screencast on the compositor side.
+    // Keep the portal session alive — dropping ends the screencast.
     let session_box = Box::new(session);
     std::mem::forget(session_box);
 
-    // --- 2. Capture frames using the screenshots crate ---
-    // This avoids the pw_init() / GTK conflict entirely.
-    let capture_interval_ms = (1000.0 / preset.fps() as f64).round() as u64;
-    log::info!(
-        "Linux capture: starting screenshots-based capture ({}fps, {}ms interval)",
-        preset.fps(), capture_interval_ms
+    // --- 2. Set up GStreamer pipeline ---
+    use gstreamer::prelude::*;
+
+    gstreamer::init().map_err(|e| format!("GStreamer init failed: {}", e))?;
+
+    let pipeline_str = format!(
+        "pipewiresrc path={node_id} do-timestamp=true keepalive-time=1000 \
+         ! videoconvert \
+         ! videoscale \
+         ! video/x-raw,format=I420,width={w},height={h} \
+         ! appsink name=sink emit-signals=false max-buffers=2 drop=true sync=false",
+        node_id = node_id,
+        w = preset.width(),
+        h = preset.height(),
     );
+    log::info!("GStreamer pipeline: {}", pipeline_str);
 
-    let screens = screenshots::Screen::all()
-        .map_err(|e| format!("screenshots: failed to enumerate screens: {}", e))?;
-    let screen = screens.into_iter().next()
-        .ok_or("screenshots: no screens found")?;
+    let pipeline = gstreamer::parse::launch(&pipeline_str)
+        .map_err(|e| { log::error!("GStreamer pipeline parse failed: {}", e); format!("GStreamer pipeline parse failed: {}", e) })?;
+    let pipeline = pipeline.downcast::<gstreamer::Pipeline>()
+        .map_err(|_| { log::error!("Failed to cast to Pipeline"); "Failed to cast to Pipeline".to_string() })?;
 
+    let appsink = pipeline
+        .by_name("sink")
+        .ok_or_else(|| { log::error!("appsink not found"); "appsink element not found in pipeline".to_string() })?
+        .downcast::<gstreamer_app::AppSink>()
+        .map_err(|_| { log::error!("Failed to cast to AppSink"); "Failed to cast sink to AppSink".to_string() })?;
+
+    pipeline.set_state(gstreamer::State::Playing)
+        .map_err(|e| { log::error!("Failed to start GStreamer pipeline: {:?}", e); format!("Failed to start GStreamer pipeline: {:?}", e) })?;
+    log::info!("GStreamer pipeline started");
+
+    // --- 3. Spawn frame-pulling thread ---
     let resolution = livekit::webrtc::video_source::VideoResolution {
         width: preset.width(),
         height: preset.height(),
     };
     let video_source = NativeVideoSource::new(resolution, true);
-    let video_source_clone = video_source.clone();
-
+    let video_source_cap = video_source.clone();
     let shutdown = Arc::new(AtomicBool::new(false));
     let shutdown_thread = shutdown.clone();
 
+    let out_w = preset.width() as i32;
+    let out_h = preset.height() as i32;
+
+    let pipeline_clone = pipeline.clone();
     let capturer_thread = thread::Builder::new()
-        .name("linux-screen-capture".into())
+        .name("gst-screen-capture".into())
         .spawn(move || {
-            log::info!("Linux screen capture thread started");
+            log::info!("GStreamer capture thread started for node {}", node_id);
             let mut frame_count: u64 = 0;
+
             while !shutdown_thread.load(Ordering::Relaxed) {
-                match screen.capture() {
-                    Ok(img) => {
-                        let w = img.width() as i32;
-                        let h = img.height() as i32;
-                        if w <= 0 || h <= 0 {
-                            continue;
-                        }
-                        let raw = img.as_raw();
-                        let stride = w * 4;
-
-                        let mut i420 = livekit::webrtc::video_frame::I420Buffer::new(w as u32, h as u32);
-                        let (dst_y, dst_u, dst_v) = i420.data_mut();
-                        let src_stride = stride as u32;
-                        // screenshots crate returns RGBA on Linux
-                        libwebrtc::native::yuv_helper::abgr_to_i420(
-                            raw,
-                            src_stride,
-                            dst_y,
-                            w as u32,
-                            dst_u,
-                            ((w + 1) / 2) as u32,
-                            dst_v,
-                            ((w + 1) / 2) as u32,
-                            w,
-                            h,
-                        );
-
-                        let (out_w, out_h) = (preset.width() as i32, preset.height() as i32);
-                        let buffer = if w != out_w || h != out_h {
-                            i420.scale(out_w, out_h)
-                        } else {
-                            i420
-                        };
-
-                        let now = SystemTime::now()
-                            .duration_since(UNIX_EPOCH)
-                            .unwrap()
-                            .as_micros() as i64;
-                        let vf = livekit::webrtc::video_frame::VideoFrame {
-                            rotation: livekit::webrtc::video_frame::VideoRotation::VideoRotation0,
-                            timestamp_us: now,
-                            buffer,
-                        };
-                        video_source_clone.capture_frame(&vf);
-                        frame_count += 1;
-                        if frame_count == 1 {
-                            log::info!("Linux capture: first frame ({}x{})", w, h);
-                        } else if frame_count % 300 == 0 {
-                            log::debug!("Linux capture: frame {} ({}x{})", frame_count, w, h);
-                        }
+                // Pull a sample with a 100ms timeout so we can check shutdown
+                let sample = appsink.try_pull_sample(gstreamer::ClockTime::from_mseconds(100));
+                let Some(sample) = sample else {
+                    if appsink.is_eos() {
+                        log::info!("GStreamer appsink reached EOS");
+                        break;
                     }
-                    Err(e) => {
-                        log::warn!("screenshots capture: {}", e);
+                    continue;
+                };
+
+                let buffer = match sample.buffer() {
+                    Some(b) => b,
+                    None => continue,
+                };
+
+                let map = match buffer.map_readable() {
+                    Ok(m) => m,
+                    Err(_) => continue,
+                };
+
+                let data = map.as_slice();
+
+                // Data is already I420 thanks to videoconvert in the pipeline.
+                // Frame layout: Y plane (w*h) + U plane (w/2*h/2) + V plane (w/2*h/2)
+                let expected_size = (out_w * out_h * 3 / 2) as usize;
+                if data.len() < expected_size {
+                    if frame_count == 0 {
+                        log::warn!("GStreamer: frame too small ({} < {})", data.len(), expected_size);
                     }
+                    continue;
                 }
-                thread::sleep(Duration::from_millis(capture_interval_ms));
-            }
-            log::info!("Linux screen capture thread exited (frame_count={})", frame_count);
-        })
-        .map_err(|e| format!("Failed to spawn capture thread: {}", e))?;
 
-    // --- 3. Publish video track ---
+                // Copy I420 data directly into a LiveKit I420Buffer
+                let mut i420 = livekit::webrtc::video_frame::I420Buffer::new(
+                    out_w as u32, out_h as u32,
+                );
+                let (dst_y, dst_u, dst_v) = i420.data_mut();
+
+                let y_size = (out_w * out_h) as usize;
+                let uv_size = (out_w / 2 * out_h / 2) as usize;
+                dst_y[..y_size].copy_from_slice(&data[..y_size]);
+                dst_u[..uv_size].copy_from_slice(&data[y_size..y_size + uv_size]);
+                dst_v[..uv_size].copy_from_slice(&data[y_size + uv_size..y_size + 2 * uv_size]);
+
+                let now = SystemTime::now()
+                    .duration_since(UNIX_EPOCH)
+                    .unwrap()
+                    .as_micros() as i64;
+                let vf = livekit::webrtc::video_frame::VideoFrame {
+                    rotation: livekit::webrtc::video_frame::VideoRotation::VideoRotation0,
+                    timestamp_us: now,
+                    buffer: i420,
+                };
+                video_source_cap.capture_frame(&vf);
+                frame_count += 1;
+                if frame_count == 1 {
+                    log::info!("GStreamer: first frame captured ({}x{} I420)", out_w, out_h);
+                } else if frame_count % 300 == 0 {
+                    log::debug!("GStreamer: frame {} ({}x{})", frame_count, out_w, out_h);
+                }
+            }
+
+            // Shut down the pipeline
+            let _ = pipeline_clone.set_state(gstreamer::State::Null);
+            log::info!("GStreamer capture thread exited (frame_count={})", frame_count);
+        })
+        .map_err(|e| format!("Failed to spawn GStreamer capture thread: {}", e))?;
+
+    // --- 4. Publish video track ---
     let track = LocalVideoTrack::create_video_track(
         "screenshare",
         livekit::webrtc::video_source::RtcVideoSource::Native(video_source),
@@ -1097,8 +1126,7 @@ async fn start_screen_capture_linux(
         .map_err(|e| format!("Failed to publish screen track: {}", e))?;
     log::info!("Screen track published successfully");
 
-    // Audio capture is not yet implemented on Linux.
-    // TODO: investigate PipeWire audio capture via subprocess or GStreamer.
+    // Audio: not yet implemented. GStreamer pulsesrc monitor could be added later.
     let audio_track: Option<LocalAudioTrack> = None;
 
     Ok(ScreenShareHandle {
