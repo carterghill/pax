@@ -30,6 +30,18 @@ pub struct LivekitConfig {
     pub url: Option<String>,
 }
 
+/// Auth/registration config loaded from .env at startup.
+/// Controls pre-fill and field visibility on the login/sign-up screen.
+#[derive(Clone, Default, serde::Serialize)]
+pub struct AuthConfig {
+    /// Default homeserver URL (pre-fills the field).
+    pub default_homeserver: Option<String>,
+    /// Registration token (pre-fills the sign-up token field).
+    pub registration_token: Option<String>,
+    /// When true AND both above are set, hide homeserver + token fields entirely.
+    pub hide_server_config: bool,
+}
+
 pub struct AppState {
     pub client: Mutex<Option<Client>>,
     pub http_client: reqwest::Client,
@@ -39,6 +51,7 @@ pub struct AppState {
     pub display_server: DisplayServer,
     pub livekit: LivekitConfig,
     pub giphy_api_key: Option<String>,
+    pub auth_config: AuthConfig,
     /// Matrix voice room id → LiveKit SFU room name (learned on connect; used for admin ListParticipants).
     pub livekit_matrix_to_sfu_room: StdMutex<HashMap<String, String>>,
     /// Stops the periodic `m.call.member` refresh task (see `voice_matrix`).
@@ -87,20 +100,31 @@ pub fn run() {
     ensure_system_certs();
     let display_server = platform::detect_display_server();
 
-    // Load .env (silently ignored if missing — e.g. production builds)
-    dotenvy::dotenv().ok();
+    // All env vars are baked in at compile time via build.rs → cargo:rustc-env.
+    // option_env!() returns Option<&'static str>; None if the var was unset at build.
     let livekit = LivekitConfig {
-        api_key: std::env::var("LIVEKIT_API_KEY").ok().filter(|s| !s.is_empty()),
-        api_secret: std::env::var("LIVEKIT_API_SECRET").ok().filter(|s| !s.is_empty()),
-        url: std::env::var("LIVEKIT_URL").ok().filter(|s| !s.is_empty()),
+        api_key: option_env!("LIVEKIT_API_KEY").map(String::from),
+        api_secret: option_env!("LIVEKIT_API_SECRET").map(String::from),
+        url: option_env!("LIVEKIT_URL").map(String::from),
     };
     if livekit.api_key.is_some() {
-        log::info!("LiveKit admin credentials loaded from .env");
+        log::info!("LiveKit admin credentials compiled in");
     } else {
         log::info!("No LiveKit admin credentials — multi-device kick disabled");
     }
 
-    let giphy_api_key = std::env::var("GIPHY_API_KEY").ok().filter(|s| !s.is_empty());
+    let giphy_api_key = option_env!("GIPHY_API_KEY").map(String::from);
+
+    let default_homeserver = option_env!("PAX_HOMESERVER").map(String::from);
+    let registration_token = option_env!("PAX_REGISTRATION_TOKEN").map(String::from);
+    let hide_server_config = option_env!("PAX_HIDE_SERVER_CONFIG")
+        .map(|v| v == "true" || v == "1")
+        .unwrap_or(false);
+    let auth_config = AuthConfig {
+        default_homeserver,
+        registration_token,
+        hide_server_config,
+    };
 
     // Detect best video codec based on GPU before any screen share publishes
     detect_codec_early();
@@ -114,6 +138,7 @@ pub fn run() {
         display_server,
         livekit,
         giphy_api_key,
+        auth_config,
         livekit_matrix_to_sfu_room: StdMutex::new(HashMap::new()),
         call_member_refresh_stop: Arc::new(AtomicBool::new(true)),
         call_member_refresh_task: StdMutex::new(None),
@@ -142,6 +167,7 @@ pub fn run() {
             commands::auth::load_credentials,
             commands::auth::clear_saved_credentials,
             commands::rooms::login,
+            commands::rooms::register,
             commands::rooms::restore_session,
             commands::rooms::get_rooms,
             commands::messages::get_messages,
@@ -182,6 +208,7 @@ pub fn run() {
             commands::codec::set_codec_preference,
             commands::codec::get_resolved_codec,
             commands::config::get_giphy_api_key,
+            commands::config::get_auth_config,
             commands::profile::get_display_name,
             commands::profile::set_display_name,
             commands::profile::set_user_avatar,

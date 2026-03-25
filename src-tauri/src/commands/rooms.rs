@@ -21,6 +21,200 @@ fn store_path(app: &tauri::AppHandle) -> Result<std::path::PathBuf, String> {
         .join("matrix_store"))
 }
 
+/// Register a new account on the homeserver.
+///
+/// Handles the UIAA flow for `m.login.registration_token` + `m.login.dummy`.
+/// After registration succeeds, builds a full matrix-sdk Client and logs in.
+#[tauri::command]
+pub async fn register(
+    state: State<'_, Arc<AppState>>,
+    app: tauri::AppHandle,
+    homeserver: String,
+    username: String,
+    password: String,
+    registration_token: String,
+) -> Result<String, String> {
+    let http = &state.http_client;
+    let register_url = format!(
+        "{}/_matrix/client/v3/register",
+        homeserver.trim_end_matches('/')
+    );
+
+    // Step 1: Initial request to get session + required flows
+    let initial = serde_json::json!({
+        "username": username,
+        "password": password,
+        "initial_device_display_name": "Pax",
+    });
+
+    let resp = http
+        .post(&register_url)
+        .json(&initial)
+        .send()
+        .await
+        .map_err(|e| format!("Failed to contact homeserver: {e}"))?;
+
+    // 200 means open registration (no UIAA) — unlikely with a token server, but handle it
+    if resp.status().is_success() {
+        let body: serde_json::Value = resp.json().await
+            .map_err(|e| format!("Failed to parse registration response: {e}"))?;
+        return finish_registration(&state, &app, &homeserver, &username, &password, &body).await;
+    }
+
+    if resp.status().as_u16() != 401 {
+        let status = resp.status();
+        let text = resp.text().await.unwrap_or_default();
+        return Err(format!("Registration failed ({}): {}", status, text));
+    }
+
+    // 401 → UIAA challenge
+    let uiaa: serde_json::Value = resp.json().await
+        .map_err(|e| format!("Failed to parse UIAA response: {e}"))?;
+
+    let session = uiaa["session"]
+        .as_str()
+        .ok_or("No UIAA session in response")?
+        .to_string();
+
+    // Step 2: Complete m.login.registration_token stage
+    let token_auth = serde_json::json!({
+        "username": username,
+        "password": password,
+        "initial_device_display_name": "Pax",
+        "auth": {
+            "type": "m.login.registration_token",
+            "token": registration_token,
+            "session": session,
+        }
+    });
+
+    let resp = http
+        .post(&register_url)
+        .json(&token_auth)
+        .send()
+        .await
+        .map_err(|e| format!("Failed to send token auth: {e}"))?;
+
+    if resp.status().is_success() {
+        let body: serde_json::Value = resp.json().await
+            .map_err(|e| format!("Failed to parse registration response: {e}"))?;
+        return finish_registration(&state, &app, &homeserver, &username, &password, &body).await;
+    }
+
+    if resp.status().as_u16() != 401 {
+        let status = resp.status();
+        let text = resp.text().await.unwrap_or_default();
+        return Err(format!("Registration token rejected ({}): {}", status, text));
+    }
+
+    // Some servers require an additional m.login.dummy stage after the token
+    let uiaa2: serde_json::Value = resp.json().await
+        .map_err(|e| format!("Failed to parse second UIAA response: {e}"))?;
+
+    // Check if the token stage completed (should appear in "completed" array)
+    let completed = uiaa2["completed"].as_array();
+    let token_accepted = completed
+        .map(|arr| arr.iter().any(|v| v.as_str() == Some("m.login.registration_token")))
+        .unwrap_or(false);
+
+    if !token_accepted {
+        return Err("Registration token was not accepted by the server".to_string());
+    }
+
+    // Step 3: Complete m.login.dummy stage
+    let dummy_auth = serde_json::json!({
+        "username": username,
+        "password": password,
+        "initial_device_display_name": "Pax",
+        "auth": {
+            "type": "m.login.dummy",
+            "session": session,
+        }
+    });
+
+    let resp = http
+        .post(&register_url)
+        .json(&dummy_auth)
+        .send()
+        .await
+        .map_err(|e| format!("Failed to send dummy auth: {e}"))?;
+
+    if resp.status().is_success() {
+        let body: serde_json::Value = resp.json().await
+            .map_err(|e| format!("Failed to parse registration response: {e}"))?;
+        return finish_registration(&state, &app, &homeserver, &username, &password, &body).await;
+    }
+
+    let status = resp.status();
+    let text = resp.text().await.unwrap_or_default();
+    Err(format!("Registration failed at dummy stage ({}): {}", status, text))
+}
+
+/// After registration succeeds, log in with the SDK to get a proper Client.
+async fn finish_registration(
+    state: &State<'_, Arc<AppState>>,
+    app: &tauri::AppHandle,
+    homeserver: &str,
+    username: &str,
+    password: &str,
+    _reg_response: &serde_json::Value,
+) -> Result<String, String> {
+    // Registration succeeded — now do a normal SDK login so we get a fully
+    // initialised Client with crypto store, sync, etc.
+    let sp = store_path(app)?;
+    if sp.exists() {
+        let _ = std::fs::remove_dir_all(&sp);
+    }
+
+    let client = Client::builder()
+        .homeserver_url(homeserver)
+        .sqlite_store(&sp, None)
+        .build()
+        .await
+        .map_err(|e| format!("Failed to create client: {}", fmt_error_chain(&e)))?;
+
+    client
+        .matrix_auth()
+        .login_username(username, password)
+        .initial_device_display_name("Pax")
+        .send()
+        .await
+        .map_err(|e| format!("Post-registration login failed: {}", fmt_error_chain(&e)))?;
+
+    tokio::time::timeout(
+        Duration::from_secs(30),
+        client.sync_once(SyncSettings::default().set_presence(
+            matrix_sdk::ruma::presence::PresenceState::Offline,
+        )),
+    )
+    .await
+    .map_err(|_| "Initial sync timed out (30s)".to_string())?
+    .map_err(|e| format!("Initial sync failed: {}", fmt_error_chain(&e)))?;
+
+    if let Some(session) = client.matrix_auth().session() {
+        let _ = save_session_to_credentials(
+            app,
+            homeserver,
+            SavedSession {
+                user_id: session.meta.user_id.to_string(),
+                device_id: session.meta.device_id.to_string(),
+                access_token: session.tokens.access_token,
+            },
+        );
+    }
+
+    let user_id = client
+        .user_id()
+        .ok_or("No user ID after registration")?
+        .to_string();
+
+    *state.client.lock().await = Some(client);
+    *state.sync_running.lock().await = false;
+    state.avatar_cache.lock().await.clear();
+    log::info!("register: done — user_id={}", user_id);
+    Ok(user_id)
+}
+
 #[tauri::command]
 pub async fn login(
     state: State<'_, Arc<AppState>>,

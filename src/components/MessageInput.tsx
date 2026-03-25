@@ -890,7 +890,7 @@ interface GiphyPickerInnerProps {
   onGifSelect: (gifUrl: string) => void;
 }
 
-function GiphyPickerInner({ palette, typography, spacing, themeName, onGifSelect }: GiphyPickerInnerProps) {
+function GiphyPickerInner({ palette, typography, spacing, onGifSelect }: GiphyPickerInnerProps) {
   const { fetchGifs, searchKey } = useContext(SearchContext);
 
   return (
