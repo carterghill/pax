@@ -3,6 +3,7 @@ import RoomSidebar from "../components/RoomSidebar";
 import ChatView from "../layouts/ChatView";
 import VoiceRoomView from "../components/VoiceRoomView";
 import InvitationView from "../layouts/InvitationView";
+import SpaceHomeView from "../layouts/SpaceHomeView";
 import { useRooms } from "../hooks/useRooms";
 import { usePresence } from "../hooks/usePresence";
 import { useVoiceParticipants } from "../hooks/useVoiceParticipants";
@@ -90,6 +91,16 @@ export default function MainLayout({ userId, onSignOut }: MainLayoutProps) {
   const setActiveRoomId = useCallback((roomId: string | null) => {
     setActiveRoomBySpace((prev) => ({ ...prev, [spaceKey]: roomId }));
   }, [spaceKey]);
+
+  // Clicking the already-active space clears room selection to show the space home
+  const handleSelectSpace = useCallback((spaceId: string) => {
+    const id = spaceId || null;
+    if (id === activeSpaceId) {
+      // Re-clicking same space: clear room selection
+      setActiveRoomBySpace((prev) => ({ ...prev, [spaceId || ""]: null }));
+    }
+    setActiveSpaceId(id);
+  }, [activeSpaceId]);
 
   const { palette, spacing } = useTheme();
   const activeSpace = activeSpaceId ? getRoom(activeSpaceId) : null;
@@ -200,7 +211,7 @@ export default function MainLayout({ userId, onSignOut }: MainLayoutProps) {
         <SpaceSidebar
           spaces={spaces}
           activeSpaceId={activeSpaceId}
-          onSelectSpace={setActiveSpaceId}
+          onSelectSpace={handleSelectSpace}
         />
         <div style={{ display: "flex", flexShrink: 0 }}>
           <RoomSidebar
@@ -270,6 +281,12 @@ export default function MainLayout({ userId, onSignOut }: MainLayoutProps) {
             />
           ) : activeSpace && activeSpace.membership === "invited" ? (
             <InvitationView room={activeSpace} onJoined={fetchRooms} />
+          ) : activeSpace && activeSpace.membership === "joined" ? (
+            <SpaceHomeView
+              space={activeSpace}
+              onSelectRoom={handleSelectRoom}
+              onRoomsChanged={fetchRooms}
+            />
           ) : (
             <div style={{
               flex: 1,

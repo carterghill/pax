@@ -7,7 +7,7 @@ use matrix_sdk::ruma::events::StateEventType;
 use matrix_sdk::{config::SyncSettings, Client, SessionMeta};
 use tauri::{Manager, State};
 
-use crate::types::RoomInfo;
+use crate::types::{RoomInfo, SpaceChildInfo, SpaceInfo};
 use crate::AppState;
 
 use super::auth::{save_session_to_credentials, SavedSession};
@@ -442,13 +442,169 @@ pub async fn join_room(
     let parsed =
         matrix_sdk::ruma::RoomId::parse(&room_id).map_err(|e| format!("Invalid room ID: {e}"))?;
 
-    let room = client
-        .get_room(&parsed)
-        .ok_or_else(|| "Room not found".to_string())?;
-
-    room.join()
+    // join_room_by_id works for both accepting invites and joining public rooms
+    // the client may not yet know about.
+    client
+        .join_room_by_id(&parsed)
         .await
         .map_err(|e| format!("Failed to join room: {}", fmt_error_chain(&e)))?;
 
     Ok(())
+}
+
+/// Convert an MXC URI to an unauthenticated thumbnail URL.
+fn mxc_to_thumbnail_url(homeserver: &str, mxc: &str, width: u32, height: u32) -> Option<String> {
+    let stripped = mxc.strip_prefix("mxc://")?;
+    let (server, media_id) = stripped.split_once('/')?;
+    Some(format!(
+        "{}/_matrix/media/v3/thumbnail/{}/{}?width={}&height={}&method=crop",
+        homeserver.trim_end_matches('/'),
+        server,
+        media_id,
+        width,
+        height,
+    ))
+}
+
+#[tauri::command]
+pub async fn get_space_info(
+    state: State<'_, Arc<AppState>>,
+    space_id: String,
+) -> Result<SpaceInfo, String> {
+    let client = super::get_client(&state).await?;
+    let parsed = matrix_sdk::ruma::RoomId::parse(&space_id)
+        .map_err(|e| format!("Invalid room ID: {e}"))?;
+
+    let space = client
+        .get_room(&parsed)
+        .ok_or("Space not found")?;
+
+    let avatar_cache = state.avatar_cache.clone();
+    let space_avatar = get_or_fetch_avatar(
+        space.avatar_url().as_deref(),
+        space.avatar(matrix_sdk::media::MediaFormat::File),
+        &avatar_cache,
+    )
+    .await;
+
+    let space_name = space.name().unwrap_or_else(|| "Unnamed".to_string());
+    let space_topic = space.topic();
+
+    // Call the room hierarchy API to discover child rooms (including ones not yet joined)
+    let session = client
+        .matrix_auth()
+        .session()
+        .ok_or("Not logged in")?;
+    let homeserver = client.homeserver().to_string();
+    let url = format!(
+        "{}/_matrix/client/v1/rooms/{}/hierarchy?limit=50",
+        homeserver.trim_end_matches('/'),
+        space_id,
+    );
+
+    let resp = state
+        .http_client
+        .get(&url)
+        .header(
+            "Authorization",
+            format!("Bearer {}", session.tokens.access_token),
+        )
+        .send()
+        .await
+        .map_err(|e| format!("Hierarchy request failed: {e}"))?;
+
+    if !resp.status().is_success() {
+        let status = resp.status();
+        let text = resp.text().await.unwrap_or_default();
+        return Err(format!("Hierarchy API error ({}): {}", status, text));
+    }
+
+    let body: serde_json::Value = resp
+        .json()
+        .await
+        .map_err(|e| format!("Failed to parse hierarchy response: {e}"))?;
+
+    let mut children = Vec::new();
+
+    if let Some(rooms) = body["rooms"].as_array() {
+        for room_data in rooms {
+            let child_id = match room_data["room_id"].as_str() {
+                Some(id) => id.to_string(),
+                None => continue,
+            };
+
+            // Skip the space itself (first entry in hierarchy is always the queried space)
+            if child_id == space_id {
+                continue;
+            }
+
+            let name = room_data["name"]
+                .as_str()
+                .unwrap_or("Unnamed")
+                .to_string();
+            let topic = room_data["topic"]
+                .as_str()
+                .filter(|t| !t.is_empty())
+                .map(|t| t.to_string());
+            let join_rule = room_data["join_rule"].as_str().map(|s| s.to_string());
+            let room_type = room_data["room_type"].as_str().map(|s| s.to_string());
+            let num_joined_members = room_data["num_joined_members"].as_u64().unwrap_or(0);
+
+            // Determine this user's membership in the child room
+            let membership = if let Ok(rid) = matrix_sdk::ruma::RoomId::parse(&child_id) {
+                if let Some(r) = client.get_room(&rid) {
+                    match r.state() {
+                        matrix_sdk::RoomState::Joined => "joined",
+                        matrix_sdk::RoomState::Invited => "invited",
+                        _ => "none",
+                    }
+                } else {
+                    "none"
+                }
+            } else {
+                "none"
+            }
+            .to_string();
+
+            // Avatar: use cache for joined rooms, convert MXC thumbnail URL for others
+            let avatar_url = if membership == "joined" {
+                if let Ok(rid) = matrix_sdk::ruma::RoomId::parse(&child_id) {
+                    if let Some(r) = client.get_room(&rid) {
+                        get_or_fetch_avatar(
+                            r.avatar_url().as_deref(),
+                            r.avatar(matrix_sdk::media::MediaFormat::File),
+                            &avatar_cache,
+                        )
+                        .await
+                    } else {
+                        None
+                    }
+                } else {
+                    None
+                }
+            } else {
+                room_data["avatar_url"]
+                    .as_str()
+                    .and_then(|mxc| mxc_to_thumbnail_url(&homeserver, mxc, 64, 64))
+            };
+
+            children.push(SpaceChildInfo {
+                id: child_id,
+                name,
+                topic,
+                avatar_url,
+                membership,
+                join_rule,
+                room_type,
+                num_joined_members,
+            });
+        }
+    }
+
+    Ok(SpaceInfo {
+        name: space_name,
+        topic: space_topic,
+        avatar_url: space_avatar,
+        children,
+    })
 }

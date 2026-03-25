@@ -118,3 +118,26 @@ pub struct RoomRedactionPolicy {
     pub can_redact_own: bool,
     pub can_redact_other: bool,
 }
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SpaceChildInfo {
+    pub id: String,
+    pub name: String,
+    pub topic: Option<String>,
+    pub avatar_url: Option<String>,
+    /// "joined", "invited", or "none"
+    pub membership: String,
+    pub join_rule: Option<String>,
+    pub room_type: Option<String>,
+    pub num_joined_members: u64,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SpaceInfo {
+    pub name: String,
+    pub topic: Option<String>,
+    pub avatar_url: Option<String>,
+    pub children: Vec<SpaceChildInfo>,
+}
