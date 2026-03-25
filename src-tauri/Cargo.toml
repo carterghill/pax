@@ -64,4 +64,3 @@ windows-sys = { version = "0.59", features = [
 zbus = { version = "4", default-features = false, features = ["tokio"] }
 webkit2gtk = { version = "2.0", features = ["v2_38"] }
 ashpd = { version = "0.12", default-features = true }
-pipewire = "0.9"
