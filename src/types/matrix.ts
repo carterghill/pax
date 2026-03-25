@@ -5,6 +5,8 @@ export interface Room {
   isSpace: boolean;
   parentSpaceIds: string[];
   roomType: string | null;
+  /** "joined" or "invited" */
+  membership: string;
 }
 
 export interface Message {

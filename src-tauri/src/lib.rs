@@ -170,6 +170,7 @@ pub fn run() {
             commands::rooms::register,
             commands::rooms::restore_session,
             commands::rooms::get_rooms,
+            commands::rooms::join_room,
             commands::messages::get_messages,
             commands::members::get_room_members,
             commands::members::get_user_avatar,

@@ -339,14 +339,15 @@ pub async fn restore_session(
 pub async fn get_rooms(state: State<'_, Arc<AppState>>) -> Result<Vec<RoomInfo>, String> {
     let client = super::get_client(&state).await?;
 
-    let all_rooms = client.joined_rooms();
+    let joined_rooms = client.joined_rooms();
+    let invited_rooms = client.invited_rooms();
     let avatar_cache = state.avatar_cache.clone();
 
     // First pass: collect space IDs and their children via m.space.child state events
     let mut space_children: std::collections::HashMap<String, Vec<String>> =
         std::collections::HashMap::new();
 
-    for room in &all_rooms {
+    for room in &joined_rooms {
         if room.is_space() {
             let mut children = Vec::new();
             if let Ok(events) = room.get_state_events(StateEventType::SpaceChild).await {
@@ -369,10 +370,10 @@ pub async fn get_rooms(state: State<'_, Arc<AppState>>) -> Result<Vec<RoomInfo>,
         }
     }
 
-    // Second pass: build room list with parent space info
+    // Second pass: build room list with parent space info (joined rooms)
     let mut room_list = Vec::new();
 
-    for room in &all_rooms {
+    for room in &joined_rooms {
         let avatar_url = get_or_fetch_avatar(
             room.avatar_url().as_deref(),
             room.avatar(matrix_sdk::media::MediaFormat::File),
@@ -396,8 +397,58 @@ pub async fn get_rooms(state: State<'_, Arc<AppState>>) -> Result<Vec<RoomInfo>,
             is_space: room.is_space(),
             parent_space_ids,
             room_type: room_type_str,
+            membership: "joined".to_string(),
+        });
+    }
+
+    // Third pass: add invited rooms
+    for room in &invited_rooms {
+        let avatar_url = get_or_fetch_avatar(
+            room.avatar_url().as_deref(),
+            room.avatar(matrix_sdk::media::MediaFormat::File),
+            &avatar_cache,
+        ).await;
+        let room_id_str = room.room_id().to_string();
+
+        // Check if any joined space lists this room as a child
+        let parent_space_ids: Vec<String> = space_children
+            .iter()
+            .filter(|(_, children)| children.contains(&room_id_str))
+            .map(|(space_id, _)| space_id.clone())
+            .collect();
+
+        let room_type_str = room.room_type().map(|rt| rt.to_string());
+
+        room_list.push(RoomInfo {
+            id: room_id_str,
+            name: room.name().unwrap_or_else(|| "Unnamed".to_string()),
+            avatar_url,
+            is_space: room.is_space(),
+            parent_space_ids,
+            room_type: room_type_str,
+            membership: "invited".to_string(),
         });
     }
 
     Ok(room_list)
+}
+
+#[tauri::command]
+pub async fn join_room(
+    state: State<'_, Arc<AppState>>,
+    room_id: String,
+) -> Result<(), String> {
+    let client = super::get_client(&state).await?;
+    let parsed =
+        matrix_sdk::ruma::RoomId::parse(&room_id).map_err(|e| format!("Invalid room ID: {e}"))?;
+
+    let room = client
+        .get_room(&parsed)
+        .ok_or_else(|| "Room not found".to_string())?;
+
+    room.join()
+        .await
+        .map_err(|e| format!("Failed to join room: {}", fmt_error_chain(&e)))?;
+
+    Ok(())
 }

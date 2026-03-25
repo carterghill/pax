@@ -69,5 +69,5 @@ export function useRooms(userId: string) {
 
   const getRoom = (roomId: string) => rooms.find((r) => r.id === roomId) ?? null;
 
-  return { rooms, spaces, roomsBySpace, getRoom };
+  return { rooms, spaces, roomsBySpace, getRoom, fetchRooms };
 }

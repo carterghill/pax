@@ -10,6 +10,8 @@ pub struct RoomInfo {
     pub is_space: bool,
     pub parent_space_ids: Vec<String>,
     pub room_type: Option<String>,
+    /// "joined" or "invited"
+    pub membership: String,
 }
 
 #[derive(Clone, Serialize)]

@@ -2,6 +2,7 @@ import SpaceSidebar from "../components/SpaceSidebar";
 import RoomSidebar from "../components/RoomSidebar";
 import ChatView from "../layouts/ChatView";
 import VoiceRoomView from "../components/VoiceRoomView";
+import InvitationView from "../layouts/InvitationView";
 import { useRooms } from "../hooks/useRooms";
 import { usePresence } from "../hooks/usePresence";
 import { useVoiceParticipants } from "../hooks/useVoiceParticipants";
@@ -77,7 +78,7 @@ interface MainLayoutProps {
 }
 
 export default function MainLayout({ userId, onSignOut }: MainLayoutProps) {
-  const { spaces, roomsBySpace, getRoom } = useRooms(userId);
+  const { spaces, roomsBySpace, getRoom, fetchRooms } = useRooms(userId);
   const { manualStatus, setManualStatus, effectivePresence } = usePresence();
   const voiceCall = useVoiceCall();
   const [activeSpaceId, setActiveSpaceId] = useState<string | null>(null);
@@ -175,12 +176,12 @@ export default function MainLayout({ userId, onSignOut }: MainLayoutProps) {
 
   const { connect: connectVoiceCall, connectedRoomId: connectedVoiceRoomId } = voiceCall;
 
-  // Handle room selection — clicking a voice room joins the call
+  // Handle room selection — clicking a voice room joins the call (only if already joined/member)
   const handleSelectRoom = useCallback((roomId: string) => {
     setActiveRoomId(roomId);
 
     const room = getRoom(roomId);
-    if (room && room.roomType === VOICE_ROOM_TYPE && connectedVoiceRoomId !== roomId) {
+    if (room && room.roomType === VOICE_ROOM_TYPE && room.membership === "joined" && connectedVoiceRoomId !== roomId) {
       // Join voice room on click (only if not already connected to this room)
       connectVoiceCall(roomId);
     }
@@ -247,6 +248,8 @@ export default function MainLayout({ userId, onSignOut }: MainLayoutProps) {
               userAvatarUrl={userAvatarUrl}
               onAvatarChanged={setAvatarOverride}
             />
+          ) : activeRoom && activeRoom.membership === "invited" ? (
+            <InvitationView room={activeRoom} onJoined={fetchRooms} />
           ) : activeRoom && activeRoom.roomType === VOICE_ROOM_TYPE ? (
             <VoiceRoomView
               room={activeRoom}
@@ -265,6 +268,8 @@ export default function MainLayout({ userId, onSignOut }: MainLayoutProps) {
                 setUserMenuWidth(clamped);
               }}
             />
+          ) : activeSpace && activeSpace.membership === "invited" ? (
+            <InvitationView room={activeSpace} onJoined={fetchRooms} />
           ) : (
             <div style={{
               flex: 1,
