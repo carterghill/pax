@@ -983,13 +983,15 @@ async fn start_screen_capture_linux(
 
     let pipeline_str = format!(
         "pipewiresrc path={node_id} do-timestamp=true keepalive-time=1000 \
+         ! videorate \
          ! videoconvert \
          ! videoscale \
-         ! video/x-raw,format=I420,width={w},height={h} \
+         ! video/x-raw,format=I420,width={w},height={h},framerate={fps}/1 \
          ! appsink name=sink emit-signals=false max-buffers=2 drop=true sync=false",
         node_id = node_id,
         w = preset.width(),
         h = preset.height(),
+        fps = preset.fps(),
     );
     log::info!("GStreamer pipeline: {}", pipeline_str);
 
@@ -1126,16 +1128,199 @@ async fn start_screen_capture_linux(
         .map_err(|e| format!("Failed to publish screen track: {}", e))?;
     log::info!("Screen track published successfully");
 
-    // Audio: not yet implemented. GStreamer pulsesrc monitor could be added later.
-    let audio_track: Option<LocalAudioTrack> = None;
+    // --- 5. Desktop audio capture via GStreamer pulsesrc ---
+    log::info!("Setting up screen share audio capture...");
+    let shutdown_audio = shutdown.clone();
+    let (audio_track, audio_thread) = setup_screen_share_audio_gstreamer(shutdown_audio);
+    log::info!("Audio setup result: track={}, thread={}", audio_track.is_some(), audio_thread.is_some());
 
     Ok(ScreenShareHandle {
         track,
         audio_track,
         _shutdown: shutdown,
         _capturer_thread: Some(capturer_thread),
-        _audio_capture_thread: None,
+        _audio_capture_thread: audio_thread,
     })
+}
+
+/// Set up desktop audio capture via GStreamer pulsesrc on Linux.
+///
+/// Captures all desktop audio from the default sink's monitor using PipeWire's
+/// PulseAudio compatibility layer. Outputs mono i16 at 48kHz in 10ms frames
+/// for LiveKit.
+#[cfg(target_os = "linux")]
+fn setup_screen_share_audio_gstreamer(
+    shutdown: Arc<AtomicBool>,
+) -> (Option<LocalAudioTrack>, Option<std::thread::JoinHandle<()>>) {
+    use livekit::webrtc::{
+        audio_frame::AudioFrame,
+        audio_source::native::NativeAudioSource,
+        prelude::{AudioSourceOptions, RtcAudioSource},
+    };
+    use gstreamer::prelude::*;
+
+    const SAMPLE_RATE: u32 = 48000;
+    const NUM_CHANNELS: u32 = 1;
+    const SAMPLES_PER_10MS: usize = (SAMPLE_RATE / 100) as usize; // 480
+
+    eprintln!("[pax-audio] setup_screen_share_audio_gstreamer called");
+    log::info!("Setting up GStreamer audio capture");
+
+    let audio_source = NativeAudioSource::new(
+        AudioSourceOptions {
+            echo_cancellation: false,
+            noise_suppression: false,
+            auto_gain_control: false,
+        },
+        SAMPLE_RATE,
+        NUM_CHANNELS,
+        100,
+    );
+
+    // Try pulsesrc with default monitor first, then fall back to autoaudiosrc
+    let pipeline_str = format!(
+        "pulsesrc device=\"@DEFAULT_MONITOR@\" \
+         ! audioconvert \
+         ! audioresample \
+         ! audio/x-raw,format=S16LE,rate={rate},channels={ch} \
+         ! appsink name=audiosink emit-signals=false max-buffers=10 drop=true sync=false",
+        rate = SAMPLE_RATE,
+        ch = NUM_CHANNELS,
+    );
+    eprintln!("[pax-audio] trying pipeline: {}", pipeline_str);
+    log::info!("GStreamer audio pipeline: {}", pipeline_str);
+
+    let audio_pipeline = match gstreamer::parse::launch(&pipeline_str) {
+        Ok(p) => {
+            eprintln!("[pax-audio] parse::launch succeeded");
+            p
+        }
+        Err(e) => {
+            eprintln!("[pax-audio] pulsesrc pipeline failed: {}, skipping audio", e);
+            log::warn!("GStreamer audio pipeline parse failed: {}", e);
+            return (None, None);
+        }
+    };
+    let audio_pipeline = match audio_pipeline.downcast::<gstreamer::Pipeline>() {
+        Ok(p) => {
+            eprintln!("[pax-audio] downcast to Pipeline succeeded");
+            p
+        }
+        Err(_) => {
+            eprintln!("[pax-audio] downcast to Pipeline FAILED");
+            log::warn!("Failed to cast audio pipeline");
+            return (None, None);
+        }
+    };
+    let audio_appsink = match audio_pipeline.by_name("audiosink") {
+        Some(e) => match e.downcast::<gstreamer_app::AppSink>() {
+            Ok(s) => s,
+            Err(_) => {
+                eprintln!("[pax-audio] downcast audiosink FAILED");
+                log::warn!("Failed to cast audiosink to AppSink");
+                return (None, None);
+            }
+        },
+        None => {
+            eprintln!("[pax-audio] audiosink not found in pipeline");
+            log::warn!("audiosink element not found in audio pipeline");
+            return (None, None);
+        }
+    };
+
+    eprintln!("[pax-audio] setting pipeline to Playing...");
+    if let Err(e) = audio_pipeline.set_state(gstreamer::State::Playing) {
+        eprintln!("[pax-audio] set_state(Playing) FAILED: {:?}", e);
+        log::warn!("Failed to start GStreamer audio pipeline: {:?}", e);
+        return (None, None);
+    }
+    eprintln!("[pax-audio] audio pipeline Playing!");
+    log::info!("GStreamer audio pipeline started (desktop audio capture)");
+
+    let audio_source_clone = audio_source.clone();
+    let audio_pipeline_clone = audio_pipeline.clone();
+
+    let audio_thread = thread::Builder::new()
+        .name("gst-audio-capture".into())
+        .spawn(move || {
+            log::info!("GStreamer audio capture thread started");
+            let mut sample_buf: Vec<i16> = Vec::with_capacity(SAMPLES_PER_10MS * 2);
+
+            // Create a tokio runtime for this thread to drive audio_source.capture_frame
+            let rt = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .expect("Failed to create audio tokio runtime");
+
+            while !shutdown.load(Ordering::Relaxed) {
+                let sample = audio_appsink.try_pull_sample(
+                    gstreamer::ClockTime::from_mseconds(100),
+                );
+                let Some(sample) = sample else {
+                    if audio_appsink.is_eos() {
+                        log::info!("GStreamer audio appsink reached EOS");
+                        break;
+                    }
+                    continue;
+                };
+
+                let buffer = match sample.buffer() {
+                    Some(b) => b,
+                    None => continue,
+                };
+                let map = match buffer.map_readable() {
+                    Ok(m) => m,
+                    Err(_) => continue,
+                };
+
+                // Data is S16LE mono — interpret as i16 slice
+                let data = map.as_slice();
+                let samples = unsafe {
+                    std::slice::from_raw_parts(
+                        data.as_ptr() as *const i16,
+                        data.len() / std::mem::size_of::<i16>(),
+                    )
+                };
+                sample_buf.extend_from_slice(samples);
+
+                // Emit 10ms frames (480 mono samples at 48kHz)
+                while sample_buf.len() >= SAMPLES_PER_10MS {
+                    let frame_samples: Vec<i16> =
+                        sample_buf.drain(..SAMPLES_PER_10MS).collect();
+                    let frame = AudioFrame {
+                        data: frame_samples.into(),
+                        sample_rate: SAMPLE_RATE,
+                        num_channels: NUM_CHANNELS,
+                        samples_per_channel: SAMPLES_PER_10MS as u32,
+                    };
+                    rt.block_on(async {
+                        if let Err(e) = audio_source_clone.capture_frame(&frame).await {
+                            log::warn!("Screen share audio capture: {}", e);
+                        }
+                    });
+                }
+            }
+
+            let _ = audio_pipeline_clone.set_state(gstreamer::State::Null);
+            log::info!("GStreamer audio capture thread exited");
+        })
+        .map_err(|e| {
+            log::warn!("GStreamer audio thread spawn failed: {}", e);
+            e
+        })
+        .ok();
+
+    if audio_thread.is_none() {
+        return (None, None);
+    }
+
+    let track = LocalAudioTrack::create_audio_track(
+        "screenshare-audio",
+        RtcAudioSource::Native(audio_source),
+    );
+
+    log::info!("Screen share audio (GStreamer pulsesrc monitor) enabled");
+    (Some(track), audio_thread)
 }
 
 /// Enumerate capturable windows (Windows only). Returns (title, process_name) for each.
