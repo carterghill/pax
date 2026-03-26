@@ -340,12 +340,12 @@ function RoomRow({
   const isInvited = room.membership === "invited";
   const canJoin = !isJoined;
 
-  const initials = room.name
-    .split(" ")
-    .map((w) => w[0])
-    .join("")
-    .slice(0, 2)
-    .toUpperCase();
+  // const initials = room.name
+  //   .split(" ")
+  //   .map((w) => w[0])
+  //   .join("")
+  //   .slice(0, 2)
+  //   .toUpperCase();
 
   return (
     <div

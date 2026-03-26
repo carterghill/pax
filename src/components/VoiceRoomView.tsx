@@ -167,13 +167,19 @@ export default function VoiceRoomView({
     displayName: string;
   } | null>(null);
 
-  /** Shared volume change handler — persists to localStorage AND sends to Rust backend. */
+  /** Shared volume change handler for screen share streams — persists + sends to Rust. */
   const handleStreamVolumeChange = useCallback(
     (identity: string, vol: number) => {
-      setVolume(identity, vol);
-      onSetParticipantVolume(identity, vol);
+      setVolume(identity, vol, "screenshare_audio");
+      onSetParticipantVolume(identity, vol, "screenshare_audio");
     },
     [setVolume, onSetParticipantVolume],
+  );
+
+  /** Get stream (screenshare_audio) volume for a participant. */
+  const getStreamVolume = useCallback(
+    (identity: string) => getVolume(identity, "screenshare_audio"),
+    [getVolume],
   );
 
   const isConnected = callState.connectedRoomId === room.id && !callState.isConnecting;
@@ -372,7 +378,7 @@ export default function VoiceRoomView({
           <ScreenShareGrid
             remoteSharers={remoteSharers}
             isLocalScreenSharing={callState.isLocalScreenSharing}
-            getVolume={getVolume}
+            getVolume={getStreamVolume}
             onVolumeChange={handleStreamVolumeChange}
             onStreamContextMenu={(e, identity, displayName) => {
               e.preventDefault();
@@ -1068,10 +1074,10 @@ export default function VoiceRoomView({
           x={contextMenu.x}
           y={contextMenu.y}
           displayName={contextMenu.displayName}
-          volume={getVolume(contextMenu.identity)}
+          volume={getVolume(contextMenu.identity, "microphone")}
           onVolumeChange={(vol) => {
-            setVolume(contextMenu.identity, vol);
-            onSetParticipantVolume(contextMenu.identity, vol);
+            setVolume(contextMenu.identity, vol, "microphone");
+            onSetParticipantVolume(contextMenu.identity, vol, "microphone");
           }}
           onClose={() => setContextMenu(null)}
         />

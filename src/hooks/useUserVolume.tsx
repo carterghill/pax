@@ -3,12 +3,20 @@ import { useState, useRef, useCallback } from "react";
 const STORAGE_KEY_PREFIX = "pax-user-volume:";
 
 /**
- * Get the stored volume for a user from localStorage.
+ * Build a localStorage key for a specific user and audio source.
+ * e.g. "pax-user-volume:@user:server::microphone"
+ */
+function storageKey(userId: string, source: string = "microphone"): string {
+  return `${STORAGE_KEY_PREFIX}${userId}::${source}`;
+}
+
+/**
+ * Get the stored volume for a user + source from localStorage.
  * Returns a value between 0 and 2 (0% to 200%). Default is 1 (100%).
  */
-export function getStoredVolume(userId: string): number {
+export function getStoredVolume(userId: string, source: string = "microphone"): number {
   try {
-    const raw = localStorage.getItem(STORAGE_KEY_PREFIX + userId);
+    const raw = localStorage.getItem(storageKey(userId, source));
     if (raw !== null) {
       const val = parseFloat(raw);
       if (!isNaN(val) && val >= 0 && val <= 2) return val;
@@ -22,17 +30,18 @@ export function getStoredVolume(userId: string): number {
 /**
  * Persist a user's volume to localStorage.
  */
-function storeVolume(userId: string, volume: number) {
+function storeVolume(userId: string, volume: number, source: string = "microphone") {
   try {
-    localStorage.setItem(STORAGE_KEY_PREFIX + userId, String(volume));
+    localStorage.setItem(storageKey(userId, source), String(volume));
   } catch {
     // ignore
   }
 }
 
 /**
- * React hook that provides per-user volume state backed by localStorage.
+ * React hook that provides per-user, per-source volume state backed by localStorage.
  * Volume is a number from 0 to 2 (representing 0% – 200%).
+ * Source is "microphone" or "screenshare_audio".
  */
 export function useUserVolume() {
   // In-memory cache of volumes we've loaded this session
@@ -40,18 +49,20 @@ export function useUserVolume() {
   // Re-render trigger for controlled UI consumers (e.g. volume slider).
   const [, setVersion] = useState(0);
 
-  const getVolume = useCallback((userId: string): number => {
-    if (userId in volumesRef.current) return volumesRef.current[userId];
-    const stored = getStoredVolume(userId);
+  const getVolume = useCallback((userId: string, source: string = "microphone"): number => {
+    const cacheKey = `${userId}::${source}`;
+    if (cacheKey in volumesRef.current) return volumesRef.current[cacheKey];
+    const stored = getStoredVolume(userId, source);
     // Lazy-load into in-memory cache without changing function identity.
-    volumesRef.current[userId] = stored;
+    volumesRef.current[cacheKey] = stored;
     return stored;
   }, []);
 
-  const setVolume = useCallback((userId: string, volume: number) => {
+  const setVolume = useCallback((userId: string, volume: number, source: string = "microphone") => {
     const clamped = Math.max(0, Math.min(2, volume));
-    storeVolume(userId, clamped);
-    volumesRef.current[userId] = clamped;
+    const cacheKey = `${userId}::${source}`;
+    storeVolume(userId, clamped, source);
+    volumesRef.current[cacheKey] = clamped;
     setVersion((v) => v + 1);
   }, []);
 

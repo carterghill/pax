@@ -59,7 +59,7 @@ export interface VoiceCallActions {
   setScreenSharePreset: (preset: "720p" | "1080p") => Promise<void>;
   getNoiseSuppressionConfig: () => Promise<{ extraAttenuation: number; agcTargetRms: number }>;
   setNoiseSuppressionConfig: (config: { extraAttenuation: number; agcTargetRms: number }) => Promise<void>;
-  setParticipantVolume: (identity: string, volume: number) => void;
+  setParticipantVolume: (identity: string, volume: number, source: string) => void;
 }
 
 /** Full return type of useVoiceCall — state + actions. */
@@ -237,9 +237,9 @@ export function useVoiceCall() {
    * Volume is 0-2 (0% to 200%).
    */
   const setParticipantVolume = useCallback(
-    (identity: string, volume: number) => {
+    (identity: string, volume: number, source: string) => {
       const clamped = Math.max(0, Math.min(2, volume));
-      invoke("voice_set_participant_volume", { identity, volume: clamped }).catch(
+      invoke("voice_set_participant_volume", { identity, volume: clamped, source }).catch(
         (e) => {
           console.error("[Pax TS] Failed to set volume in Rust:", e);
         }
@@ -262,12 +262,16 @@ export function useVoiceCall() {
     for (const id of currentIds) {
       if (!volumeSentRef.current.has(id)) {
         volumeSentRef.current.add(id);
-        const stored = getStoredVolume(id);
-        if (stored !== 1.0) {
-          invoke("voice_set_participant_volume", {
-            identity: id,
-            volume: stored,
-          }).catch(() => {});
+        // Sync both mic and screenshare_audio volumes
+        for (const source of ["microphone", "screenshare_audio"] as const) {
+          const stored = getStoredVolume(id, source);
+          if (stored !== 1.0) {
+            invoke("voice_set_participant_volume", {
+              identity: id,
+              volume: stored,
+              source,
+            }).catch(() => {});
+          }
         }
       }
     }

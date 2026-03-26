@@ -865,8 +865,9 @@ pub async fn voice_set_participant_volume(
     voice_mgr: State<'_, voice::VoiceManager>,
     identity: String,
     volume: f32,
+    source: String,
 ) -> Result<(), String> {
-    voice_mgr.set_participant_volume(identity, volume);
+    voice_mgr.set_participant_volume(identity, volume, source);
     Ok(())
 }
 

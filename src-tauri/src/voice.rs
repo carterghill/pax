@@ -375,19 +375,16 @@ impl VoiceManager {
             .unwrap_or_else(|| NOISE_SUPPRESSION_CONFIG.read().clone()))
     }
 
-    /// Set per-user volume (0.0 – 2.0).
-    pub fn set_participant_volume(&self, identity: String, volume: f32) {
+    /// Set per-user volume (0.0 – 2.0) for a specific source ("microphone" or "screenshare_audio").
+    pub fn set_participant_volume(&self, identity: String, volume: f32, source: String) {
         let guard = self.session.lock();
         let clamped = volume.clamp(0.0, 2.0);
         if let Some(session) = guard.as_ref() {
             let mut state = session.audio_state.lock();
-            let old_volume = state.user_volumes.insert(identity.clone(), clamped);
-
-            // If the volume actually changed, clear all playback buffers so the new
-            // volume takes effect *immediately* (brief silence while buffers refill).
-            if old_volume != Some(clamped) {
-                state.playback_buffers.values_mut().for_each(|b| b.clear());
-            }
+            // Key format: "@user:server::microphone" or "@user:server::screenshare_audio"
+            let user_part: String = identity.split(':').take(2).collect::<Vec<_>>().join(":");
+            let vol_key = format!("{}::{}", user_part, source);
+            state.user_volumes.insert(vol_key, clamped);
         } 
     }
     /// Get the currently connected room ID, if any.
@@ -587,6 +584,7 @@ async fn handle_remote_audio(
     audio_track: RemoteAudioTrack,
     identity: String,
     track_key: String,
+    source_tag: String,
     audio_state: Arc<Mutex<AudioState>>,
 ) {
     let mut stream = NativeAudioStream::new(
@@ -594,10 +592,12 @@ async fn handle_remote_audio(
         SAMPLE_RATE as i32,
         NUM_CHANNELS as i32,
     );
+    // Build the volume lookup key: "@user:server::microphone" or "@user:server::screenshare_audio"
+    let user_part: String = identity.split(':').take(2).collect::<Vec<_>>().join(":");
+    let vol_key = format!("{}::{}", user_part, source_tag);
     while let Some(frame) = stream.next().await {
         let samples: &[i16] = frame.data.as_ref();
         let mut st = audio_state.lock();
-        let vol_key = identity.split(':').take(2).collect::<Vec<_>>().join(":");
         let volume = *st.user_volumes.get(&vol_key).unwrap_or(&1.0);
 
         // Per-track RMS for speaking indicator (only track mic-source audio for levels)
@@ -676,8 +676,13 @@ async fn run_event_loop(
                             }
                             let state_clone = audio_state.clone();
                             let track_key = format!("{}::{:?}", identity, source);
+                            let source_tag = match source {
+                                TrackSource::Microphone => "microphone".to_string(),
+                                TrackSource::ScreenshareAudio => "screenshare_audio".to_string(),
+                                other => format!("{:?}", other).to_lowercase(),
+                            };
                             tokio::spawn(async move {
-                                handle_remote_audio(audio_track, identity, track_key, state_clone).await;
+                                handle_remote_audio(audio_track, identity, track_key, source_tag, state_clone).await;
                             });
                             emit_state(app_handle.as_ref(), &room_id, &local_identity, &audio_state, false, true, None);
                         } else if let RemoteTrack::Video(video_track) = track {

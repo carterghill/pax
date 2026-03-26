@@ -44,7 +44,7 @@ interface RoomSidebarProps {
     string,
     Record<string, { isMuted: boolean; isDeafened: boolean; isSpeaking: boolean }>
   >;
-  onSetParticipantVolume: (identity: string, volume: number) => void;
+  onSetParticipantVolume: (identity: string, volume: number, source: string) => void;
 }
 
 function VoiceParticipantRow({
@@ -349,10 +349,10 @@ export default function RoomSidebar({
           x={contextMenu.x}
           y={contextMenu.y}
           displayName={contextMenu.displayName}
-          volume={getVolume(contextMenu.identity)}
+          volume={getVolume(contextMenu.identity, "microphone")}
           onVolumeChange={(vol) => {
-            setVolume(contextMenu.identity, vol);
-            onSetParticipantVolume(contextMenu.identity, vol);
+            setVolume(contextMenu.identity, vol, "microphone");
+            onSetParticipantVolume(contextMenu.identity, vol, "microphone");
           }}
           onClose={() => setContextMenu(null)}
         />
