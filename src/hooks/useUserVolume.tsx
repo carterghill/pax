@@ -3,11 +3,22 @@ import { useState, useRef, useCallback } from "react";
 const STORAGE_KEY_PREFIX = "pax-user-volume:";
 
 /**
+ * Normalize a LiveKit identity or Matrix userId to just "@user:server"
+ * by taking the first two ':'-separated segments.  This matches the Rust
+ * vol_key derivation so that the sidebar (which passes Matrix userId) and
+ * the voice view (which passes LiveKit identity with device suffix) both
+ * resolve to the same key.
+ */
+function normalizeIdentity(id: string): string {
+  return id.split(":").slice(0, 2).join(":");
+}
+
+/**
  * Build a localStorage key for a specific user and audio source.
  * e.g. "pax-user-volume:@user:server::microphone"
  */
 function storageKey(userId: string, source: string = "microphone"): string {
-  return `${STORAGE_KEY_PREFIX}${userId}::${source}`;
+  return `${STORAGE_KEY_PREFIX}${normalizeIdentity(userId)}::${source}`;
 }
 
 /**
@@ -50,7 +61,7 @@ export function useUserVolume() {
   const [, setVersion] = useState(0);
 
   const getVolume = useCallback((userId: string, source: string = "microphone"): number => {
-    const cacheKey = `${userId}::${source}`;
+    const cacheKey = `${normalizeIdentity(userId)}::${source}`;
     if (cacheKey in volumesRef.current) return volumesRef.current[cacheKey];
     const stored = getStoredVolume(userId, source);
     // Lazy-load into in-memory cache without changing function identity.
@@ -60,7 +71,7 @@ export function useUserVolume() {
 
   const setVolume = useCallback((userId: string, volume: number, source: string = "microphone") => {
     const clamped = Math.max(0, Math.min(2, volume));
-    const cacheKey = `${userId}::${source}`;
+    const cacheKey = `${normalizeIdentity(userId)}::${source}`;
     storeVolume(userId, clamped, source);
     volumesRef.current[cacheKey] = clamped;
     setVersion((v) => v + 1);
