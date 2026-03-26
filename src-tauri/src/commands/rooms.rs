@@ -608,3 +608,104 @@ pub async fn get_space_info(
         children,
     })
 }
+
+#[tauri::command]
+pub async fn get_history_visibility(
+    state: State<'_, Arc<AppState>>,
+    room_id: String,
+) -> Result<String, String> {
+    let client = super::get_client(&state).await?;
+    // Validate the room exists
+    let _ = super::resolve_room(&client, &room_id)?;
+
+    let homeserver = client.homeserver().to_string();
+    let access_token = client.access_token().ok_or("No access token")?;
+    let state_url = format!(
+        "{}/_matrix/client/v3/rooms/{}/state/m.room.history_visibility/",
+        homeserver.trim_end_matches('/'),
+        urlencoding::encode(&room_id),
+    );
+
+    let resp = state
+        .http_client
+        .get(&state_url)
+        .timeout(Duration::from_secs(15))
+        .bearer_auth(access_token.to_string())
+        .send()
+        .await
+        .map_err(|e| format!("Failed to get history visibility: {}", super::fmt_error_chain(&e)))?;
+
+    if !resp.status().is_success() {
+        // If the event doesn't exist yet, the spec default is "shared"
+        return Ok("shared".to_string());
+    }
+
+    let body: serde_json::Value = resp
+        .json()
+        .await
+        .map_err(|e| format!("Failed to parse history visibility response: {e}"))?;
+
+    Ok(body
+        .get("history_visibility")
+        .and_then(|v| v.as_str())
+        .unwrap_or("shared")
+        .to_string())
+}
+
+#[tauri::command]
+pub async fn set_history_visibility(
+    state: State<'_, Arc<AppState>>,
+    room_id: String,
+    visibility: String,
+) -> Result<(), String> {
+    let valid = ["joined", "shared", "invited", "world_readable"];
+    if !valid.contains(&visibility.as_str()) {
+        return Err(format!(
+            "Invalid history_visibility '{}'. Must be one of: {}",
+            visibility,
+            valid.join(", ")
+        ));
+    }
+
+    let client = super::get_client(&state).await?;
+    // Validate the room exists
+    let _ = super::resolve_room(&client, &room_id)?;
+
+    let content = serde_json::json!({
+        "history_visibility": visibility,
+    });
+
+    let homeserver = client.homeserver().to_string();
+    let access_token = client.access_token().ok_or("No access token")?;
+    let state_url = format!(
+        "{}/_matrix/client/v3/rooms/{}/state/m.room.history_visibility/",
+        homeserver.trim_end_matches('/'),
+        urlencoding::encode(&room_id),
+    );
+
+    let resp = state
+        .http_client
+        .put(&state_url)
+        .timeout(Duration::from_secs(15))
+        .bearer_auth(access_token.to_string())
+        .json(&content)
+        .send()
+        .await
+        .map_err(|e| format!("Failed to send history visibility event: {}", super::fmt_error_chain(&e)))?;
+
+    let status = resp.status();
+    if !status.is_success() {
+        let body = resp.text().await.unwrap_or_default();
+        return Err(format!(
+            "Failed to set history visibility ({}): {}",
+            status, body
+        ));
+    }
+
+    log::info!(
+        "set_history_visibility: room={} visibility={}",
+        room_id,
+        visibility
+    );
+    Ok(())
+}

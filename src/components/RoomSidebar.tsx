@@ -4,6 +4,8 @@ import { Room, VoiceParticipant } from "../types/matrix";
 import { useTheme } from "../theme/ThemeContext";
 import StatusDropdown from "./StatusDropdown";
 import VolumeContextMenu from "./VolumeContextMenu";
+import RoomContextMenu from "./RoomContextMenu";
+import RoomSettingsModal from "./RoomSettingsModal";
 import { useUserVolume } from "../hooks/useUserVolume";
 import {
   VOICE_ROOM_TYPE,
@@ -182,6 +184,16 @@ export default function RoomSidebar({
     identity: string;
     displayName: string;
   } | null>(null);
+  const [roomContextMenu, setRoomContextMenu] = useState<{
+    x: number;
+    y: number;
+    roomId: string;
+    roomName: string;
+  } | null>(null);
+  const [settingsRoomId, setSettingsRoomId] = useState<string | null>(null);
+  const settingsRoom = settingsRoomId
+    ? rooms.find((r) => r.id === settingsRoomId)
+    : null;
 
   // Extract local part of userId for display (e.g. @carter:matrix.org → carter)
   const displayName = userId.startsWith("@")
@@ -235,6 +247,15 @@ export default function RoomSidebar({
               {/* Room row */}
               <div
                 onClick={() => onSelectRoom(room.id)}
+                onContextMenu={(e) => {
+                  e.preventDefault();
+                  setRoomContextMenu({
+                    x: e.clientX,
+                    y: e.clientY,
+                    roomId: room.id,
+                    roomName: room.name,
+                  });
+                }}
                 style={{
                   padding: `${spacing.unit * 2}px ${spacing.unit * 3}px`,
                   borderRadius: spacing.unit,
@@ -334,6 +355,26 @@ export default function RoomSidebar({
             onSetParticipantVolume(contextMenu.identity, vol);
           }}
           onClose={() => setContextMenu(null)}
+        />
+      )}
+
+      {/* Room context menu */}
+      {roomContextMenu && (
+        <RoomContextMenu
+          x={roomContextMenu.x}
+          y={roomContextMenu.y}
+          roomName={roomContextMenu.roomName}
+          onOpenSettings={() => setSettingsRoomId(roomContextMenu.roomId)}
+          onClose={() => setRoomContextMenu(null)}
+        />
+      )}
+
+      {/* Room settings modal */}
+      {settingsRoom && (
+        <RoomSettingsModal
+          roomId={settingsRoom.id}
+          roomName={settingsRoom.name}
+          onClose={() => setSettingsRoomId(null)}
         />
       )}
     </div>
