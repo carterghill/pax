@@ -226,7 +226,7 @@ pub async fn get_voice_participants(
 /// Re-send `m.call.member` so `origin_server_ts` advances and roster expiry stays valid while connected.
 pub(crate) async fn matrix_voice_refresh_call_member(
     client: &Client,
-    http: &reqwest::Client,
+    http: &reqwest_middleware::ClientWithMiddleware,
     room_id: &str,
 ) -> Result<(), String> {
     matrix_voice_put_call_member(client, http, room_id)
@@ -237,7 +237,7 @@ pub(crate) async fn matrix_voice_refresh_call_member(
 /// PUT `org.matrix.msc3401.call.member` for this device. Returns the LiveKit JWT service URL.
 async fn matrix_voice_put_call_member(
     client: &Client,
-    http: &reqwest::Client,
+    http: &reqwest_middleware::ClientWithMiddleware,
     room_id: &str,
 ) -> Result<String, String> {
     let room_id_parsed =
@@ -298,7 +298,7 @@ async fn matrix_voice_put_call_member(
 /// Returns (jwt, livekit_url).
 pub(crate) async fn matrix_voice_join(
     client: &Client,
-    http: &reqwest::Client,
+    http: &reqwest_middleware::ClientWithMiddleware,
     room_id: &str,
 ) -> Result<VoiceJoinResult, String> {
     let livekit_service_url = matrix_voice_put_call_member(client, http, room_id).await?;
@@ -366,7 +366,7 @@ pub(crate) async fn matrix_voice_join(
 /// 404 is treated as success (already no state). Reuses `http` to avoid creating a client per PUT.
 async fn matrix_voice_leave_state_key(
     client: &Client,
-    http: &reqwest::Client,
+    http: &reqwest_middleware::ClientWithMiddleware,
     room_id: &str,
     event_type: &str,
     state_key: &str,
@@ -412,7 +412,7 @@ async fn matrix_voice_leave_state_key(
 /// we're about to join so we don't leave-then-immediately-join the same key).
 async fn matrix_voice_clear_my_memberships_in_room(
     client: &Client,
-    http: &reqwest::Client,
+    http: &reqwest_middleware::ClientWithMiddleware,
     room_id: &str,
     skip_state_key: Option<&str>,
 ) -> Result<(), String> {
@@ -463,7 +463,7 @@ async fn matrix_voice_clear_my_memberships_in_room(
 /// Runs room cleanups in parallel to reduce total time.
 pub(crate) async fn matrix_voice_leave_all_joined_rooms(
     client: &Client,
-    http: &reqwest::Client,
+    http: &reqwest_middleware::ClientWithMiddleware,
     join_room_state_key: Option<(&str, &str)>,
 ) -> Result<(), String> {
     let room_ids: Vec<String> = client
@@ -549,7 +549,7 @@ fn make_livekit_admin_jwt(
 
 /// Remove a single participant from a LiveKit room via Room Service API.
 async fn livekit_remove_participant(
-    http: &reqwest::Client,
+    http: &reqwest_middleware::ClientWithMiddleware,
     lk_url: &str,
     room_admin_jwt: &str,
     room_name: &str,
@@ -580,7 +580,7 @@ async fn livekit_remove_participant(
 /// helpers and the `make_livekit_admin_jwt` helper to avoid code duplication.
 /// Best-effort: errors are logged but do not block the join flow.
 async fn kick_other_devices_from_livekit(
-    http: &reqwest::Client,
+    http: &reqwest_middleware::ClientWithMiddleware,
     user_id: &str,
     our_device_id: &str,
     config: &LivekitConfig,
@@ -1051,7 +1051,7 @@ fn parse_livekit_participant_json(p: &serde_json::Value) -> Option<LivekitVoiceP
 }
 
 async fn livekit_list_rooms(
-    http: &reqwest::Client,
+    http: &reqwest_middleware::ClientWithMiddleware,
     lk_url: &str,
     admin_jwt: &str,
 ) -> Result<Vec<serde_json::Value>, String> {
@@ -1082,7 +1082,7 @@ async fn livekit_list_rooms(
 }
 
 async fn livekit_list_participants_for_room(
-    http: &reqwest::Client,
+    http: &reqwest_middleware::ClientWithMiddleware,
     lk_url: &str,
     room_admin_jwt: &str,
     livekit_room_name: &str,
@@ -1119,7 +1119,7 @@ async fn livekit_list_participants_for_room(
 
 /// Second value: SFU room name to persist when it was discovered (not read from cache).
 async fn fetch_livekit_voice_snapshot_for_matrix_room(
-    http: &reqwest::Client,
+    http: &reqwest_middleware::ClientWithMiddleware,
     config: &LivekitConfig,
     matrix_room_id: &str,
     cached_sfu_room_name: Option<&str>,

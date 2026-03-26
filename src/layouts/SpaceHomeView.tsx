@@ -1,6 +1,6 @@
 import { useState, useEffect, useRef, useCallback } from "react";
 import { invoke } from "@tauri-apps/api/core";
-import { Hash, Volume2, Users, LogIn, Check, Mail } from "lucide-react";
+import { Hash, Volume2, Users, LogIn, Check, Mail, RefreshCw } from "lucide-react";
 import { useTheme } from "../theme/ThemeContext";
 import { Room } from "../types/matrix";
 import { VOICE_ROOM_TYPE } from "../utils/matrix";
@@ -100,11 +100,33 @@ export default function SpaceHomeView({ space, onSelectRoom, onRoomsChanged }: S
       <div style={{
         flex: 1,
         display: "flex",
+        flexDirection: "column",
         alignItems: "center",
         justifyContent: "center",
-        color: "#f38ba8",
+        gap: spacing.unit * 3,
       }}>
-        {error}
+        <span style={{ color: "#f38ba8", fontSize: typography.fontSizeSmall }}>
+          {error}
+        </span>
+        <button
+          onClick={fetchInfo}
+          style={{
+            display: "flex",
+            alignItems: "center",
+            gap: spacing.unit,
+            padding: `${spacing.unit * 1.5}px ${spacing.unit * 3}px`,
+            borderRadius: spacing.unit * 1.5,
+            border: "none",
+            backgroundColor: palette.accent,
+            color: "#fff",
+            fontSize: typography.fontSizeSmall,
+            fontWeight: typography.fontWeightBold,
+            cursor: "pointer",
+          }}
+        >
+          <RefreshCw size={13} />
+          Retry
+        </button>
       </div>
     );
   }

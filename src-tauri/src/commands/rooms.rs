@@ -21,6 +21,34 @@ fn store_path(app: &tauri::AppHandle) -> Result<std::path::PathBuf, String> {
         .join("matrix_store"))
 }
 
+/// Build a matrix-sdk Client with automatic retries for transient failures
+/// (DNS hiccups, brief network outages). Tries up to 3 times with increasing
+/// delays before giving up.
+async fn build_client_with_retry(
+    homeserver: &str,
+    store_path: &std::path::Path,
+) -> Result<Client, String> {
+    let mut last_err = String::new();
+    for attempt in 0u64..3 {
+        match Client::builder()
+            .homeserver_url(homeserver)
+            .sqlite_store(store_path, None)
+            .build()
+            .await
+        {
+            Ok(c) => return Ok(c),
+            Err(e) => {
+                last_err = format!("Failed to create client: {}", fmt_error_chain(&e));
+                log::warn!("build_client attempt {}/3 failed: {}", attempt + 1, last_err);
+                if attempt < 2 {
+                    tokio::time::sleep(Duration::from_millis(500 * (attempt + 1))).await;
+                }
+            }
+        }
+    }
+    Err(format!("{} (retried 3 times)", last_err))
+}
+
 /// Register a new account on the homeserver.
 ///
 /// Handles the UIAA flow for `m.login.registration_token` + `m.login.dummy`.
@@ -166,20 +194,33 @@ async fn finish_registration(
         let _ = std::fs::remove_dir_all(&sp);
     }
 
-    let client = Client::builder()
-        .homeserver_url(homeserver)
-        .sqlite_store(&sp, None)
-        .build()
-        .await
-        .map_err(|e| format!("Failed to create client: {}", fmt_error_chain(&e)))?;
+    let client = build_client_with_retry(homeserver, &sp).await?;
 
-    client
-        .matrix_auth()
-        .login_username(username, password)
-        .initial_device_display_name("Pax")
-        .send()
-        .await
-        .map_err(|e| format!("Post-registration login failed: {}", fmt_error_chain(&e)))?;
+    {
+        let mut last_err = String::new();
+        let mut succeeded = false;
+        for attempt in 0u32..3 {
+            match client
+                .matrix_auth()
+                .login_username(username, password)
+                .initial_device_display_name("Pax")
+                .send()
+                .await
+            {
+                Ok(_) => { succeeded = true; break; }
+                Err(e) => {
+                    last_err = fmt_error_chain(&e);
+                    log::warn!("Post-registration login attempt {}/3 failed: {}", attempt + 1, last_err);
+                    if attempt < 2 {
+                        tokio::time::sleep(Duration::from_millis(1000 * (attempt as u64 + 1))).await;
+                    }
+                }
+            }
+        }
+        if !succeeded {
+            return Err(format!("Post-registration login failed: {} (retried 3 times)", last_err));
+        }
+    }
 
     tokio::time::timeout(
         Duration::from_secs(30),
@@ -233,21 +274,34 @@ pub async fn login(
     }
 
     log::info!("login: building client for {}", homeserver);
-    let client = Client::builder()
-        .homeserver_url(&homeserver)
-        .sqlite_store(&sp, None)
-        .build()
-        .await
-        .map_err(|e| format!("Failed to create client: {}", fmt_error_chain(&e)))?;
+    let client = build_client_with_retry(&homeserver, &sp).await?;
 
     log::info!("login: authenticating...");
-    client
-        .matrix_auth()
-        .login_username(&username, &password)
-        .initial_device_display_name("Pax")
-        .send()
-        .await
-        .map_err(|e| format!("Login failed: {}", fmt_error_chain(&e)))?;
+    {
+        let mut last_err = String::new();
+        let mut succeeded = false;
+        for attempt in 0u32..3 {
+            match client
+                .matrix_auth()
+                .login_username(&username, &password)
+                .initial_device_display_name("Pax")
+                .send()
+                .await
+            {
+                Ok(_) => { succeeded = true; break; }
+                Err(e) => {
+                    last_err = fmt_error_chain(&e);
+                    log::warn!("Login attempt {}/3 failed: {}", attempt + 1, last_err);
+                    if attempt < 2 {
+                        tokio::time::sleep(Duration::from_millis(1000 * (attempt as u64 + 1))).await;
+                    }
+                }
+            }
+        }
+        if !succeeded {
+            return Err(format!("Login failed: {} (retried 3 times)", last_err));
+        }
+    }
 
     log::info!("login: running initial sync...");
     tokio::time::timeout(
@@ -297,12 +351,7 @@ pub async fn restore_session(
     let sp = store_path(&app)?;
 
     log::info!("restore_session: building client for {}", creds.homeserver);
-    let client = Client::builder()
-        .homeserver_url(&creds.homeserver)
-        .sqlite_store(&sp, None)
-        .build()
-        .await
-        .map_err(|e| format!("Failed to create client: {}", fmt_error_chain(&e)))?;
+    let client = build_client_with_retry(&creds.homeserver, &sp).await?;
 
     let user_id = matrix_sdk::ruma::UserId::parse(&sd.user_id)
         .map_err(|e| format!("Invalid user ID: {e}"))?;
@@ -322,11 +371,43 @@ pub async fn restore_session(
         .await
         .map_err(|e| format!("Failed to restore session: {}", fmt_error_chain(&e)))?;
 
-    // Quick token validity check (lightweight /account/whoami call)
-    tokio::time::timeout(Duration::from_secs(5), client.whoami())
-        .await
-        .map_err(|_| "Token check timed out".to_string())?
-        .map_err(|e| format!("Session expired: {e}"))?;
+    // Quick token validity check (lightweight /account/whoami call) with retries
+    {
+        let mut last_err = String::new();
+        let mut succeeded = false;
+        for attempt in 0u32..3 {
+            match tokio::time::timeout(Duration::from_secs(5), client.whoami()).await {
+                Ok(Ok(_)) => { succeeded = true; break; }
+                Ok(Err(e)) => {
+                    let err_str = format!("{e}");
+                    // Transient network errors (DNS, connection) — retry
+                    let is_transient = err_str.contains("dns")
+                        || err_str.contains("connect")
+                        || err_str.contains("sending request")
+                        || err_str.contains("lookup");
+                    if !is_transient {
+                        // Likely auth error (expired token, etc.) — fail immediately
+                        return Err(format!("Session expired: {e}"));
+                    }
+                    last_err = format!("Connection failed: {}", err_str);
+                    log::warn!("whoami attempt {}/3 failed (transient): {}", attempt + 1, err_str);
+                    if attempt < 2 {
+                        tokio::time::sleep(Duration::from_millis(1000 * (attempt as u64 + 1))).await;
+                    }
+                }
+                Err(_) => {
+                    last_err = "Token check timed out".to_string();
+                    log::warn!("whoami attempt {}/3 timed out", attempt + 1);
+                    if attempt < 2 {
+                        tokio::time::sleep(Duration::from_millis(1000 * (attempt as u64 + 1))).await;
+                    }
+                }
+            }
+        }
+        if !succeeded {
+            return Err(format!("{} (retried 3 times)", last_err));
+        }
+    }
 
     log::info!("restore_session: valid — user_id={}", user_id);
 

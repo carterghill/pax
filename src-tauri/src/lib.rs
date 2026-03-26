@@ -44,7 +44,7 @@ pub struct AuthConfig {
 
 pub struct AppState {
     pub client: Mutex<Option<Client>>,
-    pub http_client: reqwest::Client,
+    pub http_client: reqwest_middleware::ClientWithMiddleware,
     pub presence_map: Arc<Mutex<HashMap<String, String>>>,
     pub avatar_cache: Arc<Mutex<HashMap<String, String>>>,
     pub sync_running: Arc<Mutex<bool>>,
@@ -131,7 +131,21 @@ pub fn run() {
 
     let state = Arc::new(AppState {
         client: Mutex::new(None),
-        http_client: reqwest::Client::new(),
+        http_client: {
+            use reqwest_middleware::ClientBuilder;
+            use reqwest_retry::{RetryTransientMiddleware, policies::ExponentialBackoff};
+
+            let retry_policy = ExponentialBackoff::builder()
+                .retry_bounds(
+                    std::time::Duration::from_millis(250),
+                    std::time::Duration::from_secs(3),
+                )
+                .build_with_max_retries(3);
+
+            ClientBuilder::new(reqwest::Client::new())
+                .with(RetryTransientMiddleware::new_with_policy(retry_policy))
+                .build()
+        },
         presence_map: Arc::new(Mutex::new(HashMap::new())),
         avatar_cache: Arc::new(Mutex::new(HashMap::new())),
         sync_running: Arc::new(Mutex::new(false)),
