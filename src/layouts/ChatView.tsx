@@ -49,9 +49,10 @@ function TypingIndicator({
   }
 
   const bg = palette.bgPrimary;
-  const fadePadTop = spacing.unit * 6;
-  const fadePadBottom = spacing.unit * 2;
-  const fadePadX = spacing.unit * 3;
+  const fadeHeight = spacing.unit * 4;
+  const rowPadY = spacing.unit * 1;
+  const rowPadX = spacing.unit * 3;
+  const fadeMask = "linear-gradient(to bottom, transparent, black)";
 
   return (
     <div
@@ -66,11 +67,16 @@ function TypingIndicator({
     >
       <div
         style={{
-          paddingTop: fadePadTop,
-          paddingBottom: fadePadBottom,
-          paddingLeft: fadePadX,
-          paddingRight: fadePadX,
-          backgroundImage: `linear-gradient(to bottom, transparent 0%, ${bg} 72%, ${bg} 100%)`,
+          height: fadeHeight,
+          backgroundColor: bg,
+          maskImage: fadeMask,
+          WebkitMaskImage: fadeMask,
+        }}
+      />
+      <div
+        style={{
+          padding: `${0}px ${rowPadX}px ${rowPadY}px`,
+          backgroundColor: bg,
           fontSize: typography.fontSizeSmall,
           color: palette.textSecondary,
           display: "flex",
