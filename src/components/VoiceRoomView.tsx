@@ -41,8 +41,8 @@ export default function VoiceRoomView({
     startScreenShare: onStartScreenShare,
     enumerateScreenShareWindows: onEnumerateScreenShareWindows,
     stopScreenShare: onStopScreenShare,
-    getScreenSharePreset: onGetScreenSharePreset,
-    setScreenSharePreset: onSetScreenSharePreset,
+    getScreenShareQuality: onGetScreenShareQuality,
+    setScreenShareQuality: onSetScreenShareQuality,
     getNoiseSuppressionConfig: onGetNoiseSuppressionConfig,
     setNoiseSuppressionConfig: onSetNoiseSuppressionConfig,
     setParticipantVolume: onSetParticipantVolume,
@@ -51,7 +51,7 @@ export default function VoiceRoomView({
   const { getVolume, setVolume } = useUserVolume();
   const [screenShareMenuOpen, setScreenShareMenuOpen] = useState(false);
   const [generalSettingsOpen, setGeneralSettingsOpen] = useState(false);
-  const [screenSharePreset, setScreenSharePreset] = useState<"720p" | "1080p">("1080p");
+  const [screenShareQuality, setScreenShareQuality] = useState<"low" | "medium" | "high">("high");
   const [isStartingScreenShare, setIsStartingScreenShare] = useState(false);
   const [windowPickerOpen, setWindowPickerOpen] = useState(false);
   const [noiseConfig, setNoiseConfig] = useState({ extraAttenuation: 0.1, agcTargetRms: 6000 });
@@ -70,9 +70,9 @@ export default function VoiceRoomView({
   const [windowListLoading, setWindowListLoading] = useState(false);
 
   useEffect(() => {
-    onGetScreenSharePreset().then(setScreenSharePreset).catch(() => {});
+    onGetScreenShareQuality().then(setScreenShareQuality).catch(() => {});
     onGetNoiseSuppressionConfig().then(setNoiseConfig).catch(() => {});
-  }, [onGetScreenSharePreset, onGetNoiseSuppressionConfig]);
+  }, [onGetScreenShareQuality, onGetNoiseSuppressionConfig]);
 
   const startShare = useCallback(
     async (mode: "screen" | "window", windowTitle?: string) => {
@@ -98,23 +98,16 @@ export default function VoiceRoomView({
     }
   }, [onStopScreenShare]);
 
-  const setPresetAndRestartIfNeeded = useCallback(
-    async (preset: "720p" | "1080p") => {
-      setScreenSharePreset(preset);
+  const changeQuality = useCallback(
+    async (quality: "low" | "medium" | "high") => {
+      setScreenShareQuality(quality);
       try {
-        await onSetScreenSharePreset(preset);
-        if (!callState.isLocalScreenSharing) return;
-        setIsStartingScreenShare(true);
-        const activeShare = activeShareRef.current;
-        if (!activeShare) return;
-        await onStopScreenShare();
-        await new Promise((resolve) => setTimeout(resolve, 200));
-        await onStartScreenShare(activeShare.mode, activeShare.windowTitle);
+        await onSetScreenShareQuality(quality);
       } catch (e) {
-        console.error("Failed to apply screen share preset:", e);
+        console.error("Failed to change screen share quality:", e);
       }
     },
-    [callState.isLocalScreenSharing, onSetScreenSharePreset, onStartScreenShare, onStopScreenShare]
+    [onSetScreenShareQuality]
   );
 
   useEffect(() => {
@@ -950,23 +943,23 @@ export default function VoiceRoomView({
                   Screen share quality
                 </div>
                 <div style={{ display: "flex", gap: spacing.unit }}>
-                  {(["720p", "1080p"] as const).map((p) => (
+                  {(["low", "medium", "high"] as const).map((q) => (
                     <button
-                      key={p}
-                      onClick={() => { void setPresetAndRestartIfNeeded(p); }}
+                      key={q}
+                      onClick={() => { void changeQuality(q); }}
                       style={{
                         flex: 1,
                         padding: `${spacing.unit}px ${spacing.unit * 2}px`,
-                        backgroundColor: screenSharePreset === p ? palette.accent : palette.bgTertiary,
-                        color: screenSharePreset === p ? "#fff" : palette.textPrimary,
-                        border: `1px solid ${screenSharePreset === p ? palette.accent : palette.border}`,
+                        backgroundColor: screenShareQuality === q ? palette.accent : palette.bgTertiary,
+                        color: screenShareQuality === q ? "#fff" : palette.textPrimary,
+                        border: `1px solid ${screenShareQuality === q ? palette.accent : palette.border}`,
                         borderRadius: spacing.unit,
                         cursor: "pointer",
                         fontSize: typography.fontSizeSmall,
-                        fontWeight: screenSharePreset === p ? 600 : 400,
+                        fontWeight: screenShareQuality === q ? 600 : 400,
                       }}
                     >
-                      {p}
+                      {q.charAt(0).toUpperCase() + q.slice(1)}
                     </button>
                   ))}
                 </div>

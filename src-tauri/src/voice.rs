@@ -15,8 +15,8 @@ use tauri::{AppHandle, Emitter};
 use tokio::sync::mpsc;
 use tokio::time::{interval_at, Instant as TokioInstant, MissedTickBehavior};
 use livekit::prelude::*;
-use livekit::track::{LocalAudioTrack, LocalTrack, RemoteTrack, TrackSource};
-use livekit::options::TrackPublishOptions;
+use livekit::track::{LocalAudioTrack, LocalTrack, LocalVideoTrack, RemoteTrack, TrackSource};
+use livekit::options::{TrackPublishOptions, VideoEncoding};
 use livekit::webrtc::{
     audio_frame::AudioFrame,
     audio_source::native::NativeAudioSource,
@@ -464,6 +464,87 @@ impl VoiceManager {
             st.is_local_screen_sharing = true;
         }
         emit_state(app_handle, &room_id, &local_identity, &audio_state, false, true, None);
+        Ok(())
+    }
+
+    /// Change screen share quality on-the-fly by republishing the video track
+    /// with a new bitrate. The capture thread keeps running — only the track
+    /// is unpublished and re-created from the same NativeVideoSource.
+    pub async fn set_screen_share_quality(
+        &self,
+        quality: crate::screen::ScreenShareQuality,
+        _app_handle: &AppHandle,
+    ) -> Result<(), String> {
+        crate::screen::set_screen_share_quality(quality);
+
+        let room = {
+            let guard = self.session.lock();
+            let session = guard.as_ref().ok_or("Not in a voice call")?;
+            if session._screen_handle.is_none() {
+                // Not currently sharing — just store the quality for next time
+                return Ok(());
+            }
+            session.room.clone()
+        };
+
+        let lp = room.local_participant();
+
+        // Unpublish old screenshare video track (keep audio)
+        let video_sids: Vec<_> = lp
+            .track_publications()
+            .iter()
+            .filter(|(_, p)| p.source() == TrackSource::Screenshare)
+            .map(|(sid, _)| sid.clone())
+            .collect();
+        for sid in video_sids {
+            let _ = lp.unpublish_track(&sid).await;
+        }
+
+        // Create a new LocalVideoTrack from the same video source
+        let video_source = {
+            let guard = self.session.lock();
+            let session = guard.as_ref().ok_or("Not in a voice call")?;
+            let handle = session._screen_handle.as_ref().ok_or("No active screen share")?;
+            handle.video_source.clone()
+        };
+
+        let new_track = LocalVideoTrack::create_video_track(
+            "screenshare",
+            livekit::webrtc::video_source::RtcVideoSource::Native(video_source),
+        );
+
+        let codec = crate::codec::resolve_codec();
+        log::info!(
+            "Republishing screen track with quality={} bitrate={}",
+            quality.label(),
+            quality.max_bitrate()
+        );
+        lp.publish_track(
+            LocalTrack::Video(new_track.clone()),
+            TrackPublishOptions {
+                source: TrackSource::Screenshare,
+                video_codec: codec,
+                simulcast: false,
+                video_encoding: Some(VideoEncoding {
+                    max_bitrate: quality.max_bitrate(),
+                    max_framerate: quality.fps() as f64,
+                }),
+                ..Default::default()
+            },
+        )
+        .await
+        .map_err(|e| format!("Failed to republish screen track: {}", e))?;
+
+        // Update the handle's track reference
+        {
+            let mut guard = self.session.lock();
+            let session = guard.as_mut().ok_or("Not in a voice call")?;
+            if let Some(handle) = session._screen_handle.as_mut() {
+                handle.track = new_track;
+            }
+        }
+
+        log::info!("Screen share quality changed to {}", quality.label());
         Ok(())
     }
 
