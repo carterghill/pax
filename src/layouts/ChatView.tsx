@@ -48,39 +48,60 @@ function TypingIndicator({
     text = `${ordered[0]} and ${ordered.length - 1} others are typing`;
   }
 
+  const bg = palette.bgPrimary;
+  const fadePadTop = spacing.unit * 6;
+  const fadePadBottom = spacing.unit * 2;
+  const fadePadX = spacing.unit * 3;
+
   return (
-    <div style={{
-      padding: `${spacing.unit}px ${spacing.unit * 3}px`,
-      fontSize: typography.fontSizeSmall,
-      color: palette.textSecondary,
-      display: "flex",
-      alignItems: "center",
-      gap: spacing.unit,
-      minHeight: spacing.unit * 5,
-    }}>
-      {/* Animated dots */}
-      <span style={{ display: "inline-flex", gap: 2 }}>
-        {[0, 1, 2].map((i) => (
-          <span
-            key={i}
-            style={{
-              width: 4,
-              height: 4,
-              borderRadius: "50%",
-              backgroundColor: palette.textSecondary,
-              animation: `typingDot 1.4s infinite`,
-              animationDelay: `${i * 0.2}s`,
-            }}
-          />
-        ))}
-      </span>
-      <span>{text}</span>
-      <style>{`
-        @keyframes typingDot {
-          0%, 60%, 100% { opacity: 0.3; transform: translateY(0); }
-          30% { opacity: 1; transform: translateY(-2px); }
-        }
-      `}</style>
+    <div
+      style={{
+        position: "absolute",
+        left: 0,
+        right: 0,
+        bottom: "100%",
+        zIndex: 2,
+        pointerEvents: "none",
+      }}
+    >
+      <div
+        style={{
+          paddingTop: fadePadTop,
+          paddingBottom: fadePadBottom,
+          paddingLeft: fadePadX,
+          paddingRight: fadePadX,
+          backgroundImage: `linear-gradient(to bottom, transparent 0%, ${bg} 72%, ${bg} 100%)`,
+          fontSize: typography.fontSizeSmall,
+          color: palette.textSecondary,
+          display: "flex",
+          alignItems: "center",
+          gap: spacing.unit,
+          minHeight: spacing.unit * 5,
+        }}
+      >
+        <span style={{ display: "inline-flex", gap: 2 }}>
+          {[0, 1, 2].map((i) => (
+            <span
+              key={i}
+              style={{
+                width: 4,
+                height: 4,
+                borderRadius: "50%",
+                backgroundColor: palette.textSecondary,
+                animation: `typingDot 1.4s infinite`,
+                animationDelay: `${i * 0.2}s`,
+              }}
+            />
+          ))}
+        </span>
+        <span>{text}</span>
+        <style>{`
+          @keyframes typingDot {
+            0%, 60%, 100% { opacity: 0.3; transform: translateY(0); }
+            30% { opacity: 1; transform: translateY(-2px); }
+          }
+        `}</style>
+      </div>
     </div>
   );
 }
@@ -218,6 +239,7 @@ export default function ChatView({
           flexDirection: "column",
           minWidth: 0,
           minHeight: 0,
+          backgroundColor: palette.bgPrimary,
         }}>
           <MessageList
             messages={messages}
@@ -234,19 +256,21 @@ export default function ChatView({
             onMessageRemoved={removeMessageById}
           />
 
-          <TypingIndicator
-            names={typingNames}
-            localTyping={localTyping}
-          />
-          <MessageInput
-            key={room.id}
-            roomId={room.id}
-            roomName={room.name}
-            onMessageSent={refresh}
-            editingMessage={editingMessage}
-            onCancelEdit={() => setEditingMessage(null)}
-            onLocalTypingActive={setLocalTyping}
-          />
+          <div style={{ position: "relative", flexShrink: 0, zIndex: 1 }}>
+            <TypingIndicator
+              names={typingNames}
+              localTyping={localTyping}
+            />
+            <MessageInput
+              key={room.id}
+              roomId={room.id}
+              roomName={room.name}
+              onMessageSent={refresh}
+              editingMessage={editingMessage}
+              onCancelEdit={() => setEditingMessage(null)}
+              onLocalTypingActive={setLocalTyping}
+            />
+          </div>
         </div>
 
         {/* User menu panel with resizable inside border */}
