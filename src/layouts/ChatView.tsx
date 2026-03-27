@@ -27,17 +27,25 @@ interface TypingPayload {
   displayNames: string[];
 }
 
-function TypingIndicator({ names }: { names: string[] }) {
+function TypingIndicator({
+  names,
+  localTyping,
+}: {
+  names: string[];
+  /** True while this client is sending typing=true to the homeserver. */
+  localTyping?: boolean;
+}) {
   const { palette, typography, spacing } = useTheme();
-  if (names.length === 0) return null;
+  if (!localTyping && names.length === 0) return null;
 
+  const ordered = localTyping ? ["You", ...names] : [...names];
   let text: string;
-  if (names.length === 1) {
-    text = `${names[0]} is typing`;
-  } else if (names.length === 2) {
-    text = `${names[0]} and ${names[1]} are typing`;
+  if (ordered.length === 1) {
+    text = ordered[0] === "You" ? "You are typing" : `${ordered[0]} is typing`;
+  } else if (ordered.length === 2) {
+    text = `${ordered[0]} and ${ordered[1]} are typing`;
   } else {
-    text = `${names[0]} and ${names.length - 1} others are typing`;
+    text = `${ordered[0]} and ${ordered.length - 1} others are typing`;
   }
 
   return (
@@ -96,6 +104,7 @@ export default function ChatView({
   const redactionPolicy = useRoomRedactionPolicy(room.id);
   const { palette, typography, spacing } = useTheme();
   const [typingNames, setTypingNames] = useState<string[]>([]);
+  const [localTyping, setLocalTyping] = useState(false);
   const [showUsers, setShowUsers] = useState(true);
   const [editingMessage, setEditingMessage] = useState<EditingMessageRef | null>(null);
 
@@ -111,18 +120,20 @@ export default function ChatView({
   // Listen for typing events in this room
   useEffect(() => {
     const unlisten = listen<TypingPayload>("typing", (event) => {
-      const { roomId, displayNames } = event.payload;
+      const { roomId, displayNames, userIds } = event.payload;
       if (roomId !== room.id) return;
-      setTypingNames(displayNames);
+      const filtered = displayNames.filter((_, i) => userIds[i] !== userId);
+      setTypingNames(filtered);
     });
 
     // Clear typing when switching rooms
     setTypingNames([]);
+    setLocalTyping(false);
 
     return () => {
       unlisten.then((fn) => fn());
     };
-  }, [room.id]);
+  }, [room.id, userId]);
 
   useEffect(() => {
     setEditingMessage(null);
@@ -225,6 +236,7 @@ export default function ChatView({
 
           <TypingIndicator
             names={typingNames}
+            localTyping={localTyping}
           />
           <MessageInput
             key={room.id}
@@ -233,6 +245,7 @@ export default function ChatView({
             onMessageSent={refresh}
             editingMessage={editingMessage}
             onCancelEdit={() => setEditingMessage(null)}
+            onLocalTypingActive={setLocalTyping}
           />
         </div>
 

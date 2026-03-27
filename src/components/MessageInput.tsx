@@ -62,6 +62,8 @@ interface MessageInputProps {
   onMessageSent: () => void;
   editingMessage?: EditingMessageRef | null;
   onCancelEdit?: () => void;
+  /** Fires when this client starts/stops sending typing notices (Matrix sync usually omits self). */
+  onLocalTypingActive?: (active: boolean) => void;
 }
 
 const COMPOSER_POPOVER_Z = 12_000;
@@ -81,6 +83,7 @@ export default function MessageInput({
   onMessageSent,
   editingMessage = null,
   onCancelEdit,
+  onLocalTypingActive,
 }: MessageInputProps) {
   const [plainText, setPlainText] = useState("");
   const [sending, setSending] = useState(false);
@@ -141,9 +144,10 @@ export default function MessageInput({
     (typing: boolean) => {
       if (typing === isTyping.current) return;
       isTyping.current = typing;
+      onLocalTypingActive?.(typing);
       invoke("send_typing_notice", { roomId, typing }).catch(() => {});
     },
-    [roomId],
+    [roomId, onLocalTypingActive],
   );
 
   useEffect(() => {
@@ -152,9 +156,16 @@ export default function MessageInput({
       if (isTyping.current) {
         invoke("send_typing_notice", { roomId, typing: false }).catch(() => {});
         isTyping.current = false;
+        onLocalTypingActive?.(false);
       }
     };
-  }, [roomId]);
+  }, [roomId, onLocalTypingActive]);
+
+  useEffect(() => {
+    if (!editingMessage) return;
+    if (typingTimeout.current) clearTimeout(typingTimeout.current);
+    sendTyping(false);
+  }, [editingMessage, sendTyping]);
 
   // ─── Editor input handler ─────────────────────────────────────────────────
 
