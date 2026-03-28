@@ -140,6 +140,51 @@ export function useVoiceCall() {
     };
   }, []);
 
+  // Listen for force-disconnect events from the Rust backend.
+  // Emitted when the m.call.member refresh loop fails too many times
+  // (e.g. Matrix membership expired while AFK and couldn't be restored).
+  useEffect(() => {
+    let unlisten: UnlistenFn | null = null;
+    listen<string>("voice-force-disconnect", (event) => {
+      const roomId = event.payload;
+      console.warn(
+        `[Pax] Force-disconnecting from voice room ${roomId} — Matrix call membership expired`
+      );
+      if (connectedRoomIdRef.current === roomId) {
+        playSound("ui/pop_close");
+        setState((prev) => ({
+          ...prev,
+          connectedRoomId: null,
+          isConnecting: false,
+          isMicEnabled: false,
+          isDeafened: false,
+          isNoiseSuppressed: false,
+          screenSharingOwners: [],
+          isLocalScreenSharing: false,
+          error: "Disconnected: call membership expired",
+          participants: [],
+          disconnectingFromRoomId: roomId,
+        }));
+        invoke("voice_disconnect", { roomId }).catch((e) => {
+          console.error("Failed to disconnect after force-disconnect:", e);
+        });
+        // Clear disconnecting state after Matrix has had time to sync
+        setTimeout(() => {
+          setState((prev) =>
+            prev.disconnectingFromRoomId === roomId
+              ? { ...prev, disconnectingFromRoomId: null }
+              : prev
+          );
+        }, 4000);
+      }
+    }).then((fn) => {
+      unlisten = fn;
+    });
+    return () => {
+      if (unlisten) unlisten();
+    };
+  }, []);
+
   const connect = useCallback(async (roomId: string) => {
     if (connectedRoomIdRef.current === roomId) return;
     if (isConnectingRef.current) return;

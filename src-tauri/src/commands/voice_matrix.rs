@@ -8,7 +8,7 @@ use jsonwebtoken::{encode, EncodingKey, Header};
 use matrix_sdk::ruma::events::StateEventType;
 use matrix_sdk::{Client, Room};
 use serde::Serialize;
-use tauri::State;
+use tauri::{Emitter, State};
 
 use crate::types::{LivekitVoiceParticipantInfo, VoiceJoinResult, VoiceParticipant};
 use crate::{screen, voice, AppState, LivekitConfig};
@@ -22,7 +22,11 @@ const VOICE_ROOM_TYPE: &str = "org.matrix.msc3417.call";
 /// `m.call.member` `expires` field (ms). Membership is inactive after `origin_server_ts + expires`.
 const VOICE_CALL_MEMBER_EXPIRES_MS: u64 = 7_200_000;
 /// Re-send `m.call.member` on this interval so the roster stays valid while connected.
-const CALL_MEMBER_REFRESH_INTERVAL_SECS: u64 = 45 * 60;
+/// 10 minutes gives ~12 chances before the 2-hour expiry lapses, and lets us
+/// recover quickly from a single failed refresh.
+const CALL_MEMBER_REFRESH_INTERVAL_SECS: u64 = 10 * 60;
+/// How many consecutive refresh failures before we force-disconnect from the call.
+const MAX_REFRESH_FAILURES: u32 = 3;
 
 /// Check whether a call.member state event JSON represents an active participant.
 /// Handles both MSC4143 (per-device content) and MSC3401 (memberships array) formats,
@@ -232,6 +236,126 @@ pub(crate) async fn matrix_voice_refresh_call_member(
     matrix_voice_put_call_member(client, http, room_id)
         .await
         .map(|_| ())
+}
+
+/// Verify our `m.call.member` state event is active on the server by GETting it
+/// directly via the Client-Server API (bypasses the local SDK store cache).
+/// Returns `true` if our event exists AND is not expired.
+async fn verify_call_member_on_server(
+    client: &Client,
+    http: &reqwest::Client,
+    room_id: &str,
+) -> Result<bool, String> {
+    let user_id = client.user_id().ok_or("No user ID")?;
+    let device_id = client.device_id().ok_or("No device ID")?;
+    let state_key = format!("_{}_{}_{}", user_id, device_id, "m.call");
+    let homeserver = client.homeserver().to_string();
+    let access_token = client.access_token().ok_or("No access token")?;
+
+    let state_url = format!(
+        "{}/_matrix/client/v3/rooms/{}/state/{}/{}",
+        homeserver.trim_end_matches('/'),
+        urlencoding::encode(room_id),
+        urlencoding::encode("org.matrix.msc3401.call.member"),
+        urlencoding::encode(&state_key),
+    );
+
+    let resp = http
+        .get(&state_url)
+        .timeout(Duration::from_secs(10))
+        .bearer_auth(access_token.to_string())
+        .send()
+        .await
+        .map_err(|e| format!("verify call.member GET: {}", fmt_error_chain(&e)))?;
+
+    if resp.status().as_u16() == 404 {
+        return Ok(false);
+    }
+    if !resp.status().is_success() {
+        return Err(format!("verify call.member GET status {}", resp.status()));
+    }
+
+    let json: serde_json::Value = resp
+        .json()
+        .await
+        .map_err(|e| format!("verify call.member JSON: {e}"))?;
+
+    // Check if content has "application" (active MSC4143 format)
+    let has_application = json.get("application").is_some();
+    if !has_application {
+        return Ok(false);
+    }
+
+    // NOTE: The GET /state/ endpoint returns just the content, not the full
+    // event with origin_server_ts, so we can't check expiry here. The presence
+    // of "application" alone means the event exists and hasn't been cleared.
+    Ok(true)
+}
+
+/// Attempt to ensure our call.member is active: verify on server, re-PUT if missing.
+/// Returns Ok(true) if state is confirmed active, Ok(false) if we gave up.
+async fn ensure_call_member_active(
+    client: &Client,
+    http: &reqwest::Client,
+    room_id: &str,
+    max_attempts: u32,
+) -> Result<bool, String> {
+    for attempt in 0..max_attempts {
+        // Check server state
+        match verify_call_member_on_server(client, http, room_id).await {
+            Ok(true) => return Ok(true),
+            Ok(false) => {
+                log::warn!(
+                    "call.member not active on server (attempt {}/{}), re-PUTting",
+                    attempt + 1,
+                    max_attempts
+                );
+            }
+            Err(e) => {
+                log::warn!(
+                    "call.member verify failed (attempt {}/{}): {}",
+                    attempt + 1,
+                    max_attempts,
+                    e
+                );
+            }
+        }
+
+        // Re-PUT the state event
+        if let Err(e) = matrix_voice_refresh_call_member(client, http, room_id).await {
+            log::warn!("call.member re-PUT failed (attempt {}/{}): {}", attempt + 1, max_attempts, e);
+            if attempt + 1 < max_attempts {
+                tokio::time::sleep(Duration::from_secs(2)).await;
+            }
+            continue;
+        }
+
+        // Brief pause for the server to process, then re-verify
+        tokio::time::sleep(Duration::from_millis(500)).await;
+    }
+
+    // Final verification after all attempts
+    verify_call_member_on_server(client, http, room_id)
+        .await
+        .unwrap_or(false)
+        .then_some(true)
+        .ok_or_else(|| "call.member could not be confirmed active after retries".to_string())
+        .map(|_| true)
+}
+
+/// Force-emit a `voice-participants-changed` event so the sidebar updates immediately
+/// without waiting for the next sync response.
+async fn force_emit_voice_participants(
+    client: &Client,
+    avatar_cache: &Arc<tokio::sync::Mutex<HashMap<String, String>>>,
+    app_handle: &tauri::AppHandle,
+) {
+    let participants_by_room =
+        collect_voice_participants_for_joined_voice_rooms(client, avatar_cache).await;
+    let _ = app_handle.emit(
+        "voice-participants-changed",
+        crate::types::VoiceParticipantsChangedPayload { participants_by_room },
+    );
 }
 
 /// PUT `org.matrix.msc3401.call.member` for this device. Returns the LiveKit JWT service URL.
@@ -643,7 +767,11 @@ async fn kick_other_devices_from_livekit(
     }
 }
 
-fn start_call_member_refresh_loop(state: Arc<AppState>, room_id: String) {
+fn start_call_member_refresh_loop(
+    state: Arc<AppState>,
+    room_id: String,
+    app_handle: tauri::AppHandle,
+) {
     state.stop_call_member_refresh_loop();
     state
         .call_member_refresh_stop
@@ -655,7 +783,8 @@ fn start_call_member_refresh_loop(state: Arc<AppState>, room_id: String) {
         let mut interval =
             tokio::time::interval(Duration::from_secs(CALL_MEMBER_REFRESH_INTERVAL_SECS));
         interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
-        interval.tick().await;
+        interval.tick().await; // skip the immediate first tick
+        let mut consecutive_failures: u32 = 0;
         loop {
             interval.tick().await;
             if stop.load(Ordering::SeqCst) {
@@ -668,10 +797,71 @@ fn start_call_member_refresh_loop(state: Arc<AppState>, room_id: String) {
             let Some(ref c) = client else {
                 break;
             };
-            if let Err(e) =
-                matrix_voice_refresh_call_member(c, &st.http_client, &room_id_clone).await
-            {
-                log::warn!("m.call.member refresh failed: {}", e);
+
+            // Try to refresh, with up to 3 immediate retries on failure
+            let mut refreshed = false;
+            for attempt in 0..3u32 {
+                if stop.load(Ordering::SeqCst) {
+                    return;
+                }
+                match matrix_voice_refresh_call_member(c, &st.http_client, &room_id_clone).await {
+                    Ok(()) => {
+                        refreshed = true;
+                        break;
+                    }
+                    Err(e) => {
+                        log::warn!(
+                            "m.call.member refresh attempt {}/3 failed: {}",
+                            attempt + 1,
+                            e
+                        );
+                        if attempt < 2 {
+                            tokio::time::sleep(Duration::from_secs(5)).await;
+                        }
+                    }
+                }
+            }
+
+            if refreshed {
+                // Verify our state is actually active on the server
+                match verify_call_member_on_server(c, &st.http_client, &room_id_clone).await {
+                    Ok(true) => {
+                        consecutive_failures = 0;
+                        log::debug!("m.call.member refresh verified OK");
+                    }
+                    Ok(false) => {
+                        log::warn!("m.call.member refresh PUT succeeded but server verification failed, re-PUTting");
+                        // Try once more
+                        let _ = matrix_voice_refresh_call_member(c, &st.http_client, &room_id_clone).await;
+                        consecutive_failures += 1;
+                    }
+                    Err(e) => {
+                        log::warn!("m.call.member verify error (non-fatal): {}", e);
+                        // PUT succeeded, verification errored — count as partial success
+                        consecutive_failures = 0;
+                    }
+                }
+            } else {
+                consecutive_failures += 1;
+                log::warn!(
+                    "m.call.member refresh failed after retries ({}/{} consecutive)",
+                    consecutive_failures,
+                    MAX_REFRESH_FAILURES
+                );
+            }
+
+            if consecutive_failures >= MAX_REFRESH_FAILURES {
+                log::error!(
+                    "m.call.member refresh failed {} consecutive times — forcing disconnect",
+                    consecutive_failures
+                );
+                let _ = app_handle.emit("voice-force-disconnect", room_id_clone.clone());
+                break;
+            }
+
+            // Force-emit participant update so sidebar stays in sync
+            if refreshed {
+                force_emit_voice_participants(c, &st.avatar_cache, &app_handle).await;
             }
         }
     });
@@ -739,6 +929,10 @@ pub async fn voice_connect(
     let result = matrix_voice_join(&client, &http_client, &room_id).await?;
     let identity = client.user_id().ok_or("No user ID")?.to_string();
 
+    // Clone AppHandle before it's moved into voice_mgr.connect
+    let app_handle_for_refresh = app_handle.clone();
+    let app_handle_for_verify = app_handle.clone();
+
     // 2. Connect to LiveKit natively via the Rust SDK
     voice_mgr
         .connect(
@@ -756,7 +950,33 @@ pub async fn voice_connect(
         }
     }
 
-    start_call_member_refresh_loop(state_arc, room_id);
+    // 3. Post-join verification: confirm our call.member state is live on the server.
+    //    If not (race with cleanup, server hiccup, etc.), re-PUT with retries.
+    //    Run in a spawned task so voice_connect returns quickly to the frontend.
+    let verify_client = client.clone();
+    let verify_http = http_client.clone();
+    let verify_room_id = room_id.clone();
+    let verify_avatar_cache = state_arc.avatar_cache.clone();
+    tokio::spawn(async move {
+        // Brief delay to let the server process the join PUT
+        tokio::time::sleep(Duration::from_millis(800)).await;
+
+        match ensure_call_member_active(&verify_client, &verify_http, &verify_room_id, 3).await {
+            Ok(true) => {
+                log::info!("Post-join verification: call.member confirmed active");
+            }
+            Ok(false) | Err(_) => {
+                log::warn!("Post-join verification: call.member NOT confirmed — client may be invisible in sidebar");
+            }
+        }
+
+        // Force-emit participant update so sidebar refreshes immediately
+        // instead of waiting for the next sync response
+        force_emit_voice_participants(&verify_client, &verify_avatar_cache, &app_handle_for_verify)
+            .await;
+    });
+
+    start_call_member_refresh_loop(state_arc, room_id, app_handle_for_refresh);
 
     Ok(())
 }
