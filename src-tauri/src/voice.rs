@@ -139,9 +139,6 @@ pub struct VoiceSession {
     _screen_handle: Option<crate::screen::ScreenShareHandle>,
     /// Noise processor for tunable suppression (shared with mic callback)
     noise_proc: Arc<Mutex<NoiseProcessor>>,
-    /// Signaled by the event loop when LiveKit reconnects after a drop.
-    /// The call-member refresh loop listens on this to do an immediate refresh.
-    reconnect_notify: Arc<tokio::sync::Notify>,
 }
 impl VoiceSession {
     pub fn room_id(&self) -> &str {
@@ -239,12 +236,10 @@ impl VoiceManager {
         });
         // 6. Start event loop
         let (shutdown_tx, shutdown_rx) = mpsc::channel::<()>(1);
-        let reconnect_notify = Arc::new(tokio::sync::Notify::new());
         let evt_state = audio_state.clone();
         let evt_room_id = room_id.clone();
         let evt_room = room.clone();
         let evt_local_id = local_identity.clone();
-        let evt_reconnect = reconnect_notify.clone();
         tokio::spawn(async move {
             run_event_loop(
                 events,
@@ -254,7 +249,6 @@ impl VoiceManager {
                 evt_local_id,
                 app_handle,
                 shutdown_rx,
-                evt_reconnect,
             )
             .await;
         });
@@ -277,7 +271,6 @@ impl VoiceManager {
                 shutdown_tx,
                 _screen_handle: None,
                 noise_proc,
-                reconnect_notify,
             });
         }
         Ok(())
@@ -321,19 +314,28 @@ impl VoiceManager {
         let deafened = state.deafened;
         let room = session.room.clone();
         drop(state);
-        // Mute/unmute only the microphone track — leave screen share audio untouched
+        // Mute/unmute only the microphone track — leave screen share audio untouched.
+        // LocalTrackPublication::mute()/unmute() sends MuteTrackRequest to the LiveKit
+        // server so other participants (Element, Cinny, etc.) receive TrackMuted/TrackUnmuted.
         let publications = session.room.local_participant().track_publications();
+        let mut found_mic = false;
         for (_sid, pub_) in publications.iter() {
             if pub_.source() != TrackSource::Microphone {
                 continue;
             }
+            found_mic = true;
+            log::info!("toggle_mic: setting mic track sid={} muted={}", pub_.sid(), !mic_enabled);
             if mic_enabled {
                 pub_.unmute();
             } else {
                 pub_.mute();
             }
         }
-        update_local_status_attributes(room, mic_enabled, deafened);
+        if !found_mic {
+            log::warn!("toggle_mic: no Microphone publication found in local_participant — mute signal not sent to server");
+        }
+        // Deafen is Pax-specific — best-effort attribute (may fail without canUpdateOwnMetadata)
+        update_local_deafen_attribute(room, deafened);
         Ok(mic_enabled)
     }
 
@@ -356,10 +358,9 @@ impl VoiceManager {
         let mut st = session.audio_state.lock();
         st.deafened = !st.deafened;
         let deafened = st.deafened;
-        let mic_enabled = st.mic_enabled;
         let room = session.room.clone();
         drop(st);
-        update_local_status_attributes(room, mic_enabled, deafened);
+        update_local_deafen_attribute(room, deafened);
         Ok(deafened)
     }
 
@@ -405,13 +406,6 @@ impl VoiceManager {
         let guard = self.session.lock();
         let s = guard.as_ref()?;
         Some((s.room_id.clone(), s.room.name()))
-    }
-
-    /// Get the reconnect notify handle for the current session (if any).
-    /// Used by the call-member refresh loop to wake up immediately on LiveKit reconnection.
-    pub fn reconnect_notify(&self) -> Option<Arc<tokio::sync::Notify>> {
-        let guard = self.session.lock();
-        guard.as_ref().map(|s| s.reconnect_notify.clone())
     }
 
     /// Start sharing screen. Returns error if not in a call or capture fails.
@@ -704,7 +698,6 @@ async fn run_event_loop(
     local_identity: String,
     app_handle: Arc<AppHandle>,
     mut shutdown_rx: mpsc::Receiver<()>,
-    reconnect_notify: Arc<tokio::sync::Notify>,
 ) {
     // Emit initial connected state
     emit_state(app_handle.as_ref(), &room_id, &local_identity, &audio_state, false, true, None);
@@ -734,9 +727,6 @@ async fn run_event_loop(
                                 }
                                 if source == TrackSource::Microphone {
                                     st.remote_mic_muted.insert(identity.clone(), publication.is_muted());
-                                }
-                                if let Some(raw) = participant.attributes().get("pax.muted") {
-                                    st.remote_mic_muted.insert(identity.clone(), raw == "true");
                                 }
                                 let deafened = participant
                                     .attributes()
@@ -857,9 +847,6 @@ async fn run_event_loop(
                                 .map(|v| v == "true")
                                 .unwrap_or(false);
                             st.remote_deafened.insert(identity.clone(), deafened);
-                            if let Some(raw) = participant.attributes().get("pax.muted") {
-                                st.remote_mic_muted.insert(participant.identity().to_string(), raw == "true");
-                            }
                         }
                         emit_state(app_handle.as_ref(), &room_id, &local_identity, &audio_state, false, true, None);
                     }
@@ -869,10 +856,6 @@ async fn run_event_loop(
                         let mut st = audio_state.lock();
                         if let Some(raw) = changed_attributes.get("pax.deafened") {
                             st.remote_deafened.insert(identity.clone(), raw == "true");
-                            changed = true;
-                        }
-                        if let Some(raw) = changed_attributes.get("pax.muted") {
-                            st.remote_mic_muted.insert(identity.clone(), raw == "true");
                             changed = true;
                         }
                         drop(st);
@@ -918,16 +901,6 @@ async fn run_event_loop(
                         log::info!("Disconnected from LiveKit room: {:?}", reason);
                         emit_state(app_handle.as_ref(), &room_id, &local_identity, &audio_state, false, false, Some("Disconnected from voice".into()));
                         break;
-                    }
-                    Some(RoomEvent::Reconnecting) => {
-                        log::warn!("LiveKit connection lost — reconnecting...");
-                    }
-                    Some(RoomEvent::Reconnected) => {
-                        log::info!("LiveKit reconnected — signaling immediate call.member refresh");
-                        // Wake up the refresh loop so it re-PUTs call.member immediately
-                        reconnect_notify.notify_one();
-                        // Re-emit state so the frontend knows we're still connected
-                        emit_state(app_handle.as_ref(), &room_id, &local_identity, &audio_state, false, true, None);
                     }
                     None => {
                         log::info!("LiveKit event channel closed");
@@ -990,14 +963,19 @@ fn emit_state(
     let _ = app_handle.emit("voice-state-changed", event);
 }
 
-fn update_local_status_attributes(room: Arc<livekit::Room>, mic_enabled: bool, deafened: bool) {
+/// Best-effort: set only the Pax-specific deafen attribute on our LiveKit participant.
+/// Mute state is communicated via the standard LiveKit track mute protocol (MuteTrackRequest),
+/// which doesn't require any special JWT permissions.
+/// Deafen requires canUpdateOwnMetadata in the JWT — log quietly if unavailable.
+fn update_local_deafen_attribute(room: Arc<livekit::Room>, deafened: bool) {
     tokio::spawn(async move {
         let lp = room.local_participant();
         let mut attrs = lp.attributes();
-        attrs.insert("pax.muted".to_string(), (!mic_enabled).to_string());
         attrs.insert("pax.deafened".to_string(), deafened.to_string());
+        // Remove pax.muted — track mute is handled by MuteTrackRequest now
+        attrs.remove("pax.muted");
         if let Err(e) = lp.set_attributes(attrs).await {
-            log::warn!("Failed to set participant attributes: {}", e);
+            log::debug!("Could not set participant attributes (canUpdateOwnMetadata may not be granted): {}", e);
         }
     });
 }
