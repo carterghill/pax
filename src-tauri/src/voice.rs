@@ -139,6 +139,9 @@ pub struct VoiceSession {
     _screen_handle: Option<crate::screen::ScreenShareHandle>,
     /// Noise processor for tunable suppression (shared with mic callback)
     noise_proc: Arc<Mutex<NoiseProcessor>>,
+    /// Signaled by the event loop when LiveKit reconnects after a drop.
+    /// The call-member refresh loop listens on this to do an immediate refresh.
+    reconnect_notify: Arc<tokio::sync::Notify>,
 }
 impl VoiceSession {
     pub fn room_id(&self) -> &str {
@@ -236,10 +239,12 @@ impl VoiceManager {
         });
         // 6. Start event loop
         let (shutdown_tx, shutdown_rx) = mpsc::channel::<()>(1);
+        let reconnect_notify = Arc::new(tokio::sync::Notify::new());
         let evt_state = audio_state.clone();
         let evt_room_id = room_id.clone();
         let evt_room = room.clone();
         let evt_local_id = local_identity.clone();
+        let evt_reconnect = reconnect_notify.clone();
         tokio::spawn(async move {
             run_event_loop(
                 events,
@@ -249,6 +254,7 @@ impl VoiceManager {
                 evt_local_id,
                 app_handle,
                 shutdown_rx,
+                evt_reconnect,
             )
             .await;
         });
@@ -271,6 +277,7 @@ impl VoiceManager {
                 shutdown_tx,
                 _screen_handle: None,
                 noise_proc,
+                reconnect_notify,
             });
         }
         Ok(())
@@ -406,6 +413,13 @@ impl VoiceManager {
         let guard = self.session.lock();
         let s = guard.as_ref()?;
         Some((s.room_id.clone(), s.room.name()))
+    }
+
+    /// Get the reconnect notify handle for the current session (if any).
+    /// Used by the call-member refresh loop to wake up immediately on LiveKit reconnection.
+    pub fn reconnect_notify(&self) -> Option<Arc<tokio::sync::Notify>> {
+        let guard = self.session.lock();
+        guard.as_ref().map(|s| s.reconnect_notify.clone())
     }
 
     /// Start sharing screen. Returns error if not in a call or capture fails.
@@ -698,6 +712,7 @@ async fn run_event_loop(
     local_identity: String,
     app_handle: Arc<AppHandle>,
     mut shutdown_rx: mpsc::Receiver<()>,
+    reconnect_notify: Arc<tokio::sync::Notify>,
 ) {
     // Emit initial connected state
     emit_state(app_handle.as_ref(), &room_id, &local_identity, &audio_state, false, true, None);
@@ -901,6 +916,16 @@ async fn run_event_loop(
                         log::info!("Disconnected from LiveKit room: {:?}", reason);
                         emit_state(app_handle.as_ref(), &room_id, &local_identity, &audio_state, false, false, Some("Disconnected from voice".into()));
                         break;
+                    }
+                    Some(RoomEvent::Reconnecting) => {
+                        log::warn!("LiveKit connection lost — reconnecting...");
+                    }
+                    Some(RoomEvent::Reconnected) => {
+                        log::info!("LiveKit reconnected — signaling immediate call.member refresh");
+                        // Wake up the refresh loop so it re-PUTs call.member immediately
+                        reconnect_notify.notify_one();
+                        // Re-emit state so the frontend knows we're still connected
+                        emit_state(app_handle.as_ref(), &room_id, &local_identity, &audio_state, false, true, None);
                     }
                     None => {
                         log::info!("LiveKit event channel closed");
