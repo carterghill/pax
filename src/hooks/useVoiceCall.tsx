@@ -55,8 +55,8 @@ export interface VoiceCallActions {
   startScreenShare: (mode: "screen" | "window", windowTitle?: string) => Promise<void>;
   enumerateScreenShareWindows: () => Promise<[string, string][]>;
   stopScreenShare: () => Promise<void>;
-  getScreenSharePreset: () => Promise<"720p" | "1080p">;
-  setScreenSharePreset: (preset: "720p" | "1080p") => Promise<void>;
+  getScreenShareQuality: () => Promise<"low" | "medium" | "high">;
+  setScreenShareQuality: (quality: "low" | "medium" | "high") => Promise<void>;
   getNoiseSuppressionConfig: () => Promise<{ extraAttenuation: number; agcTargetRms: number }>;
   setNoiseSuppressionConfig: (config: { extraAttenuation: number; agcTargetRms: number }) => Promise<void>;
   setParticipantVolume: (identity: string, volume: number, source: string) => void;
@@ -326,9 +326,9 @@ export function useVoiceCall() {
         throw e;
       }
     },
-    getScreenSharePreset: () => invoke<"720p" | "1080p">("get_screen_share_preset"),
-    setScreenSharePreset: (preset: "720p" | "1080p") =>
-      invoke<void>("set_screen_share_preset", { preset }),
+    getScreenShareQuality: () => invoke<"low" | "medium" | "high">("get_screen_share_quality"),
+    setScreenShareQuality: (quality: "low" | "medium" | "high") =>
+      invoke<void>("set_screen_share_quality", { quality }),
     getNoiseSuppressionConfig: () =>
       invoke<{ extraAttenuation: number; agcTargetRms: number }>("get_noise_suppression_config"),
     setNoiseSuppressionConfig: (config: { extraAttenuation: number; agcTargetRms: number }) =>

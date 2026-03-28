@@ -467,6 +467,62 @@ impl VoiceManager {
         Ok(())
     }
 
+    /// Change screen share quality on-the-fly via RtpSender::set_parameters().
+    /// This updates the encoder's bitrate target on the very next frame —
+    /// no track renegotiation, no subscriber interruption.
+    pub async fn set_screen_share_quality(
+        &self,
+        quality: crate::screen::ScreenShareQuality,
+        _app_handle: &AppHandle,
+    ) -> Result<(), String> {
+        crate::screen::set_screen_share_quality(quality);
+
+        // Get the track from the screen handle
+        let track = {
+            let guard = self.session.lock();
+            let session = guard.as_ref().ok_or("Not in a voice call")?;
+            match session._screen_handle.as_ref() {
+                Some(handle) => handle.track.clone(),
+                None => {
+                    // Not currently sharing — just store the quality for next time
+                    return Ok(());
+                }
+            }
+        };
+
+        // Reach the RtpSender via the track's transceiver
+        let transceiver = track
+            .transceiver()
+            .ok_or("Screen share track has no transceiver (not published?)")?;
+        let sender = transceiver.sender();
+
+        // Get current parameters (preserves transaction_id + encodings)
+        let mut params = sender.parameters();
+        if params.encodings.is_empty() {
+            return Err("No encodings on screen share sender".to_string());
+        }
+
+        // Update the first encoding's max_bitrate
+        let new_bitrate = quality.max_bitrate();
+        params.encodings[0].max_bitrate = Some(new_bitrate);
+
+        log::info!(
+            "set_parameters: quality={} max_bitrate={} (transaction_id={}, {} encodings)",
+            quality.label(),
+            new_bitrate,
+            params.transaction_id,
+            params.encodings.len()
+        );
+
+        // Apply — encoder picks up the new bitrate on the next frame
+        sender
+            .set_parameters(params)
+            .map_err(|e| format!("set_parameters failed: {}", e))?;
+
+        log::info!("Screen share quality changed to {} (seamless)", quality.label());
+        Ok(())
+    }
+
     /// Stop sharing screen.
     pub async fn stop_screen_share(&self, app_handle: &AppHandle) -> Result<(), String> {
         log::info!("voice::stop_screen_share");
