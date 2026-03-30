@@ -8,7 +8,7 @@ use jsonwebtoken::{encode, EncodingKey, Header};
 use matrix_sdk::ruma::events::StateEventType;
 use matrix_sdk::{Client, Room};
 use serde::Serialize;
-use tauri::State;
+use tauri::{Emitter, State};
 
 use crate::types::{LivekitVoiceParticipantInfo, VoiceJoinResult, VoiceParticipant};
 use crate::{screen, voice, AppState, LivekitConfig};
@@ -19,10 +19,21 @@ use super::{fmt_error_chain, get_or_fetch_avatar};
 /// Also defined in the frontend at `src/utils/matrix.ts` — keep both in sync.
 const VOICE_ROOM_TYPE: &str = "org.matrix.msc3417.call";
 
-/// `m.call.member` `expires` field (ms). Membership is inactive after `origin_server_ts + expires`.
-const VOICE_CALL_MEMBER_EXPIRES_MS: u64 = 7_200_000;
-/// Re-send `m.call.member` on this interval so the roster stays valid while connected.
-const CALL_MEMBER_REFRESH_INTERVAL_SECS: u64 = 45 * 60;
+/// `m.call.member` `expires` field (ms). 4 hours, matching matrix-js-sdk DEFAULT_EXPIRE_DURATION.
+const VOICE_CALL_MEMBER_EXPIRES_MS: u64 = 4 * 60 * 60 * 1000;
+/// Delayed leave event timeout (ms). If the client crashes, the server
+/// fires the leave event after this many ms without a heartbeat restart.
+/// 60 s is generous enough to survive brief computer sleep/suspend cycles
+/// while still cleaning up ghost participants within a minute of a real crash.
+const DELAYED_LEAVE_DELAY_MS: u64 = 60_000;
+/// Heartbeat interval: restart the delayed leave timer this often.
+/// Must be well under DELAYED_LEAVE_DELAY_MS / 1000 to guarantee at least
+/// one restart arrives before the server fires the leave.
+const HEARTBEAT_INTERVAL_SECS: u64 = 15;
+/// Re-PUT `m.call.member` this often to bump `origin_server_ts` and keep the
+/// membership alive. Must be well under VOICE_CALL_MEMBER_EXPIRES_MS (4 h).
+/// 3.5 hours = 12 600 s, matching matrix-js-sdk's membershipExpiryTimeout pattern.
+const MEMBERSHIP_REFRESH_INTERVAL_SECS: u64 = 3 * 60 * 60 + 30 * 60;
 
 /// Check whether a call.member state event JSON represents an active participant.
 /// Handles both MSC4143 (per-device content) and MSC3401 (memberships array) formats,
@@ -223,15 +234,163 @@ pub async fn get_voice_participants(
     Ok(participants)
 }
 
-/// Re-send `m.call.member` so `origin_server_ts` advances and roster expiry stays valid while connected.
-pub(crate) async fn matrix_voice_refresh_call_member(
+// ─── MSC4140 Delayed Events API ─────────────────────────────────────────────
+// Instead of client-side refresh timers, we use server-side delayed events:
+//   1. On join: PUT a delayed leave (empty content, 60s timeout) → get delay_id
+//   2. PUT the actual join state event
+//   3. Heartbeat: POST restart every 15s to keep the delayed leave from firing
+//   4. On leave: POST send to fire the delayed leave immediately
+// If the client crashes, the server fires the leave event after 60s automatically.
+// If the client sleeps and the delayed leave fires, the heartbeat loop detects
+// the 404 on restart and re-registers + re-PUTs to recover the session.
+
+/// PUT a delayed leave event (empty content) for this device.
+/// The server will auto-fire it after `DELAYED_LEAVE_DELAY_MS` unless restarted.
+/// Returns the `delay_id` used for heartbeat restarts and graceful leave.
+async fn send_delayed_leave_event(
     client: &Client,
     http: &reqwest::Client,
     room_id: &str,
-) -> Result<(), String> {
-    matrix_voice_put_call_member(client, http, room_id)
+) -> Result<String, String> {
+    let user_id = client.user_id().ok_or("No user ID")?;
+    let device_id = client.device_id().ok_or("No device ID")?;
+    let state_key = format!("_{}_{}_{}", user_id, device_id, "m.call");
+    let homeserver = client.homeserver().to_string();
+    let access_token = client.access_token().ok_or("No access token")?;
+
+    // Same state endpoint as a normal PUT, but with the delay query parameter.
+    // Body is empty {} (= leave content). Server holds it for DELAYED_LEAVE_DELAY_MS.
+    let state_url = format!(
+        "{}/_matrix/client/v3/rooms/{}/state/{}/{}?org.matrix.msc4140.delay={}",
+        homeserver.trim_end_matches('/'),
+        urlencoding::encode(room_id),
+        urlencoding::encode("org.matrix.msc3401.call.member"),
+        urlencoding::encode(&state_key),
+        DELAYED_LEAVE_DELAY_MS,
+    );
+
+    let resp = http
+        .put(&state_url)
+        .timeout(Duration::from_secs(15))
+        .bearer_auth(access_token.to_string())
+        .json(&serde_json::json!({}))
+        .send()
         .await
-        .map(|_| ())
+        .map_err(|e| format!("send_delayed_leave: {}", fmt_error_chain(&e)))?;
+
+    if !resp.status().is_success() {
+        let status = resp.status();
+        let body = resp.text().await.unwrap_or_default();
+        return Err(format!("send_delayed_leave ({}): {}", status, body));
+    }
+
+    let json: serde_json::Value = resp
+        .json()
+        .await
+        .map_err(|e| format!("send_delayed_leave JSON: {e}"))?;
+
+    json.get("delay_id")
+        .and_then(|d| d.as_str())
+        .map(|s| s.to_string())
+        .ok_or_else(|| "send_delayed_leave: no delay_id in response".to_string())
+}
+
+/// Restart the delayed leave timer (heartbeat). Must be called every ~15s.
+/// Returns Ok(true) on success, Ok(false) if the delayed event is gone (404 —
+/// the server already fired it), or Err on transient/network errors.
+async fn restart_delayed_event(
+    http: &reqwest::Client,
+    homeserver: &str,
+    access_token: &str,
+    delay_id: &str,
+) -> Result<bool, String> {
+    let url = format!(
+        "{}/_matrix/client/unstable/org.matrix.msc4140/delayed_events/{}",
+        homeserver.trim_end_matches('/'),
+        urlencoding::encode(delay_id),
+    );
+
+    let resp = http
+        .post(&url)
+        .timeout(Duration::from_secs(10))
+        .bearer_auth(access_token)
+        .json(&serde_json::json!({ "action": "restart" }))
+        .send()
+        .await
+        .map_err(|e| format!("restart_delayed: {}", fmt_error_chain(&e)))?;
+
+    let status = resp.status();
+    if status.is_success() {
+        Ok(true)
+    } else if status.as_u16() == 404 {
+        // The delayed event no longer exists — it was already fired by the server
+        // (e.g. after computer sleep exceeded the timeout).
+        let body = resp.text().await.unwrap_or_default();
+        log::warn!("Delayed event {} is gone (404): {}", delay_id, body);
+        Ok(false)
+    } else {
+        let body = resp.text().await.unwrap_or_default();
+        Err(format!("restart_delayed ({}): {}", status, body))
+    }
+}
+
+/// Immediately fire the delayed leave event (graceful disconnect).
+/// Falls back to manually PUTting empty content if the delayed event is gone.
+async fn send_or_fallback_leave(
+    client: &Client,
+    http: &reqwest::Client,
+    room_id: &str,
+    delay_id: Option<&str>,
+) -> Result<(), String> {
+    // Try to fire the delayed event first
+    if let Some(did) = delay_id {
+        let homeserver = client.homeserver().to_string();
+        let access_token = client.access_token().ok_or("No access token")?;
+        let url = format!(
+            "{}/_matrix/client/unstable/org.matrix.msc4140/delayed_events/{}",
+            homeserver.trim_end_matches('/'),
+            urlencoding::encode(did),
+        );
+
+        let resp = http
+            .post(&url)
+            .timeout(Duration::from_secs(10))
+            .bearer_auth(access_token.to_string())
+            .json(&serde_json::json!({ "action": "send" }))
+            .send()
+            .await;
+
+        match resp {
+            Ok(r) if r.status().is_success() => {
+                log::info!("Graceful leave: fired delayed event {}", did);
+                return Ok(());
+            }
+            Ok(r) => {
+                log::warn!("send delayed leave failed ({}), falling back to manual PUT", r.status());
+            }
+            Err(e) => {
+                log::warn!("send delayed leave error: {}, falling back to manual PUT", e);
+            }
+        }
+    }
+
+    // Fallback: clear all memberships manually (same as before)
+    matrix_voice_clear_my_memberships_in_room(client, http, room_id, None).await
+}
+
+/// Force-emit a `voice-participants-changed` event so the sidebar updates immediately
+/// without waiting for the next sync response.
+pub(crate) async fn force_emit_voice_participants(
+    client: &Client,
+    avatar_cache: &Arc<tokio::sync::Mutex<HashMap<String, String>>>,
+    app_handle: &tauri::AppHandle,
+) {
+    let participants_by_room =
+        collect_voice_participants_for_joined_voice_rooms(client, avatar_cache).await;
+    let _ = app_handle.emit(
+        "voice-participants-changed",
+        crate::types::VoiceParticipantsChangedPayload { participants_by_room },
+    );
 }
 
 /// PUT `org.matrix.msc3401.call.member` for this device. Returns the LiveKit JWT service URL.
@@ -248,9 +407,14 @@ async fn matrix_voice_put_call_member(
 
     let livekit_service_url = discover_livekit_service_url(&room).await?;
     let state_key = format!("_{}_{}_{}", user_id, device_id, "m.call");
+    let now_ms = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis() as u64;
     let content = serde_json::json!({
         "application": "m.call",
         "call_id": "",
+        "created_ts": now_ms,
         "device_id": device_id.as_str(),
         "expires": VOICE_CALL_MEMBER_EXPIRES_MS,
         "foci_preferred": [{
@@ -352,6 +516,11 @@ pub(crate) async fn matrix_voice_join(
         .and_then(|j| j.as_str())
         .ok_or("No 'jwt' field in lk-jwt-service response")?
         .to_string();
+
+    // Log the JWT's expiry so we can correlate with ConnectionTimeout kicks
+    if let Some(ttl_info) = decode_jwt_expiry(&jwt) {
+        log::info!("LiveKit JWT: {}", ttl_info);
+    }
 
     let livekit_url = jwt_data
         .get("url")
@@ -643,19 +812,32 @@ async fn kick_other_devices_from_livekit(
     }
 }
 
-fn start_call_member_refresh_loop(state: Arc<AppState>, room_id: String) {
-    state.stop_call_member_refresh_loop();
+/// Start the MSC4140 heartbeat loop: restart the delayed leave event every 15s.
+/// If the heartbeat stops (crash, network), the server fires the leave after 60s.
+///
+/// Also re-PUTs the `m.call.member` state event every ~3.5 hours so that the
+/// `origin_server_ts + expires` window never lapses while the user is connected.
+///
+/// **Recovery after sleep/suspend:** If the delayed event has been fired by the
+/// server (404 on restart), the loop re-registers a new delayed leave and
+/// re-PUTs the call.member state event to rejoin transparently.
+fn start_heartbeat_loop(state: Arc<AppState>, initial_delay_id: String, room_id: String) {
+    state.stop_heartbeat_loop();
     state
-        .call_member_refresh_stop
+        .heartbeat_stop
         .store(false, Ordering::SeqCst);
-    let stop = state.call_member_refresh_stop.clone();
+    let stop = state.heartbeat_stop.clone();
     let st = state.clone();
-    let room_id_clone = room_id.clone();
     let handle = tauri::async_runtime::spawn(async move {
         let mut interval =
-            tokio::time::interval(Duration::from_secs(CALL_MEMBER_REFRESH_INTERVAL_SECS));
+            tokio::time::interval(Duration::from_secs(HEARTBEAT_INTERVAL_SECS));
         interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
-        interval.tick().await;
+        interval.tick().await; // skip immediate first tick
+
+        let mut current_delay_id = initial_delay_id;
+        let mut last_membership_refresh = tokio::time::Instant::now();
+        let refresh_threshold = Duration::from_secs(MEMBERSHIP_REFRESH_INTERVAL_SECS);
+
         loop {
             interval.tick().await;
             if stop.load(Ordering::SeqCst) {
@@ -668,16 +850,126 @@ fn start_call_member_refresh_loop(state: Arc<AppState>, room_id: String) {
             let Some(ref c) = client else {
                 break;
             };
-            if let Err(e) =
-                matrix_voice_refresh_call_member(c, &st.http_client, &room_id_clone).await
+            let homeserver = c.homeserver().to_string();
+            let access_token = match c.access_token() {
+                Some(t) => t.to_string(),
+                None => break,
+            };
+
+            // 1. Restart the delayed leave (the core heartbeat)
+            match restart_delayed_event(
+                &st.http_client,
+                &homeserver,
+                &access_token,
+                &current_delay_id,
+            )
+            .await
             {
-                log::warn!("m.call.member refresh failed: {}", e);
+                Ok(true) => {
+                    // Normal heartbeat success — nothing else to do
+                }
+                Ok(false) => {
+                    // 404: the delayed event was already fired (computer slept, network
+                    // outage exceeded the timeout, etc.). We need to re-register and
+                    // re-PUT call.member to rejoin the call.
+                    log::warn!(
+                        "Delayed leave was fired while we were away — recovering session"
+                    );
+                    match recover_session(c, &st.http_client, &room_id).await {
+                        Ok(new_delay_id) => {
+                            log::info!(
+                                "Session recovered: new delay_id={}",
+                                new_delay_id
+                            );
+                            current_delay_id = new_delay_id.clone();
+                            last_membership_refresh = tokio::time::Instant::now();
+                            // Update the shared delay_id so voice_disconnect uses the new one
+                            if let Ok(mut g) = st.delayed_leave_id.lock() {
+                                *g = Some(new_delay_id);
+                            }
+                        }
+                        Err(e) => {
+                            log::error!("Session recovery failed: {}", e);
+                            // Will retry on the next tick
+                        }
+                    }
+                }
+                Err(e) => {
+                    log::warn!("Heartbeat restart failed: {}", e);
+                    // Transient error — the next tick will retry.
+                }
+            }
+
+            // 2. Periodically re-PUT call.member to bump origin_server_ts
+            if last_membership_refresh.elapsed() >= refresh_threshold {
+                log::info!("Refreshing m.call.member to extend expiry window");
+                match matrix_voice_put_call_member(c, &st.http_client, &room_id).await {
+                    Ok(_) => {
+                        log::info!("m.call.member refreshed successfully");
+                        last_membership_refresh = tokio::time::Instant::now();
+                    }
+                    Err(e) => {
+                        log::warn!("m.call.member refresh failed: {}", e);
+                        // Will retry on the next tick that crosses the threshold
+                    }
+                }
             }
         }
     });
-    if let Ok(mut g) = state.call_member_refresh_task.lock() {
+    if let Ok(mut g) = state.heartbeat_task.lock() {
         *g = Some(handle);
     }
+}
+
+/// Re-register a delayed leave + re-PUT the call.member state event after the
+/// previous delayed leave was fired by the server (e.g. after computer sleep).
+async fn recover_session(
+    client: &Client,
+    http: &reqwest::Client,
+    room_id: &str,
+) -> Result<String, String> {
+    // 1. Register a new delayed leave (dead man's switch)
+    let new_delay_id = send_delayed_leave_event(client, http, room_id).await?;
+    // 2. Re-PUT the call.member to rejoin
+    matrix_voice_put_call_member(client, http, room_id).await?;
+    Ok(new_delay_id)
+}
+
+/// Decode a JWT's payload (without signature verification) to log its expiry.
+/// Helps diagnose the recurring ~4h LiveKit ConnectionTimeout kicks.
+fn decode_jwt_expiry(jwt: &str) -> Option<String> {
+    let mut validation = jsonwebtoken::Validation::new(jsonwebtoken::Algorithm::HS256);
+    validation.insecure_disable_signature_validation();
+    validation.validate_exp = false;
+    validation.validate_aud = false;
+    validation.required_spec_claims.clear();
+
+    let key = jsonwebtoken::DecodingKey::from_secret(b"unused");
+    let token_data =
+        jsonwebtoken::decode::<serde_json::Value>(jwt, &key, &validation).ok()?;
+    let claims = token_data.claims;
+
+    let exp = claims.get("exp")?.as_u64()?;
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .ok()?
+        .as_secs();
+
+    let ttl_secs = exp.saturating_sub(now);
+    let total_validity = claims
+        .get("iat")
+        .and_then(|v| v.as_u64())
+        .map(|iat| exp.saturating_sub(iat))
+        .unwrap_or(ttl_secs);
+
+    Some(format!(
+        "expires in {}h{}m (total validity: {}h{}m, exp={})",
+        ttl_secs / 3600,
+        (ttl_secs % 3600) / 60,
+        total_validity / 3600,
+        (total_validity % 3600) / 60,
+        exp,
+    ))
 }
 
 #[tauri::command]
@@ -689,7 +981,7 @@ pub async fn voice_connect(
 ) -> Result<(), String> {
     log::debug!("voice_connect called for room {}", room_id);
     let state_arc: Arc<AppState> = (*state).clone();
-    state_arc.stop_call_member_refresh_loop();
+    state_arc.stop_heartbeat_loop();
     let client = super::get_client(&state).await?;
     let http_client = state.http_client.clone();
 
@@ -701,8 +993,6 @@ pub async fn voice_connect(
     );
 
     // Kick other devices of the same user from the LiveKit room.
-    // Uses the LiveKit Room Service API to list actual participants and
-    // remove any that match our userId but have a different deviceId.
     let user_id_str = client.user_id().ok_or("No user ID")?.to_string();
     let device_id_str = client.device_id().ok_or("No device ID")?.to_string();
     log::debug!("About to kick other devices (user={}, device={})", user_id_str, device_id_str);
@@ -715,13 +1005,7 @@ pub async fn voice_connect(
     .await;
     log::debug!("Kick check complete, proceeding with join");
 
-    // Optimistic join: start the Matrix join + LiveKit connect immediately.
-    // Run leave-all-rooms cleanup in parallel as fire-and-forget so the user
-    // sees the new room almost instantly. Stale memberships get cleaned up
-    // a moment later; briefly appearing in two rooms is cosmetic and resolves quickly.
-    // Note: cleanup and join hit the homeserver concurrently. skip_state_key avoids
-    // clearing our new membership, but stale keys from other devices could race
-    // with the join PUT — harmless flicker possible, no functional impact.
+    // Clean up stale memberships in other rooms (fire-and-forget)
     let client_cleanup = client.clone();
     let http_cleanup = http_client.clone();
     let room_id_cleanup = room_id.clone();
@@ -735,11 +1019,26 @@ pub async fn voice_connect(
         .await;
     });
 
-    // 1. Do the Matrix join (state event + JWT)
+    // ── MSC4140 join sequence ──
+    // 1. Send delayed leave event (dead man's switch) — server will fire it
+    //    in 8s unless we keep restarting it via heartbeat.
+    let delay_id = send_delayed_leave_event(&client, &http_client, &room_id).await?;
+    log::info!("Delayed leave registered: delay_id={}", delay_id);
+
+    // 2. PUT the actual join state event + get LiveKit JWT
     let result = matrix_voice_join(&client, &http_client, &room_id).await?;
     let identity = client.user_id().ok_or("No user ID")?.to_string();
 
-    // 2. Connect to LiveKit natively via the Rust SDK
+    // 3. Start heartbeat (restarts the delayed leave every 5s, refreshes membership before expiry)
+    start_heartbeat_loop(state_arc.clone(), delay_id.clone(), room_id.clone());
+
+    // Store the delay_id so voice_disconnect can fire it
+    if let Ok(mut g) = state_arc.delayed_leave_id.lock() {
+        *g = Some(delay_id);
+    }
+
+    // 4. Connect to LiveKit
+    let app_handle_for_emit = app_handle.clone();
     voice_mgr
         .connect(
             room_id.clone(),
@@ -756,7 +1055,13 @@ pub async fn voice_connect(
         }
     }
 
-    start_call_member_refresh_loop(state_arc, room_id);
+    // 5. Force-emit participant update so sidebar refreshes immediately
+    let emit_client = client.clone();
+    let emit_avatar_cache = state_arc.avatar_cache.clone();
+    tokio::spawn(async move {
+        tokio::time::sleep(Duration::from_millis(500)).await;
+        force_emit_voice_participants(&emit_client, &emit_avatar_cache, &app_handle_for_emit).await;
+    });
 
     Ok(())
 }
@@ -767,18 +1072,31 @@ pub async fn voice_disconnect(
     voice_mgr: State<'_, voice::VoiceManager>,
     room_id: String,
 ) -> Result<(), String> {
-    state.stop_call_member_refresh_loop();
-    // 1. Disconnect from LiveKit (blocks until room is closed)
+    // 1. Stop the heartbeat so the delayed leave fires naturally (or we fire it now)
+    state.stop_heartbeat_loop();
+
+    // 2. Grab the delay_id before disconnecting
+    let delay_id = state
+        .delayed_leave_id
+        .lock()
+        .ok()
+        .and_then(|mut g| g.take());
+
+    // 3. Disconnect from LiveKit
     voice_mgr.disconnect().await;
 
-    // 2. Clear Matrix call.member state in background so we return quickly
+    // 4. Fire the delayed leave immediately (graceful) or fall back to manual PUT
     let state_clone = state.inner().clone();
     tauri::async_runtime::spawn(async move {
         let guard = state_clone.client.lock().await;
         if let Some(client) = guard.as_ref() {
-            let _ =
-                matrix_voice_clear_my_memberships_in_room(client, &state_clone.http_client, &room_id, None)
-                    .await;
+            let _ = send_or_fallback_leave(
+                client,
+                &state_clone.http_client,
+                &room_id,
+                delay_id.as_deref(),
+            )
+            .await;
         }
     });
 

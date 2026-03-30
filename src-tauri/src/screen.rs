@@ -250,7 +250,7 @@ async fn start_screen_capture_windows_graphics(
     );
 
     let framerate = quality.fps() as f64;
-    let codec = crate::codec::resolve_codec();
+    let codec = crate::codec::resolve_screen_share_codec();
     log::info!(
         "Publishing screen track to LiveKit ({:?}, {}, {}fps)",
         codec,
@@ -520,7 +520,7 @@ async fn start_screen_capture_libwebrtc_or_fallback(
             LocalTrack::Video(track.clone()),
             TrackPublishOptions {
                 source: TrackSource::Screenshare,
-                video_codec: crate::codec::resolve_codec(),
+                video_codec: crate::codec::resolve_screen_share_codec(),
                 simulcast: false,
                 video_encoding: Some(VideoEncoding {
                     max_bitrate: bitrate,
@@ -643,7 +643,7 @@ async fn start_screen_capture_screenshots_fallback(
             LocalTrack::Video(track.clone()),
             TrackPublishOptions {
                 source: TrackSource::Screenshare,
-                video_codec: crate::codec::resolve_codec(),
+                video_codec: crate::codec::resolve_screen_share_codec(),
                 simulcast: false,
                 video_encoding: Some(VideoEncoding {
                     max_bitrate: bitrate,
@@ -1094,7 +1094,7 @@ async fn start_screen_capture_linux(
         livekit::webrtc::video_source::RtcVideoSource::Native(video_source.clone()),
     );
 
-    let codec = crate::codec::resolve_codec();
+    let codec = crate::codec::resolve_screen_share_codec();
     log::info!(
         "Publishing screen track to LiveKit ({:?}, {}, {}fps)",
         codec, quality.label(), quality.fps()

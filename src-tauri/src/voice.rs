@@ -15,8 +15,8 @@ use tauri::{AppHandle, Emitter};
 use tokio::sync::mpsc;
 use tokio::time::{interval_at, Instant as TokioInstant, MissedTickBehavior};
 use livekit::prelude::*;
-use livekit::track::{LocalAudioTrack, LocalTrack, LocalVideoTrack, RemoteTrack, TrackSource};
-use livekit::options::{TrackPublishOptions, VideoEncoding};
+use livekit::track::{LocalAudioTrack, LocalTrack, RemoteTrack, TrackSource};
+use livekit::options::TrackPublishOptions;
 use livekit::webrtc::{
     audio_frame::AudioFrame,
     audio_source::native::NativeAudioSource,
@@ -139,6 +139,9 @@ pub struct VoiceSession {
     _screen_handle: Option<crate::screen::ScreenShareHandle>,
     /// Noise processor for tunable suppression (shared with mic callback)
     noise_proc: Arc<Mutex<NoiseProcessor>>,
+    /// Signaled by the event loop when LiveKit reconnects after a drop.
+    /// The call-member refresh loop listens on this to do an immediate refresh.
+    reconnect_notify: Arc<tokio::sync::Notify>,
 }
 impl VoiceSession {
     pub fn room_id(&self) -> &str {
@@ -236,10 +239,12 @@ impl VoiceManager {
         });
         // 6. Start event loop
         let (shutdown_tx, shutdown_rx) = mpsc::channel::<()>(1);
+        let reconnect_notify = Arc::new(tokio::sync::Notify::new());
         let evt_state = audio_state.clone();
         let evt_room_id = room_id.clone();
         let evt_room = room.clone();
         let evt_local_id = local_identity.clone();
+        let evt_reconnect = reconnect_notify.clone();
         tokio::spawn(async move {
             run_event_loop(
                 events,
@@ -249,6 +254,7 @@ impl VoiceManager {
                 evt_local_id,
                 app_handle,
                 shutdown_rx,
+                evt_reconnect,
             )
             .await;
         });
@@ -271,6 +277,7 @@ impl VoiceManager {
                 shutdown_tx,
                 _screen_handle: None,
                 noise_proc,
+                reconnect_notify,
             });
         }
         Ok(())
@@ -314,19 +321,28 @@ impl VoiceManager {
         let deafened = state.deafened;
         let room = session.room.clone();
         drop(state);
-        // Mute/unmute only the microphone track — leave screen share audio untouched
+        // Mute/unmute only the microphone track — leave screen share audio untouched.
+        // LocalTrackPublication::mute()/unmute() sends MuteTrackRequest to the LiveKit
+        // server so other participants (Element, Cinny, etc.) receive TrackMuted/TrackUnmuted.
         let publications = session.room.local_participant().track_publications();
+        let mut found_mic = false;
         for (_sid, pub_) in publications.iter() {
             if pub_.source() != TrackSource::Microphone {
                 continue;
             }
+            found_mic = true;
+            log::info!("toggle_mic: setting mic track sid={} muted={}", pub_.sid(), !mic_enabled);
             if mic_enabled {
                 pub_.unmute();
             } else {
                 pub_.mute();
             }
         }
-        update_local_status_attributes(room, mic_enabled, deafened);
+        if !found_mic {
+            log::warn!("toggle_mic: no Microphone publication found in local_participant — mute signal not sent to server");
+        }
+        // Deafen is Pax-specific — best-effort attribute (may fail without canUpdateOwnMetadata)
+        update_local_deafen_attribute(room, deafened);
         Ok(mic_enabled)
     }
 
@@ -349,10 +365,9 @@ impl VoiceManager {
         let mut st = session.audio_state.lock();
         st.deafened = !st.deafened;
         let deafened = st.deafened;
-        let mic_enabled = st.mic_enabled;
         let room = session.room.clone();
         drop(st);
-        update_local_status_attributes(room, mic_enabled, deafened);
+        update_local_deafen_attribute(room, deafened);
         Ok(deafened)
     }
 
@@ -398,6 +413,13 @@ impl VoiceManager {
         let guard = self.session.lock();
         let s = guard.as_ref()?;
         Some((s.room_id.clone(), s.room.name()))
+    }
+
+    /// Get the reconnect notify handle for the current session (if any).
+    /// Used by the call-member refresh loop to wake up immediately on LiveKit reconnection.
+    pub fn reconnect_notify(&self) -> Option<Arc<tokio::sync::Notify>> {
+        let guard = self.session.lock();
+        guard.as_ref().map(|s| s.reconnect_notify.clone())
     }
 
     /// Start sharing screen. Returns error if not in a call or capture fails.
@@ -467,9 +489,9 @@ impl VoiceManager {
         Ok(())
     }
 
-    /// Change screen share quality on-the-fly by republishing the video track
-    /// with a new bitrate. The capture thread keeps running — only the track
-    /// is unpublished and re-created from the same NativeVideoSource.
+    /// Change screen share quality on-the-fly via RtpSender::set_parameters().
+    /// This updates the encoder's bitrate target on the very next frame —
+    /// no track renegotiation, no subscriber interruption.
     pub async fn set_screen_share_quality(
         &self,
         quality: crate::screen::ScreenShareQuality,
@@ -477,74 +499,49 @@ impl VoiceManager {
     ) -> Result<(), String> {
         crate::screen::set_screen_share_quality(quality);
 
-        let room = {
+        // Get the track from the screen handle
+        let track = {
             let guard = self.session.lock();
             let session = guard.as_ref().ok_or("Not in a voice call")?;
-            if session._screen_handle.is_none() {
-                // Not currently sharing — just store the quality for next time
-                return Ok(());
+            match session._screen_handle.as_ref() {
+                Some(handle) => handle.track.clone(),
+                None => {
+                    // Not currently sharing — just store the quality for next time
+                    return Ok(());
+                }
             }
-            session.room.clone()
         };
 
-        let lp = room.local_participant();
+        // Reach the RtpSender via the track's transceiver
+        let transceiver = track
+            .transceiver()
+            .ok_or("Screen share track has no transceiver (not published?)")?;
+        let sender = transceiver.sender();
 
-        // Unpublish old screenshare video track (keep audio)
-        let video_sids: Vec<_> = lp
-            .track_publications()
-            .iter()
-            .filter(|(_, p)| p.source() == TrackSource::Screenshare)
-            .map(|(sid, _)| sid.clone())
-            .collect();
-        for sid in video_sids {
-            let _ = lp.unpublish_track(&sid).await;
+        // Get current parameters (preserves transaction_id + encodings)
+        let mut params = sender.parameters();
+        if params.encodings.is_empty() {
+            return Err("No encodings on screen share sender".to_string());
         }
 
-        // Create a new LocalVideoTrack from the same video source
-        let video_source = {
-            let guard = self.session.lock();
-            let session = guard.as_ref().ok_or("Not in a voice call")?;
-            let handle = session._screen_handle.as_ref().ok_or("No active screen share")?;
-            handle.video_source.clone()
-        };
+        // Update the first encoding's max_bitrate
+        let new_bitrate = quality.max_bitrate();
+        params.encodings[0].max_bitrate = Some(new_bitrate);
 
-        let new_track = LocalVideoTrack::create_video_track(
-            "screenshare",
-            livekit::webrtc::video_source::RtcVideoSource::Native(video_source),
-        );
-
-        let codec = crate::codec::resolve_codec();
         log::info!(
-            "Republishing screen track with quality={} bitrate={}",
+            "set_parameters: quality={} max_bitrate={} (transaction_id={}, {} encodings)",
             quality.label(),
-            quality.max_bitrate()
+            new_bitrate,
+            params.transaction_id,
+            params.encodings.len()
         );
-        lp.publish_track(
-            LocalTrack::Video(new_track.clone()),
-            TrackPublishOptions {
-                source: TrackSource::Screenshare,
-                video_codec: codec,
-                simulcast: false,
-                video_encoding: Some(VideoEncoding {
-                    max_bitrate: quality.max_bitrate(),
-                    max_framerate: quality.fps() as f64,
-                }),
-                ..Default::default()
-            },
-        )
-        .await
-        .map_err(|e| format!("Failed to republish screen track: {}", e))?;
 
-        // Update the handle's track reference
-        {
-            let mut guard = self.session.lock();
-            let session = guard.as_mut().ok_or("Not in a voice call")?;
-            if let Some(handle) = session._screen_handle.as_mut() {
-                handle.track = new_track;
-            }
-        }
+        // Apply — encoder picks up the new bitrate on the next frame
+        sender
+            .set_parameters(params)
+            .map_err(|e| format!("set_parameters failed: {}", e))?;
 
-        log::info!("Screen share quality changed to {}", quality.label());
+        log::info!("Screen share quality changed to {} (seamless)", quality.label());
         Ok(())
     }
 
@@ -715,6 +712,7 @@ async fn run_event_loop(
     local_identity: String,
     app_handle: Arc<AppHandle>,
     mut shutdown_rx: mpsc::Receiver<()>,
+    reconnect_notify: Arc<tokio::sync::Notify>,
 ) {
     // Emit initial connected state
     emit_state(app_handle.as_ref(), &room_id, &local_identity, &audio_state, false, true, None);
@@ -744,9 +742,6 @@ async fn run_event_loop(
                                 }
                                 if source == TrackSource::Microphone {
                                     st.remote_mic_muted.insert(identity.clone(), publication.is_muted());
-                                }
-                                if let Some(raw) = participant.attributes().get("pax.muted") {
-                                    st.remote_mic_muted.insert(identity.clone(), raw == "true");
                                 }
                                 let deafened = participant
                                     .attributes()
@@ -867,9 +862,6 @@ async fn run_event_loop(
                                 .map(|v| v == "true")
                                 .unwrap_or(false);
                             st.remote_deafened.insert(identity.clone(), deafened);
-                            if let Some(raw) = participant.attributes().get("pax.muted") {
-                                st.remote_mic_muted.insert(participant.identity().to_string(), raw == "true");
-                            }
                         }
                         emit_state(app_handle.as_ref(), &room_id, &local_identity, &audio_state, false, true, None);
                     }
@@ -879,10 +871,6 @@ async fn run_event_loop(
                         let mut st = audio_state.lock();
                         if let Some(raw) = changed_attributes.get("pax.deafened") {
                             st.remote_deafened.insert(identity.clone(), raw == "true");
-                            changed = true;
-                        }
-                        if let Some(raw) = changed_attributes.get("pax.muted") {
-                            st.remote_mic_muted.insert(identity.clone(), raw == "true");
                             changed = true;
                         }
                         drop(st);
@@ -925,9 +913,22 @@ async fn run_event_loop(
                         emit_state(app_handle.as_ref(), &room_id, &local_identity, &audio_state, false, true, None);
                     }
                     Some(RoomEvent::Disconnected { reason }) => {
-                        log::info!("Disconnected from LiveKit room: {:?}", reason);
+                        log::warn!("Permanently disconnected from LiveKit room: {:?}", reason);
+                        // Notify the frontend so it can auto-rejoin.
+                        // This does NOT fire on manual disconnect (that takes the shutdown_rx branch).
+                        let _ = app_handle.emit("voice-livekit-kicked", room_id.clone());
                         emit_state(app_handle.as_ref(), &room_id, &local_identity, &audio_state, false, false, Some("Disconnected from voice".into()));
                         break;
+                    }
+                    Some(RoomEvent::Reconnecting) => {
+                        log::warn!("LiveKit connection lost — reconnecting...");
+                    }
+                    Some(RoomEvent::Reconnected) => {
+                        log::info!("LiveKit reconnected — signaling immediate call.member refresh");
+                        // Wake up the refresh loop so it re-PUTs call.member immediately
+                        reconnect_notify.notify_one();
+                        // Re-emit state so the frontend knows we're still connected
+                        emit_state(app_handle.as_ref(), &room_id, &local_identity, &audio_state, false, true, None);
                     }
                     None => {
                         log::info!("LiveKit event channel closed");
@@ -990,14 +991,19 @@ fn emit_state(
     let _ = app_handle.emit("voice-state-changed", event);
 }
 
-fn update_local_status_attributes(room: Arc<livekit::Room>, mic_enabled: bool, deafened: bool) {
+/// Best-effort: set only the Pax-specific deafen attribute on our LiveKit participant.
+/// Mute state is communicated via the standard LiveKit track mute protocol (MuteTrackRequest),
+/// which doesn't require any special JWT permissions.
+/// Deafen requires canUpdateOwnMetadata in the JWT — log quietly if unavailable.
+fn update_local_deafen_attribute(room: Arc<livekit::Room>, deafened: bool) {
     tokio::spawn(async move {
         let lp = room.local_participant();
         let mut attrs = lp.attributes();
-        attrs.insert("pax.muted".to_string(), (!mic_enabled).to_string());
         attrs.insert("pax.deafened".to_string(), deafened.to_string());
+        // Remove pax.muted — track mute is handled by MuteTrackRequest now
+        attrs.remove("pax.muted");
         if let Err(e) = lp.set_attributes(attrs).await {
-            log::warn!("Failed to set participant attributes: {}", e);
+            log::debug!("Could not set participant attributes (canUpdateOwnMetadata may not be granted): {}", e);
         }
     });
 }

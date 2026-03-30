@@ -54,16 +54,19 @@ pub struct AppState {
     pub auth_config: AuthConfig,
     /// Matrix voice room id → LiveKit SFU room name (learned on connect; used for admin ListParticipants).
     pub livekit_matrix_to_sfu_room: StdMutex<HashMap<String, String>>,
-    /// Stops the periodic `m.call.member` refresh task (see `voice_matrix`).
-    pub call_member_refresh_stop: Arc<AtomicBool>,
-    pub call_member_refresh_task: StdMutex<Option<tauri::async_runtime::JoinHandle<()>>>,
+    /// Stops the MSC4140 heartbeat task that restarts the delayed leave event.
+    pub heartbeat_stop: Arc<AtomicBool>,
+    pub heartbeat_task: StdMutex<Option<tauri::async_runtime::JoinHandle<()>>>,
+    /// The delay_id from the server for the current delayed leave event.
+    /// Used by voice_disconnect to fire the leave immediately.
+    pub delayed_leave_id: StdMutex<Option<String>>,
 }
 
 impl AppState {
-    /// Abort the background task that re-sends `m.call.member` to extend `expires`.
-    pub fn stop_call_member_refresh_loop(&self) {
-        self.call_member_refresh_stop.store(true, Ordering::SeqCst);
-        if let Ok(mut guard) = self.call_member_refresh_task.lock() {
+    /// Stop the MSC4140 heartbeat loop.
+    pub fn stop_heartbeat_loop(&self) {
+        self.heartbeat_stop.store(true, Ordering::SeqCst);
+        if let Ok(mut guard) = self.heartbeat_task.lock() {
             if let Some(h) = guard.take() {
                 h.abort();
             }
@@ -140,8 +143,9 @@ pub fn run() {
         giphy_api_key,
         auth_config,
         livekit_matrix_to_sfu_room: StdMutex::new(HashMap::new()),
-        call_member_refresh_stop: Arc::new(AtomicBool::new(true)),
-        call_member_refresh_task: StdMutex::new(None),
+        heartbeat_stop: Arc::new(AtomicBool::new(true)),
+        heartbeat_task: StdMutex::new(None),
+        delayed_leave_id: StdMutex::new(None),
     });
 
     tauri::Builder::default()
