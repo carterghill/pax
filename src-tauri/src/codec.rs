@@ -158,6 +158,37 @@ fn has_amd_av1_support(name: &str) -> bool {
     false
 }
 
+/// Resolve the codec for screen sharing.
+///
+/// On Windows, the LiveKit Rust SDK's bundled libwebrtc does not include
+/// hardware encoder factories (NVENC/AMF) — only OpenH264 software encoding
+/// is available for H264.  OpenH264's rate controller cannot keep up with
+/// native-resolution screen content at 30 fps, causing cascading frame drops
+/// (`iContinualSkipFrames` warnings) and wildly fluctuating actual frame rates.
+///
+/// VP9's libvpx encoder has a dedicated screen-content coding mode and a much
+/// more robust rate controller, so we force VP9 for screen shares on Windows
+/// when the resolved codec would otherwise be H264 (software).
+///
+/// On Linux, hardware encoding (VA-API / NVENC via CUDA) *is* wired up in
+/// webrtc-sys, so we honour the normal resolved codec there.
+pub fn resolve_screen_share_codec() -> VideoCodec {
+    let codec = resolve_codec();
+
+    #[cfg(target_os = "windows")]
+    {
+        if codec == VideoCodec::H264 {
+            eprintln!(
+                "[Pax Codec] Screen share: overriding H264 → VP9 \
+                 (no HW encoder on Windows, OpenH264 too slow for screen content)"
+            );
+            return VideoCodec::VP9;
+        }
+    }
+
+    codec
+}
+
 /// Get a human-readable label for the currently resolved codec.
 pub fn resolved_codec_label() -> &'static str {
     match resolve_codec() {
