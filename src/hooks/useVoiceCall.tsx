@@ -85,6 +85,9 @@ export function useVoiceCall() {
   const connectedRoomIdRef = useRef<string | null>(null);
   connectedRoomIdRef.current = state.connectedRoomId;
   const isConnectingRef = useRef(false);
+  /** Tracks which room is being auto-rejoined (null = none). Set to null
+   *  by disconnect() to cancel an in-progress rejoin attempt. */
+  const rejoinRoomRef = useRef<string | null>(null);
 
   const wasConnectedRef = useRef(false);
   const prevParticipantIdsRef = useRef<Set<string>>(new Set());
@@ -185,9 +188,76 @@ export function useVoiceCall() {
     };
   }, []);
 
+  // Auto-rejoin when LiveKit kicks us unexpectedly (JWT expiry, server restart, etc.).
+  // This event only fires on unexpected disconnects — manual disconnect takes the
+  // shutdown_rx branch in the Rust event loop and never emits this event.
+  useEffect(() => {
+    let unlisten: UnlistenFn | null = null;
+    listen<string>("voice-livekit-kicked", async (event) => {
+      const roomId = event.payload;
+      console.warn(
+        `[Pax] LiveKit kicked from ${roomId} — auto-rejoining`
+      );
+      rejoinRoomRef.current = roomId;
+
+      const MAX_RETRIES = 5;
+      for (let attempt = 0; attempt < MAX_RETRIES; attempt++) {
+        // Cancelled by disconnect() or connect() to a different room
+        if (rejoinRoomRef.current !== roomId) return;
+
+        const delay = Math.min(2000 * Math.pow(2, attempt), 30000);
+        setState((prev) => ({
+          ...prev,
+          connectedRoomId: roomId,
+          isConnecting: true,
+          error: null,
+        }));
+
+        await new Promise((r) => setTimeout(r, delay));
+        if (rejoinRoomRef.current !== roomId) return;
+
+        try {
+          isConnectingRef.current = true;
+          await invoke("voice_connect", { roomId });
+          isConnectingRef.current = false;
+          console.log(
+            `[Pax] Auto-rejoin succeeded on attempt ${attempt + 1}`
+          );
+          rejoinRoomRef.current = null;
+          return;
+        } catch (e) {
+          isConnectingRef.current = false;
+          console.error(
+            `[Pax] Auto-rejoin attempt ${attempt + 1}/${MAX_RETRIES} failed:`,
+            e
+          );
+        }
+      }
+
+      // All retries exhausted
+      rejoinRoomRef.current = null;
+      playSound("ui/pop_close");
+      setState((prev) => ({
+        ...prev,
+        connectedRoomId: null,
+        isConnecting: false,
+        error: "Lost connection to voice chat",
+        participants: [],
+      }));
+    }).then((fn) => {
+      unlisten = fn;
+    });
+    return () => {
+      rejoinRoomRef.current = null;
+      if (unlisten) unlisten();
+    };
+  }, []);
+
   const connect = useCallback(async (roomId: string) => {
     if (connectedRoomIdRef.current === roomId) return;
     if (isConnectingRef.current) return;
+    // Cancel any in-progress auto-rejoin (e.g. user connects to a different room)
+    rejoinRoomRef.current = null;
     isConnectingRef.current = true;
     setState((prev) => ({
       ...prev,
@@ -219,6 +289,8 @@ export function useVoiceCall() {
   const disconnect = useCallback(async () => {
     const roomId = connectedRoomIdRef.current;
     if (!roomId) return;
+    // Cancel any in-progress auto-rejoin
+    rejoinRoomRef.current = null;
     playSound("ui/pop_close");
     // Optimistic update: clear UI immediately so disconnect feels instant
     setState((prev) => ({

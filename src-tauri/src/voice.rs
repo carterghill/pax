@@ -913,7 +913,10 @@ async fn run_event_loop(
                         emit_state(app_handle.as_ref(), &room_id, &local_identity, &audio_state, false, true, None);
                     }
                     Some(RoomEvent::Disconnected { reason }) => {
-                        log::info!("Disconnected from LiveKit room: {:?}", reason);
+                        log::warn!("Permanently disconnected from LiveKit room: {:?}", reason);
+                        // Notify the frontend so it can auto-rejoin.
+                        // This does NOT fire on manual disconnect (that takes the shutdown_rx branch).
+                        let _ = app_handle.emit("voice-livekit-kicked", room_id.clone());
                         emit_state(app_handle.as_ref(), &room_id, &local_identity, &audio_state, false, false, Some("Disconnected from voice".into()));
                         break;
                     }
