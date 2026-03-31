@@ -160,6 +160,7 @@ pub fn run() {
                 ))
                 .build(),
         )
+        .plugin(tauri_plugin_opener::init())
         .manage(state)
         .manage(voice::VoiceManager::new())
         .register_uri_scheme_protocol("paxvideo", |_app, request| {
