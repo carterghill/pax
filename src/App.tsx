@@ -4,6 +4,7 @@ import { invoke } from "@tauri-apps/api/core";
 import MainLayout from "./layouts/MainLayout";
 import { ThemeProvider } from "./theme/ThemeContext";
 import { clearMessageCache } from "./hooks/useMessages";
+import { useExternalLinkInterceptor } from "./hooks/useExternalLinks";
 
 interface AuthConfig {
   default_homeserver: string | null;
@@ -27,6 +28,9 @@ function App() {
 
   const [tab, setTab] = useState<"login" | "signup">("login");
   const [authConfig, setAuthConfig] = useState<AuthConfig | null>(null);
+
+  // Open all external (http/https) link clicks in the system browser.
+  useExternalLinkInterceptor();
 
   // Fetch auth config from backend (env-driven defaults)
   useEffect(() => {
