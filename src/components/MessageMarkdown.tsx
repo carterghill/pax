@@ -7,6 +7,8 @@ import {
   EMOJI_ONLY_DISPLAY_SCALE,
   isOnlyEmojisAndWhitespace,
 } from "../utils/emojifyTwemoji";
+import { resolveEmbed } from "../utils/urlEmbed";
+import LinkEmbed from "./LinkEmbed";
 import {
   Braces,
   ExternalLink,
@@ -152,6 +154,38 @@ export default function MessageMarkdown({ children, edited = false }: MessageMar
 
         const external = isExternalHref(href);
         const LinkIcon = external ? ExternalLink : Link2;
+
+        const embedInfo = href ? resolveEmbed(href) : null;
+        if (embedInfo) {
+          return (
+            <span style={{ display: "block" }}>
+              <a
+                href={href}
+                target="_blank"
+                rel="noopener noreferrer"
+                style={{
+                  display: "inline-flex",
+                  alignItems: "center",
+                  gap: spacing.unit * 0.75,
+                  color: palette.accent,
+                  textDecoration: "underline",
+                  textUnderlineOffset: 2,
+                  wordBreak: "break-all",
+                }}
+              >
+                <E>{c}</E>
+                <ExternalLink
+                  size={Math.round(typography.fontSizeSmall)}
+                  strokeWidth={2}
+                  style={{ flexShrink: 0, opacity: 0.85, verticalAlign: "middle" }}
+                  aria-hidden
+                />
+              </a>
+              <LinkEmbed embed={embedInfo} href={href!} />
+            </span>
+          );
+        }
+
         return (
           <a
             href={href}
