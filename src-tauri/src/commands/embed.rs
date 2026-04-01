@@ -1,4 +1,5 @@
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
+use tauri::Manager;
 
 /// Open Graph / meta-tag metadata extracted from a URL.
 #[derive(Debug, Clone, Serialize)]
@@ -10,27 +11,144 @@ pub struct UrlMetadata {
     pub video_url: Option<String>,
 }
 
+/* ------------------------------------------------------------------ */
+/*  fxtwitter JSON API types                                           */
+/* ------------------------------------------------------------------ */
+
+#[derive(Debug, Deserialize)]
+struct FxTweetResponse {
+    code: u32,
+    tweet: Option<FxTweet>,
+}
+
+#[derive(Debug, Deserialize)]
+struct FxTweet {
+    text: Option<String>,
+    author: Option<FxAuthor>,
+    media: Option<FxMedia>,
+}
+
+#[derive(Debug, Deserialize)]
+struct FxAuthor {
+    name: Option<String>,
+    screen_name: Option<String>,
+    #[allow(dead_code)]
+    avatar_url: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+struct FxMedia {
+    photos: Option<Vec<FxPhoto>>,
+    videos: Option<Vec<FxVideo>>,
+}
+
+#[derive(Debug, Deserialize)]
+struct FxPhoto {
+    url: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+struct FxVideo {
+    url: Option<String>,
+    thumbnail_url: Option<String>,
+}
+
+/* ------------------------------------------------------------------ */
+/*  Twitter / X → fxtwitter JSON API                                   */
+/* ------------------------------------------------------------------ */
+
+/// Check if a URL is a Twitter/X status link. Returns the API URL if so.
+fn twitter_api_url(url: &str) -> Option<String> {
+    let re = regex::Regex::new(
+        r"^https?://(twitter\.com|x\.com)/([^/]+)/status/(\d+)"
+    ).unwrap();
+    let caps = re.captures(url)?;
+    let user = &caps[2];
+    let id = &caps[3];
+    Some(format!("https://api.fxtwitter.com/{user}/status/{id}"))
+}
+
+/// Fetch tweet metadata via the fxtwitter JSON API, which returns direct
+/// video.twimg.com MP4 URLs instead of embed player URLs.
+async fn fetch_twitter_metadata(
+    client: &reqwest::Client,
+    api_url: &str,
+) -> Result<UrlMetadata, String> {
+    let resp = client
+        .get(api_url)
+        .header("Accept", "application/json")
+        .send()
+        .await
+        .map_err(|e| format!("fxtwitter fetch failed: {e}"))?;
+
+    if !resp.status().is_success() {
+        return Err(format!("fxtwitter HTTP {}", resp.status()));
+    }
+
+    let data: FxTweetResponse = resp
+        .json()
+        .await
+        .map_err(|e| format!("fxtwitter JSON parse error: {e}"))?;
+
+    if data.code != 200 {
+        return Err(format!("fxtwitter returned code {}", data.code));
+    }
+
+    let tweet = data.tweet.ok_or("fxtwitter: no tweet in response")?;
+
+    let author = tweet.author.as_ref();
+    let title = match (
+        author.and_then(|a| a.name.as_deref()),
+        author.and_then(|a| a.screen_name.as_deref()),
+    ) {
+        (Some(name), Some(handle)) => Some(format!("{name} (@{handle})")),
+        (Some(name), None) => Some(name.to_string()),
+        (None, Some(handle)) => Some(format!("@{handle}")),
+        _ => None,
+    };
+
+    let description = tweet.text;
+    let media = tweet.media.as_ref();
+
+    // Prefer video thumbnail, then first photo
+    let image = media
+        .and_then(|m| m.videos.as_ref())
+        .and_then(|v| v.first())
+        .and_then(|v| v.thumbnail_url.clone())
+        .or_else(|| {
+            media
+                .and_then(|m| m.photos.as_ref())
+                .and_then(|p| p.first())
+                .and_then(|p| p.url.clone())
+        });
+
+    // Direct MP4 URL from Twitter's CDN
+    let video_url = media
+        .and_then(|m| m.videos.as_ref())
+        .and_then(|v| v.first())
+        .and_then(|v| v.url.clone());
+
+    Ok(UrlMetadata {
+        title,
+        description,
+        image,
+        site_name: Some("Twitter".to_string()),
+        video_url,
+    })
+}
+
+/* ------------------------------------------------------------------ */
+/*  Generic OG metadata scraper                                        */
+/* ------------------------------------------------------------------ */
+
 /// Fetch Open Graph metadata from a URL by downloading the HTML and parsing
 /// `<meta property="og:*">` and `<meta name="twitter:*">` tags.
-///
-/// This is intentionally lightweight — no full HTML parser crate, just enough
-/// regex to pull the tags we need.  Works for the vast majority of sites that
-/// support OG tags (Twitter, Reddit, news sites, etc.).
-#[tauri::command]
-pub async fn fetch_url_metadata(url: String) -> Result<UrlMetadata, String> {
-    // Twitter/X serves minimal OG tags to non-browser user agents.
-    // Rewrite to fxtwitter.com which returns rich metadata (tweet text, author, media).
-    let fetch_url = rewrite_for_metadata(&url);
-
-    let client = reqwest::Client::builder()
-        .timeout(std::time::Duration::from_secs(8))
-        .redirect(reqwest::redirect::Policy::limited(5))
-        .user_agent("Mozilla/5.0 (compatible; PaxBot/1.0)")
-        .build()
-        .map_err(|e| format!("HTTP client error: {e}"))?;
-
+async fn fetch_og_metadata(
+    client: &reqwest::Client,
+    url: &str,
+) -> Result<UrlMetadata, String> {
     let resp = client
-        .get(&fetch_url)
+        .get(url)
         .header("Accept", "text/html")
         .send()
         .await
@@ -40,7 +158,6 @@ pub async fn fetch_url_metadata(url: String) -> Result<UrlMetadata, String> {
         return Err(format!("HTTP {}", resp.status()));
     }
 
-    // Only read the first ~256 KB — we only need <head> content.
     let body = resp
         .text()
         .await
@@ -48,7 +165,6 @@ pub async fn fetch_url_metadata(url: String) -> Result<UrlMetadata, String> {
     let head = if let Some(end) = body.find("</head>") {
         &body[..end + 7]
     } else {
-        // No </head> found — just use first 256 KB
         &body[..body.len().min(256 * 1024)]
     };
 
@@ -58,94 +174,60 @@ pub async fn fetch_url_metadata(url: String) -> Result<UrlMetadata, String> {
     let mut site_name: Option<String> = None;
     let mut video_url: Option<String> = None;
 
-    // Match <meta> tags with property= or name= attributes.
-    // Handles both single and double quotes, and content before/after property.
     let meta_re = regex::Regex::new(
         r#"(?i)<meta\s+(?:[^>]*?\s)?(?:property|name)\s*=\s*["']([^"']+)["'][^>]*?\s?content\s*=\s*["']([^"']*)["']"#,
     )
     .unwrap();
 
-    // Also match content-first order: <meta content="..." property="...">
     let meta_re_rev = regex::Regex::new(
         r#"(?i)<meta\s+(?:[^>]*?\s)?content\s*=\s*["']([^"']*)["'][^>]*?\s?(?:property|name)\s*=\s*["']([^"']+)["']"#,
     )
     .unwrap();
 
-    // Process property=X content=Y order
+    let mut apply = |prop: &str, content: &str| {
+        if content.is_empty() {
+            return;
+        }
+        match prop {
+            "og:title" | "twitter:title" => {
+                if title.is_none() {
+                    title = Some(html_decode(content));
+                }
+            }
+            "og:description" | "twitter:description" => {
+                if description.is_none() {
+                    description = Some(html_decode(content));
+                }
+            }
+            "og:image" | "twitter:image" | "twitter:image:src" => {
+                if image.is_none() {
+                    image = Some(content.to_string());
+                }
+            }
+            "og:site_name" => {
+                if site_name.is_none() {
+                    site_name = Some(html_decode(content));
+                }
+            }
+            "og:video" | "og:video:url" | "og:video:secure_url" | "twitter:player:stream" => {
+                if video_url.is_none() {
+                    video_url = Some(content.to_string());
+                }
+            }
+            _ => {}
+        }
+    };
+
     for cap in meta_re.captures_iter(head) {
         let prop = cap[1].to_lowercase();
-        let content = cap[2].to_string();
-        if content.is_empty() {
-            continue;
-        }
-        match prop.as_str() {
-            "og:title" | "twitter:title" => {
-                if title.is_none() {
-                    title = Some(html_decode(&content));
-                }
-            }
-            "og:description" | "twitter:description" => {
-                if description.is_none() {
-                    description = Some(html_decode(&content));
-                }
-            }
-            "og:image" | "twitter:image" | "twitter:image:src" => {
-                if image.is_none() {
-                    image = Some(content);
-                }
-            }
-            "og:site_name" => {
-                if site_name.is_none() {
-                    site_name = Some(html_decode(&content));
-                }
-            }
-            "og:video" | "og:video:url" | "og:video:secure_url" | "twitter:player:stream" => {
-                if video_url.is_none() {
-                    video_url = Some(content);
-                }
-            }
-            _ => {}
-        }
+        apply(&prop, &cap[2]);
     }
 
-    // Process content=Y property=X order
     for cap in meta_re_rev.captures_iter(head) {
-        let content = cap[1].to_string();
         let prop = cap[2].to_lowercase();
-        if content.is_empty() {
-            continue;
-        }
-        match prop.as_str() {
-            "og:title" | "twitter:title" => {
-                if title.is_none() {
-                    title = Some(html_decode(&content));
-                }
-            }
-            "og:description" | "twitter:description" => {
-                if description.is_none() {
-                    description = Some(html_decode(&content));
-                }
-            }
-            "og:image" | "twitter:image" | "twitter:image:src" => {
-                if image.is_none() {
-                    image = Some(content);
-                }
-            }
-            "og:site_name" => {
-                if site_name.is_none() {
-                    site_name = Some(html_decode(&content));
-                }
-            }
-            "og:video" | "og:video:url" | "og:video:secure_url" | "twitter:player:stream" => {
-                if video_url.is_none() {
-                    video_url = Some(content);
-                }
-            }
-            _ => {}
-        }
+        apply(&prop, &cap[1]);
     }
 
-    // Fallback: try <title> tag if no OG title found
     if title.is_none() {
         let title_re = regex::Regex::new(r#"(?is)<title[^>]*>(.*?)</title>"#).unwrap();
         if let Some(cap) = title_re.captures(head) {
@@ -165,6 +247,32 @@ pub async fn fetch_url_metadata(url: String) -> Result<UrlMetadata, String> {
     })
 }
 
+/* ------------------------------------------------------------------ */
+/*  Public Tauri command                                                */
+/* ------------------------------------------------------------------ */
+
+#[tauri::command]
+pub async fn fetch_url_metadata(url: String) -> Result<UrlMetadata, String> {
+    let client = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(8))
+        .redirect(reqwest::redirect::Policy::limited(5))
+        .user_agent("Mozilla/5.0 (compatible; PaxBot/1.0)")
+        .build()
+        .map_err(|e| format!("HTTP client error: {e}"))?;
+
+    // Twitter / X: use fxtwitter's JSON API for direct media URLs.
+    if let Some(api_url) = twitter_api_url(&url) {
+        return fetch_twitter_metadata(&client, &api_url).await;
+    }
+
+    // Everything else: scrape OG tags from HTML.
+    fetch_og_metadata(&client, &url).await
+}
+
+/* ------------------------------------------------------------------ */
+/*  Helpers                                                            */
+/* ------------------------------------------------------------------ */
+
 /// Decode common HTML entities.
 fn html_decode(s: &str) -> String {
     s.replace("&amp;", "&")
@@ -177,14 +285,93 @@ fn html_decode(s: &str) -> String {
         .replace("&#x2F;", "/")
 }
 
-/// Rewrite certain URLs to proxy services that return richer OG metadata.
-/// The original URL is preserved for display; only the fetch target changes.
-fn rewrite_for_metadata(url: &str) -> String {
-    // Twitter / X → fxtwitter.com (serves full tweet text, author, media as OG tags)
-    let twitter_re =
-        regex::Regex::new(r"^https?://(twitter\.com|x\.com)/").unwrap();
-    if twitter_re.is_match(url) {
-        return twitter_re.replace(url, "https://fxtwitter.com/").to_string();
+/* ------------------------------------------------------------------ */
+/*  Media proxy command                                                */
+/* ------------------------------------------------------------------ */
+
+/// Domains allowed through the media proxy (security: prevent open proxy).
+const ALLOWED_MEDIA_HOSTS: &[&str] = &[
+    "video.twimg.com",
+    "pbs.twimg.com",
+    "abs.twimg.com",
+];
+
+fn is_allowed_media_host(url: &str) -> bool {
+    ALLOWED_MEDIA_HOSTS.iter().any(|&allowed| {
+        url.starts_with(&format!("https://{allowed}/"))
+            || url.starts_with(&format!("https://{allowed}?"))
+            || url == format!("https://{allowed}")
+    })
+}
+
+/// Download a video URL server-side (bypasses webview CORS), save to a
+/// temp file, and return the file path.  The frontend uses convertFileSrc()
+/// to create an asset:// URL the <video> element can play.
+#[tauri::command]
+pub async fn proxy_media(app: tauri::AppHandle, url: String) -> Result<String, String> {
+    if !is_allowed_media_host(&url) {
+        return Err(format!("Host not allowed for media proxy: {url}"));
     }
-    url.to_string()
+
+    log::info!("[Pax Media] Proxying: {url}");
+
+    let client = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(60))
+        .redirect(reqwest::redirect::Policy::limited(5))
+        .user_agent("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36")
+        .build()
+        .map_err(|e| format!("Proxy HTTP client error: {e}"))?;
+
+    let resp = client
+        .get(&url)
+        .header("Referer", "https://twitter.com/")
+        .header("Origin", "https://twitter.com")
+        .send()
+        .await
+        .map_err(|e| format!("Proxy fetch failed: {e}"))?;
+
+    if !resp.status().is_success() {
+        return Err(format!("Proxy HTTP {}", resp.status()));
+    }
+
+    let bytes = resp
+        .bytes()
+        .await
+        .map_err(|e| format!("Proxy body read error: {e}"))?;
+
+    log::info!("[Pax Media] Downloaded {} bytes", bytes.len());
+
+    // Write to a temp file in the app's temp directory.
+    let temp_dir = app
+        .path()
+        .temp_dir()
+        .map_err(|e| format!("Failed to get temp dir: {e}"))?;
+
+    std::fs::create_dir_all(&temp_dir)
+        .map_err(|e| format!("Failed to create temp dir: {e}"))?;
+
+    // Use a hash of the URL as filename to enable caching across clicks.
+    let hash = {
+        use std::hash::{Hash, Hasher};
+        let mut h = std::collections::hash_map::DefaultHasher::new();
+        url.hash(&mut h);
+        h.finish()
+    };
+    let filename = format!("pax_media_{hash:016x}.mp4");
+    let file_path = temp_dir.join(&filename);
+
+    // Skip download if already cached.
+    if !file_path.exists() {
+        std::fs::write(&file_path, &bytes)
+            .map_err(|e| format!("Failed to write temp file: {e}"))?;
+    }
+
+    let path_str = file_path
+        .to_str()
+        .ok_or("Temp file path is not valid UTF-8")?
+        .to_string();
+
+    log::info!("[Pax Media] Saved to: {path_str}");
+
+    Ok(path_str)
 }

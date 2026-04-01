@@ -223,6 +223,7 @@ pub fn run() {
             commands::profile::set_user_avatar,
             commands::profile::remove_user_avatar,
             commands::embed::fetch_url_metadata,
+            commands::embed::proxy_media,
         ])
         .setup(|app| {
             // Set window icon (taskbar + title bar) from our bundled icons

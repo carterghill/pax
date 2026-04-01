@@ -1,5 +1,5 @@
 import { useState, useEffect, useRef, type CSSProperties } from "react";
-import { invoke } from "@tauri-apps/api/core";
+import { invoke, convertFileSrc } from "@tauri-apps/api/core";
 import { Play, ExternalLink, AlertCircle } from "lucide-react";
 import { useTheme } from "../theme/ThemeContext";
 import type { EmbedInfo, IframeEmbed } from "../utils/urlEmbed";
@@ -173,6 +173,9 @@ function MetadataEmbedView({
   const [meta, setMeta] = useState<UrlMetadata | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState(false);
+  const [playing, setPlaying] = useState(false);
+  const [videoSrc, setVideoSrc] = useState<string | null>(null);
+  const [videoLoading, setVideoLoading] = useState(false);
   const fetched = useRef(false);
 
   useEffect(() => {
@@ -189,6 +192,21 @@ function MetadataEmbedView({
         setLoading(false);
       });
   }, [embed.url]);
+
+  // Download video via Rust proxy and create an asset URL from the temp file
+  const handlePlay = async (videoUrl: string) => {
+    setPlaying(true);
+    setVideoLoading(true);
+    try {
+      const filePath = await invoke<string>("proxy_media", { url: videoUrl });
+      setVideoSrc(convertFileSrc(filePath));
+    } catch (err) {
+      console.error("[Pax Embed] Failed to proxy video:", err);
+      setPlaying(false);
+    } finally {
+      setVideoLoading(false);
+    }
+  };
 
   const containerStyle: CSSProperties = {
     width: MAX_EMBED_WIDTH,
@@ -223,12 +241,185 @@ function MetadataEmbedView({
   }
 
   if (error || !meta) {
-    // Silently fall back — don't show a broken embed for metadata failures
     return null;
   }
 
   const hasImage = Boolean(meta.image);
   const hasVideo = Boolean(meta.video_url);
+
+  // Media section: video player or thumbnail
+  const mediaSection = (() => {
+    if (playing && hasVideo) {
+      return (
+        <div style={{ position: "relative", width: "100%", backgroundColor: "#000" }}>
+          {videoLoading || !videoSrc ? (
+            <div
+              style={{
+                display: "flex",
+                alignItems: "center",
+                justifyContent: "center",
+                height: 200,
+                color: palette.textSecondary,
+                fontSize: typography.fontSizeSmall,
+              }}
+            >
+              Loading video…
+            </div>
+          ) : (
+            <video
+              src={videoSrc}
+              controls
+              autoPlay
+              style={{ display: "block", width: "100%", maxHeight: 400 }}
+              onError={(e) => {
+                const vid = e.currentTarget;
+                console.error("[Pax Embed] Video error:", {
+                  src: vid.src,
+                  originalUrl: meta.video_url,
+                  error: vid.error?.message,
+                  code: vid.error?.code,
+                  networkState: vid.networkState,
+                });
+              }}
+            />
+          )}
+        </div>
+      );
+    }
+
+    if (hasImage) {
+      return (
+        <div
+          style={{
+            position: "relative",
+            width: "100%",
+            backgroundColor: palette.bgTertiary,
+            cursor: hasVideo ? "pointer" : "default",
+          }}
+          onClick={
+            hasVideo
+              ? (e) => {
+                  e.preventDefault();
+                  e.stopPropagation();
+                  handlePlay(meta.video_url!);
+                }
+              : undefined
+          }
+        >
+          <img
+            src={meta.image!}
+            alt=""
+            style={{
+              display: "block",
+              width: "100%",
+              maxHeight: 250,
+              objectFit: "cover",
+            }}
+          />
+          {hasVideo && (
+            <div
+              style={{
+                position: "absolute",
+                inset: 0,
+                display: "flex",
+                alignItems: "center",
+                justifyContent: "center",
+                background: "rgba(0,0,0,0.3)",
+                transition: "background 0.15s ease",
+              }}
+            >
+              <div
+                style={{
+                  width: 56,
+                  height: 56,
+                  borderRadius: "50%",
+                  backgroundColor: "rgba(0,0,0,0.6)",
+                  display: "flex",
+                  alignItems: "center",
+                  justifyContent: "center",
+                  transition: "transform 0.15s ease",
+                }}
+              >
+                <Play size={28} color="#fff" fill="#fff" />
+              </div>
+            </div>
+          )}
+        </div>
+      );
+    }
+    return null;
+  })();
+
+  // Text content section (always links to original URL)
+  const textSection = (
+    <div style={{ padding: `${spacing.unit * 1.5}px ${spacing.unit * 2}px` }}>
+      {meta.site_name && (
+        <div
+          style={{
+            fontSize: typography.fontSizeSmall - 1,
+            fontWeight: typography.fontWeightMedium,
+            color: embed.color,
+            textTransform: "uppercase",
+            letterSpacing: "0.05em",
+            marginBottom: spacing.unit * 0.5,
+          }}
+        >
+          {meta.site_name}
+        </div>
+      )}
+      {meta.title && (
+        <div
+          style={{
+            fontSize: typography.fontSizeBase,
+            fontWeight: typography.fontWeightMedium,
+            color: palette.textPrimary,
+            lineHeight: typography.lineHeight,
+            marginBottom: meta.description ? spacing.unit * 0.5 : 0,
+            display: "-webkit-box",
+            WebkitLineClamp: 2,
+            WebkitBoxOrient: "vertical",
+            overflow: "hidden",
+          }}
+        >
+          {meta.title}
+        </div>
+      )}
+      {meta.description && (
+        <div
+          style={{
+            fontSize: typography.fontSizeSmall,
+            color: palette.textSecondary,
+            lineHeight: typography.lineHeight,
+            display: "-webkit-box",
+            WebkitLineClamp: 3,
+            WebkitBoxOrient: "vertical",
+            overflow: "hidden",
+          }}
+        >
+          {meta.description}
+        </div>
+      )}
+    </div>
+  );
+
+  // When there's a video, keep the media section outside the <a> tag entirely
+  // so clicks on the thumbnail/play button and video controls don't get
+  // intercepted by the global external-link handler (capture phase).
+  if (hasVideo) {
+    return (
+      <div style={containerStyle}>
+        {mediaSection}
+        <a
+          href={href}
+          target="_blank"
+          rel="noopener noreferrer"
+          style={{ textDecoration: "none", display: "block" }}
+        >
+          {textSection}
+        </a>
+      </div>
+    );
+  }
 
   return (
     <a
@@ -238,105 +429,8 @@ function MetadataEmbedView({
       style={{ textDecoration: "none", display: "block" }}
     >
       <div style={containerStyle}>
-        {/* Thumbnail / video */}
-        {hasImage && (
-          <div
-            style={{
-              position: "relative",
-              width: "100%",
-              backgroundColor: palette.bgTertiary,
-            }}
-          >
-            <img
-              src={meta.image!}
-              alt=""
-              style={{
-                display: "block",
-                width: "100%",
-                maxHeight: 250,
-                objectFit: "cover",
-              }}
-            />
-            {hasVideo && (
-              <div
-                style={{
-                  position: "absolute",
-                  inset: 0,
-                  display: "flex",
-                  alignItems: "center",
-                  justifyContent: "center",
-                  background: "rgba(0,0,0,0.3)",
-                }}
-              >
-                <div
-                  style={{
-                    width: 48,
-                    height: 48,
-                    borderRadius: "50%",
-                    backgroundColor: "rgba(0,0,0,0.6)",
-                    display: "flex",
-                    alignItems: "center",
-                    justifyContent: "center",
-                  }}
-                >
-                  <Play size={24} color="#fff" fill="#fff" />
-                </div>
-              </div>
-            )}
-          </div>
-        )}
-
-        {/* Text content */}
-        <div style={{ padding: `${spacing.unit * 1.5}px ${spacing.unit * 2}px` }}>
-          {meta.site_name && (
-            <div
-              style={{
-                fontSize: typography.fontSizeSmall - 1,
-                fontWeight: typography.fontWeightMedium,
-                color: embed.color,
-                textTransform: "uppercase",
-                letterSpacing: "0.05em",
-                marginBottom: spacing.unit * 0.5,
-              }}
-            >
-              {meta.site_name}
-            </div>
-          )}
-          {meta.title && (
-            <div
-              style={{
-                fontSize: typography.fontSizeBase,
-                fontWeight: typography.fontWeightMedium,
-                color: palette.textPrimary,
-                lineHeight: typography.lineHeight,
-                marginBottom: meta.description ? spacing.unit * 0.5 : 0,
-                // Clamp to 2 lines
-                display: "-webkit-box",
-                WebkitLineClamp: 2,
-                WebkitBoxOrient: "vertical",
-                overflow: "hidden",
-              }}
-            >
-              {meta.title}
-            </div>
-          )}
-          {meta.description && (
-            <div
-              style={{
-                fontSize: typography.fontSizeSmall,
-                color: palette.textSecondary,
-                lineHeight: typography.lineHeight,
-                // Clamp to 3 lines
-                display: "-webkit-box",
-                WebkitLineClamp: 3,
-                WebkitBoxOrient: "vertical",
-                overflow: "hidden",
-              }}
-            >
-              {meta.description}
-            </div>
-          )}
-        </div>
+        {mediaSection}
+        {textSection}
       </div>
     </a>
   );

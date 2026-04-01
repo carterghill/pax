@@ -155,37 +155,6 @@ export default function MessageMarkdown({ children, edited = false }: MessageMar
         const external = isExternalHref(href);
         const LinkIcon = external ? ExternalLink : Link2;
 
-        const embedInfo = href ? resolveEmbed(href) : null;
-        if (embedInfo) {
-          return (
-            <span style={{ display: "block" }}>
-              <a
-                href={href}
-                target="_blank"
-                rel="noopener noreferrer"
-                style={{
-                  display: "inline-flex",
-                  alignItems: "center",
-                  gap: spacing.unit * 0.75,
-                  color: palette.accent,
-                  textDecoration: "underline",
-                  textUnderlineOffset: 2,
-                  wordBreak: "break-all",
-                }}
-              >
-                <E>{c}</E>
-                <ExternalLink
-                  size={Math.round(typography.fontSizeSmall)}
-                  strokeWidth={2}
-                  style={{ flexShrink: 0, opacity: 0.85, verticalAlign: "middle" }}
-                  aria-hidden
-                />
-              </a>
-              <LinkEmbed embed={embedInfo} href={href!} />
-            </span>
-          );
-        }
-
         return (
           <a
             href={href}
@@ -583,6 +552,23 @@ export default function MessageMarkdown({ children, edited = false }: MessageMar
     [palette, typography, spacing, themeName, edited],
   );
 
+  // Extract embeddable URLs from the raw text and render them below the markdown.
+  // This keeps block-level embed elements (divs, video) outside the <p> tree.
+  const embeds = useMemo(() => {
+    const urlRe = /\bhttps?:\/\/[^\s)\]>"'`]+/gi;
+    const seen = new Set<string>();
+    const result: { href: string; embed: ReturnType<typeof resolveEmbed> }[] = [];
+    let m: RegExpExecArray | null;
+    while ((m = urlRe.exec(children)) !== null) {
+      const href = m[0];
+      if (seen.has(href)) continue;
+      seen.add(href);
+      const embed = resolveEmbed(href);
+      if (embed) result.push({ href, embed });
+    }
+    return result;
+  }, [children]);
+
   return (
     <div
       style={{
@@ -599,6 +585,9 @@ export default function MessageMarkdown({ children, edited = false }: MessageMar
       <ReactMarkdown remarkPlugins={[remarkGfm]} components={components}>
         {markdownSource}
       </ReactMarkdown>
+      {embeds.map(({ href, embed }) => (
+        <LinkEmbed key={href} embed={embed!} href={href} />
+      ))}
     </div>
   );
 }
