@@ -119,7 +119,7 @@ function App() {
   }
 
   useEffect(() => {
-    if (autoLoginAttemptedRef.current || userId) return;
+    if (autoLoginAttemptedRef.current || userId || !authConfig) return;
     autoLoginAttemptedRef.current = true;
 
     (async () => {
@@ -138,7 +138,11 @@ function App() {
       try {
         const creds = await invoke<{ homeserver: string } | null>("load_credentials");
         if (creds) {
-          setHomeserver(creds.homeserver);
+          // Only restore the saved homeserver if no compile-time default is
+          // configured — PAX_HOMESERVER is the source of truth when set.
+          if (!authConfig?.default_homeserver) {
+            setHomeserver(creds.homeserver);
+          }
           setRememberMe(true);
         }
       } catch {
@@ -147,7 +151,7 @@ function App() {
     })().finally(() => {
       setAutoLoggingIn(false);
     });
-  }, [userId]);
+  }, [userId, authConfig]);
 
   function switchTab(newTab: "login" | "signup") {
     setTab(newTab);

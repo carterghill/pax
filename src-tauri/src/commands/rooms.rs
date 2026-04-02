@@ -350,6 +350,18 @@ pub async fn restore_session(
     let sd = creds.session.ok_or("No saved session")?;
     let sp = store_path(&app)?;
 
+    // If a compile-time homeserver is configured, reject saved sessions that
+    // point at a different server — the baked-in value is the source of truth.
+    if let Some(configured) = &state.auth_config.default_homeserver {
+        if creds.homeserver.trim_end_matches('/') != configured.trim_end_matches('/') {
+            log::warn!(
+                "restore_session: saved homeserver ({}) differs from configured ({}), discarding stale session",
+                creds.homeserver, configured
+            );
+            return Err("Saved session is for a different homeserver".to_string());
+        }
+    }
+
     log::info!("restore_session: building client for {}", creds.homeserver);
     let client = build_client_with_retry(&creds.homeserver, &sp).await?;
 
