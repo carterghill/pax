@@ -1,9 +1,10 @@
 import { useState, useEffect, useRef, useCallback } from "react";
 import { invoke } from "@tauri-apps/api/core";
-import { Hash, Volume2, Users, LogIn, Check, Mail, RefreshCw } from "lucide-react";
+import { Hash, Volume2, Users, LogIn, Check, Mail, RefreshCw, Plus } from "lucide-react";
 import { useTheme } from "../theme/ThemeContext";
 import { Room } from "../types/matrix";
 import { VOICE_ROOM_TYPE } from "../utils/matrix";
+import CreateRoomDialog from "../components/CreateRoomDialog";
 
 interface SpaceChildInfo {
   id: string;
@@ -36,6 +37,9 @@ export default function SpaceHomeView({ space, onSelectRoom, onRoomsChanged }: S
   const [error, setError] = useState<string | null>(null);
   const [joiningRoomId, setJoiningRoomId] = useState<string | null>(null);
   const fetchingRef = useRef(false);
+  const [canManageChildren, setCanManageChildren] = useState(false);
+  const [showCreateRoom, setShowCreateRoom] = useState(false);
+  const permCheckedRef = useRef<string | null>(null);
 
   const fetchInfo = useCallback(() => {
     if (fetchingRef.current) return;
@@ -60,6 +64,15 @@ export default function SpaceHomeView({ space, onSelectRoom, onRoomsChanged }: S
   useEffect(() => {
     fetchInfo();
   }, [fetchInfo]);
+
+  // Check whether the user can add rooms to this space
+  useEffect(() => {
+    if (permCheckedRef.current === space.id) return;
+    permCheckedRef.current = space.id;
+    invoke<boolean>("can_manage_space_children", { spaceId: space.id })
+      .then(setCanManageChildren)
+      .catch(() => setCanManageChildren(false));
+  }, [space.id]);
 
   async function handleJoinRoom(roomId: string) {
     setJoiningRoomId(roomId);
@@ -227,6 +240,53 @@ export default function SpaceHomeView({ space, onSelectRoom, onRoomsChanged }: S
           )}
         </div>
 
+        {/* Create room button */}
+        {canManageChildren && (
+          <div style={{ marginBottom: spacing.unit * 4 }}>
+            <button
+              onClick={() => setShowCreateRoom(true)}
+              style={{
+                display: "flex",
+                alignItems: "center",
+                gap: spacing.unit * 2,
+                padding: `${spacing.unit * 2.5}px ${spacing.unit * 3}px`,
+                borderRadius: spacing.unit * 1.5,
+                border: `1px solid ${palette.border}`,
+                backgroundColor: "transparent",
+                color: palette.textPrimary,
+                fontSize: typography.fontSizeBase,
+                fontWeight: typography.fontWeightMedium,
+                fontFamily: typography.fontFamily,
+                cursor: "pointer",
+                width: "100%",
+                transition: "background-color 0.15s",
+              }}
+              onMouseEnter={(e) =>
+                (e.currentTarget.style.backgroundColor = palette.bgHover)
+              }
+              onMouseLeave={(e) =>
+                (e.currentTarget.style.backgroundColor = "transparent")
+              }
+            >
+              <div
+                style={{
+                  width: 36,
+                  height: 36,
+                  borderRadius: "50%",
+                  backgroundColor: palette.bgActive,
+                  display: "flex",
+                  alignItems: "center",
+                  justifyContent: "center",
+                  flexShrink: 0,
+                }}
+              >
+                <Plus size={18} color={palette.accent} />
+              </div>
+              Create Room
+            </button>
+          </div>
+        )}
+
         {/* Room sections */}
         {joinedRooms.length > 0 && (
           <RoomSection
@@ -273,10 +333,24 @@ export default function SpaceHomeView({ space, onSelectRoom, onRoomsChanged }: S
             textAlign: "center",
             padding: spacing.unit * 6,
           }}>
-            No rooms in this space yet
+            {canManageChildren
+              ? "No rooms in this space yet. Create one to get started!"
+              : "No rooms in this space yet"}
           </div>
         )}
       </div>
+
+      {/* Create room dialog */}
+      {showCreateRoom && (
+        <CreateRoomDialog
+          spaceId={space.id}
+          onClose={() => setShowCreateRoom(false)}
+          onCreated={() => {
+            onRoomsChanged();
+            fetchInfo();
+          }}
+        />
+      )}
     </div>
   );
 }

@@ -1020,3 +1020,238 @@ pub async fn create_space(
 
     Ok(room_id)
 }
+
+/// Check whether the logged-in user has permission to add/remove children
+/// in a space (i.e. can send `m.space.child` state events).
+///
+/// Compares the user's power level against the level required for
+/// `m.space.child` in the space's `m.room.power_levels` state.
+#[tauri::command]
+pub async fn can_manage_space_children(
+    state: State<'_, Arc<AppState>>,
+    space_id: String,
+) -> Result<bool, String> {
+    let client = super::get_client(&state).await?;
+    let user_id = client.user_id().ok_or("No user ID")?.to_owned();
+    let homeserver = client.homeserver().to_string();
+    let access_token = client.access_token().ok_or("No access token")?;
+
+    // Fetch m.room.power_levels from the space
+    let pl_url = format!(
+        "{}/_matrix/client/v3/rooms/{}/state/m.room.power_levels/",
+        homeserver.trim_end_matches('/'),
+        urlencoding::encode(&space_id),
+    );
+
+    let resp = state
+        .http_client
+        .get(&pl_url)
+        .timeout(Duration::from_secs(10))
+        .bearer_auth(access_token.to_string())
+        .send()
+        .await
+        .map_err(|e| format!("Failed to fetch power levels: {}", super::fmt_error_chain(&e)))?;
+
+    if !resp.status().is_success() {
+        // If we can't read power levels, assume no permission
+        return Ok(false);
+    }
+
+    let pl: serde_json::Value = resp
+        .json()
+        .await
+        .map_err(|e| format!("Failed to parse power levels: {e}"))?;
+
+    // Determine the required power level for m.space.child state events.
+    // Check events["m.space.child"] first, then fall back to state_default (spec default 50).
+    let required = pl
+        .get("events")
+        .and_then(|e| e.get("m.space.child"))
+        .and_then(|v| v.as_i64())
+        .unwrap_or_else(|| {
+            pl.get("state_default")
+                .and_then(|v| v.as_i64())
+                .unwrap_or(50)
+        });
+
+    // Determine this user's power level.
+    // Check users[user_id] first, then fall back to users_default (spec default 0).
+    let user_id_str = user_id.to_string();
+    let user_pl = pl
+        .get("users")
+        .and_then(|u| u.get(&user_id_str))
+        .and_then(|v| v.as_i64())
+        .unwrap_or_else(|| {
+            pl.get("users_default")
+                .and_then(|v| v.as_i64())
+                .unwrap_or(0)
+        });
+
+    Ok(user_pl >= required)
+}
+
+/// Create a new room and add it as a child of the specified space.
+///
+/// Creates the room via `POST /createRoom`, then sends an `m.space.child`
+/// state event in the parent space and an `m.space.parent` state event
+/// in the new room to link them bidirectionally.
+#[tauri::command]
+pub async fn create_room_in_space(
+    state: State<'_, Arc<AppState>>,
+    space_id: String,
+    name: String,
+    topic: Option<String>,
+    is_public: bool,
+    room_type: Option<String>,
+    room_alias: Option<String>,
+    history_visibility: Option<String>,
+) -> Result<String, String> {
+    let client = super::get_client(&state).await?;
+    let homeserver = client.homeserver().to_string();
+    let access_token = client.access_token().ok_or("No access token")?;
+
+    // Derive the server name from the space ID (e.g. "!abc:matrix.example.com" → "matrix.example.com")
+    let server_name = space_id
+        .split(':')
+        .nth(1)
+        .unwrap_or("localhost")
+        .to_string();
+
+    // Build initial state
+    let mut initial_state: Vec<serde_json::Value> = Vec::new();
+
+    // Link back to the parent space
+    initial_state.push(serde_json::json!({
+        "type": "m.space.parent",
+        "state_key": space_id,
+        "content": {
+            "via": [server_name],
+            "canonical": true,
+        }
+    }));
+
+    // History visibility
+    if let Some(hv) = &history_visibility {
+        let valid = ["joined", "shared", "invited", "world_readable"];
+        if valid.contains(&hv.as_str()) {
+            initial_state.push(serde_json::json!({
+                "type": "m.room.history_visibility",
+                "state_key": "",
+                "content": {
+                    "history_visibility": hv,
+                }
+            }));
+        }
+    }
+
+    // Build createRoom body
+    let preset = if is_public { "public_chat" } else { "private_chat" };
+    let visibility = if is_public { "public" } else { "private" };
+
+    let mut body = serde_json::json!({
+        "name": name,
+        "preset": preset,
+        "visibility": visibility,
+        "initial_state": initial_state,
+    });
+
+    if let Some(t) = &topic {
+        if !t.is_empty() {
+            body["topic"] = serde_json::json!(t);
+        }
+    }
+
+    if let Some(alias) = &room_alias {
+        if !alias.is_empty() {
+            body["room_alias_name"] = serde_json::json!(alias);
+        }
+    }
+
+    // Set room type in creation_content if specified (e.g. voice room)
+    if let Some(rt) = &room_type {
+        if !rt.is_empty() {
+            body["creation_content"] = serde_json::json!({
+                "type": rt,
+            });
+        }
+    }
+
+    // Create the room
+    let create_url = format!(
+        "{}/_matrix/client/v3/createRoom",
+        homeserver.trim_end_matches('/')
+    );
+
+    let resp = state
+        .http_client
+        .post(&create_url)
+        .timeout(Duration::from_secs(30))
+        .bearer_auth(access_token.to_string())
+        .json(&body)
+        .send()
+        .await
+        .map_err(|e| format!("Failed to create room: {}", super::fmt_error_chain(&e)))?;
+
+    let status = resp.status();
+    let resp_body: serde_json::Value = resp
+        .json()
+        .await
+        .map_err(|e| format!("Failed to parse create response: {e}"))?;
+
+    if !status.is_success() {
+        let errcode = resp_body["errcode"].as_str().unwrap_or("UNKNOWN");
+        let error = resp_body["error"].as_str().unwrap_or("Unknown error");
+        return Err(format!("{}: {}", errcode, error));
+    }
+
+    let new_room_id = resp_body["room_id"]
+        .as_str()
+        .ok_or("No room_id in create response")?
+        .to_string();
+
+    // Add the new room as a child of the space via m.space.child state event
+    let child_url = format!(
+        "{}/_matrix/client/v3/rooms/{}/state/m.space.child/{}",
+        homeserver.trim_end_matches('/'),
+        urlencoding::encode(&space_id),
+        urlencoding::encode(&new_room_id),
+    );
+
+    let child_content = serde_json::json!({
+        "via": [server_name],
+        "suggested": false,
+    });
+
+    let child_resp = state
+        .http_client
+        .put(&child_url)
+        .timeout(Duration::from_secs(15))
+        .bearer_auth(access_token.to_string())
+        .json(&child_content)
+        .send()
+        .await
+        .map_err(|e| format!("Room created but failed to link to space: {}", super::fmt_error_chain(&e)))?;
+
+    if !child_resp.status().is_success() {
+        let status = child_resp.status();
+        let text = child_resp.text().await.unwrap_or_default();
+        log::warn!(
+            "create_room_in_space: m.space.child failed ({}): {} — room {} exists but is unlinked",
+            status, text, new_room_id
+        );
+        return Err(format!(
+            "Room created ({}) but linking to space failed ({}): {}",
+            new_room_id, status, text
+        ));
+    }
+
+    log::info!(
+        "create_room_in_space: created '{}' → {} in space {} (type={:?})",
+        name,
+        new_room_id,
+        space_id,
+        room_type,
+    );
+
+    Ok(new_room_id)
+}

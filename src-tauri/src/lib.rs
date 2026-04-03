@@ -181,6 +181,8 @@ pub fn run() {
             commands::rooms::set_history_visibility,
             commands::rooms::can_create_rooms,
             commands::rooms::create_space,
+            commands::rooms::can_manage_space_children,
+            commands::rooms::create_room_in_space,
             commands::messages::get_messages,
             commands::members::get_room_members,
             commands::members::get_user_avatar,
