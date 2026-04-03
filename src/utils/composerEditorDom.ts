@@ -130,11 +130,34 @@ export function insertPlainTextAtSelection(_root: HTMLElement, text: string): vo
   document.execCommand("insertText", false, text);
 }
 
+/**
+ * Re-run `sync` on the next frame and when the image gets real dimensions (after load).
+ * Without this, contenteditable `scrollHeight` stays one line until something else reflows.
+ */
+function whenComposerImageAffectsLayout(img: HTMLImageElement, sync: () => void): void {
+  const run = () => requestAnimationFrame(() => sync());
+  if (img.complete) {
+    run();
+    return;
+  }
+  run();
+  img.addEventListener("load", run, { once: true });
+  img.addEventListener("error", run, { once: true });
+}
+
+/** Attach layout sync for every `<img>` under `root` (e.g. after loading markdown into the editor). */
+export function syncComposerHeightAfterImages(root: HTMLElement, sync: () => void): void {
+  root.querySelectorAll("img").forEach((node) => {
+    if (node instanceof HTMLImageElement) whenComposerImageAffectsLayout(node, sync);
+  });
+}
+
 /** Insert an <img> element at the current selection. */
 export function insertImageAtSelection(
   root: HTMLElement,
   href: string,
   imgStyle: { borderRadius: number; maxWidth: string },
+  onImageLayout?: () => void,
 ): void {
   const src = normalizeImageSrcHref(href);
   if (!src) return;
@@ -159,6 +182,8 @@ export function insertImageAtSelection(
     range.insertNode(img);
     range.collapse(false);
   }
+
+  if (onImageLayout) whenComposerImageAffectsLayout(img, onImageLayout);
 
   root.dispatchEvent(new InputEvent("input", { bubbles: true, inputType: "insertFromPaste" }));
 }

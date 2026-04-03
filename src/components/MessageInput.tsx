@@ -45,6 +45,7 @@ import {
   getEditorPlainText,
   insertPlainTextAtSelection,
   insertImageAtSelection,
+  syncComposerHeightAfterImages,
   getActiveFormats,
   toggleInlineCode,
   toggleCodeBlock,
@@ -86,6 +87,8 @@ export default function MessageInput({
   onLocalTypingActive,
 }: MessageInputProps) {
   const [plainText, setPlainText] = useState("");
+  /** True when the editor contains an embedded image (GIF, pasted image). Plain text alone is tracked in `plainText`. */
+  const [hasComposerMedia, setHasComposerMedia] = useState(false);
   const [sending, setSending] = useState(false);
   const [formatOpen, setFormatOpen] = useState(false);
   const [pickerOpen, setPickerOpen] = useState(false);
@@ -132,6 +135,17 @@ export default function MessageInput({
     el.style.height = `${Math.min(el.scrollHeight, composerMaxHeightPx)}px`;
   }, [composerMaxHeightPx]);
 
+  /** Sync React state and height from the live editor DOM (needed after GIF/image insert when synthetic `input` may not run). */
+  const refreshComposerDomState = useCallback(() => {
+    const el = editorRef.current;
+    if (!el) return;
+    const text = getEditorPlainText(el);
+    const media = el.querySelector("img") != null;
+    setPlainText(text);
+    setHasComposerMedia(media);
+    syncHeight();
+  }, [syncHeight]);
+
   useLayoutEffect(syncHeight, [syncHeight]);
 
   useEffect(() => {
@@ -173,11 +187,13 @@ export default function MessageInput({
     const el = editorRef.current;
     if (!el) return;
     const text = getEditorPlainText(el);
+    const media = el.querySelector("img") != null;
     setPlainText(text);
+    setHasComposerMedia(media);
     syncHeight();
 
     if (editingMessage) return;
-    if (text.trim().length > 0) {
+    if (text.trim().length > 0 || media) {
       sendTyping(true);
       if (typingTimeout.current) clearTimeout(typingTimeout.current);
       typingTimeout.current = setTimeout(() => sendTyping(false), 3000);
@@ -284,8 +300,12 @@ export default function MessageInput({
     const el = editorRef.current;
     if (!el) return;
     fillComposerEditorFromMarkdown(el, editingMessage.body, composerImgStyle);
-    setPlainText(getEditorPlainText(el));
+    const text = getEditorPlainText(el);
+    const media = el.querySelector("img") != null;
+    setPlainText(text);
+    setHasComposerMedia(media);
     syncHeight();
+    syncComposerHeightAfterImages(el, syncHeight);
     requestAnimationFrame(() => {
       el.focus();
       const sel = window.getSelection();
@@ -369,6 +389,7 @@ export default function MessageInput({
       const prevFormats = getActiveFormats(el);
       el.innerHTML = "";
       setPlainText("");
+      setHasComposerMedia(false);
       onMessageSent();
       el.focus();
       if (prevFormats.has("bold") || prevFormats.has("italic") || prevFormats.has("strikethrough")) {
@@ -410,6 +431,7 @@ export default function MessageInput({
         const el = editorRef.current;
         if (el) el.innerHTML = "";
         setPlainText("");
+        setHasComposerMedia(false);
         onCancelEdit();
       }
     }
@@ -427,7 +449,7 @@ export default function MessageInput({
     e.currentTarget.style.backgroundColor = enter ? palette.bgHover : "transparent";
     e.currentTarget.style.color = enter ? palette.textPrimary : palette.textSecondary;
   };
-  const canSend = plainText.trim().length > 0 && !sending;
+  const canSend = (plainText.trim().length > 0 || hasComposerMedia) && !sending;
 
   // ─── Picker portal (emoji + GIF tabs) ─────────────────────────────────────
 
@@ -510,10 +532,11 @@ export default function MessageInput({
                   if (!el) return;
                   el.focus();
                   if (hrefLooksLikeDirectImageUrl(gifUrl)) {
-                    insertImageAtSelection(el, gifUrl, composerImgStyle);
+                    insertImageAtSelection(el, gifUrl, composerImgStyle, () => syncHeight());
                   } else {
                     document.execCommand("insertText", false, gifUrl);
                   }
+                  refreshComposerDomState();
                   setPickerOpen(false);
                   requestAnimationFrame(() => el.focus());
                 }}
@@ -610,7 +633,7 @@ export default function MessageInput({
             alignSelf: "stretch",
           }}
         >
-          {!plainText.trim() && (
+          {!plainText.trim() && !hasComposerMedia && (
             <div
               aria-hidden
               style={{
@@ -650,10 +673,11 @@ export default function MessageInput({
               if (!el) return;
               const trimmed = text.trim();
               if (hrefLooksLikeDirectImageUrl(trimmed)) {
-                insertImageAtSelection(el, trimmed, composerImgStyle);
+                insertImageAtSelection(el, trimmed, composerImgStyle, () => syncHeight());
               } else {
                 insertPlainTextAtSelection(el, text);
               }
+              refreshComposerDomState();
             }}
             style={{
               minWidth: 0,
