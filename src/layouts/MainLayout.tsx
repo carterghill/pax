@@ -219,6 +219,13 @@ export default function MainLayout({ userId, onSignOut }: MainLayoutProps) {
             rooms={visibleRooms}
             activeRoomId={activeRoomId}
             onSelectRoom={handleSelectRoom}
+            onSelectSpaceHome={() => setActiveRoomId(null)}
+            isSpaceHomeActive={
+              activeRoomId === null &&
+              !!activeSpace &&
+              activeSpace.membership === "joined"
+            }
+            showSpaceHomeNav={!!activeSpace && activeSpace.membership === "joined"}
             spaceName={activeSpace?.name ?? "Home"}
             userId={userId}
             userAvatarUrl={userAvatarUrl}

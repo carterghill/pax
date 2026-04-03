@@ -1,5 +1,5 @@
 import { useState } from "react";
-import { Hash, Volume2, Monitor, MicOff, Headphones, Slash, Loader2 } from "lucide-react";
+import { Hash, House, Volume2, Monitor, MicOff, Headphones, Slash, Loader2 } from "lucide-react";
 import { Room, VoiceParticipant } from "../types/matrix";
 import { useTheme } from "../theme/ThemeContext";
 import StatusDropdown from "./StatusDropdown";
@@ -31,6 +31,10 @@ interface RoomSidebarProps {
   rooms: Room[];
   activeRoomId: string | null;
   onSelectRoom: (roomId: string) => void;
+  /** Clears room selection so the joined space home is shown (same as re-clicking the space). */
+  onSelectSpaceHome: () => void;
+  isSpaceHomeActive: boolean;
+  showSpaceHomeNav: boolean;
   spaceName: string;
   userId: string;
   userAvatarUrl: string | null;
@@ -165,6 +169,9 @@ export default function RoomSidebar({
   rooms,
   activeRoomId,
   onSelectRoom,
+  onSelectSpaceHome,
+  isSpaceHomeActive,
+  showSpaceHomeNav,
   spaceName,
   userId,
   userAvatarUrl,
@@ -237,6 +244,34 @@ export default function RoomSidebar({
         </div>
       }
       <div style={{ flex: 1, overflowY: "auto", padding: spacing.unit * 2 }}>
+        {showSpaceHomeNav && (
+          <div style={{ marginBottom: spacing.unit }}>
+            <div
+              onClick={() => onSelectSpaceHome()}
+              style={{
+                padding: `${spacing.unit * 2}px ${spacing.unit * 3}px`,
+                borderRadius: spacing.unit,
+                cursor: "pointer",
+                color: isSpaceHomeActive ? palette.textHeading : palette.textSecondary,
+                backgroundColor: isSpaceHomeActive ? palette.bgActive : "transparent",
+                fontSize: typography.fontSizeBase,
+                fontWeight: isSpaceHomeActive
+                  ? typography.fontWeightMedium
+                  : typography.fontWeightNormal,
+              }}
+            >
+              <span style={{ display: "flex", alignItems: "center", gap: spacing.unit }}>
+                <House
+                  size={16}
+                  color="currentColor"
+                  fill={isSpaceHomeActive ? "currentColor" : "none"}
+                  strokeWidth={isSpaceHomeActive ? 0 : 2}
+                />
+                <div style={{ marginLeft: spacing.unit }}>Home</div>
+              </span>
+            </div>
+          </div>
+        )}
         {rooms.map((room) => {
           const isVoice = room.roomType === VOICE_ROOM_TYPE;
           const participants = isVoice ? (voiceParticipants[room.id] ?? []) : [];
