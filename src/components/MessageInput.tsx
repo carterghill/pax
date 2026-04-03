@@ -116,7 +116,7 @@ export default function MessageInput({
     [spacing.unit],
   );
 
-  const COMPOSER_MAX_AUTO_LINES = 3;
+  const COMPOSER_MAX_AUTO_LINES = 6;
   const composerMaxHeightPx = useMemo(() => {
     const fontSize = emojiOnlyComposer
       ? typography.fontSizeBase * EMOJI_ONLY_DISPLAY_SCALE
