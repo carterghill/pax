@@ -13,6 +13,7 @@ import { useResizeHandle } from "../hooks/useResizeHandle";
 const USER_MENU_DEFAULT_WIDTH = 240;
 const MIN_USER_MENU_WIDTH = 180;
 const MAX_USER_MENU_WIDTH = 400;
+const USER_MENU_RESIZE_HANDLE = 6;
 
 interface ChatViewProps {
   room: Room;
@@ -140,7 +141,7 @@ export default function ChatView({
     width: userMenuWidth,
     onWidthChange: onUserMenuWidthChange,
     min: MIN_USER_MENU_WIDTH,
-    max: () => Math.min(MAX_USER_MENU_WIDTH, (containerRef.current?.offsetWidth ?? 600) - 200 - 6),
+    max: () => Math.min(MAX_USER_MENU_WIDTH, (containerRef.current?.offsetWidth ?? 600) - 200),
     direction: -1,
   });
 
@@ -281,23 +282,27 @@ export default function ChatView({
 
         {/* User menu panel with resizable inside border */}
         {showUsers && (
-          <>
+          <div style={{ position: "relative", flexShrink: 0, zIndex: 1 }}>
+            <UserMenu width={userMenuWidth} roomId={room.id} userId={userId} />
             <div
               onMouseDown={userMenuResize.onMouseDown}
               onDoubleClick={() => onUserMenuWidthChange(USER_MENU_DEFAULT_WIDTH)}
               onMouseEnter={() => userMenuResize.setIsHovered(true)}
               onMouseLeave={() => userMenuResize.setIsHovered(false)}
               style={{
-                width: 6,
-                flexShrink: 0,
+                position: "absolute",
+                top: 0,
+                bottom: 0,
+                left: -(USER_MENU_RESIZE_HANDLE / 2),
+                width: USER_MENU_RESIZE_HANDLE,
                 cursor: "col-resize",
                 backgroundColor: userMenuResize.isHovered ? palette.border : "transparent",
                 transition: "background-color 0.15s",
+                zIndex: 2,
               }}
               title="Drag to resize, double-click to reset"
             />
-            <UserMenu width={userMenuWidth} roomId={room.id} userId={userId} />
-          </>
+          </div>
         )}
       </div>
     </div>

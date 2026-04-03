@@ -28,8 +28,7 @@ const MIN_USER_MENU_WIDTH = 180;
 const MAX_USER_MENU_WIDTH = 400;
 const MIN_CHAT_VIEW_WIDTH = 200;
 const SPACE_SIDEBAR_WIDTH = 72;
-const RESIZE_HANDLE = 6;
-const USER_MENU_HANDLE = 6;
+const ROOM_SIDEBAR_RESIZE_HANDLE = 6;
 
 function getStoredUserMenuWidth(defaultWidth: number): number {
   try {
@@ -120,7 +119,7 @@ export default function MainLayout({ userId, onSignOut }: MainLayoutProps) {
     min: MIN_ROOM_SIDEBAR_WIDTH,
     max: () => Math.min(
       MAX_ROOM_SIDEBAR_WIDTH,
-      window.innerWidth - SPACE_SIDEBAR_WIDTH - RESIZE_HANDLE - MIN_CHAT_VIEW_WIDTH - USER_MENU_HANDLE - userMenuWidth
+      window.innerWidth - SPACE_SIDEBAR_WIDTH - MIN_CHAT_VIEW_WIDTH - userMenuWidth
     ),
   });
 
@@ -214,7 +213,7 @@ export default function MainLayout({ userId, onSignOut }: MainLayoutProps) {
           onSelectSpace={handleSelectSpace}
           onSpacesChanged={fetchRooms}
         />
-        <div style={{ display: "flex", flexShrink: 0 }}>
+        <div style={{ position: "relative", flexShrink: 0, zIndex: 1 }}>
           <RoomSidebar
             width={roomSidebarWidth}
             rooms={visibleRooms}
@@ -237,11 +236,15 @@ export default function MainLayout({ userId, onSignOut }: MainLayoutProps) {
             onMouseEnter={() => sidebarResize.setIsHovered(true)}
             onMouseLeave={() => sidebarResize.setIsHovered(false)}
             style={{
-              width: 6,
-              flexShrink: 0,
+              position: "absolute",
+              top: 0,
+              bottom: 0,
+              right: -(ROOM_SIDEBAR_RESIZE_HANDLE / 2),
+              width: ROOM_SIDEBAR_RESIZE_HANDLE,
               cursor: "col-resize",
               backgroundColor: sidebarResize.isHovered ? palette.border : "transparent",
               transition: "background-color 0.15s",
+              zIndex: 2,
             }}
             title="Drag to resize, double-click to reset"
           />
