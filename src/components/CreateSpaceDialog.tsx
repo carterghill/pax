@@ -90,11 +90,10 @@ export default function CreateSpaceDialog({
     return () => window.removeEventListener("keydown", handleKey);
   }, [onClose]);
 
-  // Sync join rule when toggling visibility
+  // When switching to private, demote "public" or "knock" join rules
+  // since those options are disabled for private spaces.
   useEffect(() => {
-    if (isPublic) {
-      setJoinRule("public");
-    } else if (joinRule === "public") {
+    if (!isPublic && (joinRule === "public" || joinRule === "knock")) {
       setJoinRule("invite");
     }
   }, [isPublic, joinRule]);
@@ -704,7 +703,7 @@ export default function CreateSpaceDialog({
                         icon: <DoorOpen size={16} />,
                         label: "Knock",
                         desc: "Users request to join; admins approve",
-                        enabled: true,
+                        enabled: isPublic,
                       },
                       {
                         value: "invite" as JoinRule,
@@ -713,7 +712,7 @@ export default function CreateSpaceDialog({
                         desc: "Only invited users can join",
                         enabled: true,
                       },
-                    ] as const
+                    ]
                   ).map((opt) => (
                     <button
                       key={opt.value}
