@@ -802,3 +802,221 @@ pub async fn set_history_visibility(
     );
     Ok(())
 }
+
+/// Check whether the logged-in user is allowed to create rooms on the homeserver.
+///
+/// There is no standard Matrix client API to query this permission directly.
+/// Synapse controls it via the `enable_room_creation` config (defaults to `true`).
+/// We probe by inspecting the server capabilities endpoint and fall back to
+/// assuming creation is allowed — the actual create request will fail with
+/// `M_FORBIDDEN` if the server disallows it, and we surface that error in the UI.
+#[tauri::command]
+pub async fn can_create_rooms(
+    state: State<'_, Arc<AppState>>,
+) -> Result<bool, String> {
+    let client = super::get_client(&state).await?;
+
+    // The capabilities endpoint doesn't expose room creation directly, but if
+    // we can reach it we know the session is valid. Room creation is almost
+    // universally enabled, so default to true.
+    let homeserver = client.homeserver().to_string();
+    let access_token = client.access_token().ok_or("No access token")?;
+
+    let url = format!(
+        "{}/_matrix/client/v3/capabilities",
+        homeserver.trim_end_matches('/')
+    );
+
+    let resp = state
+        .http_client
+        .get(&url)
+        .timeout(Duration::from_secs(10))
+        .bearer_auth(access_token.to_string())
+        .send()
+        .await;
+
+    match resp {
+        Ok(r) if r.status().is_success() => Ok(true),
+        Ok(r) if r.status().as_u16() == 403 => Ok(false),
+        Ok(_) => Ok(true), // Assume allowed if capabilities endpoint returns unexpected status
+        Err(_) => Ok(true), // Network error — optimistic default
+    }
+}
+
+/// Create a new Matrix space.
+///
+/// Calls `POST /_matrix/client/v3/createRoom` with `creation_content.type = "m.space"`.
+/// If an avatar is provided (base64 + MIME), it is uploaded first and included
+/// in the initial room state.
+#[tauri::command]
+pub async fn create_space(
+    state: State<'_, Arc<AppState>>,
+    name: String,
+    topic: Option<String>,
+    is_public: bool,
+    room_alias: Option<String>,
+    federate: bool,
+    avatar_data: Option<String>,
+    avatar_mime: Option<String>,
+    history_visibility: Option<String>,
+    guest_access: Option<String>,
+) -> Result<String, String> {
+    let client = super::get_client(&state).await?;
+    let homeserver = client.homeserver().to_string();
+    let access_token = client.access_token().ok_or("No access token")?;
+
+    // Upload avatar if provided, get MXC URI
+    let avatar_mxc: Option<String> = if let (Some(data), Some(mime)) = (&avatar_data, &avatar_mime) {
+        let bytes = data_encoding::BASE64
+            .decode(data.as_bytes())
+            .map_err(|e| format!("Invalid base64 avatar data: {e}"))?;
+
+        let upload_url = format!(
+            "{}/_matrix/media/v3/upload",
+            homeserver.trim_end_matches('/')
+        );
+
+        let resp = state
+            .http_client
+            .post(&upload_url)
+            .timeout(Duration::from_secs(30))
+            .bearer_auth(access_token.to_string())
+            .header("Content-Type", mime.as_str())
+            .body(bytes)
+            .send()
+            .await
+            .map_err(|e| format!("Failed to upload avatar: {}", super::fmt_error_chain(&e)))?;
+
+        if !resp.status().is_success() {
+            let status = resp.status();
+            let text = resp.text().await.unwrap_or_default();
+            return Err(format!("Avatar upload failed ({}): {}", status, text));
+        }
+
+        let body: serde_json::Value = resp
+            .json()
+            .await
+            .map_err(|e| format!("Failed to parse upload response: {e}"))?;
+
+        body["content_uri"].as_str().map(|s| s.to_string())
+    } else {
+        None
+    };
+
+    // Build initial_state events
+    let mut initial_state: Vec<serde_json::Value> = Vec::new();
+
+    // Avatar state event
+    if let Some(mxc) = &avatar_mxc {
+        initial_state.push(serde_json::json!({
+            "type": "m.room.avatar",
+            "state_key": "",
+            "content": {
+                "url": mxc,
+            }
+        }));
+    }
+
+    // History visibility
+    if let Some(hv) = &history_visibility {
+        let valid = ["joined", "shared", "invited", "world_readable"];
+        if valid.contains(&hv.as_str()) {
+            initial_state.push(serde_json::json!({
+                "type": "m.room.history_visibility",
+                "state_key": "",
+                "content": {
+                    "history_visibility": hv,
+                }
+            }));
+        }
+    }
+
+    // Guest access
+    if let Some(ga) = &guest_access {
+        let valid = ["can_join", "forbidden"];
+        if valid.contains(&ga.as_str()) {
+            initial_state.push(serde_json::json!({
+                "type": "m.room.guest_access",
+                "state_key": "",
+                "content": {
+                    "guest_access": ga,
+                }
+            }));
+        }
+    }
+
+    // Build createRoom request body
+    let preset = if is_public { "public_chat" } else { "private_chat" };
+    let visibility = if is_public { "public" } else { "private" };
+
+    let mut body = serde_json::json!({
+        "name": name,
+        "preset": preset,
+        "visibility": visibility,
+        "creation_content": {
+            "type": "m.space",
+            "m.federate": federate,
+        },
+        "initial_state": initial_state,
+        // Prevent regular messages in the space room — only admins should be
+        // able to send events (matches Element's behaviour for spaces).
+        "power_level_content_override": {
+            "events_default": 100,
+        },
+    });
+
+    if let Some(t) = &topic {
+        if !t.is_empty() {
+            body["topic"] = serde_json::json!(t);
+        }
+    }
+
+    if let Some(alias) = &room_alias {
+        if !alias.is_empty() {
+            body["room_alias_name"] = serde_json::json!(alias);
+        }
+    }
+
+    // Send createRoom request
+    let create_url = format!(
+        "{}/_matrix/client/v3/createRoom",
+        homeserver.trim_end_matches('/')
+    );
+
+    let resp = state
+        .http_client
+        .post(&create_url)
+        .timeout(Duration::from_secs(30))
+        .bearer_auth(access_token.to_string())
+        .json(&body)
+        .send()
+        .await
+        .map_err(|e| format!("Failed to create space: {}", super::fmt_error_chain(&e)))?;
+
+    let status = resp.status();
+    let resp_body: serde_json::Value = resp
+        .json()
+        .await
+        .map_err(|e| format!("Failed to parse create response: {e}"))?;
+
+    if !status.is_success() {
+        let errcode = resp_body["errcode"].as_str().unwrap_or("UNKNOWN");
+        let error = resp_body["error"].as_str().unwrap_or("Unknown error");
+        return Err(format!("{}: {}", errcode, error));
+    }
+
+    let room_id = resp_body["room_id"]
+        .as_str()
+        .ok_or("No room_id in create response")?
+        .to_string();
+
+    log::info!(
+        "create_space: created '{}' → {} (public={}, federate={})",
+        name,
+        room_id,
+        is_public,
+        federate,
+    );
+
+    Ok(room_id)
+}

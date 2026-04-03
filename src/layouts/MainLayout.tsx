@@ -212,6 +212,7 @@ export default function MainLayout({ userId, onSignOut }: MainLayoutProps) {
           spaces={spaces}
           activeSpaceId={activeSpaceId}
           onSelectSpace={handleSelectSpace}
+          onSpacesChanged={fetchRooms}
         />
         <div style={{ display: "flex", flexShrink: 0 }}>
           <RoomSidebar
