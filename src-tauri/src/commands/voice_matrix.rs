@@ -174,8 +174,17 @@ pub async fn get_all_voice_participants(
     Ok(collect_voice_participants_for_joined_voice_rooms(&client, &state.avatar_cache).await)
 }
 
-/// Discover the LiveKit JWT service URL by scanning existing call.member events in the room.
-pub(crate) async fn discover_livekit_service_url(room: &Room) -> Result<String, String> {
+/// Discover the LiveKit JWT service URL.
+///
+/// 1. Scan existing `m.call.member` state events in the room (fast, no network).
+/// 2. Fall back to the homeserver's `/.well-known/matrix/client` endpoint,
+///    reading `org.matrix.msc4143.rtc_foci` — the same mechanism Element uses.
+pub(crate) async fn discover_livekit_service_url(
+    room: &Room,
+    http: &reqwest::Client,
+    homeserver: &str,
+) -> Result<String, String> {
+    // ── 1. Room state scan (existing call.member events) ────────────────
     for event_type_str in &["org.matrix.msc3401.call.member", "m.call.member"] {
         let event_type: StateEventType = event_type_str.to_string().into();
         if let Ok(events) = room.get_state_events(event_type).await {
@@ -213,11 +222,55 @@ pub(crate) async fn discover_livekit_service_url(room: &Room) -> Result<String, 
         }
     }
 
-    Err(
-        "Could not discover LiveKit service URL from room state. \
-         Has anyone joined a call in this room via Element before?"
-            .to_string(),
-    )
+    // ── 2. .well-known/matrix/client → org.matrix.msc4143.rtc_foci ─────
+    log::info!(
+        "No livekit_service_url in room state — fetching .well-known/matrix/client from {}",
+        homeserver
+    );
+    let well_known_url = format!(
+        "{}/.well-known/matrix/client",
+        homeserver.trim_end_matches('/')
+    );
+
+    let resp = http
+        .get(&well_known_url)
+        .timeout(Duration::from_secs(10))
+        .send()
+        .await
+        .map_err(|e| format!(".well-known fetch failed: {}", fmt_error_chain(&e)))?;
+
+    if !resp.status().is_success() {
+        return Err(format!(
+            ".well-known/matrix/client returned {} — make sure org.matrix.msc4143.rtc_foci \
+             is configured (see Element Call self-hosting docs)",
+            resp.status()
+        ));
+    }
+
+    let json: serde_json::Value = resp
+        .json()
+        .await
+        .map_err(|e| format!(".well-known JSON parse error: {e}"))?;
+
+    json.get("org.matrix.msc4143.rtc_foci")
+        .and_then(|f| f.as_array())
+        .and_then(|arr| {
+            arr.iter().find(|foci| {
+                foci.get("type").and_then(|t| t.as_str()) == Some("livekit")
+            })
+        })
+        .and_then(|foci| foci.get("livekit_service_url"))
+        .and_then(|u| u.as_str())
+        .map(|url| {
+            log::info!("Discovered livekit_service_url from .well-known: {}", url);
+            url.to_string()
+        })
+        .ok_or_else(|| {
+            "No org.matrix.msc4143.rtc_foci with type 'livekit' found in \
+             .well-known/matrix/client. Add it to your homeserver config — \
+             see https://github.com/element-hq/element-call/blob/livekit/docs/self-hosting.md"
+                .to_string()
+        })
 }
 
 #[tauri::command]
@@ -405,7 +458,8 @@ async fn matrix_voice_put_call_member(
     let user_id = client.user_id().ok_or("No user ID")?;
     let device_id = client.device_id().ok_or("No device ID")?;
 
-    let livekit_service_url = discover_livekit_service_url(&room).await?;
+    let homeserver = client.homeserver().to_string();
+    let livekit_service_url = discover_livekit_service_url(&room, http, &homeserver).await?;
     let state_key = format!("_{}_{}_{}", user_id, device_id, "m.call");
     let now_ms = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -430,7 +484,6 @@ async fn matrix_voice_put_call_member(
         "scope": "m.room"
     });
 
-    let homeserver = client.homeserver().to_string();
     let access_token = client.access_token().ok_or("No access token")?;
     let state_url = format!(
         "{}/_matrix/client/v3/rooms/{}/state/{}/{}",
