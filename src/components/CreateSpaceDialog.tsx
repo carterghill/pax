@@ -8,12 +8,29 @@ import {
   Globe,
   Lock,
   Trash2,
+  Search,
+  LogIn,
+  DoorOpen,
+  Users,
+  Check,
 } from "lucide-react";
 import { useTheme } from "../theme/ThemeContext";
 import { useOverlayObstruction } from "../hooks/useOverlayObstruction";
 
 type HistoryVisibility = "shared" | "joined" | "invited" | "world_readable";
 type GuestAccess = "can_join" | "forbidden";
+type JoinRule = "public" | "invite" | "knock";
+
+interface PublicSpaceResult {
+  room_id: string;
+  name?: string;
+  topic?: string;
+  num_joined_members?: number;
+  avatar_url?: string;
+  canonical_alias?: string;
+  room_type?: string;
+  membership?: string;
+}
 
 interface CreateSpaceDialogProps {
   canCreate: boolean;
@@ -39,6 +56,7 @@ export default function CreateSpaceDialog({
   const [name, setName] = useState("");
   const [topic, setTopic] = useState("");
   const [isPublic, setIsPublic] = useState(false);
+  const [joinRule, setJoinRule] = useState<JoinRule>("invite");
   const [roomAlias, setRoomAlias] = useState("");
   const [federate, setFederate] = useState(true);
   const [historyVisibility, setHistoryVisibility] =
@@ -49,6 +67,17 @@ export default function CreateSpaceDialog({
   const [avatarMime, setAvatarMime] = useState<string | null>(null);
   const [creating, setCreating] = useState(false);
   const [error, setError] = useState<string | null>(null);
+
+  // ── Join tab state ──
+  const [searchTerm, setSearchTerm] = useState("");
+  const [searchServer, setSearchServer] = useState("");
+  const [searchResults, setSearchResults] = useState<PublicSpaceResult[]>([]);
+  const [searching, setSearching] = useState(false);
+  const [searchError, setSearchError] = useState<string | null>(null);
+  const [hasSearched, setHasSearched] = useState(false);
+  const [joinAddress, setJoinAddress] = useState("");
+  const [joiningId, setJoiningId] = useState<string | null>(null);
+  const [joinSuccess, setJoinSuccess] = useState<string | null>(null);
 
   const fileInputRef = useRef<HTMLInputElement>(null);
 
@@ -61,7 +90,15 @@ export default function CreateSpaceDialog({
     return () => window.removeEventListener("keydown", handleKey);
   }, [onClose]);
 
-  // Click outside
+  // Sync join rule when toggling visibility
+  useEffect(() => {
+    if (isPublic) {
+      setJoinRule("public");
+    } else if (joinRule === "public") {
+      setJoinRule("invite");
+    }
+  }, [isPublic, joinRule]);
+
   const handleBackdropClick = useCallback(
     (e: React.MouseEvent) => {
       if (e.target === e.currentTarget) onClose();
@@ -69,7 +106,7 @@ export default function CreateSpaceDialog({
     [onClose]
   );
 
-  // Avatar file pick
+  // ── Avatar handling ──
   const handleAvatarPick = useCallback(() => {
     fileInputRef.current?.click();
   }, []);
@@ -81,7 +118,6 @@ export default function CreateSpaceDialog({
       const reader = new FileReader();
       reader.onload = () => {
         const result = reader.result as string;
-        // result is "data:<mime>;base64,<data>"
         const commaIdx = result.indexOf(",");
         const mimeMatch = result.match(/^data:([^;]+);/);
         if (commaIdx >= 0 && mimeMatch) {
@@ -102,7 +138,7 @@ export default function CreateSpaceDialog({
     if (fileInputRef.current) fileInputRef.current.value = "";
   }, []);
 
-  // Create space submission
+  // ── Create submission ──
   const handleCreate = useCallback(async () => {
     if (!name.trim()) {
       setError("Space name is required.");
@@ -122,6 +158,7 @@ export default function CreateSpaceDialog({
         avatarMime,
         historyVisibility,
         guestAccess,
+        joinRule,
       });
       onCreated();
       onClose();
@@ -131,18 +168,82 @@ export default function CreateSpaceDialog({
       setCreating(false);
     }
   }, [
-    name,
-    topic,
-    isPublic,
-    roomAlias,
-    federate,
-    avatarData,
-    avatarMime,
-    historyVisibility,
-    guestAccess,
-    onCreated,
-    onClose,
+    name, topic, isPublic, roomAlias, federate, avatarData, avatarMime,
+    historyVisibility, guestAccess, joinRule, onCreated, onClose,
   ]);
+
+  // ── Search public spaces ──
+  const handleSearch = useCallback(async () => {
+    setSearching(true);
+    setSearchError(null);
+    setHasSearched(true);
+    setJoinSuccess(null);
+
+    try {
+      const result = await invoke<{ chunk: PublicSpaceResult[] }>(
+        "search_public_spaces",
+        {
+          searchTerm: searchTerm.trim() || null,
+          server: searchServer.trim() || null,
+          limit: 20,
+        }
+      );
+      setSearchResults(result.chunk || []);
+    } catch (e) {
+      setSearchError(String(e));
+      setSearchResults([]);
+    } finally {
+      setSearching(false);
+    }
+  }, [searchTerm, searchServer]);
+
+  // ── Join a space (by ID or from search result) ──
+  const handleJoinSpace = useCallback(
+    async (roomId: string) => {
+      setJoiningId(roomId);
+      setJoinSuccess(null);
+      try {
+        await invoke("join_room", { roomId });
+        setJoinSuccess(roomId);
+        onCreated();
+        // Update search results to reflect new membership
+        setSearchResults((prev) =>
+          prev.map((r) =>
+            r.room_id === roomId ? { ...r, membership: "joined" } : r
+          )
+        );
+      } catch (e) {
+        setSearchError(`Failed to join: ${e}`);
+      } finally {
+        setJoiningId(null);
+      }
+    },
+    [onCreated]
+  );
+
+  // ── Join by address ──
+  const handleJoinByAddress = useCallback(async () => {
+    const addr = joinAddress.trim();
+    if (!addr) return;
+    setSearchError(null);
+    setJoinSuccess(null);
+
+    try {
+      let roomId = addr;
+      // If it looks like an alias (#something:server), resolve it first
+      if (addr.startsWith("#")) {
+        const resolved = await invoke<{ room_id: string }>(
+          "resolve_room_alias",
+          { alias: addr }
+        );
+        roomId = resolved.room_id;
+      }
+      await handleJoinSpace(roomId);
+      setJoinAddress("");
+    } catch (e) {
+      setSearchError(String(e));
+    }
+  }, [joinAddress, handleJoinSpace]);
 
   // ── Shared styles ──
   const labelStyle: React.CSSProperties = {
@@ -190,7 +291,7 @@ export default function CreateSpaceDialog({
         style={{
           backgroundColor: palette.bgSecondary,
           borderRadius: 8,
-          width: 480,
+          width: 500,
           maxHeight: "85vh",
           display: "flex",
           flexDirection: "column",
@@ -250,6 +351,7 @@ export default function CreateSpaceDialog({
                 onClick={() => {
                   setActiveTab(tab);
                   setError(null);
+                  setSearchError(null);
                 }}
                 style={{
                   background: "none",
@@ -278,31 +380,205 @@ export default function CreateSpaceDialog({
         )}
 
         {/* ── Body ── */}
-        <div
-          style={{
-            flex: 1,
-            overflowY: "auto",
-            padding: 16,
-          }}
-        >
+        <div style={{ flex: 1, overflowY: "auto", padding: 16 }}>
+          {/* ═════════════════ JOIN TAB ═════════════════ */}
           {activeTab === "join" && (
-            <div
-              style={{
-                color: palette.textSecondary,
-                fontSize: typography.fontSizeBase,
-                textAlign: "center",
-                padding: "32px 0",
-              }}
-            >
-              Join functionality coming soon.
-            </div>
+            <>
+              {/* Search bar */}
+              <div style={{ marginBottom: 12 }}>
+                <div style={{ display: "flex", gap: 8 }}>
+                  <div style={{ flex: 1, position: "relative" }}>
+                    <input
+                      type="text"
+                      value={searchTerm}
+                      onChange={(e) => setSearchTerm(e.target.value)}
+                      onKeyDown={(e) => {
+                        if (e.key === "Enter") handleSearch();
+                      }}
+                      placeholder="Search public spaces..."
+                      style={{ ...inputStyle, paddingRight: 36 }}
+                      autoFocus
+                    />
+                    <Search
+                      size={16}
+                      color={palette.textSecondary}
+                      style={{
+                        position: "absolute",
+                        right: 10,
+                        top: "50%",
+                        transform: "translateY(-50%)",
+                        opacity: 0.5,
+                      }}
+                    />
+                  </div>
+                  <button
+                    onClick={handleSearch}
+                    disabled={searching}
+                    style={{
+                      padding: "8px 16px",
+                      fontSize: typography.fontSizeBase,
+                      fontFamily: typography.fontFamily,
+                      fontWeight: typography.fontWeightMedium,
+                      backgroundColor: palette.accent,
+                      border: "none",
+                      borderRadius: 4,
+                      color: "#fff",
+                      cursor: searching ? "not-allowed" : "pointer",
+                      opacity: searching ? 0.7 : 1,
+                      flexShrink: 0,
+                    }}
+                  >
+                    {searching ? (
+                      <Loader2
+                        size={16}
+                        style={{ animation: "spin 1s linear infinite" }}
+                      />
+                    ) : (
+                      "Search"
+                    )}
+                  </button>
+                </div>
+              </div>
+
+              {/* Optional server field */}
+              <div style={{ marginBottom: 16 }}>
+                <input
+                  type="text"
+                  value={searchServer}
+                  onChange={(e) => setSearchServer(e.target.value)}
+                  placeholder="Server to search (leave empty for your homeserver)"
+                  style={{
+                    ...inputStyle,
+                    fontSize: typography.fontSizeSmall,
+                  }}
+                />
+                <div
+                  style={{
+                    fontSize: typography.fontSizeSmall - 1,
+                    color: palette.textSecondary,
+                    marginTop: 3,
+                    opacity: 0.7,
+                  }}
+                >
+                  e.g. matrix.org to browse their public spaces
+                </div>
+              </div>
+
+              {/* Error */}
+              {searchError && (
+                <div
+                  style={{
+                    padding: "8px 12px",
+                    backgroundColor: "rgba(237,66,69,0.15)",
+                    border: "1px solid rgba(237,66,69,0.3)",
+                    borderRadius: 4,
+                    color: "#ed4245",
+                    fontSize: typography.fontSizeSmall,
+                    marginBottom: 12,
+                  }}
+                >
+                  {searchError}
+                </div>
+              )}
+
+              {/* Results */}
+              {searchResults.length > 0 && (
+                <div
+                  style={{
+                    display: "flex",
+                    flexDirection: "column",
+                    gap: 4,
+                    marginBottom: 16,
+                  }}
+                >
+                  {searchResults.map((space) => (
+                    <SpaceSearchRow
+                      key={space.room_id}
+                      space={space}
+                      joiningId={joiningId}
+                      joinSuccess={joinSuccess}
+                      onJoin={handleJoinSpace}
+                      palette={palette}
+                      typography={typography}
+                    />
+                  ))}
+                </div>
+              )}
+
+              {hasSearched && searchResults.length === 0 && !searching && !searchError && (
+                <div
+                  style={{
+                    color: palette.textSecondary,
+                    textAlign: "center",
+                    padding: "16px 0",
+                    fontSize: typography.fontSizeBase,
+                  }}
+                >
+                  No public spaces found.
+                </div>
+              )}
+
+              {/* Divider */}
+              <div
+                style={{
+                  height: 1,
+                  backgroundColor: palette.border,
+                  margin: "16px 0",
+                }}
+              />
+
+              {/* Join by address */}
+              <div>
+                <label style={labelStyle}>Join by Address</label>
+                <div style={{ display: "flex", gap: 8 }}>
+                  <input
+                    type="text"
+                    value={joinAddress}
+                    onChange={(e) => setJoinAddress(e.target.value)}
+                    onKeyDown={(e) => {
+                      if (e.key === "Enter" && joinAddress.trim()) handleJoinByAddress();
+                    }}
+                    placeholder="#space-name:server.com or !roomid:server.com"
+                    style={{ ...inputStyle, flex: 1 }}
+                  />
+                  <button
+                    onClick={handleJoinByAddress}
+                    disabled={!joinAddress.trim() || !!joiningId}
+                    style={{
+                      padding: "8px 16px",
+                      fontSize: typography.fontSizeBase,
+                      fontFamily: typography.fontFamily,
+                      fontWeight: typography.fontWeightMedium,
+                      backgroundColor:
+                        !joinAddress.trim() || !!joiningId
+                          ? palette.accent + "80"
+                          : palette.accent,
+                      border: "none",
+                      borderRadius: 4,
+                      color: "#fff",
+                      cursor:
+                        !joinAddress.trim() || !!joiningId
+                          ? "not-allowed"
+                          : "pointer",
+                      flexShrink: 0,
+                      display: "flex",
+                      alignItems: "center",
+                      gap: 6,
+                    }}
+                  >
+                    <LogIn size={14} />
+                    Join
+                  </button>
+                </div>
+              </div>
+            </>
           )}
 
+          {/* ═════════════════ CREATE TAB ═════════════════ */}
           {activeTab === "create" && (
             <>
-              {/* ── Avatar + Name row ── */}
+              {/* Avatar + Name row */}
               <div style={{ display: "flex", gap: 16, marginBottom: 16 }}>
-                {/* Avatar picker */}
                 <div style={{ flexShrink: 0, position: "relative" }}>
                   <input
                     ref={fileInputRef}
@@ -333,18 +609,10 @@ export default function CreateSpaceDialog({
                       <img
                         src={avatarPreview}
                         alt="Avatar preview"
-                        style={{
-                          width: "100%",
-                          height: "100%",
-                          objectFit: "cover",
-                        }}
+                        style={{ width: "100%", height: "100%", objectFit: "cover" }}
                       />
                     ) : (
-                      <ImagePlus
-                        size={28}
-                        color={palette.textSecondary}
-                        style={{ opacity: 0.6 }}
-                      />
+                      <ImagePlus size={28} color={palette.textSecondary} style={{ opacity: 0.6 }} />
                     )}
                   </button>
                   {avatarPreview && (
@@ -352,20 +620,11 @@ export default function CreateSpaceDialog({
                       onClick={handleRemoveAvatar}
                       title="Remove avatar"
                       style={{
-                        position: "absolute",
-                        top: -6,
-                        right: -6,
-                        width: 22,
-                        height: 22,
-                        borderRadius: "50%",
-                        border: "none",
-                        backgroundColor: "#ed4245",
-                        color: "#fff",
-                        cursor: "pointer",
-                        display: "flex",
-                        alignItems: "center",
-                        justifyContent: "center",
-                        padding: 0,
+                        position: "absolute", top: -6, right: -6,
+                        width: 22, height: 22, borderRadius: "50%",
+                        border: "none", backgroundColor: "#ed4245",
+                        color: "#fff", cursor: "pointer",
+                        display: "flex", alignItems: "center", justifyContent: "center", padding: 0,
                       }}
                     >
                       <Trash2 size={12} />
@@ -373,7 +632,6 @@ export default function CreateSpaceDialog({
                   )}
                 </div>
 
-                {/* Name */}
                 <div style={{ flex: 1 }}>
                   <label style={labelStyle}>
                     Space Name <span style={{ color: "#ed4245" }}>*</span>
@@ -382,7 +640,7 @@ export default function CreateSpaceDialog({
                     type="text"
                     value={name}
                     onChange={(e) => setName(e.target.value)}
-                    placeholder="My Space"
+                    placeholder="My Awesome Space"
                     maxLength={255}
                     style={inputStyle}
                     autoFocus
@@ -390,7 +648,7 @@ export default function CreateSpaceDialog({
                 </div>
               </div>
 
-              {/* ── Topic ── */}
+              {/* Topic */}
               <div style={sectionStyle}>
                 <label style={labelStyle}>Description</label>
                 <textarea
@@ -399,15 +657,11 @@ export default function CreateSpaceDialog({
                   placeholder="What is this space about?"
                   rows={3}
                   maxLength={512}
-                  style={{
-                    ...inputStyle,
-                    resize: "vertical",
-                    minHeight: 60,
-                  }}
+                  style={{ ...inputStyle, resize: "vertical", minHeight: 60 }}
                 />
               </div>
 
-              {/* ── Visibility ── */}
+              {/* Visibility */}
               <div style={sectionStyle}>
                 <label style={labelStyle}>Visibility</label>
                 <div style={{ display: "flex", gap: 8 }}>
@@ -432,7 +686,96 @@ export default function CreateSpaceDialog({
                 </div>
               </div>
 
-              {/* ── Room Alias (only for public spaces) ── */}
+              {/* Join Rules */}
+              <div style={sectionStyle}>
+                <label style={labelStyle}>Join Rules</label>
+                <div style={{ display: "flex", gap: 8 }}>
+                  {(
+                    [
+                      {
+                        value: "public" as JoinRule,
+                        icon: <Globe size={16} />,
+                        label: "Open",
+                        desc: "Anyone can join freely",
+                        enabled: isPublic,
+                      },
+                      {
+                        value: "knock" as JoinRule,
+                        icon: <DoorOpen size={16} />,
+                        label: "Knock",
+                        desc: "Users request to join; admins approve",
+                        enabled: true,
+                      },
+                      {
+                        value: "invite" as JoinRule,
+                        icon: <Lock size={16} />,
+                        label: "Invite Only",
+                        desc: "Only invited users can join",
+                        enabled: true,
+                      },
+                    ] as const
+                  ).map((opt) => (
+                    <button
+                      key={opt.value}
+                      onClick={() => {
+                        setJoinRule(opt.value);
+                        // If selecting "public" join rule, also set visibility to public
+                        if (opt.value === "public") setIsPublic(true);
+                      }}
+                      disabled={!opt.enabled}
+                      style={{
+                        flex: 1,
+                        display: "flex",
+                        flexDirection: "column",
+                        alignItems: "flex-start",
+                        gap: 3,
+                        padding: 10,
+                        backgroundColor:
+                          joinRule === opt.value
+                            ? palette.bgActive
+                            : palette.bgTertiary,
+                        border:
+                          joinRule === opt.value
+                            ? `2px solid ${palette.accent}`
+                            : `2px solid ${palette.border}`,
+                        borderRadius: 8,
+                        cursor: opt.enabled ? "pointer" : "not-allowed",
+                        textAlign: "left",
+                        transition:
+                          "border-color 0.15s, background-color 0.15s",
+                        opacity: opt.enabled ? 1 : 0.4,
+                      }}
+                    >
+                      <div
+                        style={{
+                          display: "flex",
+                          alignItems: "center",
+                          gap: 5,
+                          color:
+                            joinRule === opt.value
+                              ? palette.accent
+                              : palette.textPrimary,
+                          fontWeight: typography.fontWeightMedium,
+                          fontSize: typography.fontSizeSmall,
+                        }}
+                      >
+                        {opt.icon} {opt.label}
+                      </div>
+                      <div
+                        style={{
+                          fontSize: typography.fontSizeSmall - 2,
+                          color: palette.textSecondary,
+                          lineHeight: 1.3,
+                        }}
+                      >
+                        {opt.desc}
+                      </div>
+                    </button>
+                  ))}
+                </div>
+              </div>
+
+              {/* Room Alias (only for public) */}
               {isPublic && (
                 <div style={sectionStyle}>
                   <label style={labelStyle}>Space Address</label>
@@ -462,7 +805,9 @@ export default function CreateSpaceDialog({
                       value={roomAlias}
                       onChange={(e) =>
                         setRoomAlias(
-                          e.target.value.toLowerCase().replace(/[^a-z0-9_-]/g, "")
+                          e.target.value
+                            .toLowerCase()
+                            .replace(/[^a-z0-9_-]/g, "")
                         )
                       }
                       placeholder="my-space"
@@ -491,7 +836,7 @@ export default function CreateSpaceDialog({
                 </div>
               )}
 
-              {/* ── Advanced options ── */}
+              {/* Advanced options */}
               <AdvancedSection
                 palette={palette}
                 typography={typography}
@@ -505,7 +850,7 @@ export default function CreateSpaceDialog({
                 labelStyle={labelStyle}
               />
 
-              {/* ── Error ── */}
+              {/* Error */}
               {error && (
                 <div
                   style={{
@@ -525,7 +870,7 @@ export default function CreateSpaceDialog({
           )}
         </div>
 
-        {/* ── Footer ── */}
+        {/* ── Footer (create tab only) ── */}
         {activeTab === "create" && (
           <div
             style={{
@@ -564,7 +909,9 @@ export default function CreateSpaceDialog({
                 fontFamily: typography.fontFamily,
                 fontWeight: typography.fontWeightMedium,
                 backgroundColor:
-                  creating || !name.trim() ? palette.accent + "80" : palette.accent,
+                  creating || !name.trim()
+                    ? palette.accent + "80"
+                    : palette.accent,
                 border: "none",
                 borderRadius: 4,
                 color: "#fff",
@@ -577,7 +924,10 @@ export default function CreateSpaceDialog({
             >
               {creating ? (
                 <>
-                  <Loader2 size={16} style={{ animation: "spin 1s linear infinite" }} />
+                  <Loader2
+                    size={16}
+                    style={{ animation: "spin 1s linear infinite" }}
+                  />
                   Creating…
                 </>
               ) : (
@@ -591,7 +941,6 @@ export default function CreateSpaceDialog({
         )}
       </div>
 
-      {/* Spinner keyframe */}
       <style>{`@keyframes spin { to { transform: rotate(360deg); } }`}</style>
     </div>
   );
@@ -599,20 +948,167 @@ export default function CreateSpaceDialog({
 
 // ── Sub-components ──
 
-function VisibilityButton({
-  icon,
-  label,
-  description,
-  selected,
-  onClick,
+function SpaceSearchRow({
+  space,
+  joiningId,
+  joinSuccess,
+  onJoin,
   palette,
   typography,
 }: {
-  icon: React.ReactNode;
-  label: string;
-  description: string;
-  selected: boolean;
-  onClick: () => void;
+  space: PublicSpaceResult;
+  joiningId: string | null;
+  joinSuccess: string | null;
+  onJoin: (roomId: string) => void;
+  palette: import("../theme/types").ThemePalette;
+  typography: import("../theme/types").ThemeTypography;
+}) {
+  const [hovered, setHovered] = useState(false);
+  const isJoined = space.membership === "joined" || joinSuccess === space.room_id;
+  const isJoining = joiningId === space.room_id;
+
+  return (
+    <div
+      onMouseEnter={() => setHovered(true)}
+      onMouseLeave={() => setHovered(false)}
+      style={{
+        display: "flex",
+        alignItems: "center",
+        gap: 12,
+        padding: "10px 12px",
+        borderRadius: 6,
+        backgroundColor: hovered ? palette.bgHover : "transparent",
+        transition: "background-color 0.1s",
+      }}
+    >
+      {/* Icon */}
+      <div
+        style={{
+          width: 40,
+          height: 40,
+          borderRadius: 12,
+          backgroundColor: palette.bgActive,
+          display: "flex",
+          alignItems: "center",
+          justifyContent: "center",
+          flexShrink: 0,
+          fontSize: 16,
+          fontWeight: 600,
+          color: palette.textSecondary,
+        }}
+      >
+        {(space.name || "?")
+          .split(" ")
+          .map((w) => w[0])
+          .join("")
+          .slice(0, 2)
+          .toUpperCase()}
+      </div>
+
+      {/* Info */}
+      <div style={{ flex: 1, minWidth: 0 }}>
+        <div
+          style={{
+            fontSize: typography.fontSizeBase,
+            fontWeight: typography.fontWeightMedium,
+            color: palette.textHeading,
+            overflow: "hidden",
+            textOverflow: "ellipsis",
+            whiteSpace: "nowrap",
+          }}
+        >
+          {space.name || space.room_id}
+        </div>
+        {space.topic && (
+          <div
+            style={{
+              fontSize: typography.fontSizeSmall,
+              color: palette.textSecondary,
+              overflow: "hidden",
+              textOverflow: "ellipsis",
+              whiteSpace: "nowrap",
+            }}
+          >
+            {space.topic}
+          </div>
+        )}
+        <div
+          style={{
+            fontSize: typography.fontSizeSmall,
+            color: palette.textSecondary,
+            display: "flex",
+            alignItems: "center",
+            gap: 4,
+            marginTop: 2,
+          }}
+        >
+          <Users size={11} />
+          {space.num_joined_members ?? 0} member
+          {(space.num_joined_members ?? 0) !== 1 ? "s" : ""}
+          {space.canonical_alias && (
+            <span style={{ marginLeft: 6, opacity: 0.7 }}>
+              {space.canonical_alias}
+            </span>
+          )}
+        </div>
+      </div>
+
+      {/* Action */}
+      <div style={{ flexShrink: 0 }}>
+        {isJoined ? (
+          <span
+            style={{
+              display: "flex",
+              alignItems: "center",
+              gap: 4,
+              fontSize: typography.fontSizeSmall,
+              color: "#23a55a",
+            }}
+          >
+            <Check size={14} />
+            Joined
+          </span>
+        ) : (
+          <button
+            onClick={() => onJoin(space.room_id)}
+            disabled={isJoining}
+            style={{
+              display: "flex",
+              alignItems: "center",
+              gap: 6,
+              padding: "6px 14px",
+              borderRadius: 6,
+              border: "none",
+              backgroundColor: palette.accent,
+              color: "#fff",
+              fontSize: typography.fontSizeSmall,
+              fontWeight: typography.fontWeightBold,
+              fontFamily: typography.fontFamily,
+              cursor: isJoining ? "not-allowed" : "pointer",
+              opacity: isJoining ? 0.7 : 1,
+            }}
+          >
+            {isJoining ? (
+              <Loader2
+                size={13}
+                style={{ animation: "spin 1s linear infinite" }}
+              />
+            ) : (
+              <LogIn size={13} />
+            )}
+            {isJoining ? "Joining…" : "Join"}
+          </button>
+        )}
+      </div>
+    </div>
+  );
+}
+
+function VisibilityButton({
+  icon, label, description, selected, onClick, palette, typography,
+}: {
+  icon: React.ReactNode; label: string; description: string;
+  selected: boolean; onClick: () => void;
   palette: import("../theme/types").ThemePalette;
   typography: import("../theme/types").ThemeTypography;
 }) {
@@ -620,41 +1116,22 @@ function VisibilityButton({
     <button
       onClick={onClick}
       style={{
-        flex: 1,
-        display: "flex",
-        flexDirection: "column",
-        alignItems: "flex-start",
-        gap: 4,
-        padding: "12px",
+        flex: 1, display: "flex", flexDirection: "column",
+        alignItems: "flex-start", gap: 4, padding: "12px",
         backgroundColor: selected ? palette.bgActive : palette.bgTertiary,
-        border: selected
-          ? `2px solid ${palette.accent}`
-          : `2px solid ${palette.border}`,
-        borderRadius: 8,
-        cursor: "pointer",
-        textAlign: "left",
+        border: selected ? `2px solid ${palette.accent}` : `2px solid ${palette.border}`,
+        borderRadius: 8, cursor: "pointer", textAlign: "left",
         transition: "border-color 0.15s, background-color 0.15s",
       }}
     >
-      <div
-        style={{
-          display: "flex",
-          alignItems: "center",
-          gap: 6,
-          color: selected ? palette.accent : palette.textPrimary,
-          fontWeight: typography.fontWeightMedium,
-          fontSize: typography.fontSizeBase,
-        }}
-      >
+      <div style={{
+        display: "flex", alignItems: "center", gap: 6,
+        color: selected ? palette.accent : palette.textPrimary,
+        fontWeight: typography.fontWeightMedium, fontSize: typography.fontSizeBase,
+      }}>
         {icon} {label}
       </div>
-      <div
-        style={{
-          fontSize: typography.fontSizeSmall - 1,
-          color: palette.textSecondary,
-          lineHeight: 1.3,
-        }}
-      >
+      <div style={{ fontSize: typography.fontSizeSmall - 1, color: palette.textSecondary, lineHeight: 1.3 }}>
         {description}
       </div>
     </button>
@@ -662,40 +1139,24 @@ function VisibilityButton({
 }
 
 function AdvancedSection({
-  palette,
-  typography,
-  federate,
-  setFederate,
-  historyVisibility,
-  setHistoryVisibility,
-  guestAccess,
-  setGuestAccess,
-  inputStyle,
-  labelStyle,
+  palette, typography, federate, setFederate,
+  historyVisibility, setHistoryVisibility, guestAccess, setGuestAccess,
+  inputStyle, labelStyle,
 }: {
   palette: import("../theme/types").ThemePalette;
   typography: import("../theme/types").ThemeTypography;
-  federate: boolean;
-  setFederate: (v: boolean) => void;
-  historyVisibility: HistoryVisibility;
-  setHistoryVisibility: (v: HistoryVisibility) => void;
-  guestAccess: GuestAccess;
-  setGuestAccess: (v: GuestAccess) => void;
-  inputStyle: React.CSSProperties;
-  labelStyle: React.CSSProperties;
+  federate: boolean; setFederate: (v: boolean) => void;
+  historyVisibility: HistoryVisibility; setHistoryVisibility: (v: HistoryVisibility) => void;
+  guestAccess: GuestAccess; setGuestAccess: (v: GuestAccess) => void;
+  inputStyle: React.CSSProperties; labelStyle: React.CSSProperties;
 }) {
   const [expanded, setExpanded] = useState(false);
 
   const selectStyle: React.CSSProperties = {
-    ...inputStyle,
-    cursor: "pointer",
-    WebkitAppearance: "none",
-    MozAppearance: "none",
-    appearance: "none",
+    ...inputStyle, cursor: "pointer",
+    WebkitAppearance: "none", MozAppearance: "none", appearance: "none",
     backgroundImage: `url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='12' height='12' viewBox='0 0 24 24' fill='none' stroke='%23999' stroke-width='2'%3E%3Cpolyline points='6 9 12 15 18 9'%3E%3C/polyline%3E%3C/svg%3E")`,
-    backgroundRepeat: "no-repeat",
-    backgroundPosition: "right 10px center",
-    paddingRight: 32,
+    backgroundRepeat: "no-repeat", backgroundPosition: "right 10px center", paddingRight: 32,
   };
 
   return (
@@ -703,116 +1164,53 @@ function AdvancedSection({
       <button
         onClick={() => setExpanded(!expanded)}
         style={{
-          background: "none",
-          border: "none",
-          color: palette.textSecondary,
-          fontSize: typography.fontSizeSmall,
-          fontFamily: typography.fontFamily,
-          cursor: "pointer",
-          padding: "4px 0",
-          display: "flex",
-          alignItems: "center",
-          gap: 4,
+          background: "none", border: "none", color: palette.textSecondary,
+          fontSize: typography.fontSizeSmall, fontFamily: typography.fontFamily,
+          cursor: "pointer", padding: "4px 0",
+          display: "flex", alignItems: "center", gap: 4,
         }}
       >
-        <span
-          style={{
-            display: "inline-block",
-            transform: expanded ? "rotate(90deg)" : "rotate(0deg)",
-            transition: "transform 0.15s",
-            fontSize: 10,
-          }}
-        >
+        <span style={{
+          display: "inline-block",
+          transform: expanded ? "rotate(90deg)" : "rotate(0deg)",
+          transition: "transform 0.15s", fontSize: 10,
+        }}>
           ▶
         </span>
         Advanced Settings
       </button>
 
       {expanded && (
-        <div
-          style={{
-            marginTop: 12,
-            display: "flex",
-            flexDirection: "column",
-            gap: 14,
-            paddingLeft: 4,
-          }}
-        >
-          {/* Federation */}
-          <label
-            style={{
-              display: "flex",
-              alignItems: "center",
-              gap: 10,
-              cursor: "pointer",
-            }}
-          >
+        <div style={{ marginTop: 12, display: "flex", flexDirection: "column", gap: 14, paddingLeft: 4 }}>
+          <label style={{ display: "flex", alignItems: "center", gap: 10, cursor: "pointer" }}>
             <input
-              type="checkbox"
-              checked={federate}
+              type="checkbox" checked={federate}
               onChange={(e) => setFederate(e.target.checked)}
-              style={{
-                accentColor: palette.accent,
-                width: 16,
-                height: 16,
-                cursor: "pointer",
-              }}
+              style={{ accentColor: palette.accent, width: 16, height: 16, cursor: "pointer" }}
             />
             <div>
-              <div
-                style={{
-                  fontSize: typography.fontSizeBase,
-                  color: palette.textPrimary,
-                  fontWeight: typography.fontWeightMedium,
-                }}
-              >
+              <div style={{ fontSize: typography.fontSizeBase, color: palette.textPrimary, fontWeight: typography.fontWeightMedium }}>
                 Allow federation
               </div>
-              <div
-                style={{
-                  fontSize: typography.fontSizeSmall - 1,
-                  color: palette.textSecondary,
-                  marginTop: 2,
-                }}
-              >
+              <div style={{ fontSize: typography.fontSizeSmall - 1, color: palette.textSecondary, marginTop: 2 }}>
                 Let users from other Matrix servers join this space
               </div>
             </div>
           </label>
 
-          {/* History Visibility */}
           <div>
             <label style={labelStyle}>History Visibility</label>
-            <select
-              value={historyVisibility}
-              onChange={(e) =>
-                setHistoryVisibility(e.target.value as HistoryVisibility)
-              }
-              style={selectStyle}
-            >
-              <option value="shared">
-                Members only (full history)
-              </option>
-              <option value="joined">
-                Members only (since they joined)
-              </option>
-              <option value="invited">
-                Members only (since they were invited)
-              </option>
+            <select value={historyVisibility} onChange={(e) => setHistoryVisibility(e.target.value as HistoryVisibility)} style={selectStyle}>
+              <option value="shared">Members only (full history)</option>
+              <option value="joined">Members only (since they joined)</option>
+              <option value="invited">Members only (since they were invited)</option>
               <option value="world_readable">Anyone</option>
             </select>
           </div>
 
-          {/* Guest Access */}
           <div>
             <label style={labelStyle}>Guest Access</label>
-            <select
-              value={guestAccess}
-              onChange={(e) =>
-                setGuestAccess(e.target.value as GuestAccess)
-              }
-              style={selectStyle}
-            >
+            <select value={guestAccess} onChange={(e) => setGuestAccess(e.target.value as GuestAccess)} style={selectStyle}>
               <option value="forbidden">Guests cannot join</option>
               <option value="can_join">Guests can join</option>
             </select>

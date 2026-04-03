@@ -860,6 +860,7 @@ pub async fn create_space(
     avatar_mime: Option<String>,
     history_visibility: Option<String>,
     guest_access: Option<String>,
+    join_rule: Option<String>,
 ) -> Result<String, String> {
     let client = super::get_client(&state).await?;
     let homeserver = client.homeserver().to_string();
@@ -945,8 +946,27 @@ pub async fn create_space(
         }
     }
 
+    // Join rules (public, invite, knock)
+    // The preset sets a default join rule, but an explicit initial_state overrides it.
+    // For "knock", we use private_chat preset and override with the knock join rule.
+    if let Some(jr) = &join_rule {
+        let valid = ["public", "invite", "knock"];
+        if valid.contains(&jr.as_str()) {
+            initial_state.push(serde_json::json!({
+                "type": "m.room.join_rules",
+                "state_key": "",
+                "content": {
+                    "join_rule": jr,
+                }
+            }));
+        }
+    }
+
     // Build createRoom request body
-    let preset = if is_public { "public_chat" } else { "private_chat" };
+    // For knock join rule, use private_chat preset (closest match) and let
+    // the m.room.join_rules initial state event override it.
+    let effective_join_rule = join_rule.as_deref().unwrap_or(if is_public { "public" } else { "invite" });
+    let preset = if effective_join_rule == "public" { "public_chat" } else { "private_chat" };
     let visibility = if is_public { "public" } else { "private" };
 
     let mut body = serde_json::json!({
@@ -1254,4 +1274,137 @@ pub async fn create_room_in_space(
     );
 
     Ok(new_room_id)
+}
+
+/// Search the public room directory for spaces.
+///
+/// Uses `POST /publicRooms` with `filter.room_types: ["m.space"]` to find
+/// only spaces. Supports an optional search term and a `server` parameter
+/// to browse a remote server's directory over federation.
+#[tauri::command]
+pub async fn search_public_spaces(
+    state: State<'_, Arc<AppState>>,
+    search_term: Option<String>,
+    server: Option<String>,
+    limit: Option<u32>,
+) -> Result<serde_json::Value, String> {
+    let client = super::get_client(&state).await?;
+    let homeserver = client.homeserver().to_string();
+    let access_token = client.access_token().ok_or("No access token")?;
+
+    let mut filter = serde_json::json!({
+        "room_types": ["m.space"],
+    });
+    if let Some(term) = &search_term {
+        if !term.is_empty() {
+            filter["generic_search_term"] = serde_json::json!(term);
+        }
+    }
+
+    let body = serde_json::json!({
+        "filter": filter,
+        "limit": limit.unwrap_or(20),
+    });
+
+    // If a server is specified, pass it as a query parameter for federation
+    let mut url = format!(
+        "{}/_matrix/client/v3/publicRooms",
+        homeserver.trim_end_matches('/')
+    );
+    if let Some(srv) = &server {
+        if !srv.is_empty() {
+            url = format!("{}?server={}", url, urlencoding::encode(srv));
+        }
+    }
+
+    let resp = state
+        .http_client
+        .post(&url)
+        .timeout(Duration::from_secs(15))
+        .bearer_auth(access_token.to_string())
+        .json(&body)
+        .send()
+        .await
+        .map_err(|e| format!("Failed to search public spaces: {}", super::fmt_error_chain(&e)))?;
+
+    if !resp.status().is_success() {
+        let status = resp.status();
+        let text = resp.text().await.unwrap_or_default();
+        return Err(format!("Public rooms query failed ({}): {}", status, text));
+    }
+
+    let result: serde_json::Value = resp
+        .json()
+        .await
+        .map_err(|e| format!("Failed to parse public rooms response: {e}"))?;
+
+    // Enrich each result with the user's membership status
+    if let Some(chunk) = result["chunk"].as_array() {
+        let mut enriched = Vec::new();
+        for room_data in chunk {
+            let mut entry = room_data.clone();
+            let room_id = room_data["room_id"].as_str().unwrap_or("");
+            let membership = if let Ok(rid) = matrix_sdk::ruma::RoomId::parse(room_id) {
+                if let Some(r) = client.get_room(&rid) {
+                    match r.state() {
+                        matrix_sdk::RoomState::Joined => "joined",
+                        matrix_sdk::RoomState::Invited => "invited",
+                        _ => "none",
+                    }
+                } else {
+                    "none"
+                }
+            } else {
+                "none"
+            };
+            entry["membership"] = serde_json::json!(membership);
+            enriched.push(entry);
+        }
+        let mut enriched_result = result.clone();
+        enriched_result["chunk"] = serde_json::json!(enriched);
+        return Ok(enriched_result);
+    }
+
+    Ok(result)
+}
+
+/// Resolve a room alias (e.g. `#my-space:example.com`) to its room ID.
+///
+/// Uses `GET /directory/room/{roomAlias}` which works across federation.
+#[tauri::command]
+pub async fn resolve_room_alias(
+    state: State<'_, Arc<AppState>>,
+    alias: String,
+) -> Result<serde_json::Value, String> {
+    let client = super::get_client(&state).await?;
+    let homeserver = client.homeserver().to_string();
+    let access_token = client.access_token().ok_or("No access token")?;
+
+    let url = format!(
+        "{}/_matrix/client/v3/directory/room/{}",
+        homeserver.trim_end_matches('/'),
+        urlencoding::encode(&alias),
+    );
+
+    let resp = state
+        .http_client
+        .get(&url)
+        .timeout(Duration::from_secs(10))
+        .bearer_auth(access_token.to_string())
+        .send()
+        .await
+        .map_err(|e| format!("Failed to resolve alias: {}", super::fmt_error_chain(&e)))?;
+
+    if !resp.status().is_success() {
+        let status = resp.status();
+        let text = resp.text().await.unwrap_or_default();
+        return Err(format!("Alias not found ({}): {}", status, text));
+    }
+
+    let body: serde_json::Value = resp
+        .json()
+        .await
+        .map_err(|e| format!("Failed to parse alias response: {e}"))?;
+
+    Ok(body)
 }

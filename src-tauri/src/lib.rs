@@ -183,6 +183,8 @@ pub fn run() {
             commands::rooms::create_space,
             commands::rooms::can_manage_space_children,
             commands::rooms::create_room_in_space,
+            commands::rooms::search_public_spaces,
+            commands::rooms::resolve_room_alias,
             commands::messages::get_messages,
             commands::members::get_room_members,
             commands::members::get_user_avatar,
