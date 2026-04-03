@@ -249,10 +249,19 @@ export default function MessageList({
             }}
             style={{
               position: "relative",
-              padding: showHeader
-                ? `${spacing.unit * 3}px ${spacing.unit * 4}px ${spacing.unit}px`
-                : `${spacing.unit / 2}px ${spacing.unit * 4}px`,
-              paddingRight: showMessageActions ? spacing.unit * 4 + menuBtn + spacing.unit * 2 : spacing.unit * 4,
+              ...(showHeader
+                ? {
+                    paddingTop: spacing.unit * 3,
+                    paddingRight: spacing.unit * 2,
+                    paddingBottom: spacing.unit,
+                    paddingLeft: spacing.unit * 4,
+                  }
+                : {
+                    paddingTop: spacing.unit / 2,
+                    paddingRight: spacing.unit * 2,
+                    paddingBottom: spacing.unit / 2,
+                    paddingLeft: spacing.unit * 4,
+                  }),
               display: "flex",
               gap: spacing.unit * 3,
               marginTop: showHeader ? spacing.unit : 0,
@@ -321,7 +330,7 @@ export default function MessageList({
                 style={{
                   position: "absolute",
                   top: 0,
-                  right: spacing.unit * 4,
+                  right: spacing.unit * 2,
                   transform: "translateY(-50%)",
                   zIndex: 2,
                 }}
