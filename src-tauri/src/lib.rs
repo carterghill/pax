@@ -230,12 +230,38 @@ pub fn run() {
             commands::profile::remove_user_avatar,
             commands::embed::fetch_url_metadata,
             commands::embed::proxy_media,
+            commands::embed::cleanup_proxy_media,
+            commands::embed::cleanup_all_proxy_media,
         ])
         .setup(|app| {
             // Set window icon (taskbar + title bar) from our bundled icons
             let main_window = app.get_webview_window("main").expect("main window not found");
             let icon = tauri::include_image!("icons/32x32.png");
             let _ = main_window.set_icon(icon);
+
+            // Clean up leftover proxy media temp files from previous sessions.
+            {
+                let temp_dir = app.path().temp_dir().ok();
+                if let Some(temp_dir) = temp_dir {
+                    if temp_dir.exists() {
+                        let mut count = 0u32;
+                        if let Ok(entries) = std::fs::read_dir(&temp_dir) {
+                            for entry in entries.flatten() {
+                                let name = entry.file_name();
+                                let name_str = name.to_string_lossy();
+                                if name_str.starts_with("pax_media_") && name_str.ends_with(".mp4") {
+                                    if std::fs::remove_file(entry.path()).is_ok() {
+                                        count += 1;
+                                    }
+                                }
+                            }
+                        }
+                        if count > 0 {
+                            log::info!("[Pax Media] Startup cleanup: removed {count} temp files");
+                        }
+                    }
+                }
+            }
 
             // On Linux (WebKitGTK), auto-grant microphone/camera permission requests
             // so getUserMedia() works for voice calls.

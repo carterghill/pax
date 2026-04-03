@@ -639,7 +639,7 @@ export default function CreateSpaceDialog({
                     type="text"
                     value={name}
                     onChange={(e) => setName(e.target.value)}
-                    placeholder="My Awesome Space"
+                    placeholder="My Space"
                     maxLength={255}
                     style={inputStyle}
                     autoFocus

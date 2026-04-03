@@ -159,6 +159,28 @@ function IframeEmbedView({ embed, href }: { embed: IframeEmbed; href: string }) 
 }
 
 /* ------------------------------------------------------------------ */
+/*  Module-level metadata cache                                        */
+/* ------------------------------------------------------------------ */
+
+/** Shared cache so duplicate URLs across messages don't re-fetch. */
+const metadataCache = new Map<string, Promise<UrlMetadata>>();
+
+function fetchMetadataCached(url: string): Promise<UrlMetadata> {
+  const existing = metadataCache.get(url);
+  if (existing) return existing;
+
+  const promise = invoke<UrlMetadata>("fetch_url_metadata", { url }).catch(
+    (err) => {
+      // Evict on failure so the next attempt can retry.
+      metadataCache.delete(url);
+      throw err;
+    }
+  );
+  metadataCache.set(url, promise);
+  return promise;
+}
+
+/* ------------------------------------------------------------------ */
 /*  Metadata embed (Twitter, generic OG previews)                      */
 /* ------------------------------------------------------------------ */
 
@@ -177,12 +199,14 @@ function MetadataEmbedView({
   const [videoSrc, setVideoSrc] = useState<string | null>(null);
   const [videoLoading, setVideoLoading] = useState(false);
   const fetched = useRef(false);
+  /** The on-disk temp path returned by proxy_media, for cleanup. */
+  const tempFilePath = useRef<string | null>(null);
 
   useEffect(() => {
     if (fetched.current) return;
     fetched.current = true;
 
-    invoke<UrlMetadata>("fetch_url_metadata", { url: embed.url })
+    fetchMetadataCached(embed.url)
       .then((data) => {
         setMeta(data);
         setLoading(false);
@@ -193,12 +217,23 @@ function MetadataEmbedView({
       });
   }, [embed.url]);
 
+  // Clean up the temp video file when this embed unmounts.
+  useEffect(() => {
+    return () => {
+      const path = tempFilePath.current;
+      if (path) {
+        invoke("cleanup_proxy_media", { path }).catch(() => {});
+      }
+    };
+  }, []);
+
   // Download video via Rust proxy and create an asset URL from the temp file
   const handlePlay = async (videoUrl: string) => {
     setPlaying(true);
     setVideoLoading(true);
     try {
       const filePath = await invoke<string>("proxy_media", { url: videoUrl });
+      tempFilePath.current = filePath;
       setVideoSrc(convertFileSrc(filePath));
     } catch (err) {
       console.error("[Pax Embed] Failed to proxy video:", err);

@@ -304,6 +304,25 @@ fn is_allowed_media_host(url: &str) -> bool {
     })
 }
 
+/// Build the deterministic temp file path for a media URL.
+fn media_temp_path(app: &tauri::AppHandle, url: &str) -> Result<std::path::PathBuf, String> {
+    let temp_dir = app
+        .path()
+        .temp_dir()
+        .map_err(|e| format!("Failed to get temp dir: {e}"))?;
+
+    std::fs::create_dir_all(&temp_dir)
+        .map_err(|e| format!("Failed to create temp dir: {e}"))?;
+
+    let hash = {
+        use std::hash::{Hash, Hasher};
+        let mut h = std::collections::hash_map::DefaultHasher::new();
+        url.hash(&mut h);
+        h.finish()
+    };
+    Ok(temp_dir.join(format!("pax_media_{hash:016x}.mp4")))
+}
+
 /// Download a video URL server-side (bypasses webview CORS), save to a
 /// temp file, and return the file path.  The frontend uses convertFileSrc()
 /// to create an asset:// URL the <video> element can play.
@@ -311,6 +330,18 @@ fn is_allowed_media_host(url: &str) -> bool {
 pub async fn proxy_media(app: tauri::AppHandle, url: String) -> Result<String, String> {
     if !is_allowed_media_host(&url) {
         return Err(format!("Host not allowed for media proxy: {url}"));
+    }
+
+    let file_path = media_temp_path(&app, &url)?;
+
+    // Return immediately if already cached — skip the download entirely.
+    if file_path.exists() {
+        let path_str = file_path
+            .to_str()
+            .ok_or("Temp file path is not valid UTF-8")?
+            .to_string();
+        log::info!("[Pax Media] Cache hit: {path_str}");
+        return Ok(path_str);
     }
 
     log::info!("[Pax Media] Proxying: {url}");
@@ -341,30 +372,8 @@ pub async fn proxy_media(app: tauri::AppHandle, url: String) -> Result<String, S
 
     log::info!("[Pax Media] Downloaded {} bytes", bytes.len());
 
-    // Write to a temp file in the app's temp directory.
-    let temp_dir = app
-        .path()
-        .temp_dir()
-        .map_err(|e| format!("Failed to get temp dir: {e}"))?;
-
-    std::fs::create_dir_all(&temp_dir)
-        .map_err(|e| format!("Failed to create temp dir: {e}"))?;
-
-    // Use a hash of the URL as filename to enable caching across clicks.
-    let hash = {
-        use std::hash::{Hash, Hasher};
-        let mut h = std::collections::hash_map::DefaultHasher::new();
-        url.hash(&mut h);
-        h.finish()
-    };
-    let filename = format!("pax_media_{hash:016x}.mp4");
-    let file_path = temp_dir.join(&filename);
-
-    // Skip download if already cached.
-    if !file_path.exists() {
-        std::fs::write(&file_path, &bytes)
-            .map_err(|e| format!("Failed to write temp file: {e}"))?;
-    }
+    std::fs::write(&file_path, &bytes)
+        .map_err(|e| format!("Failed to write temp file: {e}"))?;
 
     let path_str = file_path
         .to_str()
@@ -374,4 +383,78 @@ pub async fn proxy_media(app: tauri::AppHandle, url: String) -> Result<String, S
     log::info!("[Pax Media] Saved to: {path_str}");
 
     Ok(path_str)
+}
+
+/// Delete a single proxied media temp file.
+/// The frontend calls this when a video embed unmounts.
+#[tauri::command]
+pub async fn cleanup_proxy_media(app: tauri::AppHandle, path: String) -> Result<(), String> {
+    let file_path = std::path::Path::new(&path);
+
+    // Security: only allow deleting files inside our temp dir with our prefix.
+    let temp_dir = app
+        .path()
+        .temp_dir()
+        .map_err(|e| format!("Failed to get temp dir: {e}"))?;
+
+    let canonical_file = file_path
+        .canonicalize()
+        .map_err(|_| "File does not exist".to_string())?;
+    let canonical_temp = temp_dir
+        .canonicalize()
+        .map_err(|_| "Temp dir does not exist".to_string())?;
+
+    if !canonical_file.starts_with(&canonical_temp) {
+        return Err("Path is outside temp directory".to_string());
+    }
+
+    let fname = file_path
+        .file_name()
+        .and_then(|n| n.to_str())
+        .unwrap_or("");
+    if !fname.starts_with("pax_media_") || !fname.ends_with(".mp4") {
+        return Err("Not a pax media temp file".to_string());
+    }
+
+    match std::fs::remove_file(&canonical_file) {
+        Ok(()) => {
+            log::info!("[Pax Media] Cleaned up: {path}");
+            Ok(())
+        }
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(e) => Err(format!("Failed to delete temp file: {e}")),
+    }
+}
+
+/// Bulk-delete all proxied media temp files.  Called once at startup to
+/// clear leftovers from the previous session.
+#[tauri::command]
+pub async fn cleanup_all_proxy_media(app: tauri::AppHandle) -> Result<u32, String> {
+    let temp_dir = app
+        .path()
+        .temp_dir()
+        .map_err(|e| format!("Failed to get temp dir: {e}"))?;
+
+    if !temp_dir.exists() {
+        return Ok(0);
+    }
+
+    let mut count = 0u32;
+    let entries = std::fs::read_dir(&temp_dir)
+        .map_err(|e| format!("Failed to read temp dir: {e}"))?;
+
+    for entry in entries.flatten() {
+        let name = entry.file_name();
+        let name_str = name.to_string_lossy();
+        if name_str.starts_with("pax_media_") && name_str.ends_with(".mp4") {
+            if std::fs::remove_file(entry.path()).is_ok() {
+                count += 1;
+            }
+        }
+    }
+
+    if count > 0 {
+        log::info!("[Pax Media] Startup cleanup: removed {count} temp files");
+    }
+    Ok(count)
 }
