@@ -43,6 +43,8 @@ export default function VoiceRoomView({
     stopScreenShare: onStopScreenShare,
     getScreenShareQuality: onGetScreenShareQuality,
     setScreenShareQuality: onSetScreenShareQuality,
+    getLowBandwidthMode: onGetLowBandwidthMode,
+    setLowBandwidthMode: onSetLowBandwidthMode,
     getNoiseSuppressionConfig: onGetNoiseSuppressionConfig,
     setNoiseSuppressionConfig: onSetNoiseSuppressionConfig,
     setParticipantVolume: onSetParticipantVolume,
@@ -52,6 +54,7 @@ export default function VoiceRoomView({
   const [screenShareMenuOpen, setScreenShareMenuOpen] = useState(false);
   const [generalSettingsOpen, setGeneralSettingsOpen] = useState(false);
   const [screenShareQuality, setScreenShareQuality] = useState<"low" | "medium" | "high">("high");
+  const [lowBandwidthMode, setLowBandwidthMode] = useState(false);
   const [isStartingScreenShare, setIsStartingScreenShare] = useState(false);
   const [windowPickerOpen, setWindowPickerOpen] = useState(false);
   const [noiseConfig, setNoiseConfig] = useState({ extraAttenuation: 0.1, agcTargetRms: 6000 });
@@ -71,8 +74,9 @@ export default function VoiceRoomView({
 
   useEffect(() => {
     onGetScreenShareQuality().then(setScreenShareQuality).catch(() => {});
+    onGetLowBandwidthMode().then(setLowBandwidthMode).catch(() => {});
     onGetNoiseSuppressionConfig().then(setNoiseConfig).catch(() => {});
-  }, [onGetScreenShareQuality, onGetNoiseSuppressionConfig]);
+  }, [onGetScreenShareQuality, onGetLowBandwidthMode, onGetNoiseSuppressionConfig]);
 
   const startShare = useCallback(
     async (mode: "screen" | "window", windowTitle?: string) => {
@@ -108,6 +112,19 @@ export default function VoiceRoomView({
       }
     },
     [onSetScreenShareQuality]
+  );
+
+  const toggleLowBandwidth = useCallback(
+    async () => {
+      const next = !lowBandwidthMode;
+      setLowBandwidthMode(next);
+      try {
+        await onSetLowBandwidthMode(next);
+      } catch (e) {
+        console.error("Failed to toggle low bandwidth mode:", e);
+      }
+    },
+    [lowBandwidthMode, onSetLowBandwidthMode]
   );
 
   useEffect(() => {
@@ -946,23 +963,44 @@ export default function VoiceRoomView({
                   {(["low", "medium", "high"] as const).map((q) => (
                     <button
                       key={q}
-                      onClick={() => { void changeQuality(q); }}
+                      onClick={() => { if (!lowBandwidthMode) void changeQuality(q); }}
+                      disabled={lowBandwidthMode}
                       style={{
                         flex: 1,
                         padding: `${spacing.unit}px ${spacing.unit * 2}px`,
-                        backgroundColor: screenShareQuality === q ? palette.accent : palette.bgTertiary,
-                        color: screenShareQuality === q ? "#fff" : palette.textPrimary,
-                        border: `1px solid ${screenShareQuality === q ? palette.accent : palette.border}`,
+                        backgroundColor: screenShareQuality === q && !lowBandwidthMode ? palette.accent : palette.bgTertiary,
+                        color: screenShareQuality === q && !lowBandwidthMode ? "#fff" : palette.textPrimary,
+                        border: `1px solid ${screenShareQuality === q && !lowBandwidthMode ? palette.accent : palette.border}`,
                         borderRadius: spacing.unit,
-                        cursor: "pointer",
+                        cursor: lowBandwidthMode ? "not-allowed" : "pointer",
                         fontSize: typography.fontSizeSmall,
-                        fontWeight: screenShareQuality === q ? 600 : 400,
+                        fontWeight: screenShareQuality === q && !lowBandwidthMode ? 600 : 400,
+                        opacity: lowBandwidthMode ? 0.4 : 1,
                       }}
                     >
                       {q.charAt(0).toUpperCase() + q.slice(1)}
                     </button>
                   ))}
                 </div>
+
+                <div style={{ marginTop: spacing.unit * 3, marginBottom: spacing.unit * 2, fontWeight: 600, fontSize: typography.fontSizeSmall }}>
+                  Low bandwidth mode
+                </div>
+                <button
+                  onClick={() => { void toggleLowBandwidth(); }}
+                  style={{
+                    width: "100%",
+                    padding: `${spacing.unit}px ${spacing.unit * 1.5}px`,
+                    borderRadius: spacing.unit,
+                    border: `1px solid ${palette.border}`,
+                    cursor: "pointer",
+                    backgroundColor: lowBandwidthMode ? palette.accent : palette.bgTertiary,
+                    color: lowBandwidthMode ? "#fff" : palette.textPrimary,
+                    fontSize: typography.fontSizeSmall,
+                  }}
+                >
+                  {lowBandwidthMode ? "On — 500 kbps, no simulcast" : "Off — simulcast enabled"}
+                </button>
 
                 <div style={{ marginTop: spacing.unit * 3, marginBottom: spacing.unit * 2, fontWeight: 600, fontSize: typography.fontSizeSmall }}>
                   Noise suppression

@@ -221,7 +221,7 @@ pub fn compute_default_simulcast_presets(
     initial: &VideoPreset,
 ) -> Vec<VideoPreset> {
     if is_screenshare {
-        return vec![screenshare::compute_default_simulcast_preset(initial)];
+        return screenshare::DEFAULT_SIMULCAST_PRESETS.to_owned();
     }
 
     let ar = landscape_aspect_ratio(initial.width, initial.height);
@@ -371,6 +371,14 @@ pub mod screenshare {
 
     pub const PRESETS: &[VideoPreset] =
         &[H360_FPS3, H720_FPS5, H720_FPS15, H1080_FPS15, H1080_FPS30];
+
+    /// Two simulcast layers for screenshare:
+    ///   Low:  480p @ 250 kbps / 20 fps — legible, low bandwidth
+    ///   Mid:  720p @ 500 kbps / 30 fps — decent quality fallback
+    /// The high layer (initial preset) is added automatically by compute_video_encodings.
+    pub const H480_FPS20: VideoPreset = VideoPreset::new(854, 480, 250_000, 20.0);
+    pub const H720_FPS30: VideoPreset = VideoPreset::new(1280, 720, 500_000, 30.0);
+    pub const DEFAULT_SIMULCAST_PRESETS: &[VideoPreset] = &[H480_FPS20, H720_FPS30];
 
     /// Only one additional layer for screenshares. (Prioritize quality)
     pub fn compute_default_simulcast_preset(initial: &VideoPreset) -> VideoPreset {

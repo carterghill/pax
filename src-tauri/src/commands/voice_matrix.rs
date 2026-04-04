@@ -1236,6 +1236,16 @@ pub async fn set_screen_share_quality(
 }
 
 #[tauri::command]
+pub fn get_low_bandwidth_mode() -> bool {
+    screen::is_low_bandwidth_mode()
+}
+
+#[tauri::command]
+pub fn set_low_bandwidth_mode(enabled: bool) {
+    screen::set_low_bandwidth_mode(enabled);
+}
+
+#[tauri::command]
 pub fn get_noise_suppression_config(
     voice_mgr: State<'_, voice::VoiceManager>,
 ) -> Result<voice::NoiseSuppressionConfig, String> {

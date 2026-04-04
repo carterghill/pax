@@ -524,14 +524,21 @@ impl VoiceManager {
             return Err("No encodings on screen share sender".to_string());
         }
 
-        // Update the first encoding's max_bitrate
+        // Find the high-quality encoding (rid "f") — with simulcast there are
+        // multiple encodings; without simulcast there's one with an empty rid.
         let new_bitrate = quality.max_bitrate();
-        params.encodings[0].max_bitrate = Some(new_bitrate);
+        let high_idx = params
+            .encodings
+            .iter()
+            .position(|e| e.rid == "f")
+            .unwrap_or(0);
+        params.encodings[high_idx].max_bitrate = Some(new_bitrate);
 
         log::info!(
-            "set_parameters: quality={} max_bitrate={} (transaction_id={}, {} encodings)",
+            "set_parameters: quality={} max_bitrate={} encoding_rid={} (transaction_id={}, {} encodings)",
             quality.label(),
             new_bitrate,
+            params.encodings[high_idx].rid,
             params.transaction_id,
             params.encodings.len()
         );
@@ -981,9 +988,13 @@ async fn adaptive_bitrate_monitor(
         };
 
         // Find the outbound video RTP stats
-        // Find the high-quality outbound video stats (skip rid="q" simulcast layer if present)
+        // Find the high-quality outbound video stats (rid="f" for simulcast, empty for single stream)
         let outbound = stats.iter().find_map(|s| match s {
-            RtcStats::OutboundRtp(ob) if ob.outbound.rid != "q" => Some(ob),
+            RtcStats::OutboundRtp(ob)
+                if ob.outbound.rid == "f" || ob.outbound.rid.is_empty() =>
+            {
+                Some(ob)
+            }
             _ => None,
         });
         let Some(ob) = outbound else { continue };
@@ -1092,12 +1103,21 @@ async fn apply_bitrate_to_sender(
         return;
     }
     let new_bitrate = quality.max_bitrate();
-    params.encodings[0].max_bitrate = Some(new_bitrate);
+    // Find the high-quality encoding (rid "f") — with simulcast there are
+    // multiple encodings; without simulcast there's one with an empty rid.
+    let high_idx = params
+        .encodings
+        .iter()
+        .position(|e| e.rid == "f")
+        .unwrap_or(0);
+    let rid = params.encodings[high_idx].rid.clone();
+    params.encodings[high_idx].max_bitrate = Some(new_bitrate);
     match sender.set_parameters(params) {
         Ok(()) => log::info!(
-            "ABR: set_parameters ok — quality={}, max_bitrate={}",
+            "ABR: set_parameters ok — quality={}, max_bitrate={}, rid={}",
             quality.label(),
             new_bitrate,
+            if rid.is_empty() { "(none)" } else { &rid },
         ),
         Err(e) => log::error!("ABR: set_parameters failed: {}", e),
     }

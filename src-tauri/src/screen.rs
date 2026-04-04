@@ -140,6 +140,20 @@ static SCREEN_SHARE_QUALITY: Lazy<parking_lot::RwLock<ScreenShareQuality>> =
 static USER_SCREEN_SHARE_QUALITY: Lazy<parking_lot::RwLock<ScreenShareQuality>> =
     Lazy::new(|| parking_lot::RwLock::new(ScreenShareQuality::default()));
 
+/// Low bandwidth mode: disables simulcast and streams at 500 kbps / 720p / 30 fps.
+/// When off (default), simulcast is enabled with three layers for per-viewer adaptation.
+static LOW_BANDWIDTH_MODE: Lazy<parking_lot::RwLock<bool>> =
+    Lazy::new(|| parking_lot::RwLock::new(false));
+
+pub fn is_low_bandwidth_mode() -> bool {
+    *LOW_BANDWIDTH_MODE.read()
+}
+
+pub fn set_low_bandwidth_mode(enabled: bool) {
+    *LOW_BANDWIDTH_MODE.write() = enabled;
+    log::info!("Low bandwidth mode: {}", if enabled { "ON" } else { "OFF" });
+}
+
 pub fn get_screen_share_quality() -> ScreenShareQuality {
     *SCREEN_SHARE_QUALITY.read()
 }
@@ -159,6 +173,40 @@ pub fn set_user_screen_share_quality(quality: ScreenShareQuality) {
 /// Get the user-selected quality ceiling.
 pub fn get_user_screen_share_quality() -> ScreenShareQuality {
     *USER_SCREEN_SHARE_QUALITY.read()
+}
+
+/// Build `TrackPublishOptions` for screen sharing, respecting low bandwidth mode.
+///
+/// - Default mode: simulcast ON, uses the full quality bitrate/fps.
+///   The SFU selects which layer to forward to each viewer.
+/// - Low bandwidth mode: simulcast OFF, single stream at 500 kbps / 30 fps.
+fn build_screen_share_publish_options(
+    quality: ScreenShareQuality,
+    codec: livekit::options::VideoCodec,
+) -> TrackPublishOptions {
+    let low_bw = is_low_bandwidth_mode();
+    let (bitrate, framerate, simulcast) = if low_bw {
+        // Single stream — 500 kbps / 30 fps regardless of user quality setting
+        (500_000u64, 30.0f64, false)
+    } else {
+        (quality.max_bitrate(), quality.fps() as f64, true)
+    };
+
+    log::info!(
+        "Screen share publish options: codec={:?}, {}kbps, {}fps, simulcast={}, low_bw={}",
+        codec, bitrate / 1000, framerate, simulcast, low_bw,
+    );
+
+    TrackPublishOptions {
+        source: TrackSource::Screenshare,
+        video_codec: codec,
+        simulcast,
+        video_encoding: Some(VideoEncoding {
+            max_bitrate: bitrate,
+            max_framerate: framerate,
+        }),
+        ..Default::default()
+    }
 }
 
 /// Start screen sharing and return a handle containing the track.
@@ -225,7 +273,6 @@ async fn start_screen_capture_windows_graphics(
     let first_frame = Arc::new(AtomicBool::new(false));
     let flags = (video_source.clone(), shutdown.clone(), first_frame.clone());
 
-    let bitrate = quality.max_bitrate();
     let capture_interval_ms = (1000.0 / quality.fps() as f64).round() as u64;
     log::info!(
         "start_screen_capture_windows_graphics: mode={:?} quality={} fps={}",
@@ -298,27 +345,12 @@ async fn start_screen_capture_windows_graphics(
         RtcVideoSource::Native(video_source.clone()),
     );
 
-    let framerate = quality.fps() as f64;
     let codec = crate::codec::resolve_screen_share_codec();
-    log::info!(
-        "Publishing screen track to LiveKit ({:?}, {}, {}fps)",
-        codec,
-        quality.label(),
-        quality.fps()
-    );
+    let publish_options = build_screen_share_publish_options(quality, codec);
     room.local_participant()
         .publish_track(
             LocalTrack::Video(track.clone()),
-            TrackPublishOptions {
-                source: TrackSource::Screenshare,
-                video_codec: codec,
-                simulcast: false,
-                video_encoding: Some(VideoEncoding {
-                    max_bitrate: bitrate,
-                    max_framerate: framerate,
-                }),
-                ..Default::default()
-            },
+            publish_options,
         )
         .await
         .map_err(|e| format!("Failed to publish screen track: {}", e))?;
@@ -440,7 +472,6 @@ async fn start_screen_capture_libwebrtc_or_fallback(
     _window_title: Option<String>,
 ) -> Result<ScreenShareHandle, String> {
     let quality = get_screen_share_quality();
-    let bitrate = quality.max_bitrate();
     let capture_interval_ms = (1000.0 / quality.fps() as f64).round() as u64;
     use libwebrtc::desktop_capturer::{
         CaptureSource, DesktopCaptureSourceType, DesktopCapturer, DesktopCapturerOptions,
@@ -564,19 +595,12 @@ async fn start_screen_capture_libwebrtc_or_fallback(
         RtcVideoSource::Native(video_source.clone()),
     );
 
+    let codec = crate::codec::resolve_screen_share_codec();
+    let publish_options = build_screen_share_publish_options(quality, codec);
     room.local_participant()
         .publish_track(
             LocalTrack::Video(track.clone()),
-            TrackPublishOptions {
-                source: TrackSource::Screenshare,
-                video_codec: crate::codec::resolve_screen_share_codec(),
-                simulcast: false,
-                video_encoding: Some(VideoEncoding {
-                    max_bitrate: bitrate,
-                    max_framerate: quality.fps() as f64,
-                }),
-                ..Default::default()
-            },
+            publish_options,
         )
         .await
         .map_err(|e| format!("Failed to publish screen track: {}", e))?;
@@ -611,7 +635,6 @@ async fn start_screen_capture_screenshots_fallback(
     use livekit::webrtc::video_source::native::NativeVideoSource;
 
     let quality = get_screen_share_quality();
-    let bitrate = quality.max_bitrate();
     let capture_interval_ms = (1000.0 / quality.fps() as f64).round() as u64;
     log::warn!(
         "start_screen_capture_screenshots_fallback: quality={} fps={}",
@@ -687,19 +710,12 @@ async fn start_screen_capture_screenshots_fallback(
     );
 
     // Publish video immediately while capture is hot
+    let codec = crate::codec::resolve_screen_share_codec();
+    let publish_options = build_screen_share_publish_options(quality, codec);
     room.local_participant()
         .publish_track(
             LocalTrack::Video(track.clone()),
-            TrackPublishOptions {
-                source: TrackSource::Screenshare,
-                video_codec: crate::codec::resolve_screen_share_codec(),
-                simulcast: false,
-                video_encoding: Some(VideoEncoding {
-                    max_bitrate: bitrate,
-                    max_framerate: quality.fps() as f64,
-                }),
-                ..Default::default()
-            },
+            publish_options,
         )
         .await
         .map_err(|e| format!("Failed to publish screen track (fallback): {}", e))?;
@@ -931,7 +947,6 @@ async fn start_screen_capture_linux(
     use livekit::webrtc::video_source::native::NativeVideoSource;
 
     let quality = get_screen_share_quality();
-    let bitrate = quality.max_bitrate();
     log::info!("start_screen_capture_linux: mode={:?} quality={}", mode, quality.label());
 
     // --- 1. Show native screen/window picker via xdg-desktop-portal ---
@@ -1144,23 +1159,11 @@ async fn start_screen_capture_linux(
     );
 
     let codec = crate::codec::resolve_screen_share_codec();
-    log::info!(
-        "Publishing screen track to LiveKit ({:?}, {}, {}fps)",
-        codec, quality.label(), quality.fps()
-    );
+    let publish_options = build_screen_share_publish_options(quality, codec);
     room.local_participant()
         .publish_track(
             LocalTrack::Video(track.clone()),
-            TrackPublishOptions {
-                source: TrackSource::Screenshare,
-                video_codec: codec,
-                simulcast: false,
-                video_encoding: Some(VideoEncoding {
-                    max_bitrate: bitrate,
-                    max_framerate: quality.fps() as f64,
-                }),
-                ..Default::default()
-            },
+            publish_options,
         )
         .await
         .map_err(|e| format!("Failed to publish screen track: {}", e))?;
