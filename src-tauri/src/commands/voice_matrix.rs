@@ -874,7 +874,12 @@ async fn kick_other_devices_from_livekit(
 /// **Recovery after sleep/suspend:** If the delayed event has been fired by the
 /// server (404 on restart), the loop re-registers a new delayed leave and
 /// re-PUTs the call.member state event to rejoin transparently.
-fn start_heartbeat_loop(state: Arc<AppState>, initial_delay_id: String, room_id: String) {
+fn start_heartbeat_loop(
+    state: Arc<AppState>,
+    initial_delay_id: String,
+    room_id: String,
+    reconnect_notify: Arc<tokio::sync::Notify>,
+) {
     state.stop_heartbeat_loop();
     state
         .heartbeat_stop
@@ -892,9 +897,20 @@ fn start_heartbeat_loop(state: Arc<AppState>, initial_delay_id: String, room_id:
         let refresh_threshold = Duration::from_secs(MEMBERSHIP_REFRESH_INTERVAL_SECS);
 
         loop {
-            interval.tick().await;
+            // Wait for either the regular heartbeat tick OR a LiveKit reconnect signal.
+            // On reconnect we want to immediately re-PUT call.member so the server
+            // knows we're still alive, rather than waiting up to 15s for the next tick.
+            let reconnected = tokio::select! {
+                _ = interval.tick() => false,
+                _ = reconnect_notify.notified() => true,
+            };
             if stop.load(Ordering::SeqCst) {
                 break;
+            }
+            // If LiveKit just reconnected, force an immediate membership refresh
+            if reconnected {
+                log::info!("LiveKit reconnected — forcing immediate call.member refresh");
+                last_membership_refresh = tokio::time::Instant::now() - refresh_threshold;
             }
             let client = {
                 let guard = st.client.lock().await;
@@ -1082,12 +1098,9 @@ pub async fn voice_connect(
     let result = matrix_voice_join(&client, &http_client, &room_id).await?;
     let identity = client.user_id().ok_or("No user ID")?.to_string();
 
-    // 3. Start heartbeat (restarts the delayed leave every 5s, refreshes membership before expiry)
-    start_heartbeat_loop(state_arc.clone(), delay_id.clone(), room_id.clone());
-
-    // Store the delay_id so voice_disconnect can fire it
+    // 3. Store the delay_id so voice_disconnect can fire it
     if let Ok(mut g) = state_arc.delayed_leave_id.lock() {
-        *g = Some(delay_id);
+        *g = Some(delay_id.clone());
     }
 
     // 4. Connect to LiveKit
@@ -1102,13 +1115,23 @@ pub async fn voice_connect(
         )
         .await?;
 
+    // 5. Start heartbeat (restarts the delayed leave every 15s, refreshes membership before expiry).
+    //    Started after connect so we can pass the reconnect_notify from the VoiceSession —
+    //    on LiveKit reconnection it triggers an immediate call.member refresh instead of
+    //    waiting up to 15s for the next tick. Safe timing: delayed leave timeout is 60s,
+    //    connect takes ~1-2s, and the heartbeat's first tick fires at 15s.
+    let reconnect_notify = voice_mgr
+        .reconnect_notify()
+        .expect("reconnect_notify missing right after connect");
+    start_heartbeat_loop(state_arc.clone(), delay_id, room_id.clone(), reconnect_notify);
+
     if let Some((mid, lk_name)) = voice_mgr.current_matrix_room_and_livekit_sfu_name() {
         if let Ok(mut m) = state_arc.livekit_matrix_to_sfu_room.lock() {
             m.insert(mid, lk_name);
         }
     }
 
-    // 5. Force-emit participant update so sidebar refreshes immediately
+    // 6. Force-emit participant update so sidebar refreshes immediately
     let emit_client = client.clone();
     let emit_avatar_cache = state_arc.avatar_cache.clone();
     tokio::spawn(async move {

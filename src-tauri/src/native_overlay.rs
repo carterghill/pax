@@ -1169,6 +1169,7 @@ mod platform {
         }
     }
 
+    #[allow(dead_code)] // utility available for future overlay sizing needs
     pub fn get_client_size(hwnd: isize) -> (u32, u32) {
         unsafe {
             let mut rect = RECT {
@@ -1311,6 +1312,7 @@ mod platform {
     pub fn destroy_hwnd(_hwnd: isize) {}
     pub fn set_hwnd_rect(_hwnd: isize, _x: i32, _y: i32, _w: u32, _h: u32) {}
     pub fn set_hwnd_visible(_hwnd: isize, _visible: bool) {}
+    #[allow(dead_code)]
     pub fn get_client_size(_hwnd: isize) -> (u32, u32) {
         (1, 1)
     }

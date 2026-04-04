@@ -31,6 +31,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 // cpal::Stream is !Send because of platform internals, but we only ever
 // create streams on one thread and drop them (possibly on another).
 // This is safe for our use case.
+#[allow(dead_code)] // inner field kept alive to sustain the audio stream
 struct SendStream(cpal::Stream);
 unsafe impl Send for SendStream {}
 unsafe impl Sync for SendStream {}
@@ -142,15 +143,6 @@ pub struct VoiceSession {
     /// Signaled by the event loop when LiveKit reconnects after a drop.
     /// The call-member refresh loop listens on this to do an immediate refresh.
     reconnect_notify: Arc<tokio::sync::Notify>,
-}
-impl VoiceSession {
-    pub fn room_id(&self) -> &str {
-        &self.room_id
-    }
-
-    pub fn local_identity(&self) -> &str {
-        &self.local_identity
-    }
 }
 /// Global singleton for the current voice session.
 /// Only one voice call is active at a time.
@@ -401,11 +393,6 @@ impl VoiceManager {
             let vol_key = format!("{}::{}", user_part, source);
             state.user_volumes.insert(vol_key, clamped);
         } 
-    }
-    /// Get the currently connected room ID, if any.
-    pub fn connected_room_id(&self) -> Option<String> {
-        let guard = self.session.lock();
-        guard.as_ref().map(|s| s.room_id.clone())
     }
 
     /// Matrix room id + LiveKit SFU room name (from the joined room; used for admin ListParticipants).

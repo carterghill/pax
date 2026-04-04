@@ -35,6 +35,7 @@ pub struct ScreenShareHandle {
     pub audio_track: Option<LocalAudioTrack>,
     /// The NativeVideoSource feeding the track — kept alive so we can
     /// create a new LocalVideoTrack from it without restarting capture.
+    #[allow(dead_code)]
     pub video_source: livekit::webrtc::video_source::native::NativeVideoSource,
     _shutdown: Arc<AtomicBool>,
     /// Capture thread handle; kept alive so the thread doesn't die silently.
