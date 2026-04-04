@@ -120,11 +120,17 @@ export default function VoiceRoomView({
       setLowBandwidthMode(next);
       try {
         await onSetLowBandwidthMode(next);
+        // Restart active screen share so the new simulcast setting takes effect
+        const active = activeShareRef.current;
+        if (callState.isLocalScreenSharing && active) {
+          await onStopScreenShare();
+          await onStartScreenShare(active.mode, active.windowTitle);
+        }
       } catch (e) {
         console.error("Failed to toggle low bandwidth mode:", e);
       }
     },
-    [lowBandwidthMode, onSetLowBandwidthMode]
+    [lowBandwidthMode, onSetLowBandwidthMode, callState.isLocalScreenSharing, onStopScreenShare, onStartScreenShare]
   );
 
   useEffect(() => {
