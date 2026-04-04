@@ -469,6 +469,12 @@ impl VoiceManager {
                 .map_err(|e| format!("Failed to publish screen audio track: {}", e))?;
         }
         let track_for_abr = handle.track.clone();
+
+        // Apply initial tier parameters (resolution scaling + framerate) immediately.
+        // In low bandwidth mode this downscales from native to 720p; in regular mode
+        // High tier is native/30fps so this is a no-op.
+        apply_bitrate_to_sender(&handle.track, crate::screen::ScreenShareQuality::High).await;
+
         {
             let mut guard = self.session.lock();
             let session = guard.as_mut().ok_or("Not in a voice call")?;
@@ -1019,7 +1025,8 @@ async fn adaptive_bitrate_monitor(
     log::info!("ABR: adaptive bitrate monitor stopped");
 }
 
-/// Apply a new bitrate to the track's RTP sender without unpublish/republish.
+/// Apply new encoding parameters (bitrate, framerate, resolution) to the
+/// track's RTP sender without unpublish/republish.
 async fn apply_bitrate_to_sender(
     track: &livekit::track::LocalVideoTrack,
     quality: crate::screen::ScreenShareQuality,
@@ -1034,7 +1041,6 @@ async fn apply_bitrate_to_sender(
         log::warn!("ABR: no encodings on sender, cannot set_parameters");
         return;
     }
-    let new_bitrate = quality.max_bitrate();
     // Find the high-quality encoding (rid "f") — with simulcast there are
     // multiple encodings; without simulcast there's one with an empty rid.
     let high_idx = params
@@ -1043,12 +1049,33 @@ async fn apply_bitrate_to_sender(
         .position(|e| e.rid == "f")
         .unwrap_or(0);
     let rid = params.encodings[high_idx].rid.clone();
+
+    // Apply bitrate + framerate
+    let new_bitrate = quality.max_bitrate();
+    let new_fps = quality.max_framerate();
     params.encodings[high_idx].max_bitrate = Some(new_bitrate);
+    params.encodings[high_idx].max_framerate = Some(new_fps);
+
+    // Apply resolution scaling if the tier specifies a target height.
+    // Scale is approximate — computed against a 1080p baseline since
+    // all capture functions use that as the signaling hint.
+    let res_label;
+    if let Some(target_h) = quality.target_height() {
+        let scale = 1080.0 / target_h as f64;
+        params.encodings[high_idx].scale_resolution_down_by = Some(scale);
+        res_label = format!("{}p", target_h);
+    } else {
+        params.encodings[high_idx].scale_resolution_down_by = Some(1.0);
+        res_label = "native".to_string();
+    }
+
     match sender.set_parameters(params) {
         Ok(()) => log::info!(
-            "ABR: set_parameters ok — quality={}, max_bitrate={}, rid={}",
+            "ABR: set_parameters ok — tier={}, {}bps, {}fps, {}, rid={}",
             quality.label(),
             new_bitrate,
+            new_fps,
+            res_label,
             if rid.is_empty() { "(none)" } else { &rid },
         ),
         Err(e) => log::error!("ABR: set_parameters failed: {}", e),

@@ -66,9 +66,9 @@ impl Drop for ScreenShareHandle {
 /// Internal ABR bitrate tier. The adaptive bitrate system steps through
 /// these tiers based on bandwidth conditions. Not user-facing.
 ///
-/// Bitrate values are mode-dependent:
-///   Regular mode:        High = 3.5 Mbps, Medium = 1.5 Mbps, Low = 750 kbps
-///   Low bandwidth mode:  High = 500 kbps,  Medium = 350 kbps, Low = 200 kbps
+/// Values are mode-dependent:
+///   Regular mode:        High = 3.5M/native/30fps  Med = 1.5M/native/30fps  Low = 750K/720p/20fps
+///   Low bandwidth mode:  High = 500K/720p/24fps    Med = 350K/540p/24fps    Low = 200K/480p/20fps
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum ScreenShareQuality {
@@ -79,7 +79,7 @@ pub enum ScreenShareQuality {
 
 impl ScreenShareQuality {
     pub fn fps(self) -> u32 {
-        if is_low_bandwidth_mode() { 24 } else { 30 }
+        self.max_framerate() as u32
     }
 
     /// Max bitrate in bits per second. Values depend on the current bandwidth mode.
@@ -95,6 +95,41 @@ impl ScreenShareQuality {
                 Self::Low => 750_000,
                 Self::Medium => 1_500_000,
                 Self::High => 3_500_000,
+            }
+        }
+    }
+
+    /// Max framerate for this tier.
+    pub fn max_framerate(self) -> f64 {
+        if is_low_bandwidth_mode() {
+            match self {
+                Self::Low => 20.0,
+                Self::Medium => 24.0,
+                Self::High => 24.0,
+            }
+        } else {
+            match self {
+                Self::Low => 20.0,
+                Self::Medium => 30.0,
+                Self::High => 30.0,
+            }
+        }
+    }
+
+    /// Target resolution height for this tier, or `None` for native resolution.
+    /// Used by ABR to set `scale_resolution_down_by` on the encoder mid-stream.
+    pub fn target_height(self) -> Option<u32> {
+        if is_low_bandwidth_mode() {
+            match self {
+                Self::Low => Some(480),
+                Self::Medium => Some(540),
+                Self::High => Some(720),
+            }
+        } else {
+            match self {
+                Self::Low => Some(720),
+                Self::Medium => None, // native
+                Self::High => None,   // native
             }
         }
     }
