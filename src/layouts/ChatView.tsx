@@ -282,7 +282,14 @@ export default function ChatView({
 
         {/* User menu panel with resizable inside border */}
         {showUsers && (
-          <div style={{ position: "relative", flexShrink: 0, zIndex: 1 }}>
+          <div style={{
+            position: "relative",
+            flexShrink: 0,
+            zIndex: 1,
+            alignSelf: "stretch",
+            minHeight: 0,
+            height: "100%",
+          }}>
             <UserMenu width={userMenuWidth} roomId={room.id} userId={userId} />
             <div
               onMouseDown={userMenuResize.onMouseDown}

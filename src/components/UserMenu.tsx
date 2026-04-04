@@ -40,11 +40,14 @@ export default function UserMenu({ width, roomId, userId }: UserMenuProps) {
     <div style={{
       width,
       minWidth: width,
+      minHeight: 0,
+      height: "100%",
       flexShrink: 0,
       backgroundColor: palette.bgSecondary,
       borderLeft: `1px solid ${palette.border}`,
       overflowY: "auto",
       padding: `${spacing.unit * 4}px 0`,
+      boxSizing: "border-box",
     }}>
       {loading ? (
         <div style={{
