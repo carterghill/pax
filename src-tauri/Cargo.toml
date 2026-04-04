@@ -74,3 +74,4 @@ gstreamer-video = "0.24"
 [patch.crates-io]
 livekit = { path = "livekit-local" }
 libwebrtc = { path = "libwebrtc-local" }
+webrtc-sys = { path = "webrtc-sys-local" }

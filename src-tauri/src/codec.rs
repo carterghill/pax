@@ -173,20 +173,7 @@ fn has_amd_av1_support(name: &str) -> bool {
 /// On Linux, hardware encoding (VA-API / NVENC via CUDA) *is* wired up in
 /// webrtc-sys, so we honour the normal resolved codec there.
 pub fn resolve_screen_share_codec() -> VideoCodec {
-    let codec = resolve_codec();
-
-    #[cfg(target_os = "windows")]
-    {
-        if codec == VideoCodec::H264 {
-            eprintln!(
-                "[Pax Codec] Screen share: overriding H264 → VP9 \
-                 (no HW encoder on Windows, OpenH264 too slow for screen content)"
-            );
-            return VideoCodec::VP9;
-        }
-    }
-
-    codec
+    resolve_codec()
 }
 
 /// Get a human-readable label for the currently resolved codec.

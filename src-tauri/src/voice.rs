@@ -981,8 +981,9 @@ async fn adaptive_bitrate_monitor(
         };
 
         // Find the outbound video RTP stats
+        // Find the high-quality outbound video stats (skip rid="q" simulcast layer if present)
         let outbound = stats.iter().find_map(|s| match s {
-            RtcStats::OutboundRtp(ob) => Some(ob),
+            RtcStats::OutboundRtp(ob) if ob.outbound.rid != "q" => Some(ob),
             _ => None,
         });
         let Some(ob) = outbound else { continue };
@@ -994,7 +995,7 @@ async fn adaptive_bitrate_monitor(
             QualityLimitationReason::Bandwidth => {
                 consecutive_ok = 0;
                 consecutive_bw_limited += 1;
-                log::debug!(
+                log::info!(
                     "ABR: bandwidth-limited ({}/2), current={}, fps={:.1}, bitrate={:.0}bps",
                     consecutive_bw_limited,
                     current.label(),
@@ -1021,7 +1022,7 @@ async fn adaptive_bitrate_monitor(
                 // Only try to step up if we're below the user's chosen ceiling
                 if current.tier() < user_max.tier() {
                     consecutive_ok += 1;
-                    log::debug!(
+                    log::info!(
                         "ABR: no limitation ({}/8), current={}, ceiling={}",
                         consecutive_ok,
                         current.label(),
@@ -1048,12 +1049,25 @@ async fn adaptive_bitrate_monitor(
                         consecutive_ok = 0;
                     }
                 } else {
+                    // Already at user's ceiling, no action needed
+                    log::info!(
+                        "ABR: no limitation, at ceiling={}, fps={:.1}, bitrate={:.0}bps",
+                        current.label(),
+                        ob.outbound.frames_per_second,
+                        ob.outbound.target_bitrate,
+                    );
                     consecutive_ok = 0;
                 }
             }
             reason => {
                 // Cpu or Other — don't change bitrate, just reset counters
-                log::debug!("ABR: limited by {:?}, not adjusting bitrate", reason);
+                log::info!(
+                    "ABR: limited by {:?}, current={}, fps={:.1}, bitrate={:.0}bps",
+                    reason,
+                    current.label(),
+                    ob.outbound.frames_per_second,
+                    ob.outbound.target_bitrate,
+                );
                 consecutive_bw_limited = 0;
                 consecutive_ok = 0;
             }
