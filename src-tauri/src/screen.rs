@@ -63,8 +63,12 @@ impl Drop for ScreenShareHandle {
     }
 }
 
-/// Screen share quality level — controls only the encoding bitrate.
-/// Resolution is always native (whatever the source provides).
+/// Internal ABR bitrate tier. The adaptive bitrate system steps through
+/// these tiers based on bandwidth conditions. Not user-facing.
+///
+/// Bitrate values are mode-dependent:
+///   Regular mode:        High = 3.5 Mbps, Medium = 1.5 Mbps, Low = 750 kbps
+///   Low bandwidth mode:  High = 500 kbps,  Medium = 350 kbps, Low = 200 kbps
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum ScreenShareQuality {
@@ -75,15 +79,23 @@ pub enum ScreenShareQuality {
 
 impl ScreenShareQuality {
     pub fn fps(self) -> u32 {
-        30
+        if is_low_bandwidth_mode() { 24 } else { 30 }
     }
 
-    /// Max bitrate in bits per second.
+    /// Max bitrate in bits per second. Values depend on the current bandwidth mode.
     pub fn max_bitrate(self) -> u64 {
-        match self {
-            Self::Low => 500_000,
-            Self::Medium => 2_000_000,
-            Self::High => 3_500_000,
+        if is_low_bandwidth_mode() {
+            match self {
+                Self::Low => 200_000,
+                Self::Medium => 350_000,
+                Self::High => 500_000,
+            }
+        } else {
+            match self {
+                Self::Low => 750_000,
+                Self::Medium => 1_500_000,
+                Self::High => 3_500_000,
+            }
         }
     }
 
@@ -130,17 +142,12 @@ impl Default for ScreenShareQuality {
     }
 }
 
-/// The *current active* quality — may be reduced below the user's choice
-/// by the adaptive bitrate system.
+/// The current ABR tier — may be reduced by the adaptive bitrate system.
+/// Reset to High on every new stream start.
 static SCREEN_SHARE_QUALITY: Lazy<parking_lot::RwLock<ScreenShareQuality>> =
     Lazy::new(|| parking_lot::RwLock::new(ScreenShareQuality::default()));
 
-/// The quality the *user* selected via the UI. The adaptive bitrate system
-/// treats this as its ceiling and never exceeds it.
-static USER_SCREEN_SHARE_QUALITY: Lazy<parking_lot::RwLock<ScreenShareQuality>> =
-    Lazy::new(|| parking_lot::RwLock::new(ScreenShareQuality::default()));
-
-/// Low bandwidth mode: disables simulcast and streams at 500 kbps / 720p / 30 fps.
+/// Low bandwidth mode: disables simulcast and streams at 500 kbps / 24 fps.
 /// When off (default), simulcast is enabled with three layers for per-viewer adaptation.
 static LOW_BANDWIDTH_MODE: Lazy<parking_lot::RwLock<bool>> =
     Lazy::new(|| parking_lot::RwLock::new(false));
@@ -163,34 +170,24 @@ pub fn set_screen_share_quality(quality: ScreenShareQuality) {
     *SCREEN_SHARE_QUALITY.write() = quality;
 }
 
-/// Set the user-selected quality. Also updates the active quality to match.
-/// Called when the user changes quality in the UI.
-pub fn set_user_screen_share_quality(quality: ScreenShareQuality) {
-    *USER_SCREEN_SHARE_QUALITY.write() = quality;
-    *SCREEN_SHARE_QUALITY.write() = quality;
-}
-
-/// Get the user-selected quality ceiling.
-pub fn get_user_screen_share_quality() -> ScreenShareQuality {
-    *USER_SCREEN_SHARE_QUALITY.read()
-}
-
 /// Build `TrackPublishOptions` for screen sharing, respecting low bandwidth mode.
 ///
-/// - Default mode: simulcast ON, uses the full quality bitrate/fps.
-///   The SFU selects which layer to forward to each viewer.
-/// - Low bandwidth mode: simulcast OFF, single stream at 500 kbps / 30 fps.
+/// Always resets the ABR tier to High — each new stream starts at full quality
+/// and the adaptive bitrate system steps down if needed.
+///
+/// - Default mode: simulcast ON, 3.5 Mbps / 30 fps.
+/// - Low bandwidth mode: simulcast OFF, 500 kbps / 24 fps.
 fn build_screen_share_publish_options(
-    quality: ScreenShareQuality,
     codec: livekit::options::VideoCodec,
 ) -> TrackPublishOptions {
+    // Reset ABR tier — every new stream starts at full quality
+    set_screen_share_quality(ScreenShareQuality::High);
+    let quality = ScreenShareQuality::High;
+
     let low_bw = is_low_bandwidth_mode();
-    let (bitrate, framerate, simulcast) = if low_bw {
-        // Single stream — 500 kbps / 30 fps regardless of user quality setting
-        (500_000u64, 30.0f64, false)
-    } else {
-        (quality.max_bitrate(), quality.fps() as f64, true)
-    };
+    let bitrate = quality.max_bitrate();
+    let framerate = quality.fps() as f64;
+    let simulcast = !low_bw;
 
     log::info!(
         "Screen share publish options: codec={:?}, {}kbps, {}fps, simulcast={}, low_bw={}",
@@ -346,7 +343,7 @@ async fn start_screen_capture_windows_graphics(
     );
 
     let codec = crate::codec::resolve_screen_share_codec();
-    let publish_options = build_screen_share_publish_options(quality, codec);
+    let publish_options = build_screen_share_publish_options(codec);
     room.local_participant()
         .publish_track(
             LocalTrack::Video(track.clone()),
@@ -596,7 +593,7 @@ async fn start_screen_capture_libwebrtc_or_fallback(
     );
 
     let codec = crate::codec::resolve_screen_share_codec();
-    let publish_options = build_screen_share_publish_options(quality, codec);
+    let publish_options = build_screen_share_publish_options(codec);
     room.local_participant()
         .publish_track(
             LocalTrack::Video(track.clone()),
@@ -711,7 +708,7 @@ async fn start_screen_capture_screenshots_fallback(
 
     // Publish video immediately while capture is hot
     let codec = crate::codec::resolve_screen_share_codec();
-    let publish_options = build_screen_share_publish_options(quality, codec);
+    let publish_options = build_screen_share_publish_options(codec);
     room.local_participant()
         .publish_track(
             LocalTrack::Video(track.clone()),
@@ -1159,7 +1156,7 @@ async fn start_screen_capture_linux(
     );
 
     let codec = crate::codec::resolve_screen_share_codec();
-    let publish_options = build_screen_share_publish_options(quality, codec);
+    let publish_options = build_screen_share_publish_options(codec);
     room.local_participant()
         .publish_track(
             LocalTrack::Video(track.clone()),

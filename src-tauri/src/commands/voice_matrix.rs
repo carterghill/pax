@@ -1222,20 +1222,6 @@ pub fn enumerate_screen_share_windows() -> Result<Vec<(String, String)>, String>
 }
 
 #[tauri::command]
-pub fn get_screen_share_quality() -> screen::ScreenShareQuality {
-    screen::get_screen_share_quality()
-}
-
-#[tauri::command]
-pub async fn set_screen_share_quality(
-    quality: screen::ScreenShareQuality,
-    voice_mgr: State<'_, voice::VoiceManager>,
-    app: tauri::AppHandle,
-) -> Result<(), String> {
-    voice_mgr.set_screen_share_quality(quality, &app).await
-}
-
-#[tauri::command]
 pub fn get_low_bandwidth_mode() -> bool {
     screen::is_low_bandwidth_mode()
 }

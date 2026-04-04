@@ -379,22 +379,4 @@ pub mod screenshare {
     pub const H480_FPS20: VideoPreset = VideoPreset::new(854, 480, 250_000, 20.0);
     pub const H720_FPS30: VideoPreset = VideoPreset::new(1280, 720, 500_000, 30.0);
     pub const DEFAULT_SIMULCAST_PRESETS: &[VideoPreset] = &[H480_FPS20, H720_FPS30];
-
-    /// Only one additional layer for screenshares. (Prioritize quality)
-    pub fn compute_default_simulcast_preset(initial: &VideoPreset) -> VideoPreset {
-        const SCALE_DOWN_FACTOR: u32 = 2;
-        const FPS: f64 = 3.0;
-
-        VideoPreset::new(
-            initial.width / SCALE_DOWN_FACTOR,
-            initial.height / SCALE_DOWN_FACTOR,
-            u64::max(
-                150_000,
-                initial.encoding.max_bitrate
-                    / (SCALE_DOWN_FACTOR.pow(2) as u64
-                        * (initial.encoding.max_framerate / FPS) as u64),
-            ),
-            FPS,
-        )
-    }
 }

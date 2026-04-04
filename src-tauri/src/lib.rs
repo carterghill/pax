@@ -200,8 +200,6 @@ pub fn run() {
             commands::voice_matrix::voice_start_screen_share,
             commands::voice_matrix::voice_stop_screen_share,
             commands::voice_matrix::enumerate_screen_share_windows,
-            commands::voice_matrix::get_screen_share_quality,
-            commands::voice_matrix::set_screen_share_quality,
             commands::voice_matrix::get_low_bandwidth_mode,
             commands::voice_matrix::set_low_bandwidth_mode,
             commands::voice_matrix::get_noise_suppression_config,

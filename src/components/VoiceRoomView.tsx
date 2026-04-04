@@ -41,8 +41,6 @@ export default function VoiceRoomView({
     startScreenShare: onStartScreenShare,
     enumerateScreenShareWindows: onEnumerateScreenShareWindows,
     stopScreenShare: onStopScreenShare,
-    getScreenShareQuality: onGetScreenShareQuality,
-    setScreenShareQuality: onSetScreenShareQuality,
     getLowBandwidthMode: onGetLowBandwidthMode,
     setLowBandwidthMode: onSetLowBandwidthMode,
     getNoiseSuppressionConfig: onGetNoiseSuppressionConfig,
@@ -53,7 +51,6 @@ export default function VoiceRoomView({
   const { getVolume, setVolume } = useUserVolume();
   const [screenShareMenuOpen, setScreenShareMenuOpen] = useState(false);
   const [generalSettingsOpen, setGeneralSettingsOpen] = useState(false);
-  const [screenShareQuality, setScreenShareQuality] = useState<"low" | "medium" | "high">("high");
   const [lowBandwidthMode, setLowBandwidthMode] = useState(false);
   const [isStartingScreenShare, setIsStartingScreenShare] = useState(false);
   const [windowPickerOpen, setWindowPickerOpen] = useState(false);
@@ -73,10 +70,9 @@ export default function VoiceRoomView({
   const [windowListLoading, setWindowListLoading] = useState(false);
 
   useEffect(() => {
-    onGetScreenShareQuality().then(setScreenShareQuality).catch(() => {});
     onGetLowBandwidthMode().then(setLowBandwidthMode).catch(() => {});
     onGetNoiseSuppressionConfig().then(setNoiseConfig).catch(() => {});
-  }, [onGetScreenShareQuality, onGetLowBandwidthMode, onGetNoiseSuppressionConfig]);
+  }, [onGetLowBandwidthMode, onGetNoiseSuppressionConfig]);
 
   const startShare = useCallback(
     async (mode: "screen" | "window", windowTitle?: string) => {
@@ -101,18 +97,6 @@ export default function VoiceRoomView({
       console.error("Failed to stop screen share:", e);
     }
   }, [onStopScreenShare]);
-
-  const changeQuality = useCallback(
-    async (quality: "low" | "medium" | "high") => {
-      setScreenShareQuality(quality);
-      try {
-        await onSetScreenShareQuality(quality);
-      } catch (e) {
-        console.error("Failed to change screen share quality:", e);
-      }
-    },
-    [onSetScreenShareQuality]
-  );
 
   const toggleLowBandwidth = useCallback(
     async () => {
@@ -963,33 +947,6 @@ export default function VoiceRoomView({
               }}
               >
                 <div style={{ marginBottom: spacing.unit * 2, fontWeight: 600, fontSize: typography.fontSizeSmall }}>
-                  Screen share quality
-                </div>
-                <div style={{ display: "flex", gap: spacing.unit }}>
-                  {(["low", "medium", "high"] as const).map((q) => (
-                    <button
-                      key={q}
-                      onClick={() => { if (!lowBandwidthMode) void changeQuality(q); }}
-                      disabled={lowBandwidthMode}
-                      style={{
-                        flex: 1,
-                        padding: `${spacing.unit}px ${spacing.unit * 2}px`,
-                        backgroundColor: screenShareQuality === q && !lowBandwidthMode ? palette.accent : palette.bgTertiary,
-                        color: screenShareQuality === q && !lowBandwidthMode ? "#fff" : palette.textPrimary,
-                        border: `1px solid ${screenShareQuality === q && !lowBandwidthMode ? palette.accent : palette.border}`,
-                        borderRadius: spacing.unit,
-                        cursor: lowBandwidthMode ? "not-allowed" : "pointer",
-                        fontSize: typography.fontSizeSmall,
-                        fontWeight: screenShareQuality === q && !lowBandwidthMode ? 600 : 400,
-                        opacity: lowBandwidthMode ? 0.4 : 1,
-                      }}
-                    >
-                      {q.charAt(0).toUpperCase() + q.slice(1)}
-                    </button>
-                  ))}
-                </div>
-
-                <div style={{ marginTop: spacing.unit * 3, marginBottom: spacing.unit * 2, fontWeight: 600, fontSize: typography.fontSizeSmall }}>
                   Low bandwidth mode
                 </div>
                 <button
@@ -1005,7 +962,7 @@ export default function VoiceRoomView({
                     fontSize: typography.fontSizeSmall,
                   }}
                 >
-                  {lowBandwidthMode ? "On — 500 kbps, no simulcast" : "Off — simulcast enabled"}
+                  {lowBandwidthMode ? "On — 500 kbps / 24 fps, no simulcast" : "Off — simulcast enabled"}
                 </button>
 
                 <div style={{ marginTop: spacing.unit * 3, marginBottom: spacing.unit * 2, fontWeight: 600, fontSize: typography.fontSizeSmall }}>

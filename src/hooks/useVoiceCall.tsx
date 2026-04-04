@@ -55,8 +55,6 @@ export interface VoiceCallActions {
   startScreenShare: (mode: "screen" | "window", windowTitle?: string) => Promise<void>;
   enumerateScreenShareWindows: () => Promise<[string, string][]>;
   stopScreenShare: () => Promise<void>;
-  getScreenShareQuality: () => Promise<"low" | "medium" | "high">;
-  setScreenShareQuality: (quality: "low" | "medium" | "high") => Promise<void>;
   getLowBandwidthMode: () => Promise<boolean>;
   setLowBandwidthMode: (enabled: boolean) => Promise<void>;
   getNoiseSuppressionConfig: () => Promise<{ extraAttenuation: number; agcTargetRms: number }>;
@@ -445,9 +443,6 @@ export function useVoiceCall() {
         throw e;
       }
     },
-    getScreenShareQuality: () => invoke<"low" | "medium" | "high">("get_screen_share_quality"),
-    setScreenShareQuality: (quality: "low" | "medium" | "high") =>
-      invoke<void>("set_screen_share_quality", { quality }),
     getLowBandwidthMode: () => invoke<boolean>("get_low_bandwidth_mode"),
     setLowBandwidthMode: (enabled: boolean) =>
       invoke<void>("set_low_bandwidth_mode", { enabled }),

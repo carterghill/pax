@@ -486,72 +486,6 @@ impl VoiceManager {
         Ok(())
     }
 
-    /// Change screen share quality on-the-fly via RtpSender::set_parameters().
-    /// This updates the encoder's bitrate target on the very next frame —
-    /// no track renegotiation, no subscriber interruption.
-    /// When called from the UI, this sets the user's ceiling AND resets the
-    /// active quality, so the adaptive bitrate system starts fresh.
-    pub async fn set_screen_share_quality(
-        &self,
-        quality: crate::screen::ScreenShareQuality,
-        _app_handle: &AppHandle,
-    ) -> Result<(), String> {
-        // Set as user's ceiling AND reset active quality to match
-        crate::screen::set_user_screen_share_quality(quality);
-
-        // Get the track from the screen handle
-        let track = {
-            let guard = self.session.lock();
-            let session = guard.as_ref().ok_or("Not in a voice call")?;
-            match session._screen_handle.as_ref() {
-                Some(handle) => handle.track.clone(),
-                None => {
-                    // Not currently sharing — just store the quality for next time
-                    return Ok(());
-                }
-            }
-        };
-
-        // Reach the RtpSender via the track's transceiver
-        let transceiver = track
-            .transceiver()
-            .ok_or("Screen share track has no transceiver (not published?)")?;
-        let sender = transceiver.sender();
-
-        // Get current parameters (preserves transaction_id + encodings)
-        let mut params = sender.parameters();
-        if params.encodings.is_empty() {
-            return Err("No encodings on screen share sender".to_string());
-        }
-
-        // Find the high-quality encoding (rid "f") — with simulcast there are
-        // multiple encodings; without simulcast there's one with an empty rid.
-        let new_bitrate = quality.max_bitrate();
-        let high_idx = params
-            .encodings
-            .iter()
-            .position(|e| e.rid == "f")
-            .unwrap_or(0);
-        params.encodings[high_idx].max_bitrate = Some(new_bitrate);
-
-        log::info!(
-            "set_parameters: quality={} max_bitrate={} encoding_rid={} (transaction_id={}, {} encodings)",
-            quality.label(),
-            new_bitrate,
-            params.encodings[high_idx].rid,
-            params.transaction_id,
-            params.encodings.len()
-        );
-
-        // Apply — encoder picks up the new bitrate on the next frame
-        sender
-            .set_parameters(params)
-            .map_err(|e| format!("set_parameters failed: {}", e))?;
-
-        log::info!("Screen share quality changed to {} (seamless)", quality.label());
-        Ok(())
-    }
-
     /// Stop sharing screen.
     pub async fn stop_screen_share(&self, app_handle: &AppHandle) -> Result<(), String> {
         log::info!("voice::stop_screen_share");
@@ -1000,16 +934,16 @@ async fn adaptive_bitrate_monitor(
         let Some(ob) = outbound else { continue };
 
         let current = crate::screen::get_screen_share_quality();
-        let user_max = crate::screen::get_user_screen_share_quality();
 
         match ob.outbound.quality_limitation_reason {
             QualityLimitationReason::Bandwidth => {
                 consecutive_ok = 0;
                 consecutive_bw_limited += 1;
                 log::info!(
-                    "ABR: bandwidth-limited ({}/2), current={}, fps={:.1}, bitrate={:.0}bps",
+                    "ABR: bandwidth-limited ({}/2), current={} ({}bps), fps={:.1}, bitrate={:.0}bps",
                     consecutive_bw_limited,
                     current.label(),
+                    current.max_bitrate(),
                     ob.outbound.frames_per_second,
                     ob.outbound.target_bitrate,
                 );
@@ -1018,9 +952,11 @@ async fn adaptive_bitrate_monitor(
                     let new_q = current.step_down();
                     if new_q != current {
                         log::info!(
-                            "ABR: stepping DOWN {} -> {} (bandwidth limited)",
+                            "ABR: stepping DOWN {} -> {} ({}bps -> {}bps)",
                             current.label(),
                             new_q.label(),
+                            current.max_bitrate(),
+                            new_q.max_bitrate(),
                         );
                         crate::screen::set_screen_share_quality(new_q);
                         apply_bitrate_to_sender(&track, new_q).await;
@@ -1030,29 +966,25 @@ async fn adaptive_bitrate_monitor(
             }
             QualityLimitationReason::None => {
                 consecutive_bw_limited = 0;
-                // Only try to step up if we're below the user's chosen ceiling
-                if current.tier() < user_max.tier() {
+                // Step up if below max tier
+                if current != crate::screen::ScreenShareQuality::High {
                     consecutive_ok += 1;
                     log::info!(
-                        "ABR: no limitation ({}/8), current={}, ceiling={}",
+                        "ABR: no limitation ({}/8), current={} ({}bps)",
                         consecutive_ok,
                         current.label(),
-                        user_max.label(),
+                        current.max_bitrate(),
                     );
                     // Step up after 8 consecutive polls (~16 seconds stable)
                     if consecutive_ok >= 8 {
                         let new_q = current.step_up();
-                        // Don't exceed the user's chosen ceiling
-                        let new_q = if new_q.tier() > user_max.tier() {
-                            user_max
-                        } else {
-                            new_q
-                        };
                         if new_q != current {
                             log::info!(
-                                "ABR: stepping UP {} -> {} (stable connection)",
+                                "ABR: stepping UP {} -> {} ({}bps -> {}bps)",
                                 current.label(),
                                 new_q.label(),
+                                current.max_bitrate(),
+                                new_q.max_bitrate(),
                             );
                             crate::screen::set_screen_share_quality(new_q);
                             apply_bitrate_to_sender(&track, new_q).await;
@@ -1060,12 +992,12 @@ async fn adaptive_bitrate_monitor(
                         consecutive_ok = 0;
                     }
                 } else {
-                    // Already at user's ceiling, no action needed
+                    // Already at max tier
                     log::info!(
-                        "ABR: no limitation, at ceiling={}, fps={:.1}, bitrate={:.0}bps",
+                        "ABR: no limitation, at max={} ({}bps), fps={:.1}",
                         current.label(),
+                        current.max_bitrate(),
                         ob.outbound.frames_per_second,
-                        ob.outbound.target_bitrate,
                     );
                     consecutive_ok = 0;
                 }
@@ -1073,11 +1005,11 @@ async fn adaptive_bitrate_monitor(
             reason => {
                 // Cpu or Other — don't change bitrate, just reset counters
                 log::info!(
-                    "ABR: limited by {:?}, current={}, fps={:.1}, bitrate={:.0}bps",
+                    "ABR: limited by {:?}, current={} ({}bps), fps={:.1}",
                     reason,
                     current.label(),
+                    current.max_bitrate(),
                     ob.outbound.frames_per_second,
-                    ob.outbound.target_bitrate,
                 );
                 consecutive_bw_limited = 0;
                 consecutive_ok = 0;
