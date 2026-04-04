@@ -94,6 +94,34 @@ impl ScreenShareQuality {
             Self::High => "high",
         }
     }
+
+    /// Numeric tier for ordering: 0 = Low, 1 = Medium, 2 = High.
+    pub fn tier(self) -> u8 {
+        match self {
+            Self::Low => 0,
+            Self::Medium => 1,
+            Self::High => 2,
+        }
+    }
+
+    /// Convert a tier number back to quality (clamped to valid range).
+    pub fn from_tier(t: u8) -> Self {
+        match t {
+            0 => Self::Low,
+            1 => Self::Medium,
+            _ => Self::High,
+        }
+    }
+
+    /// One tier below, or self if already at Low.
+    pub fn step_down(self) -> Self {
+        Self::from_tier(self.tier().saturating_sub(1))
+    }
+
+    /// One tier above, or self if already at High.
+    pub fn step_up(self) -> Self {
+        Self::from_tier((self.tier() + 1).min(2))
+    }
 }
 
 impl Default for ScreenShareQuality {
@@ -102,15 +130,35 @@ impl Default for ScreenShareQuality {
     }
 }
 
+/// The *current active* quality — may be reduced below the user's choice
+/// by the adaptive bitrate system.
 static SCREEN_SHARE_QUALITY: Lazy<parking_lot::RwLock<ScreenShareQuality>> =
+    Lazy::new(|| parking_lot::RwLock::new(ScreenShareQuality::default()));
+
+/// The quality the *user* selected via the UI. The adaptive bitrate system
+/// treats this as its ceiling and never exceeds it.
+static USER_SCREEN_SHARE_QUALITY: Lazy<parking_lot::RwLock<ScreenShareQuality>> =
     Lazy::new(|| parking_lot::RwLock::new(ScreenShareQuality::default()));
 
 pub fn get_screen_share_quality() -> ScreenShareQuality {
     *SCREEN_SHARE_QUALITY.read()
 }
 
+/// Set the current active quality (used by the adaptive bitrate system).
 pub fn set_screen_share_quality(quality: ScreenShareQuality) {
     *SCREEN_SHARE_QUALITY.write() = quality;
+}
+
+/// Set the user-selected quality. Also updates the active quality to match.
+/// Called when the user changes quality in the UI.
+pub fn set_user_screen_share_quality(quality: ScreenShareQuality) {
+    *USER_SCREEN_SHARE_QUALITY.write() = quality;
+    *SCREEN_SHARE_QUALITY.write() = quality;
+}
+
+/// Get the user-selected quality ceiling.
+pub fn get_user_screen_share_quality() -> ScreenShareQuality {
+    *USER_SCREEN_SHARE_QUALITY.read()
 }
 
 /// Start screen sharing and return a handle containing the track.

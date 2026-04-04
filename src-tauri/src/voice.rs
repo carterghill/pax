@@ -143,6 +143,8 @@ pub struct VoiceSession {
     /// Signaled by the event loop when LiveKit reconnects after a drop.
     /// The call-member refresh loop listens on this to do an immediate refresh.
     reconnect_notify: Arc<tokio::sync::Notify>,
+    /// Shutdown flag for the adaptive bitrate monitor task.
+    _abr_shutdown: Arc<AtomicBool>,
 }
 /// Global singleton for the current voice session.
 /// Only one voice call is active at a time.
@@ -270,6 +272,7 @@ impl VoiceManager {
                 _screen_handle: None,
                 noise_proc,
                 reconnect_notify,
+                _abr_shutdown: Arc::new(AtomicBool::new(false)),
             });
         }
         Ok(())
@@ -284,6 +287,8 @@ impl VoiceManager {
             guard.take()
         };
         if let Some(session) = session {
+            // Stop adaptive bitrate monitor
+            session._abr_shutdown.store(true, Ordering::Relaxed);
             // Stop all video receivers
             {
                 let mut st = session.audio_state.lock();
@@ -463,9 +468,14 @@ impl VoiceManager {
                 .await
                 .map_err(|e| format!("Failed to publish screen audio track: {}", e))?;
         }
+        let track_for_abr = handle.track.clone();
         {
             let mut guard = self.session.lock();
             let session = guard.as_mut().ok_or("Not in a voice call")?;
+            // Reset and spawn adaptive bitrate monitor
+            session._abr_shutdown.store(false, Ordering::Relaxed);
+            let abr_shutdown = session._abr_shutdown.clone();
+            tokio::spawn(adaptive_bitrate_monitor(track_for_abr, abr_shutdown));
             session._screen_handle = Some(handle);
         }
         {
@@ -479,12 +489,15 @@ impl VoiceManager {
     /// Change screen share quality on-the-fly via RtpSender::set_parameters().
     /// This updates the encoder's bitrate target on the very next frame —
     /// no track renegotiation, no subscriber interruption.
+    /// When called from the UI, this sets the user's ceiling AND resets the
+    /// active quality, so the adaptive bitrate system starts fresh.
     pub async fn set_screen_share_quality(
         &self,
         quality: crate::screen::ScreenShareQuality,
         _app_handle: &AppHandle,
     ) -> Result<(), String> {
-        crate::screen::set_screen_share_quality(quality);
+        // Set as user's ceiling AND reset active quality to match
+        crate::screen::set_user_screen_share_quality(quality);
 
         // Get the track from the screen handle
         let track = {
@@ -538,6 +551,8 @@ impl VoiceManager {
         let (room, audio_state, handle, room_id, local_identity) = {
             let mut guard = self.session.lock();
             let session = guard.as_mut().ok_or("Not in a voice call")?;
+            // Stop the adaptive bitrate monitor
+            session._abr_shutdown.store(true, Ordering::Relaxed);
             let handle = session._screen_handle.take();
             (
                 session.room.clone(),
@@ -927,6 +942,153 @@ async fn run_event_loop(
         }
     }
 }
+
+// ─── Adaptive bitrate monitor ───────────────────────────────────────────────
+
+/// Polls WebRTC outbound stats on the screen share track and adjusts bitrate
+/// based on `quality_limitation_reason`. Only reacts to `Bandwidth` — if the
+/// encoder reports `Cpu` limitation, lowering bitrate wouldn't help.
+///
+/// Step-down is fast (~4s of sustained bandwidth limitation), step-up is slow
+/// (~16s of no limitation), Discord-style hysteresis to avoid oscillation.
+async fn adaptive_bitrate_monitor(
+    track: livekit::track::LocalVideoTrack,
+    shutdown: Arc<AtomicBool>,
+) {
+    use libwebrtc::stats::{RtcStats, QualityLimitationReason};
+
+    log::info!("ABR: adaptive bitrate monitor started");
+
+    // Let the stream stabilize before we start monitoring
+    tokio::time::sleep(Duration::from_secs(4)).await;
+
+    let mut consecutive_bw_limited: u32 = 0;
+    let mut consecutive_ok: u32 = 0;
+    let mut interval = tokio::time::interval(Duration::from_secs(2));
+
+    loop {
+        interval.tick().await;
+        if shutdown.load(Ordering::Relaxed) {
+            break;
+        }
+
+        let stats = match track.get_stats().await {
+            Ok(s) => s,
+            Err(e) => {
+                log::debug!("ABR: get_stats failed (track gone?): {}", e);
+                break;
+            }
+        };
+
+        // Find the outbound video RTP stats
+        let outbound = stats.iter().find_map(|s| match s {
+            RtcStats::OutboundRtp(ob) => Some(ob),
+            _ => None,
+        });
+        let Some(ob) = outbound else { continue };
+
+        let current = crate::screen::get_screen_share_quality();
+        let user_max = crate::screen::get_user_screen_share_quality();
+
+        match ob.outbound.quality_limitation_reason {
+            QualityLimitationReason::Bandwidth => {
+                consecutive_ok = 0;
+                consecutive_bw_limited += 1;
+                log::debug!(
+                    "ABR: bandwidth-limited ({}/2), current={}, fps={:.1}, bitrate={:.0}bps",
+                    consecutive_bw_limited,
+                    current.label(),
+                    ob.outbound.frames_per_second,
+                    ob.outbound.target_bitrate,
+                );
+                // Step down after 2 consecutive polls (~4 seconds)
+                if consecutive_bw_limited >= 2 {
+                    let new_q = current.step_down();
+                    if new_q != current {
+                        log::info!(
+                            "ABR: stepping DOWN {} -> {} (bandwidth limited)",
+                            current.label(),
+                            new_q.label(),
+                        );
+                        crate::screen::set_screen_share_quality(new_q);
+                        apply_bitrate_to_sender(&track, new_q).await;
+                    }
+                    consecutive_bw_limited = 0;
+                }
+            }
+            QualityLimitationReason::None => {
+                consecutive_bw_limited = 0;
+                // Only try to step up if we're below the user's chosen ceiling
+                if current.tier() < user_max.tier() {
+                    consecutive_ok += 1;
+                    log::debug!(
+                        "ABR: no limitation ({}/8), current={}, ceiling={}",
+                        consecutive_ok,
+                        current.label(),
+                        user_max.label(),
+                    );
+                    // Step up after 8 consecutive polls (~16 seconds stable)
+                    if consecutive_ok >= 8 {
+                        let new_q = current.step_up();
+                        // Don't exceed the user's chosen ceiling
+                        let new_q = if new_q.tier() > user_max.tier() {
+                            user_max
+                        } else {
+                            new_q
+                        };
+                        if new_q != current {
+                            log::info!(
+                                "ABR: stepping UP {} -> {} (stable connection)",
+                                current.label(),
+                                new_q.label(),
+                            );
+                            crate::screen::set_screen_share_quality(new_q);
+                            apply_bitrate_to_sender(&track, new_q).await;
+                        }
+                        consecutive_ok = 0;
+                    }
+                } else {
+                    consecutive_ok = 0;
+                }
+            }
+            reason => {
+                // Cpu or Other — don't change bitrate, just reset counters
+                log::debug!("ABR: limited by {:?}, not adjusting bitrate", reason);
+                consecutive_bw_limited = 0;
+                consecutive_ok = 0;
+            }
+        }
+    }
+    log::info!("ABR: adaptive bitrate monitor stopped");
+}
+
+/// Apply a new bitrate to the track's RTP sender without unpublish/republish.
+async fn apply_bitrate_to_sender(
+    track: &livekit::track::LocalVideoTrack,
+    quality: crate::screen::ScreenShareQuality,
+) {
+    let Some(transceiver) = track.transceiver() else {
+        log::warn!("ABR: track has no transceiver, cannot set_parameters");
+        return;
+    };
+    let sender = transceiver.sender();
+    let mut params = sender.parameters();
+    if params.encodings.is_empty() {
+        log::warn!("ABR: no encodings on sender, cannot set_parameters");
+        return;
+    }
+    let new_bitrate = quality.max_bitrate();
+    params.encodings[0].max_bitrate = Some(new_bitrate);
+    match sender.set_parameters(params) {
+        Ok(()) => log::info!(
+            "ABR: set_parameters ok — quality={}, max_bitrate={}",
+            quality.label(),
+            new_bitrate,
+        ),
+        Err(e) => log::error!("ABR: set_parameters failed: {}", e),
+    }
+}
+
 fn emit_state(
     app_handle: &AppHandle,
     room_id: &str,
