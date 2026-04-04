@@ -103,6 +103,24 @@ NvidiaH264EncoderImpl::NvidiaH264EncoderImpl(
     nv_enc_level_ = webrtc::H264LevelToNvEncLevel(level_);
   }
 
+  // Map WebRTC H264 profile to NVENC profile GUID.
+  switch (profile_) {
+    case H264Profile::kProfileConstrainedBaseline:
+    case H264Profile::kProfileBaseline:
+      nv_profile_guid_ = NV_ENC_H264_PROFILE_BASELINE_GUID;
+      break;
+    case H264Profile::kProfileMain:
+      nv_profile_guid_ = NV_ENC_H264_PROFILE_MAIN_GUID;
+      break;
+    case H264Profile::kProfileConstrainedHigh:
+    case H264Profile::kProfileHigh:
+      nv_profile_guid_ = NV_ENC_H264_PROFILE_HIGH_GUID;
+      break;
+    default:
+      nv_profile_guid_ = NV_ENC_H264_PROFILE_BASELINE_GUID;
+      break;
+  }
+
   RTC_CHECK_NE(cu_memory_type_, CU_MEMORYTYPE_HOST);
 }
 
@@ -217,7 +235,11 @@ int32_t NvidiaH264EncoderImpl::InitEncode(
   nv_encode_config_.profileGUID = nv_profile_guid_;
   nv_encode_config_.gopLength = NVENC_INFINITE_GOPLENGTH;
   nv_encode_config_.frameIntervalP = 1;
-  nv_encode_config_.encodeCodecConfig.h264Config.level = nv_enc_level_;
+  // Let NVENC auto-select the H264 level based on the actual resolution.
+  // The SDP-negotiated level (e.g. 3.1 from profile-level-id "42e01f") may
+  // be too restrictive for high-resolution screen shares, causing error 8
+  // (NV_ENC_ERR_INVALID_PARAM) when the resolution exceeds the level's limits.
+  nv_encode_config_.encodeCodecConfig.h264Config.level = NV_ENC_LEVEL_AUTOSELECT;
   nv_encode_config_.encodeCodecConfig.h264Config.idrPeriod =
       NVENC_INFINITE_GOPLENGTH;
   nv_encode_config_.rcParams.version = NV_ENC_RC_PARAMS_VER;

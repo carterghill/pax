@@ -81,7 +81,7 @@ impl ScreenShareQuality {
     /// Max bitrate in bits per second.
     pub fn max_bitrate(self) -> u64 {
         match self {
-            Self::Low => 1_000_000,
+            Self::Low => 500_000,
             Self::Medium => 2_000_000,
             Self::High => 3_500_000,
         }
@@ -312,7 +312,7 @@ async fn start_screen_capture_windows_graphics(
             TrackPublishOptions {
                 source: TrackSource::Screenshare,
                 video_codec: codec,
-                simulcast: true,
+                simulcast: false,
                 video_encoding: Some(VideoEncoding {
                     max_bitrate: bitrate,
                     max_framerate: framerate,
@@ -570,7 +570,7 @@ async fn start_screen_capture_libwebrtc_or_fallback(
             TrackPublishOptions {
                 source: TrackSource::Screenshare,
                 video_codec: crate::codec::resolve_screen_share_codec(),
-                simulcast: true,
+                simulcast: false,
                 video_encoding: Some(VideoEncoding {
                     max_bitrate: bitrate,
                     max_framerate: quality.fps() as f64,
@@ -693,7 +693,7 @@ async fn start_screen_capture_screenshots_fallback(
             TrackPublishOptions {
                 source: TrackSource::Screenshare,
                 video_codec: crate::codec::resolve_screen_share_codec(),
-                simulcast: true,
+                simulcast: false,
                 video_encoding: Some(VideoEncoding {
                     max_bitrate: bitrate,
                     max_framerate: quality.fps() as f64,
@@ -1154,7 +1154,7 @@ async fn start_screen_capture_linux(
             TrackPublishOptions {
                 source: TrackSource::Screenshare,
                 video_codec: codec,
-                simulcast: true,
+                simulcast: false,
                 video_encoding: Some(VideoEncoding {
                     max_bitrate: bitrate,
                     max_framerate: quality.fps() as f64,
