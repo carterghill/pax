@@ -10,7 +10,9 @@ use tauri::{Manager, State};
 use crate::types::{RoomInfo, SpaceChildInfo, SpaceInfo};
 use crate::AppState;
 
-use super::auth::{save_session_to_credentials, SavedCredentials, SavedSession};
+use super::auth::{
+    save_session_to_credentials, spawn_cleanup_stale_matrix_stores, SavedCredentials, SavedSession,
+};
 use super::{fmt_error_chain, get_or_fetch_avatar};
 
 fn app_data_dir(app: &tauri::AppHandle) -> Result<std::path::PathBuf, String> {
@@ -284,6 +286,7 @@ async fn finish_registration(
     .map_err(|e| format!("Initial sync failed: {}", fmt_error_chain(&e)))?;
 
     if let Some(session) = client.matrix_auth().session() {
+        let keep = store_rel.clone();
         let _ = save_session_to_credentials(
             app,
             homeserver,
@@ -294,6 +297,7 @@ async fn finish_registration(
             },
             Some(store_rel),
         );
+        spawn_cleanup_stale_matrix_stores(app.clone(), keep);
     }
 
     let user_id = client
@@ -342,6 +346,7 @@ pub async fn login(
     log::info!("login: sync complete, saving session...");
     if persist_session {
         if let Some(session) = client.matrix_auth().session() {
+            let keep = store_rel.clone();
             let _ = save_session_to_credentials(
                 &app,
                 &homeserver,
@@ -352,6 +357,7 @@ pub async fn login(
                 },
                 Some(store_rel),
             );
+            spawn_cleanup_stale_matrix_stores(app.clone(), keep);
         }
     }
 

@@ -24,6 +24,59 @@ pub struct SavedCredentials {
     pub sqlite_store_dir: Option<String>,
 }
 
+/// Best-effort: delete every Matrix SDK SQLite directory except `keep_sqlite_relative`
+/// (relative to app data, `/`-separated, e.g. `matrix_sessions/pw_<uuid>`).
+/// Runs in the background so login/register return immediately.
+pub(crate) fn spawn_cleanup_stale_matrix_stores(app: tauri::AppHandle, keep_sqlite_relative: String) {
+    tauri::async_runtime::spawn(async move {
+        let res = tokio::task::spawn_blocking(move || {
+            let Ok(base) = app.path().app_data_dir() else {
+                return;
+            };
+            let keep_norm = keep_sqlite_relative
+                .replace('\\', "/")
+                .trim_matches('/')
+                .to_string();
+
+            // Legacy single-directory layout
+            let legacy = base.join("matrix_store");
+            if legacy.exists() && keep_norm != "matrix_store" {
+                if let Err(e) = std::fs::remove_dir_all(&legacy) {
+                    log::debug!("cleanup: could not remove legacy matrix_store: {e}");
+                }
+            }
+
+            let sessions = base.join("matrix_sessions");
+            let Ok(read_dir) = std::fs::read_dir(&sessions) else {
+                return;
+            };
+            for ent in read_dir.flatten() {
+                let Ok(ft) = ent.file_type() else {
+                    continue;
+                };
+                if !ft.is_dir() {
+                    continue;
+                }
+                let name = ent.file_name().to_string_lossy().into_owned();
+                if !name.starts_with("pw_") {
+                    continue;
+                }
+                let rel = format!("matrix_sessions/{name}").replace('\\', "/");
+                if rel == keep_norm {
+                    continue;
+                }
+                if let Err(e) = std::fs::remove_dir_all(ent.path()) {
+                    log::debug!("cleanup: could not remove {rel}: {e}");
+                }
+            }
+        })
+        .await;
+        if let Err(e) = res {
+            log::debug!("cleanup: spawn_blocking join error: {e}");
+        }
+    });
+}
+
 fn credentials_path(app: &tauri::AppHandle) -> Result<std::path::PathBuf, String> {
     let dir = app
         .path()
