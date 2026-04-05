@@ -29,7 +29,16 @@ pub struct RtpHeaderExtensionParameters {
     pub encrypted: bool,
 }
 
-#[derive(Debug, Clone, Default)]
+/// Matches WebRTC / libwebrtc `DegradationPreference` (from `getParameters`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DegradationPreference {
+    Disabled,
+    MaintainFramerate,
+    MaintainResolution,
+    Balanced,
+}
+
+#[derive(Debug, Clone)]
 pub struct RtpParameters {
     pub transaction_id: String,
     pub mid: String,
@@ -37,6 +46,8 @@ pub struct RtpParameters {
     pub header_extensions: Vec<RtpHeaderExtensionParameters>,
     pub encodings: Vec<RtpEncodingParameters>,
     pub rtcp: RtcpParameters,
+    /// Preserved from `getParameters`; must be round-tripped for `setParameters` to succeed.
+    pub degradation_preference: Option<DegradationPreference>,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -51,7 +62,13 @@ pub struct RtpCodecParameters {
 pub struct RtcpParameters {
     pub cname: String,
     pub reduced_size: bool,
+    pub mux: bool,
+    /// RTP SSRC for RTCP when present; required for `setParameters` parity with libwebrtc.
+    pub ssrc: Option<u32>,
 }
+
+/// Default `bitrate_priority` from WebRTC (must match when round-tripping `RtpEncodingParameters`).
+pub const DEFAULT_ENCODING_BITRATE_PRIORITY: f64 = 1.0;
 
 #[derive(Debug, Clone)]
 pub struct RtpEncodingParameters {
@@ -61,6 +78,9 @@ pub struct RtpEncodingParameters {
     pub priority: Priority,
     pub rid: String,
     pub scale_resolution_down_by: Option<f64>,
+    pub bitrate_priority: f64,
+    /// Per-encoding SSRC when assigned; must be preserved across `setParameters`.
+    pub ssrc: Option<u32>,
 }
 
 #[derive(Debug, Clone)]
@@ -92,6 +112,8 @@ impl Default for RtpEncodingParameters {
             priority: Priority::Low,
             rid: String::default(),
             scale_resolution_down_by: None,
+            bitrate_priority: DEFAULT_ENCODING_BITRATE_PRIORITY,
+            ssrc: None,
         }
     }
 }

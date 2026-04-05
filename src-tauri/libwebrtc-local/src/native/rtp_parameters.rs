@@ -16,6 +16,29 @@ use webrtc_sys::{rtp_parameters as sys_rp, webrtc as sys_webrtc};
 
 use crate::rtp_parameters::*;
 
+impl From<sys_rp::ffi::DegradationPreference> for DegradationPreference {
+    fn from(value: sys_rp::ffi::DegradationPreference) -> Self {
+        match value {
+            sys_rp::ffi::DegradationPreference::Disabled => Self::Disabled,
+            sys_rp::ffi::DegradationPreference::MaintainFramerate => Self::MaintainFramerate,
+            sys_rp::ffi::DegradationPreference::MaintainResolution => Self::MaintainResolution,
+            sys_rp::ffi::DegradationPreference::Balanced => Self::Balanced,
+            _ => Self::Balanced,
+        }
+    }
+}
+
+impl From<DegradationPreference> for sys_rp::ffi::DegradationPreference {
+    fn from(value: DegradationPreference) -> Self {
+        match value {
+            DegradationPreference::Disabled => Self::Disabled,
+            DegradationPreference::MaintainFramerate => Self::MaintainFramerate,
+            DegradationPreference::MaintainResolution => Self::MaintainResolution,
+            DegradationPreference::Balanced => Self::Balanced,
+        }
+    }
+}
+
 impl From<sys_webrtc::ffi::Priority> for Priority {
     fn from(value: sys_webrtc::ffi::Priority) -> Self {
         match value {
@@ -43,6 +66,9 @@ impl From<sys_rp::ffi::RtpParameters> for RtpParameters {
             header_extensions: value.header_extensions.into_iter().map(Into::into).collect(),
             encodings: value.encodings.into_iter().map(Into::into).collect(),
             rtcp: value.rtcp.into(),
+            degradation_preference: value
+                .has_degradation_preference
+                .then(|| value.degradation_preference.into()),
         }
     }
 }
@@ -60,7 +86,12 @@ impl From<sys_rp::ffi::RtpCodecParameters> for RtpCodecParameters {
 
 impl From<sys_rp::ffi::RtcpParameters> for RtcpParameters {
     fn from(value: sys_rp::ffi::RtcpParameters) -> Self {
-        Self { cname: value.cname, reduced_size: value.reduced_size }
+        Self {
+            cname: value.cname,
+            reduced_size: value.reduced_size,
+            mux: value.mux,
+            ssrc: value.has_ssrc.then_some(value.ssrc),
+        }
     }
 }
 
@@ -75,6 +106,8 @@ impl From<sys_rp::ffi::RtpEncodingParameters> for RtpEncodingParameters {
             scale_resolution_down_by: value
                 .has_scale_resolution_down_by
                 .then_some(value.scale_resolution_down_by),
+            bitrate_priority: value.bitrate_priority,
+            ssrc: value.has_ssrc.then_some(value.ssrc),
         }
     }
 }
@@ -142,6 +175,11 @@ impl From<RtpHeaderExtensionParameters> for sys_rp::ffi::RtpExtension {
 
 impl From<RtpParameters> for sys_rp::ffi::RtpParameters {
     fn from(value: RtpParameters) -> Self {
+        let has_degradation_preference = value.degradation_preference.is_some();
+        let degradation_preference = value
+            .degradation_preference
+            .map(Into::into)
+            .unwrap_or(sys_rp::ffi::DegradationPreference::Balanced);
         Self {
             transaction_id: value.transaction_id,
             mid: value.mid,
@@ -149,8 +187,8 @@ impl From<RtpParameters> for sys_rp::ffi::RtpParameters {
             header_extensions: value.header_extensions.into_iter().map(Into::into).collect(),
             encodings: value.encodings.into_iter().map(Into::into).collect(),
             rtcp: value.rtcp.into(),
-            has_degradation_preference: false,
-            degradation_preference: sys_rp::ffi::DegradationPreference::Balanced,
+            has_degradation_preference,
+            degradation_preference,
         }
     }
 }
@@ -181,9 +219,9 @@ impl From<RtcpParameters> for sys_rp::ffi::RtcpParameters {
         Self {
             cname: value.cname,
             reduced_size: value.reduced_size,
-            has_ssrc: false,
-            ssrc: 0,
-            mux: false,
+            has_ssrc: value.ssrc.is_some(),
+            ssrc: value.ssrc.unwrap_or(0),
+            mux: value.mux,
         }
     }
 }
@@ -201,15 +239,15 @@ impl From<RtpEncodingParameters> for sys_rp::ffi::RtpEncodingParameters {
             has_scale_resolution_down_by: value.scale_resolution_down_by.is_some(),
             scale_resolution_down_by: value.scale_resolution_down_by.unwrap_or_default(),
             adaptive_ptime: false,
-            bitrate_priority: sys_rp::DEFAULT_BITRATE_PRIORITY,
+            bitrate_priority: value.bitrate_priority,
             has_min_bitrate_bps: false,
             min_bitrate_bps: 0,
             has_num_temporal_layers: false,
             num_temporal_layers: 0,
             has_scalability_mode: false,
             scalability_mode: "".to_string(),
-            has_ssrc: false,
-            ssrc: 0,
+            has_ssrc: value.ssrc.is_some(),
+            ssrc: value.ssrc.unwrap_or(0),
         }
     }
 }

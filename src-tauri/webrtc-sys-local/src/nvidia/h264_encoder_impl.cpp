@@ -25,6 +25,19 @@
 
 namespace webrtc {
 
+namespace {
+
+// `vbvBufferSize` / `vbvInitialDelay` are in bits (nvEncodeAPI.h). A multi-second
+// HRD buffer lets NVENC borrow bits across scene changes; the old (5 * bits/frame)
+// sizing was only ~5 frames and was very tight at low bitrates.
+constexpr uint32_t kNvencVbvBufferSeconds = 1;
+
+uint32_t NvencVbvBufferSizeBits(uint32_t average_bitrate_bps) {
+  return average_bitrate_bps * kNvencVbvBufferSeconds;
+}
+
+}  // namespace
+
 // Used by histograms. Values of entries should not be changed.
 enum H264EncoderImplEvent {
   kH264EncoderEventInit = 0,
@@ -246,10 +259,7 @@ int32_t NvidiaH264EncoderImpl::InitEncode(
   nv_encode_config_.rcParams.rateControlMode = NV_ENC_PARAMS_RC_CBR;
   nv_encode_config_.rcParams.averageBitRate = configuration_.target_bps;
   nv_encode_config_.rcParams.vbvBufferSize =
-      (nv_encode_config_.rcParams.averageBitRate *
-       nv_initialize_params_.frameRateDen /
-       nv_initialize_params_.frameRateNum) *
-      5;
+      NvencVbvBufferSizeBits(nv_encode_config_.rcParams.averageBitRate);
   nv_encode_config_.rcParams.vbvInitialDelay =
       nv_encode_config_.rcParams.vbvBufferSize;
 
@@ -485,9 +495,7 @@ void NvidiaH264EncoderImpl::SetRates(
 
   nv_encode_config_.rcParams.averageBitRate = configuration_.target_bps;
   nv_encode_config_.rcParams.vbvBufferSize =
-      (nv_encode_config_.rcParams.averageBitRate *
-       nv_initialize_params_.frameRateDen / fps_num) *
-      5;
+      NvencVbvBufferSizeBits(nv_encode_config_.rcParams.averageBitRate);
   nv_encode_config_.rcParams.vbvInitialDelay =
       nv_encode_config_.rcParams.vbvBufferSize;
 
