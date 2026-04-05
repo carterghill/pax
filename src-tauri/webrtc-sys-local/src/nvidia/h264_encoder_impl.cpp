@@ -468,6 +468,38 @@ void NvidiaH264EncoderImpl::SetRates(
     configuration_.SetStreamState(true);
   } else {
     configuration_.SetStreamState(false);
+    return;
+  }
+
+  const CUresult cuda_result = cuCtxSetCurrent(cu_context_);
+  if (cuda_result != CUDA_SUCCESS) {
+    RTC_LOG(LS_ERROR) << "SetRates: cuCtxSetCurrent failed: " << cuda_result;
+    return;
+  }
+
+  const uint32_t fps_num =
+      std::max(1u, static_cast<uint32_t>(parameters.framerate_fps + 0.5));
+  nv_initialize_params_.frameRateNum = fps_num;
+  nv_initialize_params_.frameRateDen = 1;
+  nv_initialize_params_.encodeConfig = &nv_encode_config_;
+
+  nv_encode_config_.rcParams.averageBitRate = configuration_.target_bps;
+  nv_encode_config_.rcParams.vbvBufferSize =
+      (nv_encode_config_.rcParams.averageBitRate *
+       nv_initialize_params_.frameRateDen / fps_num) *
+      5;
+  nv_encode_config_.rcParams.vbvInitialDelay =
+      nv_encode_config_.rcParams.vbvBufferSize;
+
+  NV_ENC_RECONFIGURE_PARAMS reconfigure_params{};
+  reconfigure_params.version = NV_ENC_RECONFIGURE_PARAMS_VER;
+  reconfigure_params.reInitEncodeParams = nv_initialize_params_;
+  reconfigure_params.reInitEncodeParams.encodeConfig = &nv_encode_config_;
+
+  try {
+    encoder_->Reconfigure(&reconfigure_params);
+  } catch (const NVENCException& e) {
+    RTC_LOG(LS_ERROR) << "NVENC H.264 Reconfigure failed: " << e.what();
   }
 }
 
