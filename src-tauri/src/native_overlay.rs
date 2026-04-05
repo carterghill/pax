@@ -21,6 +21,7 @@
 
 use std::collections::HashMap;
 use std::sync::atomic::Ordering;
+use std::sync::Arc;
 use once_cell::sync::Lazy;
 use parking_lot::Mutex;
 use tokio::sync::mpsc;
@@ -124,6 +125,262 @@ fn notify_overlay_clip_changed(identity: &str) {
     if let Some(tx) = OVERLAY_CLIP_NOTIFIERS.lock().get(identity) {
         let _ = tx.send(());
     }
+}
+
+// ─── Shared GPU singleton ───────────────────────────────────────────────────
+//
+// All GpuRenderer instances share a single wgpu Device/Queue/Pipeline.
+// This avoids creating redundant DX12/Vulkan devices per stream, which
+// doesn't scale — driver-level device limits are surprisingly low on
+// consumer GPUs, and each device carries its own shader compilation,
+// command queue, and memory pool overhead.
+//
+// A single device can drive dozens of surfaces (swap chains) concurrently;
+// that's normal GPU workload.  Per-stream state (Surface, textures, bind
+// groups, staging buffers) remains private to each GpuRenderer.
+
+struct SharedGpu {
+    /// Single wgpu instance — all surfaces must be created from this instance
+    /// so they're compatible with the device/adapter.
+    instance: wgpu::Instance,
+    device: wgpu::Device,
+    queue: wgpu::Queue,
+    pipeline: wgpu::RenderPipeline,
+    bind_group_layout: wgpu::BindGroupLayout,
+    sampler: wgpu::Sampler,
+    /// Surface format chosen during init (consistent across all child HWNDs
+    /// on the same GPU — safe assumption on Windows DX12 / Linux Vulkan).
+    format: wgpu::TextureFormat,
+    /// Best present mode supported (Mailbox if available, else Fifo).
+    present_mode: wgpu::PresentMode,
+}
+
+// SAFETY: All wgpu types stored here (Instance, Device, Queue, RenderPipeline,
+// BindGroupLayout, Sampler) are Send+Sync in wgpu.  SharedGpu is wrapped in
+// Arc<> and accessed from multiple video threads.
+unsafe impl Send for SharedGpu {}
+unsafe impl Sync for SharedGpu {}
+
+static SHARED_GPU: Lazy<Mutex<Option<Arc<SharedGpu>>>> = Lazy::new(|| Mutex::new(None));
+
+/// Create a wgpu surface from a raw HWND using the given instance.
+/// The surface will be compatible with any device/adapter from the same instance.
+fn create_surface_for_hwnd(
+    instance: &wgpu::Instance,
+    hwnd: isize,
+) -> Result<wgpu::Surface<'static>, String> {
+    unsafe {
+        instance.create_surface_unsafe(wgpu::SurfaceTargetUnsafe::RawHandle {
+            raw_display_handle: raw_window_handle::RawDisplayHandle::Windows(
+                raw_window_handle::WindowsDisplayHandle::new(),
+            ),
+            raw_window_handle: {
+                let mut h = raw_window_handle::Win32WindowHandle::new(
+                    std::num::NonZeroIsize::new(hwnd)
+                        .ok_or("Invalid HWND (zero)")?,
+                );
+                h.hinstance = None;
+                raw_window_handle::RawWindowHandle::Win32(h)
+            },
+        })
+    }
+    .map_err(|e| format!("wgpu create_surface: {}", e))
+}
+
+/// Get or initialize the shared GPU singleton, and create a surface for the
+/// given HWND from the shared instance.
+///
+/// The first caller pays the one-time cost of instance creation, adapter
+/// selection, device init, and pipeline compilation.  Subsequent callers
+/// get the cached Arc and only create a new surface.
+///
+/// The lock is held for the duration of init to prevent races where two
+/// video threads create competing instances.  This is safe because each
+/// video thread has its own single-threaded tokio runtime, and wgpu's
+/// request_adapter/request_device resolve synchronously on DX12/Vulkan.
+async fn get_or_init_shared_gpu(
+    hwnd: isize,
+) -> Result<(Arc<SharedGpu>, wgpu::Surface<'static>), String> {
+    let mut guard = SHARED_GPU.lock();
+
+    if let Some(ref shared) = *guard {
+        // Already initialized — just create a surface from the shared instance
+        let surface = create_surface_for_hwnd(&shared.instance, hwnd)?;
+        return Ok((Arc::clone(shared), surface));
+    }
+
+    // First renderer: full initialization
+    let instance = wgpu::Instance::new(&wgpu::InstanceDescriptor {
+        backends: wgpu::Backends::DX12 | wgpu::Backends::VULKAN,
+        ..Default::default()
+    });
+
+    // Create the first surface — used for adapter selection and format detection
+    let surface = create_surface_for_hwnd(&instance, hwnd)?;
+
+    let adapter = instance
+        .request_adapter(&wgpu::RequestAdapterOptions {
+            power_preference: wgpu::PowerPreference::HighPerformance,
+            compatible_surface: Some(&surface),
+            force_fallback_adapter: false,
+        })
+        .await
+        .map_err(|e| format!("No suitable GPU adapter: {}", e))?;
+
+    log::info!(
+        "[SharedGpu] Using adapter: {} ({:?})",
+        adapter.get_info().name,
+        adapter.get_info().backend
+    );
+
+    // Auto-detect best video codec (once, globally)
+    crate::codec::detect_best_codec(&adapter.get_info().name);
+
+    let (device, queue) = adapter
+        .request_device(
+            &wgpu::DeviceDescriptor {
+                label: Some("pax-shared-gpu"),
+                required_features: wgpu::Features::empty(),
+                required_limits: wgpu::Limits::default(),
+                memory_hints: wgpu::MemoryHints::Performance,
+                ..Default::default()
+            },
+        )
+        .await
+        .map_err(|e| format!("wgpu request_device: {}", e))?;
+
+    // Determine surface format + present mode
+    let caps = surface.get_capabilities(&adapter);
+    let format = caps
+        .formats
+        .iter()
+        .find(|f| !f.is_srgb())
+        .or(caps.formats.first())
+        .copied()
+        .ok_or("No surface formats available")?;
+
+    let present_mode = if caps.present_modes.contains(&wgpu::PresentMode::Mailbox) {
+        wgpu::PresentMode::Mailbox
+    } else {
+        wgpu::PresentMode::Fifo
+    };
+
+    // Shader + pipeline + sampler (identical for all streams)
+    let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+        label: Some("yuv_shader"),
+        source: wgpu::ShaderSource::Wgsl(YUV_SHADER.into()),
+    });
+
+    let bind_group_layout =
+        device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+            label: Some("yuv_bgl"),
+            entries: &[
+                wgpu::BindGroupLayoutEntry {
+                    binding: 0,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Texture {
+                        sample_type: wgpu::TextureSampleType::Float { filterable: true },
+                        view_dimension: wgpu::TextureViewDimension::D2,
+                        multisampled: false,
+                    },
+                    count: None,
+                },
+                wgpu::BindGroupLayoutEntry {
+                    binding: 1,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Texture {
+                        sample_type: wgpu::TextureSampleType::Float { filterable: true },
+                        view_dimension: wgpu::TextureViewDimension::D2,
+                        multisampled: false,
+                    },
+                    count: None,
+                },
+                wgpu::BindGroupLayoutEntry {
+                    binding: 2,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Texture {
+                        sample_type: wgpu::TextureSampleType::Float { filterable: true },
+                        view_dimension: wgpu::TextureViewDimension::D2,
+                        multisampled: false,
+                    },
+                    count: None,
+                },
+                wgpu::BindGroupLayoutEntry {
+                    binding: 3,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
+                    count: None,
+                },
+            ],
+        });
+
+    let pipeline_layout =
+        device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+            label: Some("yuv_pl"),
+            bind_group_layouts: &[&bind_group_layout],
+            push_constant_ranges: &[],
+        });
+
+    let pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+        label: Some("yuv_pipeline"),
+        layout: Some(&pipeline_layout),
+        vertex: wgpu::VertexState {
+            module: &shader,
+            entry_point: Some("vs"),
+            buffers: &[],
+            compilation_options: Default::default(),
+        },
+        fragment: Some(wgpu::FragmentState {
+            module: &shader,
+            entry_point: Some("fs"),
+            targets: &[Some(wgpu::ColorTargetState {
+                format,
+                blend: None,
+                write_mask: wgpu::ColorWrites::ALL,
+            })],
+            compilation_options: Default::default(),
+        }),
+        primitive: wgpu::PrimitiveState {
+            topology: wgpu::PrimitiveTopology::TriangleList,
+            ..Default::default()
+        },
+        depth_stencil: None,
+        multisample: wgpu::MultisampleState::default(),
+        multiview: None,
+        cache: None,
+    });
+
+    let sampler = device.create_sampler(&wgpu::SamplerDescriptor {
+        label: Some("yuv_sampler"),
+        address_mode_u: wgpu::AddressMode::ClampToEdge,
+        address_mode_v: wgpu::AddressMode::ClampToEdge,
+        mag_filter: wgpu::FilterMode::Linear,
+        min_filter: wgpu::FilterMode::Linear,
+        ..Default::default()
+    });
+
+    log::info!("[SharedGpu] Initialized: format={:?} present_mode={:?}", format, present_mode);
+
+    let shared = Arc::new(SharedGpu {
+        instance,
+        device,
+        queue,
+        pipeline,
+        bind_group_layout,
+        sampler,
+        format,
+        present_mode,
+    });
+
+    *guard = Some(Arc::clone(&shared));
+    Ok((shared, surface))
+}
+
+/// Reset the shared GPU singleton (called on voice disconnect so the next
+/// session gets a fresh device if needed — e.g. after GPU driver reset).
+pub fn reset_shared_gpu() {
+    *SHARED_GPU.lock() = None;
+    log::debug!("[SharedGpu] Reset");
 }
 
 // ─── Public API ─────────────────────────────────────────────────────────────
@@ -305,17 +562,14 @@ fn align_up(value: u32, align: u32) -> u32 {
     (value + align - 1) / align * align
 }
 
-/// Per-stream GPU renderer.  Created on the video receiver thread using the
-/// HWND created by the main thread.  All wgpu state lives here and never
-/// crosses thread boundaries.
+/// Per-stream GPU renderer.  Uses the shared `SharedGpu` singleton for the
+/// wgpu Device/Queue/Pipeline (one D3D12 device for the whole app) and owns
+/// only per-stream state: surface (swap chain), YUV textures, bind group,
+/// staging buffers, and HWND geometry tracking.
 pub struct GpuRenderer {
-    device: wgpu::Device,
-    queue: wgpu::Queue,
+    shared: Arc<SharedGpu>,
     surface: Option<wgpu::Surface<'static>>,
     surface_config: wgpu::SurfaceConfiguration,
-    pipeline: wgpu::RenderPipeline,
-    bind_group_layout: wgpu::BindGroupLayout,
-    sampler: wgpu::Sampler,
     // Current YUV textures (recreated when frame resolution changes)
     tex_y: Option<wgpu::Texture>,
     tex_u: Option<wgpu::Texture>,
@@ -370,209 +624,38 @@ impl Drop for GpuRenderer {
 }
 
 impl GpuRenderer {
-    /// Create a new renderer.  Creates the child HWND **on this thread** (the
-    /// video receiver thread) so all subsequent Win32 calls (SetWindowPos,
-    /// ShowWindow) go to our own message queue — no cross-thread deadlocks.
+    /// Create a new per-stream renderer.  The heavy GPU resources (device,
+    /// queue, shader, pipeline) are shared across all streams via `SharedGpu`.
+    /// This method only creates the per-stream HWND and surface.
     pub async fn new(parent_hwnd: isize, identity: String) -> Result<Self, String> {
-        // Create child HWND on the video thread — this is the critical fix.
+        // Create child HWND on the video thread — ensures all subsequent
+        // Win32 calls go to our own message queue (no cross-thread deadlocks).
         let hwnd = create_overlay(&identity, parent_hwnd)?;
 
-        let instance = wgpu::Instance::new(&wgpu::InstanceDescriptor {
-            backends: wgpu::Backends::DX12 | wgpu::Backends::VULKAN,
-            ..Default::default()
-        });
+        // Get or initialize the shared GPU singleton and create a surface
+        // for this HWND from the shared wgpu instance.
+        let (shared, surface) = get_or_init_shared_gpu(hwnd).await?;
 
-        // Create surface from raw HWND
-        let surface = unsafe {
-            instance.create_surface_unsafe(wgpu::SurfaceTargetUnsafe::RawHandle {
-                raw_display_handle: raw_window_handle::RawDisplayHandle::Windows(
-                    raw_window_handle::WindowsDisplayHandle::new(),
-                ),
-                raw_window_handle: {
-                    let mut h = raw_window_handle::Win32WindowHandle::new(
-                        std::num::NonZeroIsize::new(hwnd)
-                            .ok_or("Invalid HWND (zero)")?,
-                    );
-                    // hinstance is optional for D3D surfaces
-                    h.hinstance = None;
-                    raw_window_handle::RawWindowHandle::Win32(h)
-                },
-            })
-        }
-        .map_err(|e| format!("wgpu create_surface: {}", e))?;
-
-        let adapter = instance
-            .request_adapter(&wgpu::RequestAdapterOptions {
-                power_preference: wgpu::PowerPreference::HighPerformance,
-                compatible_surface: Some(&surface),
-                force_fallback_adapter: false,
-            })
-            .await
-            .map_err(|e| format!("No suitable GPU adapter: {}", e))?;
-
-        log::info!(
-            "Using adapter: {} ({:?})",
-            adapter.get_info().name,
-            adapter.get_info().backend
-        );
-
-        // Auto-detect best video codec based on GPU capabilities
-        crate::codec::detect_best_codec(&adapter.get_info().name);
-
-        let (device, queue) = adapter
-            .request_device(
-                &wgpu::DeviceDescriptor {
-                    label: Some("pax-video-overlay"),
-                    required_features: wgpu::Features::empty(),
-                    required_limits: wgpu::Limits::default(),
-                    memory_hints: wgpu::MemoryHints::Performance,
-                    ..Default::default()
-                },
-            )
-            .await
-            .map_err(|e| format!("wgpu request_device: {}", e))?;
-
-        let caps = surface.get_capabilities(&adapter);
-        let format = caps
-            .formats
-            .iter()
-            .find(|f| !f.is_srgb()) // prefer non-sRGB for raw color output
-            .or(caps.formats.first())
-            .copied()
-            .ok_or("No surface formats available")?;
-
-        // Pick best present mode: Mailbox (low-latency) > Fifo (vsync fallback)
-        let present_mode = if caps.present_modes.contains(&wgpu::PresentMode::Mailbox) {
-            wgpu::PresentMode::Mailbox
-        } else {
-            wgpu::PresentMode::Fifo
-        };
-
-        // DX12 surfaces are typically Opaque; letterbox uses `get_overlay_letterbox_color`
-        // (from WebView `bgPrimary`) instead of alpha compositing.
         let surface_config = wgpu::SurfaceConfiguration {
             usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
-            format,
+            format: shared.format,
             width: 1,  // placeholder — real config deferred until first valid HWND size
             height: 1,
-            present_mode,
+            present_mode: shared.present_mode,
             alpha_mode: wgpu::CompositeAlphaMode::Opaque,
             view_formats: vec![],
             desired_maximum_frame_latency: 2,
         };
-        // NOTE: don't configure yet — deferred until HWND is sized by frontend
-
-        // Shader + pipeline
-        let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
-            label: Some("yuv_shader"),
-            source: wgpu::ShaderSource::Wgsl(YUV_SHADER.into()),
-        });
-
-        let bind_group_layout =
-            device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
-                label: Some("yuv_bgl"),
-                entries: &[
-                    // tex_y
-                    wgpu::BindGroupLayoutEntry {
-                        binding: 0,
-                        visibility: wgpu::ShaderStages::FRAGMENT,
-                        ty: wgpu::BindingType::Texture {
-                            sample_type: wgpu::TextureSampleType::Float { filterable: true },
-                            view_dimension: wgpu::TextureViewDimension::D2,
-                            multisampled: false,
-                        },
-                        count: None,
-                    },
-                    // tex_u
-                    wgpu::BindGroupLayoutEntry {
-                        binding: 1,
-                        visibility: wgpu::ShaderStages::FRAGMENT,
-                        ty: wgpu::BindingType::Texture {
-                            sample_type: wgpu::TextureSampleType::Float { filterable: true },
-                            view_dimension: wgpu::TextureViewDimension::D2,
-                            multisampled: false,
-                        },
-                        count: None,
-                    },
-                    // tex_v
-                    wgpu::BindGroupLayoutEntry {
-                        binding: 2,
-                        visibility: wgpu::ShaderStages::FRAGMENT,
-                        ty: wgpu::BindingType::Texture {
-                            sample_type: wgpu::TextureSampleType::Float { filterable: true },
-                            view_dimension: wgpu::TextureViewDimension::D2,
-                            multisampled: false,
-                        },
-                        count: None,
-                    },
-                    // sampler
-                    wgpu::BindGroupLayoutEntry {
-                        binding: 3,
-                        visibility: wgpu::ShaderStages::FRAGMENT,
-                        ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
-                        count: None,
-                    },
-                ],
-            });
-
-        let pipeline_layout =
-            device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
-                label: Some("yuv_pl"),
-                bind_group_layouts: &[&bind_group_layout],
-                push_constant_ranges: &[],
-            });
-
-        let pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
-            label: Some("yuv_pipeline"),
-            layout: Some(&pipeline_layout),
-            vertex: wgpu::VertexState {
-                module: &shader,
-                entry_point: Some("vs"),
-                buffers: &[], // fullscreen triangle, no vertex buffer
-                compilation_options: Default::default(),
-            },
-            fragment: Some(wgpu::FragmentState {
-                module: &shader,
-                entry_point: Some("fs"),
-                targets: &[Some(wgpu::ColorTargetState {
-                    format,
-                    blend: None,
-                    write_mask: wgpu::ColorWrites::ALL,
-                })],
-                compilation_options: Default::default(),
-            }),
-            primitive: wgpu::PrimitiveState {
-                topology: wgpu::PrimitiveTopology::TriangleList,
-                ..Default::default()
-            },
-            depth_stencil: None,
-            multisample: wgpu::MultisampleState::default(),
-            multiview: None,
-            cache: None,
-        });
-
-        let sampler = device.create_sampler(&wgpu::SamplerDescriptor {
-            label: Some("yuv_sampler"),
-            address_mode_u: wgpu::AddressMode::ClampToEdge,
-            address_mode_v: wgpu::AddressMode::ClampToEdge,
-            mag_filter: wgpu::FilterMode::Linear,
-            min_filter: wgpu::FilterMode::Linear,
-            ..Default::default()
-        });
 
         log::info!(
-            "Initialized: format={:?} (surface config deferred until HWND resize)",
-            format
+            "GpuRenderer initialized for '{}' (shared device, format={:?})",
+            identity, shared.format
         );
 
         Ok(Self {
-            device,
-            queue,
+            shared,
             surface: Some(surface),
             surface_config,
-            pipeline,
-            bind_group_layout,
-            sampler,
             tex_y: None,
             tex_u: None,
             tex_v: None,
@@ -729,7 +812,7 @@ impl GpuRenderer {
             let Some(surface) = self.surface.as_ref() else {
                 return;
             };
-            surface.configure(&self.device, &self.surface_config);
+            surface.configure(&self.shared.device, &self.surface_config);
             self.surface_w = target_w;
             self.surface_h = target_h;
         }
@@ -744,9 +827,9 @@ impl GpuRenderer {
         }
 
         // Upload Y/U/V planes
-        upload_plane(&self.queue, self.tex_y.as_ref().unwrap(), data_y, stride_y, width, height, &mut self.staging_y);
-        upload_plane(&self.queue, self.tex_u.as_ref().unwrap(), data_u, stride_u, cw, ch, &mut self.staging_u);
-        upload_plane(&self.queue, self.tex_v.as_ref().unwrap(), data_v, stride_v, cw, ch, &mut self.staging_v);
+        upload_plane(&self.shared.queue, self.tex_y.as_ref().unwrap(), data_y, stride_y, width, height, &mut self.staging_y);
+        upload_plane(&self.shared.queue, self.tex_u.as_ref().unwrap(), data_u, stride_u, cw, ch, &mut self.staging_u);
+        upload_plane(&self.shared.queue, self.tex_v.as_ref().unwrap(), data_v, stride_v, cw, ch, &mut self.staging_v);
 
         // Acquire swap chain frame
         let Some(surface) = self.surface.as_ref() else {
@@ -755,7 +838,7 @@ impl GpuRenderer {
         let frame = match surface.get_current_texture() {
             Ok(f) => f,
             Err(wgpu::SurfaceError::Outdated | wgpu::SurfaceError::Lost) => {
-                surface.configure(&self.device, &self.surface_config);
+                surface.configure(&self.shared.device, &self.surface_config);
                 match surface.get_current_texture() {
                     Ok(f) => f,
                     Err(_) => return,
@@ -766,7 +849,7 @@ impl GpuRenderer {
 
         let view = frame.texture.create_view(&wgpu::TextureViewDescriptor::default());
 
-        let mut encoder = self.device.create_command_encoder(&wgpu::CommandEncoderDescriptor { label: None });
+        let mut encoder = self.shared.device.create_command_encoder(&wgpu::CommandEncoderDescriptor { label: None });
 
         {
             let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
@@ -803,12 +886,12 @@ impl GpuRenderer {
                 0.0,
                 1.0,
             );
-            pass.set_pipeline(&self.pipeline);
+            pass.set_pipeline(&self.shared.pipeline);
             pass.set_bind_group(0, self.bind_group.as_ref().unwrap(), &[]);
             pass.draw(0..3, 0..1);
         }
 
-        self.queue.submit(std::iter::once(encoder.finish()));
+        self.shared.queue.submit(std::iter::once(encoder.finish()));
         frame.present();
 
         self.frame_count += 1;
@@ -841,9 +924,9 @@ impl GpuRenderer {
             })
         };
 
-        self.tex_y = Some(make_tex(&self.device, "tex_y", w, h));
-        self.tex_u = Some(make_tex(&self.device, "tex_u", cw, ch));
-        self.tex_v = Some(make_tex(&self.device, "tex_v", cw, ch));
+        self.tex_y = Some(make_tex(&self.shared.device, "tex_y", w, h));
+        self.tex_u = Some(make_tex(&self.shared.device, "tex_u", cw, ch));
+        self.tex_v = Some(make_tex(&self.shared.device, "tex_v", cw, ch));
 
         // Rebuild bind group with new texture views
         let view_y = self.tex_y.as_ref().unwrap().create_view(&Default::default());
@@ -851,10 +934,10 @@ impl GpuRenderer {
         let view_v = self.tex_v.as_ref().unwrap().create_view(&Default::default());
 
         self.bind_group = Some(
-            self.device
+            self.shared.device
                 .create_bind_group(&wgpu::BindGroupDescriptor {
                     label: Some("yuv_bg"),
-                    layout: &self.bind_group_layout,
+                    layout: &self.shared.bind_group_layout,
                     entries: &[
                         wgpu::BindGroupEntry {
                             binding: 0,
@@ -870,7 +953,7 @@ impl GpuRenderer {
                         },
                         wgpu::BindGroupEntry {
                             binding: 3,
-                            resource: wgpu::BindingResource::Sampler(&self.sampler),
+                            resource: wgpu::BindingResource::Sampler(&self.shared.sampler),
                         },
                     ],
                 }),
