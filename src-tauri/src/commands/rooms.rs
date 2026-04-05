@@ -10,15 +10,21 @@ use tauri::{Manager, State};
 use crate::types::{RoomInfo, SpaceChildInfo, SpaceInfo};
 use crate::AppState;
 
-use super::auth::{save_session_to_credentials, SavedSession};
+use super::auth::{save_session_to_credentials, SavedCredentials, SavedSession};
 use super::{fmt_error_chain, get_or_fetch_avatar};
 
-fn store_path(app: &tauri::AppHandle) -> Result<std::path::PathBuf, String> {
-    Ok(app
-        .path()
+fn app_data_dir(app: &tauri::AppHandle) -> Result<std::path::PathBuf, String> {
+    app.path()
         .app_data_dir()
-        .map_err(|e| format!("Failed to get app data dir: {e}"))?
-        .join("matrix_store"))
+        .map_err(|e| format!("Failed to get app data dir: {e}"))
+}
+
+fn sqlite_path_for_restore(app: &tauri::AppHandle, creds: &SavedCredentials) -> Result<std::path::PathBuf, String> {
+    let base = app_data_dir(app)?;
+    Ok(match &creds.sqlite_store_dir {
+        Some(rel) => base.join(rel),
+        None => base.join("matrix_store"),
+    })
 }
 
 /// Build a matrix-sdk Client with automatic retries for transient failures
@@ -47,6 +53,72 @@ async fn build_client_with_retry(
         }
     }
     Err(format!("{} (retried 3 times)", last_err))
+}
+
+/// Password login / registration: always use a new SQLite directory under `matrix_sessions/` so we
+/// never delete or reuse a store path that may still be open. Reusing the same `Client` after a
+/// failed `login_username` can panic with `AlreadyInitializedError`, so each attempt uses a new path.
+async fn login_password_into_new_store(
+    app: &tauri::AppHandle,
+    homeserver: &str,
+    username: &str,
+    password: &str,
+    log_prefix: &str,
+) -> Result<(Client, String), String> {
+    let base = app_data_dir(app)?;
+    let sessions_root = base.join("matrix_sessions");
+    std::fs::create_dir_all(&sessions_root)
+        .map_err(|e| format!("Failed to create matrix_sessions: {e}"))?;
+
+    let mut last_err = String::new();
+    for attempt in 0u32..3 {
+        let id = uuid::Uuid::new_v4();
+        let rel = format!("matrix_sessions/pw_{id}");
+        let sp = base.join(&rel);
+
+        let client = match build_client_with_retry(homeserver, &sp).await {
+            Ok(c) => c,
+            Err(e) => {
+                last_err = e;
+                log::warn!(
+                    "{}: build client attempt {}/3 failed: {}",
+                    log_prefix,
+                    attempt + 1,
+                    last_err
+                );
+                if attempt < 2 {
+                    tokio::time::sleep(Duration::from_millis(1000 * (attempt as u64 + 1))).await;
+                }
+                continue;
+            }
+        };
+        match client
+            .matrix_auth()
+            .login_username(username, password)
+            .initial_device_display_name("Pax")
+            .send()
+            .await
+        {
+            Ok(_) => return Ok((client, rel)),
+            Err(e) => {
+                last_err = fmt_error_chain(&e);
+                log::warn!(
+                    "{}: authenticate attempt {}/3 failed: {}",
+                    log_prefix,
+                    attempt + 1,
+                    last_err
+                );
+                drop(client);
+                let _ = std::fs::remove_dir_all(&sp);
+                if attempt < 2 {
+                    tokio::time::sleep(Duration::from_millis(1000 * (attempt as u64 + 1))).await;
+                }
+            }
+        }
+    }
+    Err(format!(
+        "{log_prefix} failed after 3 attempts: {last_err}"
+    ))
 }
 
 /// Register a new account on the homeserver.
@@ -189,38 +261,17 @@ async fn finish_registration(
 ) -> Result<String, String> {
     // Registration succeeded — now do a normal SDK login so we get a fully
     // initialised Client with crypto store, sync, etc.
-    let sp = store_path(app)?;
-    if sp.exists() {
-        let _ = std::fs::remove_dir_all(&sp);
-    }
+    state.stop_sync_task().await;
+    *state.client.lock().await = None;
 
-    let client = build_client_with_retry(homeserver, &sp).await?;
-
-    {
-        let mut last_err = String::new();
-        let mut succeeded = false;
-        for attempt in 0u32..3 {
-            match client
-                .matrix_auth()
-                .login_username(username, password)
-                .initial_device_display_name("Pax")
-                .send()
-                .await
-            {
-                Ok(_) => { succeeded = true; break; }
-                Err(e) => {
-                    last_err = fmt_error_chain(&e);
-                    log::warn!("Post-registration login attempt {}/3 failed: {}", attempt + 1, last_err);
-                    if attempt < 2 {
-                        tokio::time::sleep(Duration::from_millis(1000 * (attempt as u64 + 1))).await;
-                    }
-                }
-            }
-        }
-        if !succeeded {
-            return Err(format!("Post-registration login failed: {} (retried 3 times)", last_err));
-        }
-    }
+    let (client, store_rel) = login_password_into_new_store(
+        app,
+        homeserver,
+        username,
+        password,
+        "Post-registration login",
+    )
+    .await?;
 
     tokio::time::timeout(
         Duration::from_secs(30),
@@ -241,6 +292,7 @@ async fn finish_registration(
                 device_id: session.meta.device_id.to_string(),
                 access_token: session.tokens.access_token,
             },
+            Some(store_rel),
         );
     }
 
@@ -263,45 +315,20 @@ pub async fn login(
     homeserver: String,
     username: String,
     password: String,
+    persist_session: bool,
 ) -> Result<String, String> {
-    let sp = store_path(&app)?;
+    state.stop_sync_task().await;
+    *state.client.lock().await = None;
 
-    // Clear any existing store before password login. A new login creates a new device ID,
-    // but the crypto store may still have data from a previous device — that causes
-    // "account in the store doesn't match" errors.
-    if sp.exists() {
-        let _ = std::fs::remove_dir_all(&sp);
-    }
-
-    log::info!("login: building client for {}", homeserver);
-    let client = build_client_with_retry(&homeserver, &sp).await?;
-
-    log::info!("login: authenticating...");
-    {
-        let mut last_err = String::new();
-        let mut succeeded = false;
-        for attempt in 0u32..3 {
-            match client
-                .matrix_auth()
-                .login_username(&username, &password)
-                .initial_device_display_name("Pax")
-                .send()
-                .await
-            {
-                Ok(_) => { succeeded = true; break; }
-                Err(e) => {
-                    last_err = fmt_error_chain(&e);
-                    log::warn!("Login attempt {}/3 failed: {}", attempt + 1, last_err);
-                    if attempt < 2 {
-                        tokio::time::sleep(Duration::from_millis(1000 * (attempt as u64 + 1))).await;
-                    }
-                }
-            }
-        }
-        if !succeeded {
-            return Err(format!("Login failed: {} (retried 3 times)", last_err));
-        }
-    }
+    log::info!("login: password auth for {}", homeserver);
+    let (client, store_rel) = login_password_into_new_store(
+        &app,
+        &homeserver,
+        &username,
+        &password,
+        "Login",
+    )
+    .await?;
 
     log::info!("login: running initial sync...");
     tokio::time::timeout(
@@ -313,16 +340,19 @@ pub async fn login(
     .map_err(|e| format!("Initial sync failed: {}", fmt_error_chain(&e)))?;
 
     log::info!("login: sync complete, saving session...");
-    if let Some(session) = client.matrix_auth().session() {
-        let _ = save_session_to_credentials(
-            &app,
-            &homeserver,
-            SavedSession {
-                user_id: session.meta.user_id.to_string(),
-                device_id: session.meta.device_id.to_string(),
-                access_token: session.tokens.access_token,
-            },
-        );
+    if persist_session {
+        if let Some(session) = client.matrix_auth().session() {
+            let _ = save_session_to_credentials(
+                &app,
+                &homeserver,
+                SavedSession {
+                    user_id: session.meta.user_id.to_string(),
+                    device_id: session.meta.device_id.to_string(),
+                    access_token: session.tokens.access_token,
+                },
+                Some(store_rel),
+            );
+        }
     }
 
     let user_id = client
@@ -347,8 +377,8 @@ pub async fn restore_session(
 ) -> Result<String, String> {
     let creds = super::auth::load_credentials(app.clone())?
         .ok_or("No saved credentials")?;
+    let sp = sqlite_path_for_restore(&app, &creds)?;
     let sd = creds.session.ok_or("No saved session")?;
-    let sp = store_path(&app)?;
 
     // If a compile-time homeserver is configured, reject saved sessions that
     // point at a different server — the baked-in value is the source of truth.

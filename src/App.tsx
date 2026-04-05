@@ -62,14 +62,17 @@ function App() {
     !!authConfig.default_homeserver &&
     (tab === "login" || !!authConfig.registration_token);
 
-  async function handleLogin(remember: boolean = rememberMe) {
+  async function handleLogin() {
     setLoading(true);
     setError(null);
     try {
-      if (remember) {
-        await invoke("save_credentials", { homeserver });
-      }
-      const id = await invoke<string>("login", { homeserver, username, password });
+      // No credentials file access before the server accepts login; optional persist after success.
+      const id = await invoke<string>("login", {
+        homeserver,
+        username,
+        password,
+        persistSession: rememberMe,
+      });
       if (!syncStartedRef.current) {
         syncStartedRef.current = true;
         await invoke("start_sync");

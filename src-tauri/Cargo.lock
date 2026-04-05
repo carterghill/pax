@@ -5540,6 +5540,7 @@ dependencies = [
  "tokio",
  "urlencoding",
  "user-idle",
+ "uuid",
  "wasapi",
  "webkit2gtk",
  "wgpu",

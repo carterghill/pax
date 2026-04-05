@@ -16,6 +16,7 @@ use std::sync::{Arc, Mutex as StdMutex};
 
 use matrix_sdk::Client;
 use tokio::sync::Mutex;
+use tokio::task::JoinHandle;
 use tauri::Manager;
 
 use platform::DisplayServer;
@@ -48,6 +49,9 @@ pub struct AppState {
     pub presence_map: Arc<Mutex<HashMap<String, String>>>,
     pub avatar_cache: Arc<Mutex<HashMap<String, String>>>,
     pub sync_running: Arc<Mutex<bool>>,
+    /// Background `sync_with_callback` task — must be aborted before deleting the SQLite store
+    /// or replacing `client`, otherwise the DB stays locked (especially on Windows).
+    pub sync_join: Mutex<Option<JoinHandle<()>>>,
     pub display_server: DisplayServer,
     pub livekit: LivekitConfig,
     pub giphy_api_key: Option<String>,
@@ -71,6 +75,16 @@ impl AppState {
                 h.abort();
             }
         }
+    }
+
+    /// Abort the Matrix sync loop and wait for the task to finish so `Client` / SQLite handles are dropped.
+    pub async fn stop_sync_task(&self) {
+        let handle = self.sync_join.lock().await.take();
+        if let Some(h) = handle {
+            h.abort();
+            let _ = h.await;
+        }
+        *self.sync_running.lock().await = false;
     }
 }
 
@@ -138,6 +152,7 @@ pub fn run() {
         presence_map: Arc::new(Mutex::new(HashMap::new())),
         avatar_cache: Arc::new(Mutex::new(HashMap::new())),
         sync_running: Arc::new(Mutex::new(false)),
+        sync_join: Mutex::new(None),
         display_server,
         livekit,
         giphy_api_key,

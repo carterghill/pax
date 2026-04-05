@@ -19,6 +19,9 @@ pub struct SavedCredentials {
     pub homeserver: String,
     #[serde(default)]
     pub session: Option<SavedSession>,
+    /// Relative path under app data dir for the Matrix SDK SQLite store (password logins use a new subdir each time).
+    #[serde(default)]
+    pub sqlite_store_dir: Option<String>,
 }
 
 fn credentials_path(app: &tauri::AppHandle) -> Result<std::path::PathBuf, String> {
@@ -32,6 +35,7 @@ fn credentials_path(app: &tauri::AppHandle) -> Result<std::path::PathBuf, String
 
 #[tauri::command]
 pub async fn logout(state: State<'_, Arc<AppState>>, app: tauri::AppHandle) -> Result<(), String> {
+    state.stop_sync_task().await;
     state.stop_heartbeat_loop();
     if let Ok(mut m) = state.livekit_matrix_to_sfu_room.lock() {
         m.clear();
@@ -41,7 +45,7 @@ pub async fn logout(state: State<'_, Arc<AppState>>, app: tauri::AppHandle) -> R
     state.presence_map.lock().await.clear();
     *state.sync_running.lock().await = false;
 
-    // Clear the SQLite store so the next login starts fresh.
+    // Best-effort cleanup only — do not block on locked files (Windows).
     if let Ok(dir) = app.path().app_data_dir() {
         let store_path = dir.join("matrix_store");
         let _ = std::fs::remove_dir_all(&store_path);
@@ -53,10 +57,10 @@ pub fn save_session_to_credentials(
     app: &tauri::AppHandle,
     homeserver: &str,
     session: SavedSession,
+    sqlite_store_dir: Option<String>,
 ) -> Result<(), String> {
     let path = credentials_path(app)?;
 
-    // Read the existing file or start with a fresh credentials struct.
     let mut creds = if path.exists() {
         let contents = std::fs::read_to_string(&path)
             .map_err(|e| format!("Failed to read credentials: {e}"))?;
@@ -66,10 +70,15 @@ pub fn save_session_to_credentials(
         SavedCredentials {
             homeserver: homeserver.to_string(),
             session: None,
+            sqlite_store_dir: None,
         }
     };
 
+    creds.homeserver = homeserver.to_string();
     creds.session = Some(session);
+    if let Some(dir) = sqlite_store_dir {
+        creds.sqlite_store_dir = Some(dir);
+    }
     let json = serde_json::to_string_pretty(&creds)
         .map_err(|e| format!("Failed to serialize credentials: {e}"))?;
     std::fs::write(&path, json).map_err(|e| format!("Failed to write credentials: {e}"))?;
@@ -87,6 +96,7 @@ pub fn save_credentials(
     let creds = SavedCredentials {
         homeserver,
         session: None,
+        sqlite_store_dir: None,
     };
     let json = serde_json::to_string_pretty(&creds)
         .map_err(|e| format!("Failed to serialize credentials: {e}"))?;

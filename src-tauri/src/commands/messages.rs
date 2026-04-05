@@ -382,7 +382,7 @@ pub async fn start_sync(state: State<'_, Arc<AppState>>, app: tauri::AppHandle) 
     // Spawn the continuous sync loop in the background
     // set_presence(Offline) tells the server: "do NOT auto-update my presence on sync"
     // We manage presence explicitly via the set_presence command instead.
-    tokio::spawn(async move {
+    let join = tokio::spawn(async move {
         let result = client
             .sync_with_callback(
                 matrix_sdk::config::SyncSettings::default()
@@ -449,6 +449,14 @@ pub async fn start_sync(state: State<'_, Arc<AppState>>, app: tauri::AppHandle) 
 
         *sync_running.lock().await = false;
     });
+
+    {
+        let mut slot = state.sync_join.lock().await;
+        if let Some(old) = slot.replace(join) {
+            old.abort();
+            let _ = old.await;
+        }
+    }
 
     Ok(())
 }
