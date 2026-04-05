@@ -3,6 +3,7 @@ import { useState, useEffect, useRef } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import MainLayout from "./layouts/MainLayout";
 import { ThemeProvider } from "./theme/ThemeContext";
+import { useRooms } from "./hooks/useRooms";
 import { clearMessageCache } from "./hooks/useMessages";
 import { useExternalLinkInterceptor } from "./hooks/useExternalLinks";
 
@@ -28,6 +29,14 @@ function App() {
 
   const [tab, setTab] = useState<"login" | "signup">("login");
   const [authConfig, setAuthConfig] = useState<AuthConfig | null>(null);
+
+  const {
+    spaces,
+    roomsBySpace,
+    getRoom,
+    fetchRooms,
+    initialLoadComplete,
+  } = useRooms(userId);
 
   // Open all external (http/https) link clicks in the system browser.
   useExternalLinkInterceptor();
@@ -158,10 +167,23 @@ function App() {
     setError(null);
   }
 
+  if (userId && !initialLoadComplete) {
+    return (
+      <div style={styles.container}>
+        <img src="/logoBlurple.png" alt="Pax" style={styles.logo} />
+        <p style={styles.signingIn}>Loading rooms...</p>
+      </div>
+    );
+  }
+
   if (userId) {
     return (
       <ThemeProvider>
-        <MainLayout userId={userId} onSignOut={handleSignOut} />
+        <MainLayout
+          userId={userId}
+          onSignOut={handleSignOut}
+          rooms={{ spaces, roomsBySpace, getRoom, fetchRooms }}
+        />
       </ThemeProvider>
     );
   }

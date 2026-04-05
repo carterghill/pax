@@ -4,7 +4,7 @@ import ChatView from "../layouts/ChatView";
 import VoiceRoomView from "../components/VoiceRoomView";
 import InvitationView from "../layouts/InvitationView";
 import SpaceHomeView from "../layouts/SpaceHomeView";
-import { useRooms } from "../hooks/useRooms";
+import type { RoomsForLayout } from "../hooks/useRooms";
 import { usePresence } from "../hooks/usePresence";
 import { useVoiceParticipants } from "../hooks/useVoiceParticipants";
 import { useVoiceCall } from "../hooks/useVoiceCall";
@@ -75,10 +75,10 @@ function storeUserMenuWidth(width: number) {
 interface MainLayoutProps {
   userId: string;
   onSignOut: () => void;
+  rooms: RoomsForLayout;
 }
 
-export default function MainLayout({ userId, onSignOut }: MainLayoutProps) {
-  const { spaces, roomsBySpace, getRoom, fetchRooms } = useRooms(userId);
+export default function MainLayout({ userId, onSignOut, rooms: { spaces, roomsBySpace, getRoom, fetchRooms } }: MainLayoutProps) {
   const { manualStatus, setManualStatus, effectivePresence } = usePresence();
   const voiceCall = useVoiceCall();
   const [activeSpaceId, setActiveSpaceId] = useState<string | null>(null);

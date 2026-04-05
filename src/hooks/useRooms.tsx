@@ -1,14 +1,22 @@
-import { useEffect, useState, useCallback, useMemo, useRef } from "react";
+import { useEffect, useLayoutEffect, useState, useCallback, useMemo, useRef } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { Room } from "../types/matrix";
 
-export function useRooms(userId: string) {
+export type RoomsForLayout = {
+  spaces: Room[];
+  roomsBySpace: (spaceId: string | null) => Room[];
+  getRoom: (roomId: string) => Room | null;
+  fetchRooms: () => void;
+};
+
+export function useRooms(userId: string | null) {
   const [rooms, setRooms] = useState<Room[]>([]);
+  const [initialLoadComplete, setInitialLoadComplete] = useState(() => !userId);
   const fetchingRef = useRef(false);
 
   const fetchRooms = useCallback(() => {
-    if (fetchingRef.current) return;
+    if (!userId || fetchingRef.current) return;
     fetchingRef.current = true;
 
     invoke<Room[]>("get_rooms").then(setRooms).catch((e) =>
@@ -16,12 +24,42 @@ export function useRooms(userId: string) {
     ).finally(() => {
       fetchingRef.current = false;
     });
-  }, []);
+  }, [userId]);
 
-  // Initial fetch
+  // Avoid one frame of main UI after login: complete was true while logged out.
+  useLayoutEffect(() => {
+    if (userId) {
+      setInitialLoadComplete(false);
+    }
+  }, [userId]);
+
+  // Initial fetch when a session exists (must finish before showing the main UI)
   useEffect(() => {
-    fetchRooms();
-  }, [userId, fetchRooms]);
+    if (!userId) {
+      setRooms([]);
+      setInitialLoadComplete(true);
+      return;
+    }
+
+    let cancelled = false;
+    fetchingRef.current = true;
+
+    invoke<Room[]>("get_rooms")
+      .then((list) => {
+        if (!cancelled) setRooms(list);
+      })
+      .catch((e) => {
+        console.error("Failed to fetch rooms:", e);
+      })
+      .finally(() => {
+        fetchingRef.current = false;
+        if (!cancelled) setInitialLoadComplete(true);
+      });
+
+    return () => {
+      cancelled = true;
+    };
+  }, [userId]);
 
   // Re-fetch whenever the sync loop signals a change
   useEffect(() => {
@@ -69,5 +107,12 @@ export function useRooms(userId: string) {
 
   const getRoom = (roomId: string) => rooms.find((r) => r.id === roomId) ?? null;
 
-  return { rooms, spaces, roomsBySpace, getRoom, fetchRooms };
+  return {
+    rooms,
+    spaces,
+    roomsBySpace,
+    getRoom,
+    fetchRooms,
+    initialLoadComplete,
+  };
 }
