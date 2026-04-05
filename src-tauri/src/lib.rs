@@ -11,6 +11,7 @@ pub mod video_recv;
 mod voice;
 
 use std::collections::HashMap;
+use std::io::Write;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex as StdMutex};
 
@@ -112,9 +113,44 @@ fn ensure_system_certs() {
 #[cfg(not(target_os = "linux"))]
 fn ensure_system_certs() {}
 
+fn panic_payload_string(payload: &dyn std::any::Any) -> String {
+    if let Some(s) = payload.downcast_ref::<&str>() {
+        return (*s).to_string();
+    }
+    if let Some(s) = payload.downcast_ref::<String>() {
+        return s.clone();
+    }
+    "<non-string panic payload>".to_string()
+}
+
+/// Logs panics via `log::error!` (so `pax.log` and stderr targets get them) and always
+/// writes to stderr. Hook is installed before most of `run()` so late panics are captured;
+/// panics before the log plugin initializes still appear on stderr if a console exists.
+fn install_panic_hook() {
+    std::panic::set_hook(Box::new(|info| {
+        let payload = panic_payload_string(info.payload());
+        let location = info
+            .location()
+            .map(|l| format!("{}:{}:{}", l.file(), l.line(), l.column()))
+            .unwrap_or_else(|| "<unknown location>".to_string());
+        let thread = std::thread::current()
+            .name()
+            .map(String::from)
+            .unwrap_or_else(|| format!("{:?}", std::thread::current().id()));
+        let backtrace = std::backtrace::Backtrace::capture();
+        let msg = format!(
+            "PANIC: thread `{thread}` panicked at {location}: {payload}\nbacktrace capture:\n{backtrace}"
+        );
+        eprintln!("{msg}");
+        let _ = std::io::stderr().flush();
+        log::error!("{msg}");
+    }));
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     ensure_system_certs();
+    install_panic_hook();
     let display_server = platform::detect_display_server();
 
     // All env vars are baked in at compile time via build.rs → cargo:rustc-env.
@@ -167,12 +203,23 @@ pub fn run() {
         .plugin(
             tauri_plugin_log::Builder::new()
                 .level(log::LevelFilter::Info)
+                // So support bundles match local console timestamps.
+                .timezone_strategy(tauri_plugin_log::TimezoneStrategy::UseLocal)
                 .target(tauri_plugin_log::Target::new(
                     tauri_plugin_log::TargetKind::Stderr,
                 ))
                 .target(tauri_plugin_log::Target::new(
                     tauri_plugin_log::TargetKind::Webview,
                 ))
+                // Release builds: users have no terminal — persist logs for sharing.
+                // Windows: %LOCALAPPDATA%\com.carter.pax\logs\pax.log
+                .target(tauri_plugin_log::Target::new(
+                    tauri_plugin_log::TargetKind::LogDir {
+                        file_name: Some("pax.log".to_string()),
+                    },
+                ))
+                .max_file_size(5_000_000)
+                .rotation_strategy(tauri_plugin_log::RotationStrategy::KeepAll)
                 .build(),
         )
         .plugin(tauri_plugin_opener::init())
