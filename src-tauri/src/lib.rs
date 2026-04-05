@@ -373,6 +373,6 @@ fn detect_codec_early() {
     if let Ok(adapter) = adapter {
         codec::detect_best_codec(&adapter.get_info().name);
     } else {
-        log::warn!("GPU adapter probe failed — defaulting to H264");
+        log::warn!("GPU adapter probe failed — defaulting to VP9 (safe software fallback)");
     }
 }

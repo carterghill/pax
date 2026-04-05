@@ -1,14 +1,20 @@
 //! Video codec selection for screen share publishing.
 //!
-//! Picks the best codec based on GPU hardware capabilities:
-//!   1. H264 — universal HW encode (NVENC, AMF, QSV), great motion handling
-//!   2. AV1  — best compression + SVC, but needs RTX 40+/RX 7000+/Intel Arc
-//!   3. VP9  — good compression, rare HW encode but SW is fine for 30fps
-//!   4. VP8  — legacy fallback
+//! Picks the best codec based on GPU hardware capabilities AND what
+//! hardware encoders were actually compiled into this build:
 //!
-//! H264 is the default because it has near-universal hardware encode support
-//! and dramatically better motion compensation than VP8.  The bitrate targets
-//! are kept the same — H264 at VP8's bitrate produces noticeably higher quality.
+//! Cascade:  HW-accelerated H264 → VP9 (libvpx) → VP8 (ultimate fallback)
+//!
+//! The key insight: just because a GPU *supports* hardware encoding doesn't
+//! mean the encoder was compiled in.  On Windows, NVENC requires the CUDA SDK
+//! at build time and VA-API (AMD/Intel) isn't wired up yet.  So an AMD GPU on
+//! Windows gets VP9 (libvpx software, but with a good screen-content mode)
+//! rather than H264 via OpenH264 (which can't keep up at native res).
+//!
+//! Compile-time cfg flags from build.rs:
+//!   has_nvenc         — NVIDIA NVENC encoder compiled in
+//!   has_vaapi         — VA-API encoder compiled in (Linux x86)
+//!   has_videotoolbox  — Apple VideoToolbox (macOS/iOS, always available)
 
 use livekit::options::VideoCodec;
 use once_cell::sync::Lazy;
@@ -62,8 +68,8 @@ pub fn set_codec_preference(pref: CodecPreference) {
 }
 
 /// Resolve the current preference to a concrete `VideoCodec`.
-/// If `Auto`, returns the auto-detected codec (or H264 if detection
-/// hasn't run yet).
+/// If `Auto`, returns the auto-detected codec (or VP9 as a safe default
+/// if detection hasn't run yet — VP9 libvpx always works).
 pub fn resolve_codec() -> VideoCodec {
     let pref = *CODEC_PREFERENCE.read();
     match pref {
@@ -74,54 +80,117 @@ pub fn resolve_codec() -> VideoCodec {
         CodecPreference::Auto => {
             DETECTED_CODEC
                 .read()
-                .unwrap_or(VideoCodec::H264) // safe default if not yet detected
+                .unwrap_or(VideoCodec::VP9) // safe default — libvpx always works
         }
     }
 }
 
-/// Detect the best codec based on the GPU adapter name.
+// ── Compile-time hardware encoder availability ──────────────────────────
+
+/// Returns true if this build has a hardware H264 encoder for NVIDIA GPUs.
+fn has_hw_h264_nvidia() -> bool {
+    cfg!(has_nvenc)
+}
+
+/// Returns true if this build has a hardware H264 encoder via VA-API
+/// (covers AMD and Intel on Linux).
+fn has_hw_h264_vaapi() -> bool {
+    cfg!(has_vaapi)
+}
+
+/// Returns true if this build has VideoToolbox (Apple platforms).
+fn has_hw_videotoolbox() -> bool {
+    cfg!(has_videotoolbox)
+}
+
+/// Detect the best codec based on GPU adapter name AND what encoders
+/// were actually compiled into this build.
 ///
-/// Call this once at startup (e.g. after the first wgpu adapter is created).
+/// Call this once at startup (after the wgpu adapter probe).
 /// The result is cached and used when the preference is `Auto`.
 ///
-/// Detection logic:
-///   - NVIDIA RTX 40xx/50xx → AV1 (NVENC AV1 support)
-///   - NVIDIA anything else → H264 (NVENC H264, universal)
-///   - AMD RX 7000+/RX 9000+ → AV1 (AMF AV1)
-///   - AMD anything else → H264 (AMF H264)
-///   - Intel Arc → AV1 (QSV AV1)
-///   - Intel anything else → H264 (QSV H264)
-///   - Unknown → H264 (OpenH264 software fallback)
+/// Cascade per GPU vendor:
+///
+///   NVIDIA + has_nvenc:
+///     RTX 40xx/50xx → AV1 (NVENC AV1)
+///     Anything else → H264 (NVENC H264)
+///   NVIDIA without has_nvenc → VP9
+///
+///   AMD + has_vaapi (Linux):
+///     RX 7000+/9000+ → AV1 (if supported)
+///     Anything else → H264 (VA-API H264)
+///   AMD without has_vaapi (Windows) → VP9
+///
+///   Intel + has_vaapi (Linux):
+///     Arc → AV1
+///     Anything else → H264 (VA-API H264)
+///   Intel without has_vaapi → VP9
+///
+///   Apple (has_videotoolbox) → H264 (VideoToolbox)
+///
+///   Unknown → VP9 (safe software fallback)
 pub fn detect_best_codec(adapter_name: &str) {
     let name = adapter_name.to_uppercase();
 
     let codec = if name.contains("NVIDIA") || name.contains("GEFORCE") {
-        if has_nvidia_av1_support(&name) {
-            eprintln!("[Pax Codec] Detected NVIDIA with AV1 encode support");
-            VideoCodec::AV1
+        if has_hw_h264_nvidia() {
+            if has_nvidia_av1_support(&name) {
+                eprintln!("[Pax Codec] NVIDIA with AV1 (NVENC AV1)");
+                VideoCodec::AV1
+            } else {
+                eprintln!("[Pax Codec] NVIDIA → H264 (NVENC)");
+                VideoCodec::H264
+            }
         } else {
-            eprintln!("[Pax Codec] Detected NVIDIA — using H264 (NVENC)");
-            VideoCodec::H264
+            eprintln!(
+                "[Pax Codec] NVIDIA detected but NVENC not compiled in — falling back to VP9"
+            );
+            VideoCodec::VP9
         }
     } else if name.contains("AMD") || name.contains("RADEON") {
-        if has_amd_av1_support(&name) {
-            eprintln!("[Pax Codec] Detected AMD with AV1 encode support");
-            VideoCodec::AV1
+        if has_hw_h264_vaapi() {
+            if has_amd_av1_support(&name) {
+                eprintln!("[Pax Codec] AMD with AV1 (VA-API)");
+                VideoCodec::AV1
+            } else {
+                eprintln!("[Pax Codec] AMD → H264 (VA-API)");
+                VideoCodec::H264
+            }
         } else {
-            eprintln!("[Pax Codec] Detected AMD — using H264 (AMF)");
-            VideoCodec::H264
+            eprintln!(
+                "[Pax Codec] AMD detected but no HW encoder available — using VP9 (libvpx)"
+            );
+            VideoCodec::VP9
         }
     } else if name.contains("INTEL") {
-        if name.contains("ARC") {
-            eprintln!("[Pax Codec] Detected Intel Arc — using AV1 (QSV)");
-            VideoCodec::AV1
-        } else {
-            eprintln!("[Pax Codec] Detected Intel — using H264 (QSV)");
+        if has_hw_videotoolbox() {
+            // Intel Mac (unlikely these days, but handle it)
+            eprintln!("[Pax Codec] Intel (macOS) → H264 (VideoToolbox)");
             VideoCodec::H264
+        } else if has_hw_h264_vaapi() {
+            if name.contains("ARC") {
+                eprintln!("[Pax Codec] Intel Arc → AV1 (VA-API)");
+                VideoCodec::AV1
+            } else {
+                eprintln!("[Pax Codec] Intel → H264 (VA-API)");
+                VideoCodec::H264
+            }
+        } else {
+            eprintln!(
+                "[Pax Codec] Intel detected but no HW encoder available — using VP9 (libvpx)"
+            );
+            VideoCodec::VP9
         }
-    } else {
-        eprintln!("[Pax Codec] Unknown GPU '{}' — using H264 (software fallback)", adapter_name);
+    } else if has_hw_videotoolbox() {
+        // Apple Silicon or other Apple GPU
+        eprintln!("[Pax Codec] Apple GPU → H264 (VideoToolbox)");
         VideoCodec::H264
+    } else {
+        eprintln!(
+            "[Pax Codec] Unknown GPU '{}' — using VP9 (libvpx software)",
+            adapter_name
+        );
+        VideoCodec::VP9
     };
 
     *DETECTED_CODEC.write() = Some(codec);
@@ -134,13 +203,11 @@ pub fn detect_best_codec(adapter_name: &str) {
 /// Check if an NVIDIA GPU supports AV1 hardware encode.
 /// AV1 NVENC was introduced with Ada Lovelace (RTX 40 series).
 fn has_nvidia_av1_support(name: &str) -> bool {
-    // RTX 40xx, 50xx series have AV1 NVENC
     for prefix in ["RTX 40", "RTX 50", "RTX 60"] {
         if name.contains(prefix) {
             return true;
         }
     }
-    // Also check for specific professional cards
     if name.contains("L40") || name.contains("L20") || name.contains("ADA") {
         return true;
     }
@@ -160,18 +227,10 @@ fn has_amd_av1_support(name: &str) -> bool {
 
 /// Resolve the codec for screen sharing.
 ///
-/// On Windows, the LiveKit Rust SDK's bundled libwebrtc does not include
-/// hardware encoder factories (NVENC/AMF) — only OpenH264 software encoding
-/// is available for H264.  OpenH264's rate controller cannot keep up with
-/// native-resolution screen content at 30 fps, causing cascading frame drops
-/// (`iContinualSkipFrames` warnings) and wildly fluctuating actual frame rates.
-///
-/// VP9's libvpx encoder has a dedicated screen-content coding mode and a much
-/// more robust rate controller, so we force VP9 for screen shares on Windows
-/// when the resolved codec would otherwise be H264 (software).
-///
-/// On Linux, hardware encoding (VA-API / NVENC via CUDA) *is* wired up in
-/// webrtc-sys, so we honour the normal resolved codec there.
+/// This is identical to `resolve_codec()` now that detection is honest
+/// about hardware availability.  Kept as a separate function so screen-share
+/// specific overrides can be added later (e.g. preferring screen-content
+/// optimised codecs) without touching the general path.
 pub fn resolve_screen_share_codec() -> VideoCodec {
     resolve_codec()
 }
