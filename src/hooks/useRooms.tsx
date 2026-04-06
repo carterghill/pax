@@ -2,6 +2,7 @@ import { useEffect, useLayoutEffect, useState, useCallback, useMemo, useRef } fr
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { Room } from "../types/matrix";
+import { loadPersistedRooms, savePersistedRooms } from "../utils/roomsCache";
 
 export type RoomsForLayout = {
   spaces: Room[];
@@ -37,6 +38,7 @@ export function useRooms(userId: string | null) {
         (pending) => !list.some((room) => room.id === pending.id)
       );
       setFetchedRooms(list);
+      savePersistedRooms(userId, list);
       setOptimisticRooms(remainingOptimistic);
       return mergeRooms(list, remainingOptimistic);
     } catch (e) {
@@ -51,14 +53,20 @@ export function useRooms(userId: string | null) {
     setOptimisticRooms((prev) => [room, ...prev.filter((existing) => existing.id !== room.id)]);
   }, []);
 
-  // Avoid one frame of main UI after login: complete was true while logged out.
+  // Hydrate from disk so "Loading rooms…" can skip when we have a prior snapshot for this user.
   useLayoutEffect(() => {
-    if (userId) {
+    if (!userId) return;
+    setOptimisticRooms([]);
+    const cached = loadPersistedRooms(userId);
+    if (cached) {
+      setFetchedRooms(cached);
+      setInitialLoadComplete(true);
+    } else {
       setInitialLoadComplete(false);
     }
   }, [userId]);
 
-  // Initial fetch when a session exists (must finish before showing the main UI)
+  // Always refresh from the server (parallel + faster on the Rust side; cache is stale-while-revalidate).
   useEffect(() => {
     if (!userId) {
       setFetchedRooms([]);
@@ -72,7 +80,9 @@ export function useRooms(userId: string | null) {
 
     invoke<Room[]>("get_rooms")
       .then((list) => {
-        if (!cancelled) setFetchedRooms(list);
+        if (cancelled) return;
+        setFetchedRooms(list);
+        savePersistedRooms(userId, list);
       })
       .catch((e) => {
         console.error("Failed to fetch rooms:", e);

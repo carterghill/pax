@@ -1,6 +1,8 @@
+use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::Duration;
 
+use futures_util::stream::{self, StreamExt};
 use matrix_sdk::authentication::matrix::MatrixSession;
 use matrix_sdk::authentication::SessionTokens;
 use matrix_sdk::ruma::events::StateEventType;
@@ -494,6 +496,52 @@ pub async fn restore_session(
     Ok(user_id.to_string())
 }
 
+async fn fetch_space_children_for_room(
+    room: matrix_sdk::Room,
+) -> (String, Vec<String>) {
+    let room_id = room.room_id().to_string();
+    let mut children = Vec::new();
+    match tokio::time::timeout(
+        Duration::from_secs(10),
+        room.get_state_events(StateEventType::SpaceChild),
+    )
+    .await
+    {
+        Ok(Ok(events)) => {
+            for event in events {
+                if let Ok(raw) = event.deserialize() {
+                    match raw {
+                        matrix_sdk::deserialized_responses::AnySyncOrStrippedState::Sync(e) => {
+                            children.push(e.state_key().to_string());
+                        }
+                        matrix_sdk::deserialized_responses::AnySyncOrStrippedState::Stripped(e) => {
+                            children.push(e.state_key().to_string());
+                        }
+                    }
+                }
+            }
+        }
+        Ok(Err(e)) => {
+            log::warn!(
+                "get_rooms: failed to fetch m.space.child events for {}: {}",
+                room_id,
+                fmt_error_chain(&e)
+            );
+        }
+        Err(_) => {
+            log::warn!(
+                "get_rooms: timed out fetching m.space.child events for {}",
+                room_id
+            );
+        }
+    }
+    (room_id, children)
+}
+
+/// Concurrent fetches for space hierarchy + avatars; sequential was very slow with many spaces/rooms.
+const GET_ROOMS_SPACE_CHILD_CONCURRENCY: usize = 16;
+const GET_ROOMS_AVATAR_CONCURRENCY: usize = 24;
+
 #[tauri::command]
 pub async fn get_rooms(state: State<'_, Arc<AppState>>) -> Result<Vec<RoomInfo>, String> {
     let client = super::get_client(&state).await?;
@@ -502,116 +550,102 @@ pub async fn get_rooms(state: State<'_, Arc<AppState>>) -> Result<Vec<RoomInfo>,
     let invited_rooms = client.invited_rooms();
     let avatar_cache = state.avatar_cache.clone();
 
-    // First pass: collect space IDs and their children via m.space.child state events
-    let mut space_children: std::collections::HashMap<String, Vec<String>> =
-        std::collections::HashMap::new();
+    let space_rooms: Vec<matrix_sdk::Room> = joined_rooms
+        .iter()
+        .filter(|r| r.is_space())
+        .cloned()
+        .collect();
 
-    for room in &joined_rooms {
-        if room.is_space() {
-            let mut children = Vec::new();
-            match tokio::time::timeout(
-                Duration::from_secs(10),
-                room.get_state_events(StateEventType::SpaceChild),
-            )
-            .await
-            {
-                Ok(Ok(events)) => {
-                    for event in events {
-                        if let Ok(raw) = event.deserialize() {
-                            match raw {
-                                matrix_sdk::deserialized_responses::AnySyncOrStrippedState::Sync(
-                                    e,
-                                ) => {
-                                    children.push(e.state_key().to_string());
-                                }
-                                matrix_sdk::deserialized_responses::AnySyncOrStrippedState::Stripped(
-                                    e,
-                                ) => {
-                                    children.push(e.state_key().to_string());
-                                }
-                            }
-                        }
-                    }
-                }
-                Ok(Err(e)) => {
-                    log::warn!(
-                        "get_rooms: failed to fetch m.space.child events for {}: {}",
-                        room.room_id(),
-                        fmt_error_chain(&e)
-                    );
-                }
-                Err(_) => {
-                    log::warn!(
-                        "get_rooms: timed out fetching m.space.child events for {}",
-                        room.room_id()
-                    );
-                }
+    // Space → child room ids (parallel; was one 10s timeout per space in series).
+    let space_child_pairs: Vec<(String, Vec<String>)> = stream::iter(
+        space_rooms
+            .into_iter()
+            .map(|room| async move { fetch_space_children_for_room(room).await }),
+    )
+    .buffer_unordered(GET_ROOMS_SPACE_CHILD_CONCURRENCY)
+    .collect()
+    .await;
+
+    let space_children: HashMap<String, Vec<String>> = space_child_pairs.into_iter().collect();
+    let space_children = Arc::new(space_children);
+
+    // Joined rooms: parallel avatars, preserve sidebar order via index sort.
+    let mut joined_parts: Vec<(usize, RoomInfo)> = stream::iter(
+        joined_rooms.into_iter().enumerate().map(|(idx, room)| {
+            let sc = space_children.clone();
+            let ac = avatar_cache.clone();
+            async move {
+                let avatar_url = get_or_fetch_avatar(
+                    room.avatar_url().as_deref(),
+                    room.avatar(matrix_sdk::media::MediaFormat::File),
+                    &ac,
+                )
+                .await;
+                let room_id_str = room.room_id().to_string();
+                let parent_space_ids: Vec<String> = sc
+                    .iter()
+                    .filter(|(_, children)| children.contains(&room_id_str))
+                    .map(|(space_id, _)| space_id.clone())
+                    .collect();
+                let room_type_str = room.room_type().map(|rt| rt.to_string());
+                let info = RoomInfo {
+                    id: room_id_str,
+                    name: room.name().unwrap_or_else(|| "Unnamed".to_string()),
+                    avatar_url,
+                    is_space: room.is_space(),
+                    parent_space_ids,
+                    room_type: room_type_str,
+                    membership: "joined".to_string(),
+                };
+                (idx, info)
             }
-            space_children.insert(room.room_id().to_string(), children);
-        }
-    }
+        }),
+    )
+    .buffer_unordered(GET_ROOMS_AVATAR_CONCURRENCY)
+    .collect()
+    .await;
 
-    // Second pass: build room list with parent space info (joined rooms)
-    let mut room_list = Vec::new();
+    joined_parts.sort_by_key(|(i, _)| *i);
+    let mut room_list: Vec<RoomInfo> = joined_parts.into_iter().map(|(_, r)| r).collect();
 
-    for room in &joined_rooms {
-        let avatar_url = get_or_fetch_avatar(
-            room.avatar_url().as_deref(),
-            room.avatar(matrix_sdk::media::MediaFormat::File),
-            &avatar_cache,
-        )
-        .await;
-        let room_id_str = room.room_id().to_string();
+    // Invited rooms (same pattern).
+    let mut invited_parts: Vec<(usize, RoomInfo)> = stream::iter(
+        invited_rooms.into_iter().enumerate().map(|(idx, room)| {
+            let sc = space_children.clone();
+            let ac = avatar_cache.clone();
+            async move {
+                let avatar_url = get_or_fetch_avatar(
+                    room.avatar_url().as_deref(),
+                    room.avatar(matrix_sdk::media::MediaFormat::File),
+                    &ac,
+                )
+                .await;
+                let room_id_str = room.room_id().to_string();
+                let parent_space_ids: Vec<String> = sc
+                    .iter()
+                    .filter(|(_, children)| children.contains(&room_id_str))
+                    .map(|(space_id, _)| space_id.clone())
+                    .collect();
+                let room_type_str = room.room_type().map(|rt| rt.to_string());
+                let info = RoomInfo {
+                    id: room_id_str,
+                    name: room.name().unwrap_or_else(|| "Unnamed".to_string()),
+                    avatar_url,
+                    is_space: room.is_space(),
+                    parent_space_ids,
+                    room_type: room_type_str,
+                    membership: "invited".to_string(),
+                };
+                (idx, info)
+            }
+        }),
+    )
+    .buffer_unordered(GET_ROOMS_AVATAR_CONCURRENCY)
+    .collect()
+    .await;
 
-        // Find which spaces contain this room
-        let parent_space_ids: Vec<String> = space_children
-            .iter()
-            .filter(|(_, children)| children.contains(&room_id_str))
-            .map(|(space_id, _)| space_id.clone())
-            .collect();
-
-        let room_type_str = room.room_type().map(|rt| rt.to_string());
-
-        room_list.push(RoomInfo {
-            id: room_id_str,
-            name: room.name().unwrap_or_else(|| "Unnamed".to_string()),
-            avatar_url,
-            is_space: room.is_space(),
-            parent_space_ids,
-            room_type: room_type_str,
-            membership: "joined".to_string(),
-        });
-    }
-
-    // Third pass: add invited rooms
-    for room in &invited_rooms {
-        let avatar_url = get_or_fetch_avatar(
-            room.avatar_url().as_deref(),
-            room.avatar(matrix_sdk::media::MediaFormat::File),
-            &avatar_cache,
-        )
-        .await;
-        let room_id_str = room.room_id().to_string();
-
-        // Check if any joined space lists this room as a child
-        let parent_space_ids: Vec<String> = space_children
-            .iter()
-            .filter(|(_, children)| children.contains(&room_id_str))
-            .map(|(space_id, _)| space_id.clone())
-            .collect();
-
-        let room_type_str = room.room_type().map(|rt| rt.to_string());
-
-        room_list.push(RoomInfo {
-            id: room_id_str,
-            name: room.name().unwrap_or_else(|| "Unnamed".to_string()),
-            avatar_url,
-            is_space: room.is_space(),
-            parent_space_ids,
-            room_type: room_type_str,
-            membership: "invited".to_string(),
-        });
-    }
+    invited_parts.sort_by_key(|(i, _)| *i);
+    room_list.extend(invited_parts.into_iter().map(|(_, r)| r));
 
     Ok(room_list)
 }

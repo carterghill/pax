@@ -6,6 +6,7 @@ import { ThemeProvider } from "./theme/ThemeContext";
 import { useRooms } from "./hooks/useRooms";
 import { clearMessageCache } from "./hooks/useMessages";
 import { clearPersistedSpaceHomeCache } from "./utils/spaceHomeCache";
+import { clearPersistedRoomsList } from "./utils/roomsCache";
 import { useExternalLinkInterceptor } from "./hooks/useExternalLinks";
 
 interface AuthConfig {
@@ -130,6 +131,7 @@ function App() {
     syncStartedRef.current = false;
     clearMessageCache();
     clearPersistedSpaceHomeCache();
+    clearPersistedRoomsList();
     setUserId(null);
   }
 
