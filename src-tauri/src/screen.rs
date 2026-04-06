@@ -562,6 +562,12 @@ impl windows_capture::capture::GraphicsCaptureApiHandler for ScreenCaptureHandle
         }
         Ok(())
     }
+
+    fn on_closed(&mut self) -> Result<(), Self::Error> {
+        log::info!("Screen capture target closed");
+        self.shutdown.store(true, Ordering::Relaxed);
+        Ok(())
+    }
 }
 
 /// Libwebrtc DesktopCapturer path (macOS/Linux) or fallback on Windows.
@@ -1838,6 +1844,19 @@ mod windows_picker {
 #[cfg(target_os = "windows")]
 pub fn enumerate_screen_share_windows() -> Result<Vec<ScreenShareWindowOption>, String> {
     windows_picker::enumerate()
+}
+
+#[cfg(target_os = "windows")]
+pub fn is_window_handle_valid(hwnd: usize) -> bool {
+    use windows_capture::window::Window;
+
+    let window = Window::from_raw_hwnd(hwnd as *mut std::ffi::c_void);
+    window.is_valid()
+}
+
+#[cfg(not(target_os = "windows"))]
+pub fn is_window_handle_valid(_hwnd: usize) -> bool {
+    false
 }
 
 #[cfg(not(target_os = "windows"))]

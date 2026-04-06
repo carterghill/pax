@@ -22,7 +22,7 @@ use serde::Serialize;
 ///   Mic:  cpal input → ring buffer → tokio task → NativeAudioSource → LiveKit
 ///   Spkr: LiveKit → NativeAudioStream → per-user volume → mix → ring buffer → cpal output
 use std::collections::{HashMap, VecDeque};
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 use tauri::{AppHandle, Emitter};
@@ -155,8 +155,10 @@ pub struct VoiceSession {
     _output_stream: Option<SendStream>,
     /// Cancellation handle for the event loop
     shutdown_tx: mpsc::Sender<()>,
-    /// Screen share handle (track + capture shutdown); dropped on stop
-    _screen_handle: Option<crate::screen::ScreenShareHandle>,
+    /// Screen share handle (track + capture shutdown); cleared on stop.
+    screen_handle: Arc<Mutex<Option<crate::screen::ScreenShareHandle>>>,
+    /// Monotonic token used to invalidate stale auto-stop monitors.
+    screen_share_generation: Arc<AtomicU64>,
     /// Noise processor for tunable suppression (shared with mic callback)
     noise_proc: Arc<Mutex<NoiseProcessor>>,
     /// Signaled by the event loop when LiveKit reconnects after a drop.
@@ -304,7 +306,8 @@ impl VoiceManager {
                 _input_stream: Some(input_stream),
                 _output_stream: Some(output_stream),
                 shutdown_tx,
-                _screen_handle: None,
+                screen_handle: Arc::new(Mutex::new(None)),
+                screen_share_generation: Arc::new(AtomicU64::new(0)),
                 noise_proc,
                 reconnect_notify,
                 _abr_shutdown: Arc::new(AtomicBool::new(false)),
@@ -324,6 +327,10 @@ impl VoiceManager {
         if let Some(session) = session {
             // Stop adaptive bitrate monitor
             session._abr_shutdown.store(true, Ordering::Relaxed);
+            session.screen_share_generation.fetch_add(1, Ordering::Relaxed);
+            if let Some(mut handle) = session.screen_handle.lock().take() {
+                handle.stop();
+            }
             // Stop all video receivers
             {
                 let mut st = session.audio_state.lock();
@@ -465,7 +472,7 @@ impl VoiceManager {
         window_handle: Option<String>,
         app_handle: &AppHandle,
     ) -> Result<(), String> {
-        let (room, audio_state, room_id, local_identity, existing_handle) = {
+        let (room, audio_state, room_id, local_identity, screen_handle, abr_shutdown, screen_share_generation) = {
             let guard = self.session.lock();
             let session = guard.as_ref().ok_or("Not in a voice call")?;
             (
@@ -473,12 +480,24 @@ impl VoiceManager {
                 session.audio_state.clone(),
                 session.room_id.clone(),
                 session.local_identity.clone(),
-                session._screen_handle.as_ref().map(|_| ()),
+                session.screen_handle.clone(),
+                session._abr_shutdown.clone(),
+                session.screen_share_generation.clone(),
             )
         };
-        if existing_handle.is_some() {
+        if screen_handle.lock().is_some() {
             // Ensure replacement semantics: never leave a stale screenshare publication active.
-            self.stop_screen_share(app_handle).await?;
+            stop_screen_share_session(
+                room.clone(),
+                audio_state.clone(),
+                screen_handle.clone(),
+                abr_shutdown.clone(),
+                screen_share_generation.clone(),
+                app_handle,
+                &room_id,
+                &local_identity,
+            )
+            .await?;
         } else {
             // Also clean up any orphaned screen-share publications (e.g. handle lost after an error).
             let lp = room.local_participant();
@@ -501,6 +520,7 @@ impl VoiceManager {
             window_title,
             window_handle
         );
+        let monitor_window_handle = window_handle.clone();
         let handle =
             crate::screen::start_screen_capture(room.clone(), mode, window_title, window_handle)
                 .await?;
@@ -525,14 +545,14 @@ impl VoiceManager {
         // High tier is native/30fps so this is a no-op.
         apply_bitrate_to_sender(&handle.track, crate::screen::ScreenShareQuality::High).await;
 
+        abr_shutdown.store(false, Ordering::Relaxed);
+        tokio::spawn(adaptive_bitrate_monitor(track_for_abr, abr_shutdown.clone()));
+        let share_generation = screen_share_generation
+            .fetch_add(1, Ordering::Relaxed)
+            .wrapping_add(1);
         {
-            let mut guard = self.session.lock();
-            let session = guard.as_mut().ok_or("Not in a voice call")?;
-            // Reset and spawn adaptive bitrate monitor
-            session._abr_shutdown.store(false, Ordering::Relaxed);
-            let abr_shutdown = session._abr_shutdown.clone();
-            tokio::spawn(adaptive_bitrate_monitor(track_for_abr, abr_shutdown));
-            session._screen_handle = Some(handle);
+            let mut handle_slot = screen_handle.lock();
+            *handle_slot = Some(handle);
         }
         {
             let mut st = audio_state.lock();
@@ -547,57 +567,162 @@ impl VoiceManager {
             true,
             None,
         );
+
+        #[cfg(target_os = "windows")]
+        if mode == crate::screen::ScreenShareMode::Window {
+            if let Some(raw_window_handle) = monitor_window_handle.as_deref() {
+                match raw_window_handle.parse::<usize>() {
+                    Ok(hwnd) => {
+                        spawn_window_share_exit_monitor(
+                            hwnd,
+                            share_generation,
+                            room,
+                            audio_state,
+                            screen_handle,
+                            abr_shutdown,
+                            screen_share_generation,
+                            room_id,
+                            local_identity,
+                            app_handle.clone(),
+                        );
+                    }
+                    Err(e) => {
+                        log::warn!(
+                            "Failed to monitor shared window handle '{}': {}",
+                            raw_window_handle,
+                            e
+                        );
+                    }
+                }
+            }
+        }
+
         Ok(())
     }
 
     /// Stop sharing screen.
     pub async fn stop_screen_share(&self, app_handle: &AppHandle) -> Result<(), String> {
-        log::info!("voice::stop_screen_share");
-        let (room, audio_state, handle, room_id, local_identity) = {
-            let mut guard = self.session.lock();
-            let session = guard.as_mut().ok_or("Not in a voice call")?;
-            // Stop the adaptive bitrate monitor
-            session._abr_shutdown.store(true, Ordering::Relaxed);
-            let handle = session._screen_handle.take();
+        let (room, audio_state, room_id, local_identity, screen_handle, abr_shutdown, screen_share_generation) = {
+            let guard = self.session.lock();
+            let session = guard.as_ref().ok_or("Not in a voice call")?;
             (
                 session.room.clone(),
                 session.audio_state.clone(),
-                handle,
                 session.room_id.clone(),
                 session.local_identity.clone(),
+                session.screen_handle.clone(),
+                session._abr_shutdown.clone(),
+                session.screen_share_generation.clone(),
             )
         };
-        if let Some(mut h) = handle {
-            h.stop();
-            let lp = room.local_participant();
-            let sids: Vec<_> = lp
-                .track_publications()
-                .iter()
-                .filter(|(_, p)| {
-                    let s = p.source();
-                    s == TrackSource::Screenshare || s == TrackSource::ScreenshareAudio
-                })
-                .map(|(sid, _)| sid.clone())
-                .collect();
-            for sid in sids {
-                let _ = lp.unpublish_track(&sid).await;
-            }
-        }
-        {
-            let mut st = audio_state.lock();
-            st.is_local_screen_sharing = false;
-        }
-        emit_state(
+        stop_screen_share_session(
+            room,
+            audio_state,
+            screen_handle,
+            abr_shutdown,
+            screen_share_generation,
             app_handle,
             &room_id,
             &local_identity,
-            &audio_state,
-            false,
-            true,
-            None,
-        );
-        Ok(())
+        )
+        .await
     }
+}
+
+async fn stop_screen_share_session(
+    room: Arc<livekit::Room>,
+    audio_state: Arc<Mutex<AudioState>>,
+    screen_handle: Arc<Mutex<Option<crate::screen::ScreenShareHandle>>>,
+    abr_shutdown: Arc<AtomicBool>,
+    screen_share_generation: Arc<AtomicU64>,
+    app_handle: &AppHandle,
+    room_id: &str,
+    local_identity: &str,
+) -> Result<(), String> {
+    log::info!("voice::stop_screen_share");
+    abr_shutdown.store(true, Ordering::Relaxed);
+    screen_share_generation.fetch_add(1, Ordering::Relaxed);
+
+    if let Some(mut handle) = screen_handle.lock().take() {
+        handle.stop();
+    }
+
+    let lp = room.local_participant();
+    let sids: Vec<_> = lp
+        .track_publications()
+        .iter()
+        .filter(|(_, p)| {
+            let s = p.source();
+            s == TrackSource::Screenshare || s == TrackSource::ScreenshareAudio
+        })
+        .map(|(sid, _)| sid.clone())
+        .collect();
+    for sid in sids {
+        let _ = lp.unpublish_track(&sid).await;
+    }
+
+    {
+        let mut st = audio_state.lock();
+        st.is_local_screen_sharing = false;
+    }
+    emit_state(
+        app_handle,
+        room_id,
+        local_identity,
+        &audio_state,
+        false,
+        true,
+        None,
+    );
+    Ok(())
+}
+
+#[cfg(target_os = "windows")]
+fn spawn_window_share_exit_monitor(
+    hwnd: usize,
+    share_generation: u64,
+    room: Arc<livekit::Room>,
+    audio_state: Arc<Mutex<AudioState>>,
+    screen_handle: Arc<Mutex<Option<crate::screen::ScreenShareHandle>>>,
+    abr_shutdown: Arc<AtomicBool>,
+    screen_share_generation: Arc<AtomicU64>,
+    room_id: String,
+    local_identity: String,
+    app_handle: AppHandle,
+) {
+    tokio::spawn(async move {
+        loop {
+            tokio::time::sleep(Duration::from_millis(400)).await;
+
+            if screen_share_generation.load(Ordering::Relaxed) != share_generation {
+                break;
+            }
+            if screen_handle.lock().is_none() {
+                break;
+            }
+            if !crate::screen::is_window_handle_valid(hwnd) {
+                log::info!(
+                    "Shared window 0x{:X} closed; stopping local screen share",
+                    hwnd
+                );
+                if let Err(e) = stop_screen_share_session(
+                    room,
+                    audio_state,
+                    screen_handle,
+                    abr_shutdown,
+                    screen_share_generation,
+                    &app_handle,
+                    &room_id,
+                    &local_identity,
+                )
+                .await
+                {
+                    log::warn!("Failed to stop screen share after window close: {}", e);
+                }
+                break;
+            }
+        }
+    });
 }
 
 // ─── Native overlay helper ──────────────────────────────────────────────────
