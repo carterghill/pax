@@ -64,7 +64,6 @@ export default function VoiceRoomView({
   const [generalSettingsTab, setGeneralSettingsTab] = useState<"stream" | "audio">("stream");
   const [lowBandwidthMode, setLowBandwidthMode] = useState(false);
   const [isStartingScreenShare, setIsStartingScreenShare] = useState(false);
-  const [windowPickerOpen, setWindowPickerOpen] = useState(false);
   const [noiseConfig, setNoiseConfig] = useState({ extraAttenuation: 0.1, agcTargetRms: 6000 });
   const [audioDevices, setAudioDevices] = useState<AudioDeviceList>({ input: [], output: [] });
   const [audioDevicesLoading, setAudioDevicesLoading] = useState(false);
@@ -75,13 +74,12 @@ export default function VoiceRoomView({
   const screenShareMenuPopupRef = useRef<HTMLDivElement>(null);
   const generalSettingsRef = useRef<HTMLDivElement>(null);
   const generalSettingsPopupRef = useRef<HTMLDivElement>(null);
-  const windowPickerOverlayRef = useRef<HTMLDivElement>(null);
   const activeShareRef = useRef<{ mode: "screen" | "window"; windowTitle?: string } | null>(null);
+  const isLinux = navigator.userAgent.includes("Linux");
 
   // Popups are `position: absolute` — parent `getBoundingClientRect()` excludes them; ref the panels.
   useOverlayObstruction(screenShareMenuPopupRef, screenShareMenuOpen);
   useOverlayObstruction(generalSettingsPopupRef, generalSettingsOpen);
-  useOverlayObstruction(windowPickerOverlayRef, windowPickerOpen);
   const [windowList, setWindowList] = useState<[string, string][]>([]);
   const [windowListLoading, setWindowListLoading] = useState(false);
 
@@ -115,6 +113,32 @@ export default function VoiceRoomView({
       cancelled = true;
     };
   }, [generalSettingsOpen, onListAudioDevices]);
+
+  useEffect(() => {
+    if (!screenShareMenuOpen || isLinux) return;
+    let cancelled = false;
+    setWindowListLoading(true);
+    onEnumerateScreenShareWindows()
+      .then((list) => {
+        if (!cancelled) {
+          setWindowList(list);
+        }
+      })
+      .catch((e) => {
+        if (!cancelled) {
+          console.error("Failed to enumerate windows:", e);
+          setWindowList([]);
+        }
+      })
+      .finally(() => {
+        if (!cancelled) {
+          setWindowListLoading(false);
+        }
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [screenShareMenuOpen, isLinux, onEnumerateScreenShareWindows]);
 
   const startShare = useCallback(
     async (mode: "screen" | "window", windowTitle?: string) => {
@@ -189,19 +213,6 @@ export default function VoiceRoomView({
     return () => document.removeEventListener("mousedown", handleClick);
   }, [generalSettingsOpen, screenShareMenuOpen]);
 
-  const openWindowPicker = useCallback(async () => {
-    setWindowListLoading(true);
-    setWindowPickerOpen(true);
-    try {
-      const list = await onEnumerateScreenShareWindows();
-      setWindowList(list);
-    } catch (e) {
-      console.error("Failed to enumerate windows:", e);
-      setWindowList([]);
-    } finally {
-      setWindowListLoading(false);
-    }
-  }, [onEnumerateScreenShareWindows]);
   const [contextMenu, setContextMenu] = useState<{
     x: number;
     y: number;
@@ -893,102 +904,89 @@ export default function VoiceRoomView({
                     textAlign: "left",
                   }}
                 >
-                  Share entire screen
+                  Share screen...
                 </button>
-                <button
-                  onClick={() => {
-                    setScreenShareMenuOpen(false);
-                    // On Linux, the xdg-desktop-portal handles window selection natively
-                    if (navigator.userAgent.includes("Linux")) {
-                      void startShare("window");
-                    } else {
-                      openWindowPicker();
-                    }
-                  }}
-                  style={{
-                    padding: `${spacing.unit}px ${spacing.unit * 2}px`,
-                    border: "none",
-                    borderRadius: spacing.unit,
-                    cursor: "pointer",
-                    backgroundColor: palette.bgActive,
-                    color: palette.textPrimary,
-                    fontSize: typography.fontSizeSmall,
-                    textAlign: "left",
-                  }}
-                >
-                  Share application window
-                </button>
-              </div>
-            )}
-            {windowPickerOpen && (
-              <div
-                ref={windowPickerOverlayRef}
-                style={{
-                position: "fixed",
-                inset: 0,
-                backgroundColor: "rgba(0,0,0,0.5)",
-                display: "flex",
-                alignItems: "center",
-                justifyContent: "center",
-                zIndex: 1000,
-              }}
-                onClick={() => setWindowPickerOpen(false)}
-              >
-                <div style={{
-                  backgroundColor: palette.bgSecondary,
-                  border: `1px solid ${palette.border}`,
-                  borderRadius: spacing.unit * 2,
-                  padding: spacing.unit * 2,
-                  maxWidth: 400,
-                  maxHeight: 400,
-                  overflow: "auto",
-                }} onClick={(e) => e.stopPropagation()}>
-                  <div style={{ marginBottom: spacing.unit, fontWeight: 600 }}>Select window to share</div>
-                  {windowListLoading ? (
-                    <div style={{ padding: spacing.unit * 2 }}>Loading windows...</div>
-                  ) : windowList.length === 0 ? (
-                    <div style={{ padding: spacing.unit * 2, color: palette.textSecondary }}>No windows found</div>
-                  ) : (
-                    <div style={{ display: "flex", flexDirection: "column", gap: spacing.unit / 2 }}>
-                      {windowList.map(([title, process], i) => (
-                        <button
-                          key={i}
-                          onClick={() => {
-                            void startShare("window", title);
-                            setWindowPickerOpen(false);
-                          }}
-                          style={{
-                            padding: `${spacing.unit}px ${spacing.unit * 2}px`,
-                            border: `1px solid ${palette.border}`,
-                            borderRadius: spacing.unit,
-                            cursor: "pointer",
-                            backgroundColor: palette.bgActive,
-                            color: palette.textPrimary,
-                            fontSize: typography.fontSizeSmall,
-                            textAlign: "left",
-                          }}
-                        >
-                          {title || "(no title)"}
-                          {process && <span style={{ color: palette.textSecondary, fontSize: "0.85em" }}> — {process}</span>}
-                        </button>
-                      ))}
-                    </div>
-                  )}
+                {isLinux ? (
                   <button
-                    onClick={() => setWindowPickerOpen(false)}
+                    onClick={() => {
+                      void startShare("window");
+                      setScreenShareMenuOpen(false);
+                    }}
                     style={{
-                      marginTop: spacing.unit,
                       padding: `${spacing.unit}px ${spacing.unit * 2}px`,
                       border: "none",
                       borderRadius: spacing.unit,
                       cursor: "pointer",
-                      backgroundColor: palette.bgSecondary,
-                      color: palette.textSecondary,
+                      backgroundColor: palette.bgActive,
+                      color: palette.textPrimary,
+                      fontSize: typography.fontSizeSmall,
+                      textAlign: "left",
                     }}
                   >
-                    Cancel
+                    Share application window...
                   </button>
-                </div>
+                ) : (
+                  <>
+                    <div
+                      style={{
+                        marginTop: spacing.unit,
+                        paddingTop: spacing.unit * 2,
+                        borderTop: `1px solid ${palette.border}`,
+                        fontSize: typography.fontSizeSmall,
+                        fontWeight: 600,
+                        color: palette.textSecondary,
+                      }}
+                    >
+                      Share application window
+                    </div>
+                    {windowListLoading ? (
+                      <div
+                        style={{
+                          padding: `${spacing.unit}px ${spacing.unit * 2}px`,
+                          color: palette.textSecondary,
+                          fontSize: typography.fontSizeSmall,
+                        }}
+                      >
+                        Loading windows...
+                      </div>
+                    ) : windowList.length === 0 ? (
+                      <div
+                        style={{
+                          padding: `${spacing.unit}px ${spacing.unit * 2}px`,
+                          color: palette.textSecondary,
+                          fontSize: typography.fontSizeSmall,
+                        }}
+                      >
+                        No windows found
+                      </div>
+                    ) : (
+                      <div style={{ display: "flex", flexDirection: "column", gap: spacing.unit / 2 }}>
+                        {windowList.map(([title, process], i) => (
+                          <button
+                            key={`${title}-${process}-${i}`}
+                            onClick={() => {
+                              void startShare("window", title);
+                              setScreenShareMenuOpen(false);
+                            }}
+                            style={{
+                              padding: `${spacing.unit}px ${spacing.unit * 2}px`,
+                              border: "none",
+                              borderRadius: spacing.unit,
+                              cursor: "pointer",
+                              backgroundColor: palette.bgActive,
+                              color: palette.textPrimary,
+                              fontSize: typography.fontSizeSmall,
+                              textAlign: "left",
+                            }}
+                          >
+                            {title || "(no title)"}
+                            {process && <span style={{ color: palette.textSecondary, fontSize: "0.85em" }}> — {process}</span>}
+                          </button>
+                        ))}
+                      </div>
+                    )}
+                  </>
+                )}
               </div>
             )}
           </div>
