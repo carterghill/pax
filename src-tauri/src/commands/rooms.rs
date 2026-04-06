@@ -1483,6 +1483,104 @@ fn enrich_public_rooms_with_membership(
     result
 }
 
+async fn discover_federation_server_names(
+    http_client: &reqwest::Client,
+    server_input: &str,
+) -> Vec<String> {
+    let mut federation_servers = Vec::new();
+
+    let Some(url) = parse_server_input_url(server_input) else {
+        return federation_servers;
+    };
+    let Some(host) = url.host_str() else {
+        return federation_servers;
+    };
+
+    let stripped_host = host.strip_prefix("matrix.").map(str::to_string);
+
+    if let Some(apex) = &stripped_host {
+        let well_known_url = format!("https://{apex}/.well-known/matrix/server");
+        match http_client
+            .get(&well_known_url)
+            .timeout(Duration::from_secs(10))
+            .send()
+            .await
+        {
+            Ok(resp) if resp.status().is_success() => match resp.json::<serde_json::Value>().await {
+                Ok(body) => {
+                    push_unique(&mut federation_servers, apex.clone());
+                    if let Some(advertised) = body["m.server"].as_str() {
+                        push_unique(&mut federation_servers, advertised.to_string());
+                    }
+                }
+                Err(e) => {
+                    log::warn!(
+                        "search_public_spaces: failed to parse {well_known_url}: {e}"
+                    );
+                }
+            },
+            Ok(resp) => {
+                log::debug!(
+                    "search_public_spaces: {} returned {}",
+                    well_known_url,
+                    resp.status()
+                );
+            }
+            Err(e) => {
+                log::debug!(
+                    "search_public_spaces: failed to fetch {}: {}",
+                    well_known_url,
+                    fmt_error_chain(&e)
+                );
+            }
+        }
+    }
+
+    let well_known_url = format!("https://{host}/.well-known/matrix/server");
+    match http_client
+        .get(&well_known_url)
+        .timeout(Duration::from_secs(10))
+        .send()
+        .await
+    {
+        Ok(resp) if resp.status().is_success() => match resp.json::<serde_json::Value>().await {
+            Ok(body) => {
+                if let Some(normalized) = normalize_server_name(server_input) {
+                    push_unique(&mut federation_servers, normalized);
+                }
+                if let Some(advertised) = body["m.server"].as_str() {
+                    push_unique(&mut federation_servers, advertised.to_string());
+                }
+            }
+            Err(e) => {
+                log::warn!(
+                    "search_public_spaces: failed to parse {well_known_url}: {e}"
+                );
+            }
+        },
+        Ok(resp) => {
+            log::debug!(
+                "search_public_spaces: {} returned {}",
+                well_known_url,
+                resp.status()
+            );
+        }
+        Err(e) => {
+            log::debug!(
+                "search_public_spaces: failed to fetch {}: {}",
+                well_known_url,
+                fmt_error_chain(&e)
+            );
+        }
+    }
+
+    if let Some(normalized) = normalize_server_name(server_input) {
+        push_unique(&mut federation_servers, normalized);
+    }
+
+    federation_servers
+}
+
 async fn discover_client_base_urls(
     http_client: &reqwest::Client,
     server_input: &str,
@@ -1537,11 +1635,11 @@ async fn discover_client_base_urls(
 
 async fn search_public_spaces_direct_fallback(
     state: &AppState,
+    base_urls: &[String],
     server_input: &str,
     search_term: Option<&str>,
     limit: u32,
 ) -> Result<serde_json::Value, String> {
-    let base_urls = discover_client_base_urls(&state.http_client, server_input).await;
     if base_urls.is_empty() {
         return Err(format!(
             "No direct homeserver URL could be discovered for {}",
@@ -1584,6 +1682,20 @@ async fn search_public_spaces_direct_fallback(
                     continue 'base_urls;
                 }
             };
+
+            if resp.status() == reqwest::StatusCode::UNAUTHORIZED {
+                let text = resp.text().await.unwrap_or_default();
+                let err = format!(
+                    "Remote homeserver does not allow unauthenticated direct /publicRooms lookup (401 Unauthorized): {}",
+                    text
+                );
+                if saw_success {
+                    log::warn!("search_public_spaces: {err}");
+                    break;
+                }
+                last_err = Some(err);
+                continue 'base_urls;
+            }
 
             let body = match parse_public_rooms_response(resp).await {
                 Ok(body) => body,
@@ -1667,55 +1779,96 @@ pub async fn search_public_spaces(
         "limit": limit,
     });
 
-    // If a server is specified, pass it as a query parameter for federation
-    let mut url = format!(
-        "{}/_matrix/client/v3/publicRooms",
-        homeserver.trim_end_matches('/')
-    );
-    if let Some(srv) = &server {
-        let server_name = normalize_server_name(srv).unwrap_or_else(|| srv.clone());
-        url = format!("{}?server={}", url, urlencoding::encode(&server_name));
-    }
+    if let Some(server_input) = server.as_deref() {
+        let federation_servers =
+            discover_federation_server_names(&state.http_client, server_input).await;
+        let direct_base_urls = discover_client_base_urls(&state.http_client, server_input).await;
+        let mut last_federation_err: Option<String> = None;
 
-    let result = match state
-        .http_client
-        .post(&url)
-        .timeout(Duration::from_secs(15))
-        .bearer_auth(access_token)
-        .json(&body)
-        .send()
-        .await
-    {
-        Ok(resp) => parse_public_rooms_response(resp).await,
-        Err(e) => Err(format!(
-            "Failed to search public spaces: {}",
-            super::fmt_error_chain(&e)
-        )),
-    };
-
-    match result {
-        Ok(result) => Ok(enrich_public_rooms_with_membership(&client, result)),
-        Err(primary_err) => {
-            let Some(server_input) = server.as_deref() else {
-                return Err(primary_err);
-            };
-
-            log::warn!(
-                "search_public_spaces: federation lookup for '{}' failed: {}; trying direct client lookup",
-                server_input,
-                primary_err
+        for federation_server in federation_servers {
+            let url = format!(
+                "{}/_matrix/client/v3/publicRooms?server={}",
+                homeserver.trim_end_matches('/'),
+                urlencoding::encode(&federation_server)
             );
 
-            match search_public_spaces_direct_fallback(&state, server_input, search_term.as_deref(), limit)
+            let result = match state
+                .http_client
+                .post(&url)
+                .timeout(Duration::from_secs(15))
+                .bearer_auth(&access_token)
+                .json(&body)
+                .send()
                 .await
             {
-                Ok(result) => Ok(enrich_public_rooms_with_membership(&client, result)),
-                Err(fallback_err) => Err(format!(
-                    "{} | Direct lookup fallback failed: {}",
-                    primary_err, fallback_err
+                Ok(resp) => parse_public_rooms_response(resp).await,
+                Err(e) => Err(format!(
+                    "Failed to search public spaces: {}",
+                    super::fmt_error_chain(&e)
                 )),
+            };
+
+            match result {
+                Ok(result) => return Ok(enrich_public_rooms_with_membership(&client, result)),
+                Err(err) => {
+                    log::warn!(
+                        "search_public_spaces: federation lookup via '{}' failed: {}",
+                        federation_server,
+                        err
+                    );
+                    last_federation_err = Some(format!(
+                        "Federated public rooms query failed via {}: {}",
+                        federation_server, err
+                    ));
+                }
             }
         }
+
+        let primary_err = last_federation_err.unwrap_or_else(|| {
+            format!(
+                "Failed to resolve a federation server name for {}",
+                server_input
+            )
+        });
+
+        match search_public_spaces_direct_fallback(
+            &state,
+            &direct_base_urls,
+            server_input,
+            search_term.as_deref(),
+            limit,
+        )
+        .await
+        {
+            Ok(result) => Ok(enrich_public_rooms_with_membership(&client, result)),
+            Err(fallback_err) => Err(format!(
+                "{} | Direct lookup fallback failed: {}",
+                primary_err, fallback_err
+            )),
+        }
+    } else {
+        let url = format!(
+            "{}/_matrix/client/v3/publicRooms",
+            homeserver.trim_end_matches('/')
+        );
+
+        let result = match state
+            .http_client
+            .post(&url)
+            .timeout(Duration::from_secs(15))
+            .bearer_auth(access_token)
+            .json(&body)
+            .send()
+            .await
+        {
+            Ok(resp) => parse_public_rooms_response(resp).await,
+            Err(e) => Err(format!(
+                "Failed to search public spaces: {}",
+                super::fmt_error_chain(&e)
+            )),
+        }?;
+
+        Ok(enrich_public_rooms_with_membership(&client, result))
     }
 }
 
@@ -1763,8 +1916,8 @@ pub async fn resolve_room_alias(
 #[cfg(test)]
 mod tests {
     use super::{
-        canonicalize_homeserver_base_url, discovery_hosts_for_server_input, normalize_server_name,
-        public_room_matches_search,
+        canonicalize_homeserver_base_url, discovery_hosts_for_server_input,
+        discover_federation_server_names, normalize_server_name, public_room_matches_search,
     };
 
     #[test]
@@ -1812,5 +1965,14 @@ mod tests {
         assert!(public_room_matches_search(&room, Some("security")));
         assert!(public_room_matches_search(&room, Some("!abc")));
         assert!(!public_room_matches_search(&room, Some("matrix.org")));
+    }
+
+    #[tokio::test]
+    async fn prefers_apex_federation_server_name_for_matrix_subdomains() {
+        let client = reqwest::Client::new();
+        let candidates = discover_federation_server_names(&client, "matrix.tchncs.de").await;
+
+        assert!(!candidates.is_empty());
+        assert_eq!(candidates[0], "tchncs.de".to_string());
     }
 }
