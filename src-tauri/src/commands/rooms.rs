@@ -595,17 +595,59 @@ pub async fn get_rooms(state: State<'_, Arc<AppState>>) -> Result<Vec<RoomInfo>,
 }
 
 #[tauri::command]
-pub async fn join_room(state: State<'_, Arc<AppState>>, room_id: String) -> Result<(), String> {
+pub async fn join_room(
+    state: State<'_, Arc<AppState>>,
+    room_id: String,
+    via_servers: Option<Vec<String>>,
+) -> Result<(), String> {
     let client = super::get_client(&state).await?;
-    let parsed =
-        matrix_sdk::ruma::RoomId::parse(&room_id).map_err(|e| format!("Invalid room ID: {e}"))?;
+    let homeserver = client.homeserver().to_string();
+    let access_token = client.access_token().ok_or("No access token")?;
 
-    // join_room_by_id works for both accepting invites and joining public rooms
-    // the client may not yet know about.
-    client
-        .join_room_by_id(&parsed)
+    let mut server_names = Vec::new();
+    if let Some(via_servers) = via_servers.as_deref() {
+        for via_server in via_servers {
+            for discovered in discover_federation_server_names(&state.http_client, via_server).await {
+                push_unique(&mut server_names, discovered);
+            }
+        }
+    }
+    if let Some((_, server_name)) = room_id.rsplit_once(':') {
+        for discovered in discover_federation_server_names(&state.http_client, server_name).await {
+            push_unique(&mut server_names, discovered);
+        }
+    }
+
+    let mut url = format!(
+        "{}/_matrix/client/v3/join/{}",
+        homeserver.trim_end_matches('/'),
+        urlencoding::encode(&room_id)
+    );
+    if !server_names.is_empty() {
+        let query = server_names
+            .iter()
+            .map(|server_name| format!("server_name={}", urlencoding::encode(server_name)))
+            .collect::<Vec<_>>()
+            .join("&");
+        url.push('?');
+        url.push_str(&query);
+    }
+
+    let resp = state
+        .http_client
+        .post(&url)
+        .timeout(Duration::from_secs(15))
+        .bearer_auth(access_token)
+        .json(&serde_json::json!({}))
+        .send()
         .await
         .map_err(|e| format!("Failed to join room: {}", fmt_error_chain(&e)))?;
+
+    if !resp.status().is_success() {
+        let status = resp.status();
+        let text = resp.text().await.unwrap_or_default();
+        return Err(format!("Failed to join room ({}): {}", status, text));
+    }
 
     Ok(())
 }
@@ -1974,5 +2016,17 @@ mod tests {
 
         assert!(!candidates.is_empty());
         assert_eq!(candidates[0], "tchncs.de".to_string());
+    }
+
+    #[test]
+    fn extracts_server_name_from_matrix_identifiers_with_rsplit_once() {
+        assert_eq!(
+            "!MfAmcoFvXtYUOhFCRt:4d2.org".rsplit_once(':').map(|(_, s)| s),
+            Some("4d2.org")
+        );
+        assert_eq!(
+            "#tune-zone:4d2.org".rsplit_once(':').map(|(_, s)| s),
+            Some("4d2.org")
+        );
     }
 }

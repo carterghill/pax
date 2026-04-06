@@ -32,6 +32,17 @@ interface PublicSpaceResult {
   membership?: string;
 }
 
+function extractMatrixServerName(identifier?: string | null): string | null {
+  if (!identifier) return null;
+  const idx = identifier.lastIndexOf(":");
+  if (idx === -1 || idx === identifier.length - 1) return null;
+  return identifier.slice(idx + 1);
+}
+
+function uniqueNonEmpty(values: Array<string | null | undefined>): string[] {
+  return Array.from(new Set(values.filter((value): value is string => !!value?.trim())));
+}
+
 interface CreateSpaceDialogProps {
   canCreate: boolean;
   onClose: () => void;
@@ -198,11 +209,22 @@ export default function CreateSpaceDialog({
 
   // ── Join a space (by ID or from search result) ──
   const handleJoinSpace = useCallback(
-    async (roomId: string) => {
+    async (space: PublicSpaceResult) => {
+      const roomId = space.room_id;
+      const joinTarget = space.canonical_alias || roomId;
+      const viaServers = uniqueNonEmpty([
+        searchServer.trim() || null,
+        extractMatrixServerName(space.canonical_alias),
+        extractMatrixServerName(roomId),
+      ]);
+
       setJoiningId(roomId);
       setJoinSuccess(null);
       try {
-        await invoke("join_room", { roomId });
+        await invoke("join_room", {
+          roomId: joinTarget,
+          viaServers: viaServers.length > 0 ? viaServers : null,
+        });
         setJoinSuccess(roomId);
         onCreated();
         // Update search results to reflect new membership
@@ -217,32 +239,43 @@ export default function CreateSpaceDialog({
         setJoiningId(null);
       }
     },
-    [onCreated]
+    [onCreated, searchServer]
   );
 
   // ── Join by address ──
   const handleJoinByAddress = useCallback(async () => {
     const addr = joinAddress.trim();
     if (!addr) return;
+    if (addr.startsWith("#") && !addr.includes(":")) {
+      setSearchError("Room aliases must look like #name:server.com");
+      return;
+    }
+    if (addr.startsWith("!") && !addr.includes(":")) {
+      setSearchError("Room IDs must look like !opaqueid:server.com");
+      return;
+    }
     setSearchError(null);
     setJoinSuccess(null);
+    setJoiningId(addr);
 
     try {
-      let roomId = addr;
-      // If it looks like an alias (#something:server), resolve it first
-      if (addr.startsWith("#")) {
-        const resolved = await invoke<{ room_id: string }>(
-          "resolve_room_alias",
-          { alias: addr }
-        );
-        roomId = resolved.room_id;
-      }
-      await handleJoinSpace(roomId);
+      const viaServers = uniqueNonEmpty([
+        searchServer.trim() || null,
+        extractMatrixServerName(addr),
+      ]);
+      await invoke("join_room", {
+        roomId: addr,
+        viaServers: viaServers.length > 0 ? viaServers : null,
+      });
       setJoinAddress("");
+      setJoinSuccess(addr);
+      onCreated();
     } catch (e) {
       setSearchError(String(e));
+    } finally {
+      setJoiningId(null);
     }
-  }, [joinAddress, handleJoinSpace]);
+  }, [joinAddress, onCreated, searchServer]);
 
   // ── Shared styles ──
   const labelStyle: React.CSSProperties = {
@@ -958,7 +991,7 @@ function SpaceSearchRow({
   space: PublicSpaceResult;
   joiningId: string | null;
   joinSuccess: string | null;
-  onJoin: (roomId: string) => void;
+  onJoin: (space: PublicSpaceResult) => void;
   palette: import("../theme/types").ThemePalette;
   typography: import("../theme/types").ThemeTypography;
 }) {
@@ -1069,7 +1102,7 @@ function SpaceSearchRow({
           </span>
         ) : (
           <button
-            onClick={() => onJoin(space.room_id)}
+            onClick={() => onJoin(space)}
             disabled={isJoining}
             style={{
               display: "flex",
