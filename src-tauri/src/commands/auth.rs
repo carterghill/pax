@@ -27,7 +27,10 @@ pub struct SavedCredentials {
 /// Best-effort: delete every Matrix SDK SQLite directory except `keep_sqlite_relative`
 /// (relative to app data, `/`-separated, e.g. `matrix_sessions/pw_<uuid>`).
 /// Runs in the background so login/register return immediately.
-pub(crate) fn spawn_cleanup_stale_matrix_stores(app: tauri::AppHandle, keep_sqlite_relative: String) {
+pub(crate) fn spawn_cleanup_stale_matrix_stores(
+    app: tauri::AppHandle,
+    keep_sqlite_relative: String,
+) {
     tauri::async_runtime::spawn(async move {
         let res = tokio::task::spawn_blocking(move || {
             let Ok(base) = app.path().app_data_dir() else {
@@ -117,8 +120,7 @@ pub fn save_session_to_credentials(
     let mut creds = if path.exists() {
         let contents = std::fs::read_to_string(&path)
             .map_err(|e| format!("Failed to read credentials: {e}"))?;
-        serde_json::from_str(&contents)
-            .map_err(|e| format!("Failed to parse credentials: {e}"))?
+        serde_json::from_str(&contents).map_err(|e| format!("Failed to parse credentials: {e}"))?
     } else {
         SavedCredentials {
             homeserver: homeserver.to_string(),
@@ -141,10 +143,7 @@ pub fn save_session_to_credentials(
 /// Persist the homeserver URL (no password). Session tokens are patched in
 /// later by `save_session_to_credentials` after a successful login.
 #[tauri::command]
-pub fn save_credentials(
-    app: tauri::AppHandle,
-    homeserver: String,
-) -> Result<(), String> {
+pub fn save_credentials(app: tauri::AppHandle, homeserver: String) -> Result<(), String> {
     let path = credentials_path(&app)?;
     let creds = SavedCredentials {
         homeserver,
@@ -163,10 +162,10 @@ pub fn load_credentials(app: tauri::AppHandle) -> Result<Option<SavedCredentials
     if !path.exists() {
         return Ok(None);
     }
-    let contents = std::fs::read_to_string(&path)
-        .map_err(|e| format!("Failed to read credentials: {e}"))?;
-    let creds: SavedCredentials = serde_json::from_str(&contents)
-        .map_err(|e| format!("Failed to parse credentials: {e}"))?;
+    let contents =
+        std::fs::read_to_string(&path).map_err(|e| format!("Failed to read credentials: {e}"))?;
+    let creds: SavedCredentials =
+        serde_json::from_str(&contents).map_err(|e| format!("Failed to parse credentials: {e}"))?;
     Ok(Some(creds))
 }
 

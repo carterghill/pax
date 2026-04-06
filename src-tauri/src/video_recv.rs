@@ -22,8 +22,8 @@ use std::sync::Arc;
 
 use futures_util::StreamExt;
 use livekit::track::RemoteVideoTrack;
-use livekit::webrtc::video_stream::native::NativeVideoStream;
 use livekit::webrtc::prelude::VideoBuffer;
+use livekit::webrtc::video_stream::native::NativeVideoStream;
 use once_cell::sync::Lazy;
 use parking_lot::Mutex;
 use serde::Serialize;
@@ -402,10 +402,17 @@ pub fn handle_protocol_request(
             if let Some(entry) = streams.get_mut(&id) {
                 entry.target = if w == 0 && h == 0 { (0, 0) } else { (w, h) };
             } else if w > 0 && h > 0 {
-                streams.insert(id, StreamState {
-                    body: None, width: 0, height: 0, frame_number: 0,
-                    receiving: false, target: (w, h),
-                });
+                streams.insert(
+                    id,
+                    StreamState {
+                        body: None,
+                        width: 0,
+                        height: 0,
+                        frame_number: 0,
+                        receiving: false,
+                        target: (w, h),
+                    },
+                );
             }
         }
         return ok_204();
@@ -417,7 +424,11 @@ pub fn handle_protocol_request(
         for (id, s) in streams.iter() {
             items.push(format!(
                 r#"{{"id":"{}","receiving":{},"frameNumber":{},"width":{},"height":{}}}"#,
-                id.replace('"', "\\\""), s.receiving, s.frame_number, s.width, s.height,
+                id.replace('"', "\\\""),
+                s.receiving,
+                s.frame_number,
+                s.width,
+                s.height,
             ));
         }
         let json = format!(r#"{{"streams":[{}]}}"#, items.join(","));

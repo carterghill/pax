@@ -123,7 +123,8 @@ async fn collect_room_voice_participants(
                         member.avatar_url(),
                         member.avatar(matrix_sdk::media::MediaFormat::File),
                         avatar_cache,
-                    ).await;
+                    )
+                    .await;
                     (name, avatar)
                 }
                 _ => (None, None),
@@ -255,9 +256,8 @@ pub(crate) async fn discover_livekit_service_url(
     json.get("org.matrix.msc4143.rtc_foci")
         .and_then(|f| f.as_array())
         .and_then(|arr| {
-            arr.iter().find(|foci| {
-                foci.get("type").and_then(|t| t.as_str()) == Some("livekit")
-            })
+            arr.iter()
+                .find(|foci| foci.get("type").and_then(|t| t.as_str()) == Some("livekit"))
         })
         .and_then(|foci| foci.get("livekit_service_url"))
         .and_then(|u| u.as_str())
@@ -419,10 +419,16 @@ async fn send_or_fallback_leave(
                 return Ok(());
             }
             Ok(r) => {
-                log::warn!("send delayed leave failed ({}), falling back to manual PUT", r.status());
+                log::warn!(
+                    "send delayed leave failed ({}), falling back to manual PUT",
+                    r.status()
+                );
             }
             Err(e) => {
-                log::warn!("send delayed leave error: {}, falling back to manual PUT", e);
+                log::warn!(
+                    "send delayed leave error: {}, falling back to manual PUT",
+                    e
+                );
             }
         }
     }
@@ -442,7 +448,9 @@ pub(crate) async fn force_emit_voice_participants(
         collect_voice_participants_for_joined_voice_rooms(client, avatar_cache).await;
     let _ = app_handle.emit(
         "voice-participants-changed",
-        crate::types::VoiceParticipantsChangedPayload { participants_by_room },
+        crate::types::VoiceParticipantsChangedPayload {
+            participants_by_room,
+        },
     );
 }
 
@@ -524,9 +532,10 @@ pub(crate) async fn matrix_voice_join(
     let device_id = client.device_id().ok_or("No device ID")?;
 
     // 4. Get OpenID token for authenticating with lk-jwt-service
-    let openid_request = matrix_sdk::ruma::api::client::account::request_openid_token::v3::Request::new(
-        user_id.to_owned(),
-    );
+    let openid_request =
+        matrix_sdk::ruma::api::client::account::request_openid_token::v3::Request::new(
+            user_id.to_owned(),
+        );
     let openid = client
         .send(openid_request)
         .await
@@ -672,8 +681,8 @@ async fn matrix_voice_clear_my_memberships_in_room(
             if skip_state_key == Some(state_key) {
                 continue;
             }
-            let _ =
-                matrix_voice_leave_state_key(client, http, room_id, event_type_str, state_key).await;
+            let _ = matrix_voice_leave_state_key(client, http, room_id, event_type_str, state_key)
+                .await;
         }
     }
     Ok(())
@@ -698,8 +707,13 @@ pub(crate) async fn matrix_voice_leave_all_joined_rooms(
         .map(|room_id| {
             let client = client.clone();
             let http = http.clone();
-            let skip =
-                join_room_state_key.and_then(|(r, sk)| if r == room_id { Some(sk.to_string()) } else { None });
+            let skip = join_room_state_key.and_then(|(r, sk)| {
+                if r == room_id {
+                    Some(sk.to_string())
+                } else {
+                    None
+                }
+            });
             async move {
                 matrix_voice_clear_my_memberships_in_room(&client, &http, &room_id, skip.as_deref())
                     .await
@@ -792,7 +806,10 @@ async fn livekit_remove_participant(
     if !resp.status().is_success() {
         let status = resp.status();
         let body = resp.text().await.unwrap_or_default();
-        return Err(format!("RemoveParticipant {} ({}): {}", identity, status, body));
+        return Err(format!(
+            "RemoveParticipant {} ({}): {}",
+            identity, status, body
+        ));
     }
     Ok(())
 }
@@ -836,7 +853,10 @@ async fn kick_other_devices_from_livekit(
     let our_identity = format!("{}:{}", user_id, our_device_id);
 
     for lk_room in &rooms {
-        let room_name = lk_room.get("name").and_then(|n| n.as_str()).unwrap_or_default();
+        let room_name = lk_room
+            .get("name")
+            .and_then(|n| n.as_str())
+            .unwrap_or_default();
         if room_name.is_empty() {
             continue;
         }
@@ -846,18 +866,26 @@ async fn kick_other_devices_from_livekit(
             Err(_) => continue,
         };
 
-        let participants = match livekit_list_participants_for_room(http, lk_url, &room_jwt, room_name).await {
-            Ok(p) => p,
-            Err(e) => {
-                log::warn!("kick: {e}");
-                continue;
-            }
-        };
+        let participants =
+            match livekit_list_participants_for_room(http, lk_url, &room_jwt, room_name).await {
+                Ok(p) => p,
+                Err(e) => {
+                    log::warn!("kick: {e}");
+                    continue;
+                }
+            };
 
         for p in &participants {
             if p.identity.starts_with(&our_prefix) && p.identity != our_identity {
-                log::info!("Kicking stale LiveKit participant: {} (room={})", p.identity, room_name);
-                if let Err(e) = livekit_remove_participant(http, lk_url, &room_jwt, room_name, &p.identity).await {
+                log::info!(
+                    "Kicking stale LiveKit participant: {} (room={})",
+                    p.identity,
+                    room_name
+                );
+                if let Err(e) =
+                    livekit_remove_participant(http, lk_url, &room_jwt, room_name, &p.identity)
+                        .await
+                {
                     log::warn!("{e}");
                 }
             }
@@ -881,14 +909,11 @@ fn start_heartbeat_loop(
     reconnect_notify: Arc<tokio::sync::Notify>,
 ) {
     state.stop_heartbeat_loop();
-    state
-        .heartbeat_stop
-        .store(false, Ordering::SeqCst);
+    state.heartbeat_stop.store(false, Ordering::SeqCst);
     let stop = state.heartbeat_stop.clone();
     let st = state.clone();
     let handle = tauri::async_runtime::spawn(async move {
-        let mut interval =
-            tokio::time::interval(Duration::from_secs(HEARTBEAT_INTERVAL_SECS));
+        let mut interval = tokio::time::interval(Duration::from_secs(HEARTBEAT_INTERVAL_SECS));
         interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
         interval.tick().await; // skip immediate first tick
 
@@ -941,15 +966,10 @@ fn start_heartbeat_loop(
                     // 404: the delayed event was already fired (computer slept, network
                     // outage exceeded the timeout, etc.). We need to re-register and
                     // re-PUT call.member to rejoin the call.
-                    log::warn!(
-                        "Delayed leave was fired while we were away — recovering session"
-                    );
+                    log::warn!("Delayed leave was fired while we were away — recovering session");
                     match recover_session(c, &st.http_client, &room_id).await {
                         Ok(new_delay_id) => {
-                            log::info!(
-                                "Session recovered: new delay_id={}",
-                                new_delay_id
-                            );
+                            log::info!("Session recovered: new delay_id={}", new_delay_id);
                             current_delay_id = new_delay_id.clone();
                             last_membership_refresh = tokio::time::Instant::now();
                             // Update the shared delay_id so voice_disconnect uses the new one
@@ -1014,8 +1034,7 @@ fn decode_jwt_expiry(jwt: &str) -> Option<String> {
     validation.required_spec_claims.clear();
 
     let key = jsonwebtoken::DecodingKey::from_secret(b"unused");
-    let token_data =
-        jsonwebtoken::decode::<serde_json::Value>(jwt, &key, &validation).ok()?;
+    let token_data = jsonwebtoken::decode::<serde_json::Value>(jwt, &key, &validation).ok()?;
     let claims = token_data.claims;
 
     let exp = claims.get("exp")?.as_u64()?;
@@ -1047,6 +1066,8 @@ pub async fn voice_connect(
     voice_mgr: State<'_, voice::VoiceManager>,
     app_handle: tauri::AppHandle,
     room_id: String,
+    input_device_id: Option<String>,
+    output_device_id: Option<String>,
 ) -> Result<(), String> {
     log::debug!("voice_connect called for room {}", room_id);
     let state_arc: Arc<AppState> = (*state).clone();
@@ -1064,14 +1085,13 @@ pub async fn voice_connect(
     // Kick other devices of the same user from the LiveKit room.
     let user_id_str = client.user_id().ok_or("No user ID")?.to_string();
     let device_id_str = client.device_id().ok_or("No device ID")?.to_string();
-    log::debug!("About to kick other devices (user={}, device={})", user_id_str, device_id_str);
-    kick_other_devices_from_livekit(
-        &http_client,
-        &user_id_str,
-        &device_id_str,
-        &state.livekit,
-    )
-    .await;
+    log::debug!(
+        "About to kick other devices (user={}, device={})",
+        user_id_str,
+        device_id_str
+    );
+    kick_other_devices_from_livekit(&http_client, &user_id_str, &device_id_str, &state.livekit)
+        .await;
     log::debug!("Kick check complete, proceeding with join");
 
     // Clean up stale memberships in other rooms (fire-and-forget)
@@ -1112,6 +1132,8 @@ pub async fn voice_connect(
             result.jwt,
             identity,
             app_handle,
+            input_device_id,
+            output_device_id,
         )
         .await?;
 
@@ -1123,7 +1145,12 @@ pub async fn voice_connect(
     let reconnect_notify = voice_mgr
         .reconnect_notify()
         .expect("reconnect_notify missing right after connect");
-    start_heartbeat_loop(state_arc.clone(), delay_id, room_id.clone(), reconnect_notify);
+    start_heartbeat_loop(
+        state_arc.clone(),
+        delay_id,
+        room_id.clone(),
+        reconnect_notify,
+    );
 
     if let Some((mid, lk_name)) = voice_mgr.current_matrix_room_and_livekit_sfu_name() {
         if let Ok(mut m) = state_arc.livekit_matrix_to_sfu_room.lock() {
@@ -1185,7 +1212,9 @@ pub async fn voice_toggle_mic(voice_mgr: State<'_, voice::VoiceManager>) -> Resu
 }
 
 #[tauri::command]
-pub async fn voice_toggle_deafen(voice_mgr: State<'_, voice::VoiceManager>) -> Result<bool, String> {
+pub async fn voice_toggle_deafen(
+    voice_mgr: State<'_, voice::VoiceManager>,
+) -> Result<bool, String> {
     voice_mgr.toggle_deafen()
 }
 
@@ -1205,7 +1234,8 @@ pub async fn voice_start_screen_share(
 ) -> Result<(), String> {
     log::info!(
         "voice_start_screen_share: mode={} window_title={:?}",
-        mode, window_title
+        mode,
+        window_title
     );
     let screen_mode = match mode.as_str() {
         "window" => screen::ScreenShareMode::Window,
@@ -1263,6 +1293,11 @@ pub async fn voice_set_participant_volume(
 ) -> Result<(), String> {
     voice_mgr.set_participant_volume(identity, volume, source);
     Ok(())
+}
+
+#[tauri::command]
+pub fn voice_list_audio_devices() -> Result<voice::AudioDeviceList, String> {
+    voice::list_audio_devices()
 }
 
 fn livekit_room_name_candidates(matrix_room_id: &str) -> Vec<String> {
@@ -1342,10 +1377,12 @@ fn track_is_microphone_or_voice_audio(track: &serde_json::Value) -> bool {
             return true;
         }
     }
-    let src_num = track
-        .get("source")
-        .and_then(|v| v.as_u64())
-        .or_else(|| track.get("source").and_then(|v| v.as_i64()).map(|i| i as u64));
+    let src_num = track.get("source").and_then(|v| v.as_u64()).or_else(|| {
+        track
+            .get("source")
+            .and_then(|v| v.as_i64())
+            .map(|i| i as u64)
+    });
     if let Some(n) = src_num {
         if n == 2 || n == 4 {
             return true;
@@ -1390,11 +1427,19 @@ fn participant_track_nodes(p: &serde_json::Value) -> Vec<serde_json::Value> {
 }
 
 fn track_muted_flag(track: &serde_json::Value) -> bool {
-    if track.get("muted").and_then(|m| m.as_bool()).unwrap_or(false) {
+    if track
+        .get("muted")
+        .and_then(|m| m.as_bool())
+        .unwrap_or(false)
+    {
         return true;
     }
     if let Some(inner) = track.get("track") {
-        if inner.get("muted").and_then(|m| m.as_bool()).unwrap_or(false) {
+        if inner
+            .get("muted")
+            .and_then(|m| m.as_bool())
+            .unwrap_or(false)
+        {
             return true;
         }
     }
@@ -1523,22 +1568,29 @@ async fn fetch_livekit_voice_snapshot_for_matrix_room(
         _ => return Ok((vec![], None)),
     };
 
-    let (lk_room, discovered_sfu_name) =
-        if let Some(name) = cached_sfu_room_name.map(str::trim).filter(|s| !s.is_empty()) {
-            (name.to_string(), None)
-        } else {
-            let admin_jwt = make_livekit_admin_jwt(api_key, api_secret, "")?;
-            let rooms = livekit_list_rooms(http, lk_url, &admin_jwt).await?;
-            let Some(picked) = pick_livekit_room_name(&rooms, matrix_room_id) else {
-                log::debug!(
-                    "LiveKit snapshot ({}): no SFU room matched among {} rooms",
-                    matrix_room_id, rooms.len()
-                );
-                return Ok((vec![], None));
-            };
-            log::debug!("LiveKit snapshot ({}): resolved SFU room '{}'", matrix_room_id, picked);
-            (picked.clone(), Some(picked))
+    let (lk_room, discovered_sfu_name) = if let Some(name) = cached_sfu_room_name
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+    {
+        (name.to_string(), None)
+    } else {
+        let admin_jwt = make_livekit_admin_jwt(api_key, api_secret, "")?;
+        let rooms = livekit_list_rooms(http, lk_url, &admin_jwt).await?;
+        let Some(picked) = pick_livekit_room_name(&rooms, matrix_room_id) else {
+            log::debug!(
+                "LiveKit snapshot ({}): no SFU room matched among {} rooms",
+                matrix_room_id,
+                rooms.len()
+            );
+            return Ok((vec![], None));
         };
+        log::debug!(
+            "LiveKit snapshot ({}): resolved SFU room '{}'",
+            matrix_room_id,
+            picked
+        );
+        (picked.clone(), Some(picked))
+    };
 
     let room_jwt = make_livekit_admin_jwt(api_key, api_secret, &lk_room)?;
     let participants =
@@ -1655,7 +1707,9 @@ pub async fn get_all_livekit_voice_snapshots(
             }
         };
 
-        match livekit_list_participants_for_room(&state.http_client, lk_url, &room_jwt, &sfu_name).await {
+        match livekit_list_participants_for_room(&state.http_client, lk_url, &room_jwt, &sfu_name)
+            .await
+        {
             Ok(participants) => {
                 result.insert(matrix_room_id.clone(), participants);
             }

@@ -1,10 +1,10 @@
 #![recursion_limit = "256"]
 
-pub mod platform;
 pub mod codec;
 mod commands;
 mod idle;
 pub mod native_overlay;
+pub mod platform;
 mod screen;
 mod types;
 pub mod video_recv;
@@ -16,9 +16,9 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex as StdMutex};
 
 use matrix_sdk::Client;
+use tauri::Manager;
 use tokio::sync::Mutex;
 use tokio::task::JoinHandle;
-use tauri::Manager;
 
 use platform::DisplayServer;
 
@@ -267,6 +267,7 @@ pub fn run() {
             commands::voice_matrix::get_noise_suppression_config,
             commands::voice_matrix::set_noise_suppression_config,
             commands::voice_matrix::voice_set_participant_volume,
+            commands::voice_matrix::voice_list_audio_devices,
             commands::messages::send_message,
             commands::messages::edit_message,
             commands::messages::redact_message,
@@ -297,7 +298,9 @@ pub fn run() {
         ])
         .setup(|app| {
             // Set window icon (taskbar + title bar) from our bundled icons
-            let main_window = app.get_webview_window("main").expect("main window not found");
+            let main_window = app
+                .get_webview_window("main")
+                .expect("main window not found");
             let icon = tauri::include_image!("icons/32x32.png");
             let _ = main_window.set_icon(icon);
 
@@ -311,7 +314,8 @@ pub fn run() {
                             for entry in entries.flatten() {
                                 let name = entry.file_name();
                                 let name_str = name.to_string_lossy();
-                                if name_str.starts_with("pax_media_") && name_str.ends_with(".mp4") {
+                                if name_str.starts_with("pax_media_") && name_str.ends_with(".mp4")
+                                {
                                     if std::fs::remove_file(entry.path()).is_ok() {
                                         count += 1;
                                     }
@@ -329,26 +333,28 @@ pub fn run() {
             // so getUserMedia() works for voice calls.
             #[cfg(target_os = "linux")]
             {
-                main_window.with_webview(|webview| {
-                    use webkit2gtk::WebViewExt;
-                    use webkit2gtk::PermissionRequestExt;
-                    use webkit2gtk::SettingsExt;
-                    let wv = webview.inner();
+                main_window
+                    .with_webview(|webview| {
+                        use webkit2gtk::PermissionRequestExt;
+                        use webkit2gtk::SettingsExt;
+                        use webkit2gtk::WebViewExt;
+                        let wv = webview.inner();
 
-                    // Enable WebRTC and media stream in WebKitGTK settings
-                    // (disabled by default since WebKitGTK 2.38)
-                    if let Some(settings) = wv.settings() {
-                        settings.set_enable_webrtc(true);
-                        settings.set_enable_media_stream(true);
-                        settings.set_enable_webaudio(true);
-                    }
+                        // Enable WebRTC and media stream in WebKitGTK settings
+                        // (disabled by default since WebKitGTK 2.38)
+                        if let Some(settings) = wv.settings() {
+                            settings.set_enable_webrtc(true);
+                            settings.set_enable_media_stream(true);
+                            settings.set_enable_webaudio(true);
+                        }
 
-                    // Auto-grant microphone/camera permission requests
-                    wv.connect_permission_request(|_wv, request| {
-                        request.allow();
-                        true
-                    });
-                }).expect("Failed to configure webview permissions");
+                        // Auto-grant microphone/camera permission requests
+                        wv.connect_permission_request(|_wv, request| {
+                            request.allow();
+                            true
+                        });
+                    })
+                    .expect("Failed to configure webview permissions");
             }
 
             Ok(())

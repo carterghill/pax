@@ -21,7 +21,10 @@ fn app_data_dir(app: &tauri::AppHandle) -> Result<std::path::PathBuf, String> {
         .map_err(|e| format!("Failed to get app data dir: {e}"))
 }
 
-fn sqlite_path_for_restore(app: &tauri::AppHandle, creds: &SavedCredentials) -> Result<std::path::PathBuf, String> {
+fn sqlite_path_for_restore(
+    app: &tauri::AppHandle,
+    creds: &SavedCredentials,
+) -> Result<std::path::PathBuf, String> {
     let base = app_data_dir(app)?;
     Ok(match &creds.sqlite_store_dir {
         Some(rel) => base.join(rel),
@@ -47,7 +50,11 @@ async fn build_client_with_retry(
             Ok(c) => return Ok(c),
             Err(e) => {
                 last_err = format!("Failed to create client: {}", fmt_error_chain(&e));
-                log::warn!("build_client attempt {}/3 failed: {}", attempt + 1, last_err);
+                log::warn!(
+                    "build_client attempt {}/3 failed: {}",
+                    attempt + 1,
+                    last_err
+                );
                 if attempt < 2 {
                     tokio::time::sleep(Duration::from_millis(500 * (attempt + 1))).await;
                 }
@@ -118,9 +125,7 @@ async fn login_password_into_new_store(
             }
         }
     }
-    Err(format!(
-        "{log_prefix} failed after 3 attempts: {last_err}"
-    ))
+    Err(format!("{log_prefix} failed after 3 attempts: {last_err}"))
 }
 
 /// Register a new account on the homeserver.
@@ -158,7 +163,9 @@ pub async fn register(
 
     // 200 means open registration (no UIAA) — unlikely with a token server, but handle it
     if resp.status().is_success() {
-        let body: serde_json::Value = resp.json().await
+        let body: serde_json::Value = resp
+            .json()
+            .await
             .map_err(|e| format!("Failed to parse registration response: {e}"))?;
         return finish_registration(&state, &app, &homeserver, &username, &password, &body).await;
     }
@@ -170,7 +177,9 @@ pub async fn register(
     }
 
     // 401 → UIAA challenge
-    let uiaa: serde_json::Value = resp.json().await
+    let uiaa: serde_json::Value = resp
+        .json()
+        .await
         .map_err(|e| format!("Failed to parse UIAA response: {e}"))?;
 
     let session = uiaa["session"]
@@ -198,7 +207,9 @@ pub async fn register(
         .map_err(|e| format!("Failed to send token auth: {e}"))?;
 
     if resp.status().is_success() {
-        let body: serde_json::Value = resp.json().await
+        let body: serde_json::Value = resp
+            .json()
+            .await
             .map_err(|e| format!("Failed to parse registration response: {e}"))?;
         return finish_registration(&state, &app, &homeserver, &username, &password, &body).await;
     }
@@ -206,17 +217,25 @@ pub async fn register(
     if resp.status().as_u16() != 401 {
         let status = resp.status();
         let text = resp.text().await.unwrap_or_default();
-        return Err(format!("Registration token rejected ({}): {}", status, text));
+        return Err(format!(
+            "Registration token rejected ({}): {}",
+            status, text
+        ));
     }
 
     // Some servers require an additional m.login.dummy stage after the token
-    let uiaa2: serde_json::Value = resp.json().await
+    let uiaa2: serde_json::Value = resp
+        .json()
+        .await
         .map_err(|e| format!("Failed to parse second UIAA response: {e}"))?;
 
     // Check if the token stage completed (should appear in "completed" array)
     let completed = uiaa2["completed"].as_array();
     let token_accepted = completed
-        .map(|arr| arr.iter().any(|v| v.as_str() == Some("m.login.registration_token")))
+        .map(|arr| {
+            arr.iter()
+                .any(|v| v.as_str() == Some("m.login.registration_token"))
+        })
         .unwrap_or(false);
 
     if !token_accepted {
@@ -242,14 +261,19 @@ pub async fn register(
         .map_err(|e| format!("Failed to send dummy auth: {e}"))?;
 
     if resp.status().is_success() {
-        let body: serde_json::Value = resp.json().await
+        let body: serde_json::Value = resp
+            .json()
+            .await
             .map_err(|e| format!("Failed to parse registration response: {e}"))?;
         return finish_registration(&state, &app, &homeserver, &username, &password, &body).await;
     }
 
     let status = resp.status();
     let text = resp.text().await.unwrap_or_default();
-    Err(format!("Registration failed at dummy stage ({}): {}", status, text))
+    Err(format!(
+        "Registration failed at dummy stage ({}): {}",
+        status, text
+    ))
 }
 
 /// After registration succeeds, log in with the SDK to get a proper Client.
@@ -277,9 +301,10 @@ async fn finish_registration(
 
     tokio::time::timeout(
         Duration::from_secs(30),
-        client.sync_once(SyncSettings::default().set_presence(
-            matrix_sdk::ruma::presence::PresenceState::Offline,
-        )),
+        client.sync_once(
+            SyncSettings::default()
+                .set_presence(matrix_sdk::ruma::presence::PresenceState::Offline),
+        ),
     )
     .await
     .map_err(|_| "Initial sync timed out (30s)".to_string())?
@@ -325,19 +350,16 @@ pub async fn login(
     *state.client.lock().await = None;
 
     log::info!("login: password auth for {}", homeserver);
-    let (client, store_rel) = login_password_into_new_store(
-        &app,
-        &homeserver,
-        &username,
-        &password,
-        "Login",
-    )
-    .await?;
+    let (client, store_rel) =
+        login_password_into_new_store(&app, &homeserver, &username, &password, "Login").await?;
 
     log::info!("login: running initial sync...");
     tokio::time::timeout(
         Duration::from_secs(30),
-        client.sync_once(SyncSettings::default().set_presence(matrix_sdk::ruma::presence::PresenceState::Offline)),
+        client.sync_once(
+            SyncSettings::default()
+                .set_presence(matrix_sdk::ruma::presence::PresenceState::Offline),
+        ),
     )
     .await
     .map_err(|_| "Initial sync timed out (30s) — is the homeserver responsive?".to_string())?
@@ -381,8 +403,7 @@ pub async fn restore_session(
     state: State<'_, Arc<AppState>>,
     app: tauri::AppHandle,
 ) -> Result<String, String> {
-    let creds = super::auth::load_credentials(app.clone())?
-        .ok_or("No saved credentials")?;
+    let creds = super::auth::load_credentials(app.clone())?.ok_or("No saved credentials")?;
     let sp = sqlite_path_for_restore(&app, &creds)?;
     let sd = creds.session.ok_or("No saved session")?;
 
@@ -425,7 +446,10 @@ pub async fn restore_session(
         let mut succeeded = false;
         for attempt in 0u32..3 {
             match tokio::time::timeout(Duration::from_secs(5), client.whoami()).await {
-                Ok(Ok(_)) => { succeeded = true; break; }
+                Ok(Ok(_)) => {
+                    succeeded = true;
+                    break;
+                }
                 Ok(Err(e)) => {
                     let err_str = format!("{e}");
                     // Transient network errors (DNS, connection) — retry
@@ -438,16 +462,22 @@ pub async fn restore_session(
                         return Err(format!("Session expired: {e}"));
                     }
                     last_err = format!("Connection failed: {}", err_str);
-                    log::warn!("whoami attempt {}/3 failed (transient): {}", attempt + 1, err_str);
+                    log::warn!(
+                        "whoami attempt {}/3 failed (transient): {}",
+                        attempt + 1,
+                        err_str
+                    );
                     if attempt < 2 {
-                        tokio::time::sleep(Duration::from_millis(1000 * (attempt as u64 + 1))).await;
+                        tokio::time::sleep(Duration::from_millis(1000 * (attempt as u64 + 1)))
+                            .await;
                     }
                 }
                 Err(_) => {
                     last_err = "Token check timed out".to_string();
                     log::warn!("whoami attempt {}/3 timed out", attempt + 1);
                     if attempt < 2 {
-                        tokio::time::sleep(Duration::from_millis(1000 * (attempt as u64 + 1))).await;
+                        tokio::time::sleep(Duration::from_millis(1000 * (attempt as u64 + 1)))
+                            .await;
                     }
                 }
             }
@@ -507,7 +537,8 @@ pub async fn get_rooms(state: State<'_, Arc<AppState>>) -> Result<Vec<RoomInfo>,
             room.avatar_url().as_deref(),
             room.avatar(matrix_sdk::media::MediaFormat::File),
             &avatar_cache,
-        ).await;
+        )
+        .await;
         let room_id_str = room.room_id().to_string();
 
         // Find which spaces contain this room
@@ -536,7 +567,8 @@ pub async fn get_rooms(state: State<'_, Arc<AppState>>) -> Result<Vec<RoomInfo>,
             room.avatar_url().as_deref(),
             room.avatar(matrix_sdk::media::MediaFormat::File),
             &avatar_cache,
-        ).await;
+        )
+        .await;
         let room_id_str = room.room_id().to_string();
 
         // Check if any joined space lists this room as a child
@@ -563,10 +595,7 @@ pub async fn get_rooms(state: State<'_, Arc<AppState>>) -> Result<Vec<RoomInfo>,
 }
 
 #[tauri::command]
-pub async fn join_room(
-    state: State<'_, Arc<AppState>>,
-    room_id: String,
-) -> Result<(), String> {
+pub async fn join_room(state: State<'_, Arc<AppState>>, room_id: String) -> Result<(), String> {
     let client = super::get_client(&state).await?;
     let parsed =
         matrix_sdk::ruma::RoomId::parse(&room_id).map_err(|e| format!("Invalid room ID: {e}"))?;
@@ -601,12 +630,10 @@ pub async fn get_space_info(
     space_id: String,
 ) -> Result<SpaceInfo, String> {
     let client = super::get_client(&state).await?;
-    let parsed = matrix_sdk::ruma::RoomId::parse(&space_id)
-        .map_err(|e| format!("Invalid room ID: {e}"))?;
+    let parsed =
+        matrix_sdk::ruma::RoomId::parse(&space_id).map_err(|e| format!("Invalid room ID: {e}"))?;
 
-    let space = client
-        .get_room(&parsed)
-        .ok_or("Space not found")?;
+    let space = client.get_room(&parsed).ok_or("Space not found")?;
 
     let avatar_cache = state.avatar_cache.clone();
     let space_avatar = get_or_fetch_avatar(
@@ -620,10 +647,7 @@ pub async fn get_space_info(
     let space_topic = space.topic();
 
     // Call the room hierarchy API to discover child rooms (including ones not yet joined)
-    let session = client
-        .matrix_auth()
-        .session()
-        .ok_or("Not logged in")?;
+    let session = client.matrix_auth().session().ok_or("Not logged in")?;
     let homeserver = client.homeserver().to_string();
     let url = format!(
         "{}/_matrix/client/v1/rooms/{}/hierarchy?limit=50",
@@ -667,10 +691,7 @@ pub async fn get_space_info(
                 continue;
             }
 
-            let name = room_data["name"]
-                .as_str()
-                .unwrap_or("Unnamed")
-                .to_string();
+            let name = room_data["name"].as_str().unwrap_or("Unnamed").to_string();
             let topic = room_data["topic"]
                 .as_str()
                 .filter(|t| !t.is_empty())
@@ -762,7 +783,12 @@ pub async fn get_history_visibility(
         .bearer_auth(access_token.to_string())
         .send()
         .await
-        .map_err(|e| format!("Failed to get history visibility: {}", super::fmt_error_chain(&e)))?;
+        .map_err(|e| {
+            format!(
+                "Failed to get history visibility: {}",
+                super::fmt_error_chain(&e)
+            )
+        })?;
 
     if !resp.status().is_success() {
         // If the event doesn't exist yet, the spec default is "shared"
@@ -820,7 +846,12 @@ pub async fn set_history_visibility(
         .json(&content)
         .send()
         .await
-        .map_err(|e| format!("Failed to send history visibility event: {}", super::fmt_error_chain(&e)))?;
+        .map_err(|e| {
+            format!(
+                "Failed to send history visibility event: {}",
+                super::fmt_error_chain(&e)
+            )
+        })?;
 
     let status = resp.status();
     if !status.is_success() {
@@ -847,9 +878,7 @@ pub async fn set_history_visibility(
 /// assuming creation is allowed — the actual create request will fail with
 /// `M_FORBIDDEN` if the server disallows it, and we surface that error in the UI.
 #[tauri::command]
-pub async fn can_create_rooms(
-    state: State<'_, Arc<AppState>>,
-) -> Result<bool, String> {
+pub async fn can_create_rooms(state: State<'_, Arc<AppState>>) -> Result<bool, String> {
     let client = super::get_client(&state).await?;
 
     // The capabilities endpoint doesn't expose room creation directly, but if
@@ -903,7 +932,8 @@ pub async fn create_space(
     let access_token = client.access_token().ok_or("No access token")?;
 
     // Upload avatar if provided, get MXC URI
-    let avatar_mxc: Option<String> = if let (Some(data), Some(mime)) = (&avatar_data, &avatar_mime) {
+    let avatar_mxc: Option<String> = if let (Some(data), Some(mime)) = (&avatar_data, &avatar_mime)
+    {
         let bytes = data_encoding::BASE64
             .decode(data.as_bytes())
             .map_err(|e| format!("Invalid base64 avatar data: {e}"))?;
@@ -1001,8 +1031,15 @@ pub async fn create_space(
     // Build createRoom request body
     // For knock join rule, use private_chat preset (closest match) and let
     // the m.room.join_rules initial state event override it.
-    let effective_join_rule = join_rule.as_deref().unwrap_or(if is_public { "public" } else { "invite" });
-    let preset = if effective_join_rule == "public" { "public_chat" } else { "private_chat" };
+    let effective_join_rule =
+        join_rule
+            .as_deref()
+            .unwrap_or(if is_public { "public" } else { "invite" });
+    let preset = if effective_join_rule == "public" {
+        "public_chat"
+    } else {
+        "private_chat"
+    };
     let visibility = if is_public { "public" } else { "private" };
 
     let mut body = serde_json::json!({
@@ -1106,7 +1143,12 @@ pub async fn can_manage_space_children(
         .bearer_auth(access_token.to_string())
         .send()
         .await
-        .map_err(|e| format!("Failed to fetch power levels: {}", super::fmt_error_chain(&e)))?;
+        .map_err(|e| {
+            format!(
+                "Failed to fetch power levels: {}",
+                super::fmt_error_chain(&e)
+            )
+        })?;
 
     if !resp.status().is_success() {
         // If we can't read power levels, assume no permission
@@ -1201,7 +1243,11 @@ pub async fn create_room_in_space(
     }
 
     // Build createRoom body
-    let preset = if is_public { "public_chat" } else { "private_chat" };
+    let preset = if is_public {
+        "public_chat"
+    } else {
+        "private_chat"
+    };
     let visibility = if is_public { "public" } else { "private" };
 
     let mut body = serde_json::json!({
@@ -1286,14 +1332,21 @@ pub async fn create_room_in_space(
         .json(&child_content)
         .send()
         .await
-        .map_err(|e| format!("Room created but failed to link to space: {}", super::fmt_error_chain(&e)))?;
+        .map_err(|e| {
+            format!(
+                "Room created but failed to link to space: {}",
+                super::fmt_error_chain(&e)
+            )
+        })?;
 
     if !child_resp.status().is_success() {
         let status = child_resp.status();
         let text = child_resp.text().await.unwrap_or_default();
         log::warn!(
             "create_room_in_space: m.space.child failed ({}): {} — room {} exists but is unlinked",
-            status, text, new_room_id
+            status,
+            text,
+            new_room_id
         );
         return Err(format!(
             "Room created ({}) but linking to space failed ({}): {}",
@@ -1361,7 +1414,12 @@ pub async fn search_public_spaces(
         .json(&body)
         .send()
         .await
-        .map_err(|e| format!("Failed to search public spaces: {}", super::fmt_error_chain(&e)))?;
+        .map_err(|e| {
+            format!(
+                "Failed to search public spaces: {}",
+                super::fmt_error_chain(&e)
+            )
+        })?;
 
     if !resp.status().is_success() {
         let status = resp.status();

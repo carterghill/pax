@@ -7,10 +7,7 @@ use crate::{idle, AppState};
 use super::{fmt_error_chain, get_client};
 
 #[tauri::command]
-pub async fn set_presence(
-    state: State<'_, Arc<AppState>>,
-    presence: String,
-) -> Result<(), String> {
+pub async fn set_presence(state: State<'_, Arc<AppState>>, presence: String) -> Result<(), String> {
     let presence_state = match presence.as_str() {
         "online" => matrix_sdk::ruma::presence::PresenceState::Online,
         "unavailable" => matrix_sdk::ruma::presence::PresenceState::Unavailable,

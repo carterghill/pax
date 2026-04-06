@@ -51,11 +51,10 @@ fn main() {
     match target_os.as_str() {
         "windows" => {
             println!("cargo:rerun-if-env-changed=CUDA_PATH");
-            let cuda_home = std::path::PathBuf::from(
-                std::env::var("CUDA_PATH").unwrap_or_else(|_| {
+            let cuda_home =
+                std::path::PathBuf::from(std::env::var("CUDA_PATH").unwrap_or_else(|_| {
                     r"C:\Program Files\NVIDIA GPU Computing Toolkit\CUDA\v13.2".into()
-                }),
-            );
+                }));
             if cuda_home.join("include").join("cuda.h").exists() {
                 println!("cargo:rustc-cfg=has_nvenc");
                 println!("cargo:warning=Pax: NVENC hardware encoding enabled");

@@ -10,6 +10,14 @@ import {
   normalizeUserId,
 } from "../utils/matrix";
 import { useUserVolume } from "../hooks/useUserVolume";
+import {
+  AudioDeviceList,
+  getStoredInputDeviceId,
+  getStoredOutputDeviceId,
+  storeInputDeviceId,
+  storeOutputDeviceId,
+  SYSTEM_AUDIO_DEVICE_ID,
+} from "../hooks/useVoiceAudioDevices";
 import VolumeContextMenu from "./VolumeContextMenu";
 import ScreenShareGrid from "./ScreenShareGrid";
 import { useOverlayObstruction } from "../hooks/useOverlayObstruction";
@@ -34,6 +42,7 @@ export default function VoiceRoomView({
   // since VoiceCall extends VoiceCallState.
   const callState = voiceCall;
   const {
+    connect: onConnect,
     disconnect: onDisconnect,
     toggleMic: onToggleMic,
     toggleDeafen: onToggleDeafen,
@@ -46,6 +55,7 @@ export default function VoiceRoomView({
     getNoiseSuppressionConfig: onGetNoiseSuppressionConfig,
     setNoiseSuppressionConfig: onSetNoiseSuppressionConfig,
     setParticipantVolume: onSetParticipantVolume,
+    listAudioDevices: onListAudioDevices,
   } = voiceCall;
   const { palette, spacing, typography } = useTheme();
   const { getVolume, setVolume } = useUserVolume();
@@ -55,6 +65,11 @@ export default function VoiceRoomView({
   const [isStartingScreenShare, setIsStartingScreenShare] = useState(false);
   const [windowPickerOpen, setWindowPickerOpen] = useState(false);
   const [noiseConfig, setNoiseConfig] = useState({ extraAttenuation: 0.1, agcTargetRms: 6000 });
+  const [audioDevices, setAudioDevices] = useState<AudioDeviceList>({ input: [], output: [] });
+  const [audioDevicesLoading, setAudioDevicesLoading] = useState(false);
+  const [audioDeviceError, setAudioDeviceError] = useState<string | null>(null);
+  const [selectedInputDeviceId, setSelectedInputDeviceId] = useState(() => getStoredInputDeviceId());
+  const [selectedOutputDeviceId, setSelectedOutputDeviceId] = useState(() => getStoredOutputDeviceId());
   const screenShareMenuRef = useRef<HTMLDivElement>(null);
   const screenShareMenuPopupRef = useRef<HTMLDivElement>(null);
   const generalSettingsRef = useRef<HTMLDivElement>(null);
@@ -73,6 +88,32 @@ export default function VoiceRoomView({
     onGetLowBandwidthMode().then(setLowBandwidthMode).catch(() => {});
     onGetNoiseSuppressionConfig().then(setNoiseConfig).catch(() => {});
   }, [onGetLowBandwidthMode, onGetNoiseSuppressionConfig]);
+
+  useEffect(() => {
+    if (!generalSettingsOpen) return;
+    let cancelled = false;
+    setAudioDevicesLoading(true);
+    setAudioDeviceError(null);
+    onListAudioDevices()
+      .then((devices) => {
+        if (!cancelled) {
+          setAudioDevices(devices);
+        }
+      })
+      .catch((e) => {
+        if (!cancelled) {
+          setAudioDeviceError(String(e));
+        }
+      })
+      .finally(() => {
+        if (!cancelled) {
+          setAudioDevicesLoading(false);
+        }
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [generalSettingsOpen, onListAudioDevices]);
 
   const startShare = useCallback(
     async (mode: "screen" | "window", windowTitle?: string) => {
@@ -182,9 +223,51 @@ export default function VoiceRoomView({
     [getVolume],
   );
 
+  const visibleInputDeviceId = useMemo(() => {
+    if (
+      selectedInputDeviceId !== SYSTEM_AUDIO_DEVICE_ID &&
+      !audioDevices.input.some((device) => device.id === selectedInputDeviceId)
+    ) {
+      return SYSTEM_AUDIO_DEVICE_ID;
+    }
+    return selectedInputDeviceId;
+  }, [audioDevices.input, selectedInputDeviceId]);
+
+  const visibleOutputDeviceId = useMemo(() => {
+    if (
+      selectedOutputDeviceId !== SYSTEM_AUDIO_DEVICE_ID &&
+      !audioDevices.output.some((device) => device.id === selectedOutputDeviceId)
+    ) {
+      return SYSTEM_AUDIO_DEVICE_ID;
+    }
+    return selectedOutputDeviceId;
+  }, [audioDevices.output, selectedOutputDeviceId]);
+
   const isConnected = callState.connectedRoomId === room.id && !callState.isConnecting;
   const isConnecting = callState.isConnecting && callState.connectedRoomId === room.id;
   const hasScreenShare = callState.screenSharingOwners.length > 0 || callState.isLocalScreenSharing;
+
+  const handleAudioDeviceChange = useCallback(
+    async (kind: "input" | "output", deviceId: string) => {
+      setAudioDeviceError(null);
+      if (kind === "input") {
+        setSelectedInputDeviceId(deviceId);
+        storeInputDeviceId(deviceId);
+      } else {
+        setSelectedOutputDeviceId(deviceId);
+        storeOutputDeviceId(deviceId);
+      }
+
+      if (!isConnected) return;
+
+      try {
+        await onConnect(room.id, { forceReconnect: true });
+      } catch (e) {
+        setAudioDeviceError(String(e));
+      }
+    },
+    [isConnected, onConnect, room.id],
+  );
 
   // Build set of LiveKit participant identities (normalized) for matching
   // Build avatar lookup from Matrix roster (keyed by normalized userId)
@@ -947,6 +1030,73 @@ export default function VoiceRoomView({
               }}
               >
                 <div style={{ marginBottom: spacing.unit * 2, fontWeight: 600, fontSize: typography.fontSizeSmall }}>
+                  Audio devices
+                </div>
+                <div style={{ display: "flex", flexDirection: "column", gap: spacing.unit * 2 }}>
+                  <label style={{ display: "flex", flexDirection: "column", gap: spacing.unit, fontSize: typography.fontSizeSmall }}>
+                    <span>Input device</span>
+                    <select
+                      value={visibleInputDeviceId}
+                      disabled={audioDevicesLoading}
+                      onChange={(e) => { void handleAudioDeviceChange("input", e.target.value); }}
+                      style={{
+                        width: "100%",
+                        padding: `${spacing.unit}px ${spacing.unit * 1.5}px`,
+                        borderRadius: spacing.unit,
+                        border: `1px solid ${palette.border}`,
+                        backgroundColor: palette.bgTertiary,
+                        color: palette.textPrimary,
+                        fontSize: typography.fontSizeSmall,
+                      }}
+                    >
+                      <option value={SYSTEM_AUDIO_DEVICE_ID}>System default</option>
+                      {audioDevices.input.map((device) => (
+                        <option key={device.id} value={device.id}>
+                          {device.isDefault ? `${device.name} (current default)` : device.name}
+                        </option>
+                      ))}
+                    </select>
+                  </label>
+                  <label style={{ display: "flex", flexDirection: "column", gap: spacing.unit, fontSize: typography.fontSizeSmall }}>
+                    <span>Output device</span>
+                    <select
+                      value={visibleOutputDeviceId}
+                      disabled={audioDevicesLoading}
+                      onChange={(e) => { void handleAudioDeviceChange("output", e.target.value); }}
+                      style={{
+                        width: "100%",
+                        padding: `${spacing.unit}px ${spacing.unit * 1.5}px`,
+                        borderRadius: spacing.unit,
+                        border: `1px solid ${palette.border}`,
+                        backgroundColor: palette.bgTertiary,
+                        color: palette.textPrimary,
+                        fontSize: typography.fontSizeSmall,
+                      }}
+                    >
+                      <option value={SYSTEM_AUDIO_DEVICE_ID}>System default</option>
+                      {audioDevices.output.map((device) => (
+                        <option key={device.id} value={device.id}>
+                          {device.isDefault ? `${device.name} (current default)` : device.name}
+                        </option>
+                      ))}
+                    </select>
+                  </label>
+                  {audioDevicesLoading && (
+                    <div style={{ fontSize: typography.fontSizeSmall, color: palette.textSecondary }}>
+                      Loading audio devices...
+                    </div>
+                  )}
+                  {audioDeviceError && (
+                    <div style={{ fontSize: typography.fontSizeSmall, color: "#f23f43" }}>
+                      {audioDeviceError}
+                    </div>
+                  )}
+                  <div style={{ fontSize: typography.fontSizeSmall, color: palette.textSecondary }}>
+                    Device changes apply immediately and briefly reconnect voice.
+                  </div>
+                </div>
+
+                <div style={{ marginTop: spacing.unit * 3, marginBottom: spacing.unit * 2, fontWeight: 600, fontSize: typography.fontSizeSmall }}>
                   Low bandwidth mode
                 </div>
                 <button

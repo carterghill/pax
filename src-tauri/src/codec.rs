@@ -55,8 +55,7 @@ static CODEC_PREFERENCE: Lazy<RwLock<CodecPreference>> =
     Lazy::new(|| RwLock::new(CodecPreference::default()));
 
 /// Cached auto-detected codec (computed once, reused).
-static DETECTED_CODEC: Lazy<RwLock<Option<VideoCodec>>> =
-    Lazy::new(|| RwLock::new(None));
+static DETECTED_CODEC: Lazy<RwLock<Option<VideoCodec>>> = Lazy::new(|| RwLock::new(None));
 
 pub fn get_codec_preference() -> CodecPreference {
     *CODEC_PREFERENCE.read()
@@ -78,9 +77,7 @@ pub fn resolve_codec() -> VideoCodec {
         CodecPreference::AV1 => VideoCodec::AV1,
         CodecPreference::VP8 => VideoCodec::VP8,
         CodecPreference::Auto => {
-            DETECTED_CODEC
-                .read()
-                .unwrap_or(VideoCodec::VP9) // safe default — libvpx always works
+            DETECTED_CODEC.read().unwrap_or(VideoCodec::VP9) // safe default — libvpx always works
         }
     }
 }
@@ -157,9 +154,7 @@ pub fn detect_best_codec(adapter_name: &str) {
                 VideoCodec::H264
             }
         } else {
-            eprintln!(
-                "[Pax Codec] AMD detected but no HW encoder available — using VP9 (libvpx)"
-            );
+            eprintln!("[Pax Codec] AMD detected but no HW encoder available — using VP9 (libvpx)");
             VideoCodec::VP9
         }
     } else if name.contains("INTEL") {

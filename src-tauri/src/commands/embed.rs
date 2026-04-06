@@ -59,9 +59,7 @@ struct FxVideo {
 
 /// Check if a URL is a Twitter/X status link. Returns the API URL if so.
 fn twitter_api_url(url: &str) -> Option<String> {
-    let re = regex::Regex::new(
-        r"^https?://(twitter\.com|x\.com)/([^/]+)/status/(\d+)"
-    ).unwrap();
+    let re = regex::Regex::new(r"^https?://(twitter\.com|x\.com)/([^/]+)/status/(\d+)").unwrap();
     let caps = re.captures(url)?;
     let user = &caps[2];
     let id = &caps[3];
@@ -143,10 +141,7 @@ async fn fetch_twitter_metadata(
 
 /// Fetch Open Graph metadata from a URL by downloading the HTML and parsing
 /// `<meta property="og:*">` and `<meta name="twitter:*">` tags.
-async fn fetch_og_metadata(
-    client: &reqwest::Client,
-    url: &str,
-) -> Result<UrlMetadata, String> {
+async fn fetch_og_metadata(client: &reqwest::Client, url: &str) -> Result<UrlMetadata, String> {
     let resp = client
         .get(url)
         .header("Accept", "text/html")
@@ -290,11 +285,7 @@ fn html_decode(s: &str) -> String {
 /* ------------------------------------------------------------------ */
 
 /// Domains allowed through the media proxy (security: prevent open proxy).
-const ALLOWED_MEDIA_HOSTS: &[&str] = &[
-    "video.twimg.com",
-    "pbs.twimg.com",
-    "abs.twimg.com",
-];
+const ALLOWED_MEDIA_HOSTS: &[&str] = &["video.twimg.com", "pbs.twimg.com", "abs.twimg.com"];
 
 fn is_allowed_media_host(url: &str) -> bool {
     ALLOWED_MEDIA_HOSTS.iter().any(|&allowed| {
@@ -311,8 +302,7 @@ fn media_temp_path(app: &tauri::AppHandle, url: &str) -> Result<std::path::PathB
         .temp_dir()
         .map_err(|e| format!("Failed to get temp dir: {e}"))?;
 
-    std::fs::create_dir_all(&temp_dir)
-        .map_err(|e| format!("Failed to create temp dir: {e}"))?;
+    std::fs::create_dir_all(&temp_dir).map_err(|e| format!("Failed to create temp dir: {e}"))?;
 
     let hash = {
         use std::hash::{Hash, Hasher};
@@ -372,8 +362,7 @@ pub async fn proxy_media(app: tauri::AppHandle, url: String) -> Result<String, S
 
     log::info!("[Pax Media] Downloaded {} bytes", bytes.len());
 
-    std::fs::write(&file_path, &bytes)
-        .map_err(|e| format!("Failed to write temp file: {e}"))?;
+    std::fs::write(&file_path, &bytes).map_err(|e| format!("Failed to write temp file: {e}"))?;
 
     let path_str = file_path
         .to_str()
@@ -408,10 +397,7 @@ pub async fn cleanup_proxy_media(app: tauri::AppHandle, path: String) -> Result<
         return Err("Path is outside temp directory".to_string());
     }
 
-    let fname = file_path
-        .file_name()
-        .and_then(|n| n.to_str())
-        .unwrap_or("");
+    let fname = file_path.file_name().and_then(|n| n.to_str()).unwrap_or("");
     if !fname.starts_with("pax_media_") || !fname.ends_with(".mp4") {
         return Err("Not a pax media temp file".to_string());
     }
@@ -440,8 +426,8 @@ pub async fn cleanup_all_proxy_media(app: tauri::AppHandle) -> Result<u32, Strin
     }
 
     let mut count = 0u32;
-    let entries = std::fs::read_dir(&temp_dir)
-        .map_err(|e| format!("Failed to read temp dir: {e}"))?;
+    let entries =
+        std::fs::read_dir(&temp_dir).map_err(|e| format!("Failed to read temp dir: {e}"))?;
 
     for entry in entries.flatten() {
         let name = entry.file_name();

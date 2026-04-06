@@ -3,6 +3,10 @@ import { invoke } from "@tauri-apps/api/core";
 import { listen, UnlistenFn } from "@tauri-apps/api/event";
 import { playSound } from "react-sounds";
 import { getStoredVolume } from "./useUserVolume";
+import {
+  AudioDeviceList,
+  getStoredAudioDevicePreferences,
+} from "./useVoiceAudioDevices";
 
 /**
  * Participant info emitted from the Rust backend.
@@ -47,7 +51,10 @@ export interface VoiceCallState {
 }
 
 export interface VoiceCallActions {
-  connect: (roomId: string) => void;
+  connect: (
+    roomId: string,
+    options?: { forceReconnect?: boolean },
+  ) => Promise<void>;
   disconnect: () => void;
   toggleMic: () => void;
   toggleDeafen: () => void;
@@ -60,6 +67,7 @@ export interface VoiceCallActions {
   getNoiseSuppressionConfig: () => Promise<{ extraAttenuation: number; agcTargetRms: number }>;
   setNoiseSuppressionConfig: (config: { extraAttenuation: number; agcTargetRms: number }) => Promise<void>;
   setParticipantVolume: (identity: string, volume: number, source: string) => void;
+  listAudioDevices: () => Promise<AudioDeviceList>;
 }
 
 /** Full return type of useVoiceCall — state + actions. */
@@ -218,7 +226,8 @@ export function useVoiceCall() {
 
         try {
           isConnectingRef.current = true;
-          await invoke("voice_connect", { roomId });
+          const { inputDeviceId, outputDeviceId } = getStoredAudioDevicePreferences();
+          await invoke("voice_connect", { roomId, inputDeviceId, outputDeviceId });
           isConnectingRef.current = false;
           console.log(
             `[Pax] Auto-rejoin succeeded on attempt ${attempt + 1}`
@@ -253,12 +262,17 @@ export function useVoiceCall() {
     };
   }, []);
 
-  const connect = useCallback(async (roomId: string) => {
-    if (connectedRoomIdRef.current === roomId) return;
+  const connect = useCallback(async (
+    roomId: string,
+    options?: { forceReconnect?: boolean },
+  ) => {
+    const forceReconnect = options?.forceReconnect ?? false;
+    if (!forceReconnect && connectedRoomIdRef.current === roomId) return;
     if (isConnectingRef.current) return;
     // Cancel any in-progress auto-rejoin (e.g. user connects to a different room)
     rejoinRoomRef.current = null;
     isConnectingRef.current = true;
+    const { inputDeviceId, outputDeviceId } = getStoredAudioDevicePreferences();
     setState((prev) => ({
       ...prev,
       isConnecting: true,
@@ -266,7 +280,7 @@ export function useVoiceCall() {
       connectedRoomId: roomId,
     }));
     try {
-      await invoke("voice_connect", { roomId });
+      await invoke("voice_connect", { roomId, inputDeviceId, outputDeviceId });
       isConnectingRef.current = false;
       // State will be updated via the event listener
     } catch (e) {
@@ -349,6 +363,73 @@ export function useVoiceCall() {
     }
   }, []);
 
+  const toggleNoiseSuppression = useCallback(() => {
+    invoke<boolean>("voice_toggle_noise_suppression")
+      .then((enabled) => {
+        setState((prev) => ({ ...prev, isNoiseSuppressed: enabled }));
+      })
+      .catch((e) => {
+        console.error("Failed to toggle noise suppression:", e);
+      });
+  }, []);
+
+  const startScreenShare = useCallback(
+    async (mode: "screen" | "window", windowTitle?: string): Promise<void> => {
+      setState((prev) => ({ ...prev, error: null }));
+      try {
+        await invoke("voice_start_screen_share", { mode, windowTitle: windowTitle ?? null });
+      } catch (e) {
+        console.error("Failed to start screen share:", e);
+        setState((prev) => ({ ...prev, error: String(e) }));
+        throw e;
+      }
+    },
+    [],
+  );
+
+  const enumerateScreenShareWindows = useCallback(
+    () => invoke<[string, string][]>("enumerate_screen_share_windows"),
+    [],
+  );
+
+  const stopScreenShare = useCallback(async (): Promise<void> => {
+    try {
+      await invoke("voice_stop_screen_share");
+    } catch (e) {
+      console.error("Failed to stop screen share:", e);
+      throw e;
+    }
+  }, []);
+
+  const getLowBandwidthMode = useCallback(
+    () => invoke<boolean>("get_low_bandwidth_mode"),
+    [],
+  );
+
+  const setLowBandwidthMode = useCallback(
+    (enabled: boolean) => invoke<void>("set_low_bandwidth_mode", { enabled }),
+    [],
+  );
+
+  const getNoiseSuppressionConfig = useCallback(
+    () =>
+      invoke<{ extraAttenuation: number; agcTargetRms: number }>(
+        "get_noise_suppression_config",
+      ),
+    [],
+  );
+
+  const setNoiseSuppressionConfig = useCallback(
+    (config: { extraAttenuation: number; agcTargetRms: number }) =>
+      invoke<void>("set_noise_suppression_config", { config }),
+    [],
+  );
+
+  const listAudioDevices = useCallback(
+    () => invoke<AudioDeviceList>("voice_list_audio_devices"),
+    [],
+  );
+
   /**
    * Set the playback volume for a specific remote participant.
    * Volume is 0-2 (0% to 200%).
@@ -414,42 +495,15 @@ export function useVoiceCall() {
     disconnect,
     toggleMic,
     toggleDeafen,
-    toggleNoiseSuppression: () => {
-      invoke<boolean>("voice_toggle_noise_suppression")
-        .then((enabled) => {
-          setState((prev) => ({ ...prev, isNoiseSuppressed: enabled }));
-        })
-        .catch((e) => {
-          console.error("Failed to toggle noise suppression:", e);
-        });
-    },
-    startScreenShare: async (mode: "screen" | "window", windowTitle?: string): Promise<void> => {
-      setState((prev) => ({ ...prev, error: null })); // Clear previous error before retry
-      try {
-        await invoke("voice_start_screen_share", { mode, windowTitle: windowTitle ?? null });
-      } catch (e) {
-        console.error("Failed to start screen share:", e);
-        setState((prev) => ({ ...prev, error: String(e) }));
-        throw e;
-      }
-    },
-    enumerateScreenShareWindows: () =>
-      invoke<[string, string][]>("enumerate_screen_share_windows"),
-    stopScreenShare: async (): Promise<void> => {
-      try {
-        await invoke("voice_stop_screen_share");
-      } catch (e) {
-        console.error("Failed to stop screen share:", e);
-        throw e;
-      }
-    },
-    getLowBandwidthMode: () => invoke<boolean>("get_low_bandwidth_mode"),
-    setLowBandwidthMode: (enabled: boolean) =>
-      invoke<void>("set_low_bandwidth_mode", { enabled }),
-    getNoiseSuppressionConfig: () =>
-      invoke<{ extraAttenuation: number; agcTargetRms: number }>("get_noise_suppression_config"),
-    setNoiseSuppressionConfig: (config: { extraAttenuation: number; agcTargetRms: number }) =>
-      invoke<void>("set_noise_suppression_config", { config }),
+    toggleNoiseSuppression,
+    startScreenShare,
+    enumerateScreenShareWindows,
+    stopScreenShare,
+    getLowBandwidthMode,
+    setLowBandwidthMode,
+    getNoiseSuppressionConfig,
+    setNoiseSuppressionConfig,
     setParticipantVolume,
+    listAudioDevices,
   };
 }

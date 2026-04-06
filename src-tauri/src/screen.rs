@@ -8,15 +8,15 @@
 //! Converts frames to I420 and feeds them into a NativeVideoSource for publishing.
 //! On Windows, captures system audio via WASAPI process loopback.
 
-use std::sync::atomic::{AtomicBool, Ordering};
 use once_cell::sync::Lazy;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::thread;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use livekit::options::{TrackPublishOptions, VideoEncoding};
-use livekit::track::{LocalAudioTrack, LocalTrack, LocalVideoTrack};
 use livekit::track::TrackSource;
+use livekit::track::{LocalAudioTrack, LocalTrack, LocalVideoTrack};
 use livekit::webrtc::video_frame::{I420Buffer, VideoFrame, VideoRotation};
 use livekit::webrtc::video_source::{RtcVideoSource, VideoResolution};
 
@@ -212,9 +212,7 @@ pub fn set_screen_share_quality(quality: ScreenShareQuality) {
 ///
 /// - Default mode: simulcast ON, 3.5 Mbps / 30 fps.
 /// - Low bandwidth mode: simulcast OFF, 500 kbps / 24 fps.
-fn build_screen_share_publish_options(
-    codec: livekit::options::VideoCodec,
-) -> TrackPublishOptions {
+fn build_screen_share_publish_options(codec: livekit::options::VideoCodec) -> TrackPublishOptions {
     // Reset ABR tier — every new stream starts at full quality
     set_screen_share_quality(ScreenShareQuality::High);
     let quality = ScreenShareQuality::High;
@@ -226,7 +224,11 @@ fn build_screen_share_publish_options(
 
     log::info!(
         "Screen share publish options: codec={:?}, {}kbps, {}fps, simulcast={}, low_bw={}",
-        codec, bitrate / 1000, framerate, simulcast, low_bw,
+        codec,
+        bitrate / 1000,
+        framerate,
+        simulcast,
+        low_bw,
     );
 
     TrackPublishOptions {
@@ -253,9 +255,13 @@ pub async fn start_screen_capture(
     #[cfg(target_os = "windows")]
     {
         // Try windows-capture (Graphics Capture API) first - avoids DXGI/COM conflicts with audio
-        match start_screen_capture_windows_graphics(room.clone(), mode, window_title.clone()).await {
+        match start_screen_capture_windows_graphics(room.clone(), mode, window_title.clone()).await
+        {
             Ok(handle) => return Ok(handle),
-            Err(e) => log::warn!("windows-capture failed ({}), falling back to DesktopCapturer", e),
+            Err(e) => log::warn!(
+                "windows-capture failed ({}), falling back to DesktopCapturer",
+                e
+            ),
         }
         start_screen_capture_libwebrtc_or_fallback(room, mode, window_title).await
     }
@@ -263,9 +269,9 @@ pub async fn start_screen_capture(
     #[cfg(target_os = "linux")]
     {
         let _ = window_title; // Portal handles window selection natively
-        // Use portal for the native screen/window picker, then GStreamer
-        // pipewiresrc for real-time frame capture. This avoids the pw_init()/GTK
-        // conflict by letting GStreamer manage its own PipeWire connection.
+                              // Use portal for the native screen/window picker, then GStreamer
+                              // pipewiresrc for real-time frame capture. This avoids the pw_init()/GTK
+                              // conflict by letting GStreamer manage its own PipeWire connection.
         start_screen_capture_linux(room, mode).await
     }
 
@@ -299,7 +305,10 @@ async fn start_screen_capture_windows_graphics(
 
     let quality = get_screen_share_quality();
     // Resolution hint for signaling — actual frames come at native size
-    let resolution = VideoResolution { width: 1920, height: 1080 };
+    let resolution = VideoResolution {
+        width: 1920,
+        height: 1080,
+    };
     let video_source = NativeVideoSource::new(resolution, true);
     let shutdown = Arc::new(AtomicBool::new(false));
     let first_frame = Arc::new(AtomicBool::new(false));
@@ -341,7 +350,11 @@ async fn start_screen_capture_windows_graphics(
             };
             let win_title = window.title().unwrap_or_else(|_| String::new());
             let target_audio_pid = window.process_id().ok();
-            log::debug!("Capturing window: {} (audio PID: {:?})", win_title, target_audio_pid);
+            log::debug!(
+                "Capturing window: {} (audio PID: {:?})",
+                win_title,
+                target_audio_pid
+            );
             let settings = Settings::new(
                 window,
                 CursorCaptureSettings::Default,
@@ -352,7 +365,10 @@ async fn start_screen_capture_windows_graphics(
                 ColorFormat::Bgra8,
                 flags,
             );
-            (ScreenCaptureHandler::start_free_threaded(settings), target_audio_pid)
+            (
+                ScreenCaptureHandler::start_free_threaded(settings),
+                target_audio_pid,
+            )
         }
     };
 
@@ -380,10 +396,7 @@ async fn start_screen_capture_windows_graphics(
     let codec = crate::codec::resolve_screen_share_codec();
     let publish_options = build_screen_share_publish_options(codec);
     room.local_participant()
-        .publish_track(
-            LocalTrack::Video(track.clone()),
-            publish_options,
-        )
+        .publish_track(LocalTrack::Video(track.clone()), publish_options)
         .await
         .map_err(|e| format!("Failed to publish screen track: {}", e))?;
     log::info!("Screen track published successfully");
@@ -428,7 +441,12 @@ impl windows_capture::capture::GraphicsCaptureApiHandler for ScreenCaptureHandle
     fn new(ctx: windows_capture::capture::Context<Self::Flags>) -> Result<Self, Self::Error> {
         let (video_source, shutdown, first_frame) = ctx.flags;
         log::debug!("ScreenCaptureHandler::new - capture starting");
-        Ok(Self { video_source, shutdown, first_frame, frame_count: 0 })
+        Ok(Self {
+            video_source,
+            shutdown,
+            first_frame,
+            frame_count: 0,
+        })
     }
 
     fn on_frame_arrived(
@@ -529,7 +547,11 @@ async fn start_screen_capture_libwebrtc_or_fallback(
         }
         if attempt < 2 {
             let delay_ms = if attempt == 0 { 1000 } else { 500 };
-            log::warn!("DesktopCapturer::new failed (attempt {}), retrying in {}ms", attempt + 1, delay_ms);
+            log::warn!(
+                "DesktopCapturer::new failed (attempt {}), retrying in {}ms",
+                attempt + 1,
+                delay_ms
+            );
             thread::sleep(Duration::from_millis(delay_ms));
         }
     }
@@ -553,7 +575,10 @@ async fn start_screen_capture_libwebrtc_or_fallback(
     }
 
     // Resolution hint for signaling — actual frames come at native size
-    let resolution = VideoResolution { width: 1920, height: 1080 };
+    let resolution = VideoResolution {
+        width: 1920,
+        height: 1080,
+    };
     let video_source = NativeVideoSource::new(resolution, true);
     let video_source_clone = video_source.clone();
 
@@ -561,58 +586,61 @@ async fn start_screen_capture_libwebrtc_or_fallback(
     let shutdown_cap = shutdown.clone();
     let shutdown_thread = shutdown.clone();
 
-    capturer.start_capture(source, move |result: Result<DesktopFrame, libwebrtc::desktop_capturer::CaptureError>| {
-        if shutdown_cap.load(Ordering::Relaxed) {
-            return;
-        }
-        let frame = match result {
-            Ok(f) => f,
-            Err(e) => {
-                log::warn!("Screen capture frame error: {:?}", e);
+    capturer.start_capture(
+        source,
+        move |result: Result<DesktopFrame, libwebrtc::desktop_capturer::CaptureError>| {
+            if shutdown_cap.load(Ordering::Relaxed) {
                 return;
             }
-        };
-        let w = frame.width();
-        let h = frame.height();
-        if w <= 0 || h <= 0 {
-            return;
-        }
-        let stride = frame.stride();
-        let data = frame.data();
+            let frame = match result {
+                Ok(f) => f,
+                Err(e) => {
+                    log::warn!("Screen capture frame error: {:?}", e);
+                    return;
+                }
+            };
+            let w = frame.width();
+            let h = frame.height();
+            if w <= 0 || h <= 0 {
+                return;
+            }
+            let stride = frame.stride();
+            let data = frame.data();
 
-        let mut i420 = I420Buffer::new(w as u32, h as u32);
-        let (dst_y, dst_u, dst_v) = i420.data_mut();
-        let stride_y = w;
-        let stride_u = (w + 1) / 2;
-        let stride_v = (w + 1) / 2;
+            let mut i420 = I420Buffer::new(w as u32, h as u32);
+            let (dst_y, dst_u, dst_v) = i420.data_mut();
+            let stride_y = w;
+            let stride_u = (w + 1) / 2;
+            let stride_v = (w + 1) / 2;
 
-        yuv_helper::argb_to_i420(
-            data,
-            stride,
-            dst_y,
-            stride_y as u32,
-            dst_u,
-            stride_u as u32,
-            dst_v,
-            stride_v as u32,
-            w,
-            h,
-        );
+            yuv_helper::argb_to_i420(
+                data,
+                stride,
+                dst_y,
+                stride_y as u32,
+                dst_u,
+                stride_u as u32,
+                dst_v,
+                stride_v as u32,
+                w,
+                h,
+            );
 
-        // Pass native resolution directly — no scaling needed
-        let buffer = i420;
+            // Pass native resolution directly — no scaling needed
+            let buffer = i420;
 
-        let now = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .unwrap()
-            .as_micros() as i64;
-        let vf = VideoFrame {
-            rotation: VideoRotation::VideoRotation0,
-            timestamp_us: now,
-            buffer,
-        };
-        video_source_clone.capture_frame(&vf);
-    });
+            let now = SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_micros() as i64;
+            let vf = VideoFrame {
+                rotation: VideoRotation::VideoRotation0,
+                timestamp_us: now,
+                buffer,
+            };
+            video_source_clone.capture_frame(&vf);
+        },
+    );
 
     let capturer_thread = thread::spawn(move || {
         let mut cap = capturer;
@@ -630,10 +658,7 @@ async fn start_screen_capture_libwebrtc_or_fallback(
     let codec = crate::codec::resolve_screen_share_codec();
     let publish_options = build_screen_share_publish_options(codec);
     room.local_participant()
-        .publish_track(
-            LocalTrack::Video(track.clone()),
-            publish_options,
-        )
+        .publish_track(LocalTrack::Video(track.clone()), publish_options)
         .await
         .map_err(|e| format!("Failed to publish screen track: {}", e))?;
 
@@ -675,11 +700,16 @@ async fn start_screen_capture_screenshots_fallback(
     );
     let screens = screenshots::Screen::all()
         .map_err(|e| format!("screenshots: failed to enumerate screens: {}", e))?;
-    let screen = screens.into_iter().next()
+    let screen = screens
+        .into_iter()
+        .next()
         .ok_or("screenshots: no screens found")?;
 
     // Resolution hint for signaling — actual frames come at native size
-    let resolution = VideoResolution { width: 1920, height: 1080 };
+    let resolution = VideoResolution {
+        width: 1920,
+        height: 1080,
+    };
     let video_source = NativeVideoSource::new(resolution, true);
     let video_source_clone = video_source.clone();
 
@@ -745,10 +775,7 @@ async fn start_screen_capture_screenshots_fallback(
     let codec = crate::codec::resolve_screen_share_codec();
     let publish_options = build_screen_share_publish_options(codec);
     room.local_participant()
-        .publish_track(
-            LocalTrack::Video(track.clone()),
-            publish_options,
-        )
+        .publish_track(LocalTrack::Video(track.clone()), publish_options)
         .await
         .map_err(|e| format!("Failed to publish screen track (fallback): {}", e))?;
 
@@ -811,8 +838,9 @@ fn setup_screen_share_audio_process_loopback(
     );
 
     let (frame_tx, mut frame_rx) = mpsc::channel::<Vec<i16>>(10);
-    let frame_buf: Arc<parking_lot::Mutex<Vec<i16>>> =
-        Arc::new(parking_lot::Mutex::new(Vec::with_capacity(SAMPLES_PER_10MS * 2)));
+    let frame_buf: Arc<parking_lot::Mutex<Vec<i16>>> = Arc::new(parking_lot::Mutex::new(
+        Vec::with_capacity(SAMPLES_PER_10MS * 2),
+    ));
 
     // Screen mode (target_audio_pid=None): EXCLUDE Pax → all system audio
     // Window mode (target_audio_pid=Some(pid)): INCLUDE that app → only that window's audio
@@ -843,16 +871,14 @@ fn setup_screen_share_audio_process_loopback(
                 return;
             }
             log::debug!("Screen share audio: initializing WASAPI process loopback");
-            let mut audio_client = match AudioClient::new_application_loopback_client(
-                process_id,
-                include_tree,
-            ) {
-                Ok(c) => c,
-                Err(e) => {
-                    log::warn!("Screen share process loopback: {}", e);
-                    return;
-                }
-            };
+            let mut audio_client =
+                match AudioClient::new_application_loopback_client(process_id, include_tree) {
+                    Ok(c) => c,
+                    Err(e) => {
+                        log::warn!("Screen share process loopback: {}", e);
+                        return;
+                    }
+                };
             let format = WaveFormat::new(32, 32, &SampleType::Float, SAMPLE_RATE as usize, 2, None);
             let stream_mode = StreamMode::EventsShared {
                 autoconvert: true,
@@ -979,22 +1005,22 @@ async fn start_screen_capture_linux(
     use livekit::webrtc::video_source::native::NativeVideoSource;
 
     let quality = get_screen_share_quality();
-    log::info!("start_screen_capture_linux: mode={:?} quality={}", mode, quality.label());
+    log::info!(
+        "start_screen_capture_linux: mode={:?} quality={}",
+        mode,
+        quality.label()
+    );
 
     // --- 1. Show native screen/window picker via xdg-desktop-portal ---
     log::info!("Linux capture: creating Screencast proxy...");
-    let proxy = tokio::time::timeout(
-        Duration::from_secs(5),
-        Screencast::new(),
-    ).await
+    let proxy = tokio::time::timeout(Duration::from_secs(5), Screencast::new())
+        .await
         .map_err(|_| "Screencast portal: D-Bus connection timed out (5s)".to_string())?
         .map_err(|e| format!("Screencast portal unavailable: {}", e))?;
 
     log::info!("Linux capture: creating session...");
-    let session = tokio::time::timeout(
-        Duration::from_secs(5),
-        proxy.create_session(),
-    ).await
+    let session = tokio::time::timeout(Duration::from_secs(5), proxy.create_session())
+        .await
         .map_err(|_| "create_session timed out (5s)".to_string())?
         .map_err(|e| format!("Failed to create screencast session: {}", e))?;
 
@@ -1014,19 +1040,21 @@ async fn start_screen_capture_linux(
             None,
             PersistMode::DoNot,
         ),
-    ).await
-        .map_err(|_| "select_sources timed out (5s)".to_string())?
-        .map_err(|e| format!("select_sources: {}", e))?;
+    )
+    .await
+    .map_err(|_| "select_sources timed out (5s)".to_string())?
+    .map_err(|e| format!("select_sources: {}", e))?;
 
     log::info!("Linux capture: waiting for user to pick screen/window...");
-    let start_response = tokio::time::timeout(
-        Duration::from_secs(60),
-        proxy.start(&session, None),
-    ).await
-        .map_err(|_| "Portal picker timed out after 60s — is xdg-desktop-portal-kde running?".to_string())?
+    let start_response = tokio::time::timeout(Duration::from_secs(60), proxy.start(&session, None))
+        .await
+        .map_err(|_| {
+            "Portal picker timed out after 60s — is xdg-desktop-portal-kde running?".to_string()
+        })?
         .map_err(|e| format!("Portal start failed: {}", e))?;
 
-    let response = start_response.response()
+    let response = start_response
+        .response()
         .map_err(|e| format!("Portal response error: {}", e))?;
 
     let streams = response.streams();
@@ -1061,19 +1089,31 @@ async fn start_screen_capture_linux(
     );
     log::info!("GStreamer pipeline: {}", pipeline_str);
 
-    let pipeline = gstreamer::parse::launch(&pipeline_str)
-        .map_err(|e| { log::error!("GStreamer pipeline parse failed: {}", e); format!("GStreamer pipeline parse failed: {}", e) })?;
-    let pipeline = pipeline.downcast::<gstreamer::Pipeline>()
-        .map_err(|_| { log::error!("Failed to cast to Pipeline"); "Failed to cast to Pipeline".to_string() })?;
+    let pipeline = gstreamer::parse::launch(&pipeline_str).map_err(|e| {
+        log::error!("GStreamer pipeline parse failed: {}", e);
+        format!("GStreamer pipeline parse failed: {}", e)
+    })?;
+    let pipeline = pipeline.downcast::<gstreamer::Pipeline>().map_err(|_| {
+        log::error!("Failed to cast to Pipeline");
+        "Failed to cast to Pipeline".to_string()
+    })?;
 
     let appsink = pipeline
         .by_name("sink")
-        .ok_or_else(|| { log::error!("appsink not found"); "appsink element not found in pipeline".to_string() })?
+        .ok_or_else(|| {
+            log::error!("appsink not found");
+            "appsink element not found in pipeline".to_string()
+        })?
         .downcast::<gstreamer_app::AppSink>()
-        .map_err(|_| { log::error!("Failed to cast to AppSink"); "Failed to cast sink to AppSink".to_string() })?;
+        .map_err(|_| {
+            log::error!("Failed to cast to AppSink");
+            "Failed to cast sink to AppSink".to_string()
+        })?;
 
-    pipeline.set_state(gstreamer::State::Playing)
-        .map_err(|e| { log::error!("Failed to start GStreamer pipeline: {:?}", e); format!("Failed to start GStreamer pipeline: {:?}", e) })?;
+    pipeline.set_state(gstreamer::State::Playing).map_err(|e| {
+        log::error!("Failed to start GStreamer pipeline: {:?}", e);
+        format!("Failed to start GStreamer pipeline: {:?}", e)
+    })?;
     log::info!("GStreamer pipeline started");
 
     // --- 3. Spawn frame-pulling thread ---
@@ -1143,15 +1183,18 @@ async fn start_screen_capture_linux(
                 let expected_size = (out_w * out_h * 3 / 2) as usize;
                 if data.len() < expected_size {
                     if frame_count == 0 {
-                        log::warn!("GStreamer: frame too small ({} < {})", data.len(), expected_size);
+                        log::warn!(
+                            "GStreamer: frame too small ({} < {})",
+                            data.len(),
+                            expected_size
+                        );
                     }
                     continue;
                 }
 
                 // Copy I420 data directly into a LiveKit I420Buffer
-                let mut i420 = livekit::webrtc::video_frame::I420Buffer::new(
-                    out_w as u32, out_h as u32,
-                );
+                let mut i420 =
+                    livekit::webrtc::video_frame::I420Buffer::new(out_w as u32, out_h as u32);
                 let (dst_y, dst_u, dst_v) = i420.data_mut();
 
                 let y_size = (out_w * out_h) as usize;
@@ -1180,7 +1223,10 @@ async fn start_screen_capture_linux(
 
             // Shut down the pipeline
             let _ = pipeline_clone.set_state(gstreamer::State::Null);
-            log::info!("GStreamer capture thread exited (frame_count={})", frame_count);
+            log::info!(
+                "GStreamer capture thread exited (frame_count={})",
+                frame_count
+            );
         })
         .map_err(|e| format!("Failed to spawn GStreamer capture thread: {}", e))?;
 
@@ -1193,10 +1239,7 @@ async fn start_screen_capture_linux(
     let codec = crate::codec::resolve_screen_share_codec();
     let publish_options = build_screen_share_publish_options(codec);
     room.local_participant()
-        .publish_track(
-            LocalTrack::Video(track.clone()),
-            publish_options,
-        )
+        .publish_track(LocalTrack::Video(track.clone()), publish_options)
         .await
         .map_err(|e| format!("Failed to publish screen track: {}", e))?;
     log::info!("Screen track published successfully");
@@ -1205,7 +1248,11 @@ async fn start_screen_capture_linux(
     log::info!("Setting up screen share audio capture...");
     let shutdown_audio = shutdown.clone();
     let (audio_track, audio_thread) = setup_screen_share_audio_gstreamer(shutdown_audio);
-    log::info!("Audio setup result: track={}, thread={}", audio_track.is_some(), audio_thread.is_some());
+    log::info!(
+        "Audio setup result: track={}, thread={}",
+        audio_track.is_some(),
+        audio_thread.is_some()
+    );
 
     Ok(ScreenShareHandle {
         track,
@@ -1226,12 +1273,12 @@ async fn start_screen_capture_linux(
 fn setup_screen_share_audio_gstreamer(
     shutdown: Arc<AtomicBool>,
 ) -> (Option<LocalAudioTrack>, Option<std::thread::JoinHandle<()>>) {
+    use gstreamer::prelude::*;
     use livekit::webrtc::{
         audio_frame::AudioFrame,
         audio_source::native::NativeAudioSource,
         prelude::{AudioSourceOptions, RtcAudioSource},
     };
-    use gstreamer::prelude::*;
 
     const SAMPLE_RATE: u32 = 48000;
     const NUM_CHANNELS: u32 = 1;
@@ -1270,7 +1317,10 @@ fn setup_screen_share_audio_gstreamer(
             p
         }
         Err(e) => {
-            eprintln!("[pax-audio] pulsesrc pipeline failed: {}, skipping audio", e);
+            eprintln!(
+                "[pax-audio] pulsesrc pipeline failed: {}, skipping audio",
+                e
+            );
             log::warn!("GStreamer audio pipeline parse failed: {}", e);
             return (None, None);
         }
@@ -1327,9 +1377,8 @@ fn setup_screen_share_audio_gstreamer(
                 .expect("Failed to create audio tokio runtime");
 
             while !shutdown.load(Ordering::Relaxed) {
-                let sample = audio_appsink.try_pull_sample(
-                    gstreamer::ClockTime::from_mseconds(100),
-                );
+                let sample =
+                    audio_appsink.try_pull_sample(gstreamer::ClockTime::from_mseconds(100));
                 let Some(sample) = sample else {
                     if audio_appsink.is_eos() {
                         log::info!("GStreamer audio appsink reached EOS");
@@ -1359,8 +1408,7 @@ fn setup_screen_share_audio_gstreamer(
 
                 // Emit 10ms frames (480 mono samples at 48kHz)
                 while sample_buf.len() >= SAMPLES_PER_10MS {
-                    let frame_samples: Vec<i16> =
-                        sample_buf.drain(..SAMPLES_PER_10MS).collect();
+                    let frame_samples: Vec<i16> = sample_buf.drain(..SAMPLES_PER_10MS).collect();
                     let frame = AudioFrame {
                         data: frame_samples.into(),
                         sample_rate: SAMPLE_RATE,

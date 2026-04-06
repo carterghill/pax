@@ -35,7 +35,8 @@ pub async fn get_room_members(
                     member.avatar_url(),
                     member.avatar(matrix_sdk::media::MediaFormat::File),
                     &cache,
-                ).await
+                )
+                .await
             }
         })
         .collect();
@@ -64,9 +65,7 @@ pub async fn get_room_members(
 
 /// Fetch the logged-in user's own avatar as a data URL.
 #[tauri::command]
-pub async fn get_user_avatar(
-    state: State<'_, Arc<AppState>>,
-) -> Result<Option<String>, String> {
+pub async fn get_user_avatar(state: State<'_, Arc<AppState>>) -> Result<Option<String>, String> {
     let client = get_client(&state).await?;
     let mxc = client
         .account()
@@ -75,8 +74,11 @@ pub async fn get_user_avatar(
         .map_err(|e| format!("Failed to get avatar URL: {}", fmt_error_chain(&e)))?;
     let avatar = get_or_fetch_avatar(
         mxc.as_deref(),
-        client.account().get_avatar(matrix_sdk::media::MediaFormat::File),
+        client
+            .account()
+            .get_avatar(matrix_sdk::media::MediaFormat::File),
         &state.avatar_cache,
-    ).await;
+    )
+    .await;
     Ok(avatar)
 }

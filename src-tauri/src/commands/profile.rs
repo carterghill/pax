@@ -21,10 +21,7 @@ pub async fn get_display_name(state: State<'_, Arc<AppState>>) -> Result<Option<
 
 /// Update the logged-in user's global display name.
 #[tauri::command]
-pub async fn set_display_name(
-    state: State<'_, Arc<AppState>>,
-    name: String,
-) -> Result<(), String> {
+pub async fn set_display_name(state: State<'_, Arc<AppState>>, name: String) -> Result<(), String> {
     let client = get_client(&state).await?;
     client
         .account()

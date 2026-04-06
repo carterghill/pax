@@ -6,7 +6,6 @@
 ///   2. `org.freedesktop.ScreenSaver` `GetSessionIdleTime` (KDE Plasma)
 ///   3. `org.freedesktop.login1.Session` `IdleSinceHint` (systemd-logind,
 ///      works across most compositors but depends on the DE setting the hint)
-
 use std::sync::Arc;
 use std::time::Duration;
 use tauri::{AppHandle, Emitter};
@@ -59,7 +58,9 @@ pub async fn run_idle_monitor(app: Arc<AppHandle>, display_server: DisplayServer
                     }
                 }
                 #[cfg(not(target_os = "linux"))]
-                { None }
+                {
+                    None
+                }
             }
             _ => {
                 // X11 / macOS / Windows – use the user-idle crate.
@@ -118,9 +119,12 @@ async fn get_idle_ms_dbus(conn: &zbus::Connection) -> Option<u64> {
 #[cfg(target_os = "linux")]
 async fn try_mutter_idle(conn: &zbus::Connection) -> Option<u64> {
     let proxy: Proxy = Builder::new(conn)
-        .destination("org.gnome.Mutter.IdleMonitor").ok()?
-        .path("/org/gnome/Mutter/IdleMonitor/Core").ok()?
-        .interface("org.gnome.Mutter.IdleMonitor").ok()?
+        .destination("org.gnome.Mutter.IdleMonitor")
+        .ok()?
+        .path("/org/gnome/Mutter/IdleMonitor/Core")
+        .ok()?
+        .interface("org.gnome.Mutter.IdleMonitor")
+        .ok()?
         .build()
         .await
         .ok()?;
@@ -136,9 +140,12 @@ async fn try_mutter_idle(conn: &zbus::Connection) -> Option<u64> {
 #[cfg(target_os = "linux")]
 async fn try_kde_idle(conn: &zbus::Connection) -> Option<u64> {
     let proxy: Proxy = Builder::new(conn)
-        .destination("org.freedesktop.ScreenSaver").ok()?
-        .path("/ScreenSaver").ok()?
-        .interface("org.freedesktop.ScreenSaver").ok()?
+        .destination("org.freedesktop.ScreenSaver")
+        .ok()?
+        .path("/ScreenSaver")
+        .ok()?
+        .interface("org.freedesktop.ScreenSaver")
+        .ok()?
         .build()
         .await
         .ok()?;
@@ -161,9 +168,12 @@ async fn try_logind_idle() -> Option<u64> {
 
     // Resolve the current session's object path via GetSession("auto").
     let manager_proxy: Proxy = Builder::new(&sys_conn)
-        .destination("org.freedesktop.login1").ok()?
-        .path("/org/freedesktop/login1").ok()?
-        .interface("org.freedesktop.login1.Manager").ok()?
+        .destination("org.freedesktop.login1")
+        .ok()?
+        .path("/org/freedesktop/login1")
+        .ok()?
+        .interface("org.freedesktop.login1.Manager")
+        .ok()?
         .build()
         .await
         .ok()?;
@@ -172,23 +182,22 @@ async fn try_logind_idle() -> Option<u64> {
         .call_method("GetSession", &("auto",))
         .await
         .ok()?;
-    let session_path: zbus::zvariant::OwnedObjectPath =
-        reply.body().deserialize().ok()?;
+    let session_path: zbus::zvariant::OwnedObjectPath = reply.body().deserialize().ok()?;
 
     // Read the IdleSinceHint property via org.freedesktop.DBus.Properties.
     let props_proxy: Proxy = Builder::new(&sys_conn)
-        .destination("org.freedesktop.login1").ok()?
-        .path(session_path).ok()?
-        .interface("org.freedesktop.DBus.Properties").ok()?
+        .destination("org.freedesktop.login1")
+        .ok()?
+        .path(session_path)
+        .ok()?
+        .interface("org.freedesktop.DBus.Properties")
+        .ok()?
         .build()
         .await
         .ok()?;
 
     let reply = props_proxy
-        .call_method(
-            "Get",
-            &("org.freedesktop.login1.Session", "IdleSinceHint"),
-        )
+        .call_method("Get", &("org.freedesktop.login1.Session", "IdleSinceHint"))
         .await
         .ok()?;
 

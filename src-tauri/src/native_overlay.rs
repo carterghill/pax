@@ -19,11 +19,11 @@
 //!   Windows: Direct3D 12 via wgpu  ← implemented here
 //!   Linux:   planned (Wayland subsurface + Vulkan)
 
+use once_cell::sync::Lazy;
+use parking_lot::Mutex;
 use std::collections::HashMap;
 use std::sync::atomic::Ordering;
 use std::sync::Arc;
-use once_cell::sync::Lazy;
-use parking_lot::Mutex;
 use tokio::sync::mpsc;
 
 // ─── WGSL shader (embedded) ─────────────────────────────────────────────────
@@ -176,8 +176,7 @@ fn create_surface_for_hwnd(
             ),
             raw_window_handle: {
                 let mut h = raw_window_handle::Win32WindowHandle::new(
-                    std::num::NonZeroIsize::new(hwnd)
-                        .ok_or("Invalid HWND (zero)")?,
+                    std::num::NonZeroIsize::new(hwnd).ok_or("Invalid HWND (zero)")?,
                 );
                 h.hinstance = None;
                 raw_window_handle::RawWindowHandle::Win32(h)
@@ -237,15 +236,13 @@ async fn get_or_init_shared_gpu(
     crate::codec::detect_best_codec(&adapter.get_info().name);
 
     let (device, queue) = adapter
-        .request_device(
-            &wgpu::DeviceDescriptor {
-                label: Some("pax-shared-gpu"),
-                required_features: wgpu::Features::empty(),
-                required_limits: wgpu::Limits::default(),
-                memory_hints: wgpu::MemoryHints::Performance,
-                ..Default::default()
-            },
-        )
+        .request_device(&wgpu::DeviceDescriptor {
+            label: Some("pax-shared-gpu"),
+            required_features: wgpu::Features::empty(),
+            required_limits: wgpu::Limits::default(),
+            memory_hints: wgpu::MemoryHints::Performance,
+            ..Default::default()
+        })
         .await
         .map_err(|e| format!("wgpu request_device: {}", e))?;
 
@@ -271,55 +268,53 @@ async fn get_or_init_shared_gpu(
         source: wgpu::ShaderSource::Wgsl(YUV_SHADER.into()),
     });
 
-    let bind_group_layout =
-        device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
-            label: Some("yuv_bgl"),
-            entries: &[
-                wgpu::BindGroupLayoutEntry {
-                    binding: 0,
-                    visibility: wgpu::ShaderStages::FRAGMENT,
-                    ty: wgpu::BindingType::Texture {
-                        sample_type: wgpu::TextureSampleType::Float { filterable: true },
-                        view_dimension: wgpu::TextureViewDimension::D2,
-                        multisampled: false,
-                    },
-                    count: None,
+    let bind_group_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+        label: Some("yuv_bgl"),
+        entries: &[
+            wgpu::BindGroupLayoutEntry {
+                binding: 0,
+                visibility: wgpu::ShaderStages::FRAGMENT,
+                ty: wgpu::BindingType::Texture {
+                    sample_type: wgpu::TextureSampleType::Float { filterable: true },
+                    view_dimension: wgpu::TextureViewDimension::D2,
+                    multisampled: false,
                 },
-                wgpu::BindGroupLayoutEntry {
-                    binding: 1,
-                    visibility: wgpu::ShaderStages::FRAGMENT,
-                    ty: wgpu::BindingType::Texture {
-                        sample_type: wgpu::TextureSampleType::Float { filterable: true },
-                        view_dimension: wgpu::TextureViewDimension::D2,
-                        multisampled: false,
-                    },
-                    count: None,
+                count: None,
+            },
+            wgpu::BindGroupLayoutEntry {
+                binding: 1,
+                visibility: wgpu::ShaderStages::FRAGMENT,
+                ty: wgpu::BindingType::Texture {
+                    sample_type: wgpu::TextureSampleType::Float { filterable: true },
+                    view_dimension: wgpu::TextureViewDimension::D2,
+                    multisampled: false,
                 },
-                wgpu::BindGroupLayoutEntry {
-                    binding: 2,
-                    visibility: wgpu::ShaderStages::FRAGMENT,
-                    ty: wgpu::BindingType::Texture {
-                        sample_type: wgpu::TextureSampleType::Float { filterable: true },
-                        view_dimension: wgpu::TextureViewDimension::D2,
-                        multisampled: false,
-                    },
-                    count: None,
+                count: None,
+            },
+            wgpu::BindGroupLayoutEntry {
+                binding: 2,
+                visibility: wgpu::ShaderStages::FRAGMENT,
+                ty: wgpu::BindingType::Texture {
+                    sample_type: wgpu::TextureSampleType::Float { filterable: true },
+                    view_dimension: wgpu::TextureViewDimension::D2,
+                    multisampled: false,
                 },
-                wgpu::BindGroupLayoutEntry {
-                    binding: 3,
-                    visibility: wgpu::ShaderStages::FRAGMENT,
-                    ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
-                    count: None,
-                },
-            ],
-        });
+                count: None,
+            },
+            wgpu::BindGroupLayoutEntry {
+                binding: 3,
+                visibility: wgpu::ShaderStages::FRAGMENT,
+                ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
+                count: None,
+            },
+        ],
+    });
 
-    let pipeline_layout =
-        device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
-            label: Some("yuv_pl"),
-            bind_group_layouts: &[&bind_group_layout],
-            push_constant_ranges: &[],
-        });
+    let pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+        label: Some("yuv_pl"),
+        bind_group_layouts: &[&bind_group_layout],
+        push_constant_ranges: &[],
+    });
 
     let pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
         label: Some("yuv_pipeline"),
@@ -359,7 +354,11 @@ async fn get_or_init_shared_gpu(
         ..Default::default()
     });
 
-    log::info!("[SharedGpu] Initialized: format={:?} present_mode={:?}", format, present_mode);
+    log::info!(
+        "[SharedGpu] Initialized: format={:?} present_mode={:?}",
+        format,
+        present_mode
+    );
 
     let shared = Arc::new(SharedGpu {
         instance,
@@ -392,24 +391,29 @@ pub fn create_overlay(identity: &str, parent_hwnd: isize) -> Result<isize, Strin
     let hwnd = platform::create_child_hwnd(parent_hwnd)?;
     log::info!(
         "Created overlay HWND {:?} for '{}' (parent={:?})",
-        hwnd, identity, parent_hwnd
+        hwnd,
+        identity,
+        parent_hwnd
     );
     // Default letterbox ≈ dark theme `#313338` until the frontend sends `bgPrimary`.
     const DEF_R: f32 = 49.0 / 255.0;
     const DEF_G: f32 = 51.0 / 255.0;
     const DEF_B: f32 = 56.0 / 255.0;
-    OVERLAYS.lock().insert(identity.to_string(), OverlayEntry {
-        hwnd,
-        target_x: std::sync::atomic::AtomicI32::new(0),
-        target_y: std::sync::atomic::AtomicI32::new(0),
-        target_w: std::sync::atomic::AtomicU32::new(0),
-        target_h: std::sync::atomic::AtomicU32::new(0),
-        visible: std::sync::atomic::AtomicBool::new(false),
-        letterbox_r: std::sync::atomic::AtomicU32::new(DEF_R.to_bits()),
-        letterbox_g: std::sync::atomic::AtomicU32::new(DEF_G.to_bits()),
-        letterbox_b: std::sync::atomic::AtomicU32::new(DEF_B.to_bits()),
-        obstructions: Mutex::new(Vec::new()),
-    });
+    OVERLAYS.lock().insert(
+        identity.to_string(),
+        OverlayEntry {
+            hwnd,
+            target_x: std::sync::atomic::AtomicI32::new(0),
+            target_y: std::sync::atomic::AtomicI32::new(0),
+            target_w: std::sync::atomic::AtomicU32::new(0),
+            target_h: std::sync::atomic::AtomicU32::new(0),
+            visible: std::sync::atomic::AtomicBool::new(false),
+            letterbox_r: std::sync::atomic::AtomicU32::new(DEF_R.to_bits()),
+            letterbox_g: std::sync::atomic::AtomicU32::new(DEF_G.to_bits()),
+            letterbox_b: std::sync::atomic::AtomicU32::new(DEF_B.to_bits()),
+            obstructions: Mutex::new(Vec::new()),
+        },
+    );
     Ok(hwnd)
 }
 
@@ -420,7 +424,10 @@ pub fn destroy_overlay(identity: &str) {
     if let Some(entry) = OVERLAYS.lock().remove(identity) {
         // Mark as not visible so render_frame stops drawing
         entry.visible.store(false, Ordering::Relaxed);
-        log::debug!("Unregistered overlay for '{}' (HWND destruction deferred to video thread)", identity);
+        log::debug!(
+            "Unregistered overlay for '{}' (HWND destruction deferred to video thread)",
+            identity
+        );
     }
 }
 
@@ -451,13 +458,15 @@ pub fn set_overlay_visible(identity: &str, visible: bool) {
 /// Read the target rect for the given identity.  Called by the video thread.
 pub fn get_overlay_target(identity: &str) -> Option<(i32, i32, u32, u32, bool)> {
     let overlays = OVERLAYS.lock();
-    overlays.get(identity).map(|e| (
-        e.target_x.load(Ordering::Relaxed),
-        e.target_y.load(Ordering::Relaxed),
-        e.target_w.load(Ordering::Relaxed),
-        e.target_h.load(Ordering::Relaxed),
-        e.visible.load(Ordering::Relaxed),
-    ))
+    overlays.get(identity).map(|e| {
+        (
+            e.target_x.load(Ordering::Relaxed),
+            e.target_y.load(Ordering::Relaxed),
+            e.target_w.load(Ordering::Relaxed),
+            e.target_h.load(Ordering::Relaxed),
+            e.visible.load(Ordering::Relaxed),
+        )
+    })
 }
 
 /// Letterbox fill for the GPU clear pass (opaque swapchains ignore alpha — match WebView background).
@@ -532,10 +541,8 @@ pub fn get_all_overlay_hover_states() -> HashMap<String, bool> {
         .filter(|(_, e)| e.visible.load(Ordering::Relaxed))
         .map(|(id, e)| {
             let (left, top, right, bottom) = platform::get_hwnd_screen_rect(e.hwnd);
-            let hovered = cursor.0 >= left
-                && cursor.0 < right
-                && cursor.1 >= top
-                && cursor.1 < bottom;
+            let hovered =
+                cursor.0 >= left && cursor.0 < right && cursor.1 >= top && cursor.1 < bottom;
             (id.clone(), hovered)
         })
         .collect()
@@ -639,7 +646,7 @@ impl GpuRenderer {
         let surface_config = wgpu::SurfaceConfiguration {
             usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
             format: shared.format,
-            width: 1,  // placeholder — real config deferred until first valid HWND size
+            width: 1, // placeholder — real config deferred until first valid HWND size
             height: 1,
             present_mode: shared.present_mode,
             alpha_mode: wgpu::CompositeAlphaMode::Opaque,
@@ -649,7 +656,8 @@ impl GpuRenderer {
 
         log::info!(
             "GpuRenderer initialized for '{}' (shared device, format={:?})",
-            identity, shared.format
+            identity,
+            shared.format
         );
 
         Ok(Self {
@@ -686,11 +694,10 @@ impl GpuRenderer {
     /// approach as the WebGL fallback path for pixel-identical results.
     /// Returns (0, 0) if the overlay hasn't received a valid target rect yet.
     pub fn get_fit_dimensions(&self, src_w: u32, src_h: u32) -> (u32, u32) {
-        let (_, _, target_w, target_h, _) =
-            match get_overlay_target(&self.identity) {
-                Some(t) => t,
-                None => return (0, 0),
-            };
+        let (_, _, target_w, target_h, _) = match get_overlay_target(&self.identity) {
+            Some(t) => t,
+            None => return (0, 0),
+        };
         if target_w < 8 || target_h < 8 || src_w == 0 || src_h == 0 {
             return (0, 0);
         }
@@ -827,9 +834,33 @@ impl GpuRenderer {
         }
 
         // Upload Y/U/V planes
-        upload_plane(&self.shared.queue, self.tex_y.as_ref().unwrap(), data_y, stride_y, width, height, &mut self.staging_y);
-        upload_plane(&self.shared.queue, self.tex_u.as_ref().unwrap(), data_u, stride_u, cw, ch, &mut self.staging_u);
-        upload_plane(&self.shared.queue, self.tex_v.as_ref().unwrap(), data_v, stride_v, cw, ch, &mut self.staging_v);
+        upload_plane(
+            &self.shared.queue,
+            self.tex_y.as_ref().unwrap(),
+            data_y,
+            stride_y,
+            width,
+            height,
+            &mut self.staging_y,
+        );
+        upload_plane(
+            &self.shared.queue,
+            self.tex_u.as_ref().unwrap(),
+            data_u,
+            stride_u,
+            cw,
+            ch,
+            &mut self.staging_u,
+        );
+        upload_plane(
+            &self.shared.queue,
+            self.tex_v.as_ref().unwrap(),
+            data_v,
+            stride_v,
+            cw,
+            ch,
+            &mut self.staging_v,
+        );
 
         // Acquire swap chain frame
         let Some(surface) = self.surface.as_ref() else {
@@ -847,9 +878,14 @@ impl GpuRenderer {
             Err(_) => return,
         };
 
-        let view = frame.texture.create_view(&wgpu::TextureViewDescriptor::default());
+        let view = frame
+            .texture
+            .create_view(&wgpu::TextureViewDescriptor::default());
 
-        let mut encoder = self.shared.device.create_command_encoder(&wgpu::CommandEncoderDescriptor { label: None });
+        let mut encoder = self
+            .shared
+            .device
+            .create_command_encoder(&wgpu::CommandEncoderDescriptor { label: None });
 
         {
             let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
@@ -898,7 +934,10 @@ impl GpuRenderer {
         if self.frame_count == 1 {
             log::debug!(
                 "First frame rendered ({}x{} in {}x{} surface)",
-                width, height, self.surface_w, self.surface_h
+                width,
+                height,
+                self.surface_w,
+                self.surface_h
             );
         } else if self.frame_count % 300 == 0 {
             log::trace!("Frame {}", self.frame_count);
@@ -918,8 +957,7 @@ impl GpuRenderer {
                 sample_count: 1,
                 dimension: wgpu::TextureDimension::D2,
                 format: wgpu::TextureFormat::R8Unorm,
-                usage: wgpu::TextureUsages::TEXTURE_BINDING
-                    | wgpu::TextureUsages::COPY_DST,
+                usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
                 view_formats: &[],
             })
         };
@@ -929,12 +967,25 @@ impl GpuRenderer {
         self.tex_v = Some(make_tex(&self.shared.device, "tex_v", cw, ch));
 
         // Rebuild bind group with new texture views
-        let view_y = self.tex_y.as_ref().unwrap().create_view(&Default::default());
-        let view_u = self.tex_u.as_ref().unwrap().create_view(&Default::default());
-        let view_v = self.tex_v.as_ref().unwrap().create_view(&Default::default());
+        let view_y = self
+            .tex_y
+            .as_ref()
+            .unwrap()
+            .create_view(&Default::default());
+        let view_u = self
+            .tex_u
+            .as_ref()
+            .unwrap()
+            .create_view(&Default::default());
+        let view_v = self
+            .tex_v
+            .as_ref()
+            .unwrap()
+            .create_view(&Default::default());
 
         self.bind_group = Some(
-            self.shared.device
+            self.shared
+                .device
                 .create_bind_group(&wgpu::BindGroupDescriptor {
                     label: Some("yuv_bg"),
                     layout: &self.shared.bind_group_layout,
@@ -966,10 +1017,7 @@ impl GpuRenderer {
         self.staging_u.resize(aligned_uv * ch as usize, 0);
         self.staging_v.resize(aligned_uv * ch as usize, 0);
 
-        log::debug!(
-            "Textures recreated: Y={}x{} UV={}x{}",
-            w, h, cw, ch
-        );
+        log::debug!("Textures recreated: Y={}x{} UV={}x{}", w, h, cw, ch);
     }
 }
 
@@ -998,7 +1046,11 @@ fn upload_plane(
                     bytes_per_row: Some(aligned_bpr),
                     rows_per_image: Some(height),
                 },
-                wgpu::Extent3d { width, height, depth_or_array_layers: 1 },
+                wgpu::Extent3d {
+                    width,
+                    height,
+                    depth_or_array_layers: 1,
+                },
             );
             return;
         }
@@ -1031,7 +1083,11 @@ fn upload_plane(
             bytes_per_row: Some(aligned_bpr),
             rows_per_image: Some(height),
         },
-        wgpu::Extent3d { width, height, depth_or_array_layers: 1 },
+        wgpu::Extent3d {
+            width,
+            height,
+            depth_or_array_layers: 1,
+        },
     );
 }
 
@@ -1052,9 +1108,7 @@ mod platform {
     static REGISTER: Once = Once::new();
 
     fn class_name() -> Vec<u16> {
-        "PaxVideoOverlay\0"
-            .encode_utf16()
-            .collect()
+        "PaxVideoOverlay\0".encode_utf16().collect()
     }
 
     fn register_class() {
@@ -1147,10 +1201,8 @@ mod platform {
     ) -> LRESULT {
         match msg {
             // Forward mouse messages to the WebView2 so clicks pass through
-            WM_LBUTTONDOWN | WM_LBUTTONUP | WM_LBUTTONDBLCLK
-            | WM_RBUTTONDOWN | WM_RBUTTONUP | WM_RBUTTONDBLCLK
-            | WM_MBUTTONDOWN | WM_MBUTTONUP
-            | WM_MOUSEMOVE => {
+            WM_LBUTTONDOWN | WM_LBUTTONUP | WM_LBUTTONDBLCLK | WM_RBUTTONDOWN | WM_RBUTTONUP
+            | WM_RBUTTONDBLCLK | WM_MBUTTONDOWN | WM_MBUTTONUP | WM_MOUSEMOVE => {
                 if forward_mouse_to_webview(hwnd, msg, wparam, lparam) {
                     return 0;
                 }
@@ -1171,8 +1223,8 @@ mod platform {
             // short-circuit layout messages so DefWindowProcW doesn't do
             // extra synchronous work that keeps SendMessage blocked on the
             // main thread.
-            WM_SIZE | WM_MOVE | WM_WINDOWPOSCHANGING | WM_WINDOWPOSCHANGED
-            | WM_DISPLAYCHANGE | WM_SHOWWINDOW => 0,
+            WM_SIZE | WM_MOVE | WM_WINDOWPOSCHANGING | WM_WINDOWPOSCHANGED | WM_DISPLAYCHANGE
+            | WM_SHOWWINDOW => 0,
             _ => DefWindowProcW(hwnd, msg, wparam, lparam),
         }
     }
@@ -1248,7 +1300,10 @@ mod platform {
 
     pub fn set_hwnd_visible(hwnd: isize, visible: bool) {
         unsafe {
-            ShowWindow(to_hwnd(hwnd), if visible { SW_SHOWNOACTIVATE } else { SW_HIDE });
+            ShowWindow(
+                to_hwnd(hwnd),
+                if visible { SW_SHOWNOACTIVATE } else { SW_HIDE },
+            );
         }
     }
 
@@ -1319,22 +1374,12 @@ mod platform {
                         ell,
                     );
                     if rr.is_null() {
-                        CreateRectRgn(
-                            obs.x,
-                            obs.y,
-                            obs.x + obs.w as i32,
-                            obs.y + obs.h as i32,
-                        )
+                        CreateRectRgn(obs.x, obs.y, obs.x + obs.w as i32, obs.y + obs.h as i32)
                     } else {
                         rr
                     }
                 } else {
-                    CreateRectRgn(
-                        obs.x,
-                        obs.y,
-                        obs.x + obs.w as i32,
-                        obs.y + obs.h as i32,
-                    )
+                    CreateRectRgn(obs.x, obs.y, obs.x + obs.w as i32, obs.y + obs.h as i32)
                 };
                 if !obs_rgn.is_null() {
                     CombineRgn(full, full, obs_rgn, RGN_DIFF);
@@ -1378,7 +1423,12 @@ mod platform {
     /// Get the screen-space rect of a HWND: (left, top, right, bottom).
     pub fn get_hwnd_screen_rect(hwnd: isize) -> (i32, i32, i32, i32) {
         unsafe {
-            let mut rect = RECT { left: 0, top: 0, right: 0, bottom: 0 };
+            let mut rect = RECT {
+                left: 0,
+                top: 0,
+                right: 0,
+                bottom: 0,
+            };
             GetWindowRect(to_hwnd(hwnd), &mut rect);
             (rect.left, rect.top, rect.right, rect.bottom)
         }
@@ -1407,7 +1457,12 @@ mod platform {
         _video_w: u32,
         _video_h: u32,
         _obs: &[super::ObstructionRect],
-    ) {}
-    pub fn get_cursor_pos() -> (i32, i32) { (0, 0) }
-    pub fn get_hwnd_screen_rect(_hwnd: isize) -> (i32, i32, i32, i32) { (0, 0, 0, 0) }
+    ) {
+    }
+    pub fn get_cursor_pos() -> (i32, i32) {
+        (0, 0)
+    }
+    pub fn get_hwnd_screen_rect(_hwnd: isize) -> (i32, i32, i32, i32) {
+        (0, 0, 0, 0)
+    }
 }

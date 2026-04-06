@@ -15,7 +15,12 @@ pub fn set_codec_preference(codec: String) -> Result<(), String> {
         "vp9" => crate::codec::CodecPreference::VP9,
         "av1" => crate::codec::CodecPreference::AV1,
         "vp8" => crate::codec::CodecPreference::VP8,
-        other => return Err(format!("Unknown codec: '{}'. Valid: auto, h264, vp9, av1, vp8", other)),
+        other => {
+            return Err(format!(
+                "Unknown codec: '{}'. Valid: auto, h264, vp9, av1, vp8",
+                other
+            ))
+        }
     };
     crate::codec::set_codec_preference(pref);
     Ok(())

@@ -1,13 +1,13 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 
-use matrix_sdk::room::MessagesOptions;
 use matrix_sdk::room::edit::EditedContent;
+use matrix_sdk::room::MessagesOptions;
 use matrix_sdk::ruma::events::room::message::OriginalSyncRoomMessageEvent;
-use matrix_sdk::ruma::events::room::redaction::OriginalSyncRoomRedactionEvent;
 use matrix_sdk::ruma::events::room::message::Relation;
 use matrix_sdk::ruma::events::room::message::RoomMessageEventContent;
 use matrix_sdk::ruma::events::room::message::RoomMessageEventContentWithoutRelation;
+use matrix_sdk::ruma::events::room::redaction::OriginalSyncRoomRedactionEvent;
 use matrix_sdk::ruma::events::typing::SyncTypingEvent;
 use matrix_sdk::ruma::events::AnyMessageLikeEventContent;
 use matrix_sdk::ruma::EventId;
@@ -21,8 +21,8 @@ use crate::types::{
 };
 use crate::AppState;
 
-use super::{fmt_error_chain, get_client, get_or_fetch_avatar, resolve_room};
 use super::voice_matrix::collect_voice_participants_for_joined_voice_rooms;
+use super::{fmt_error_chain, get_client, get_or_fetch_avatar, resolve_room};
 
 #[tauri::command]
 pub async fn get_messages(
@@ -77,7 +77,8 @@ pub async fn get_messages(
 
             if let Some(Relation::Replacement(repl)) = &original.content.relates_to {
                 let target = repl.event_id.to_string();
-                let new_body = extract_body(&RoomMessageEventContent::from(repl.new_content.clone()));
+                let new_body =
+                    extract_body(&RoomMessageEventContent::from(repl.new_content.clone()));
                 let ts: u64 = original.origin_server_ts.0.into();
                 let replace = match latest_replacement.get(&target) {
                     None => true,
@@ -113,7 +114,8 @@ pub async fn get_messages(
                     member.avatar_url(),
                     member.avatar(matrix_sdk::media::MediaFormat::File),
                     &avatar_cache,
-                ).await;
+                )
+                .await;
                 (name, avatar)
             }
             _ => (None, None),
@@ -125,10 +127,8 @@ pub async fn get_messages(
     let messages = raw_msgs
         .into_iter()
         .map(|m| {
-            let (sender_name, avatar_url) = sender_meta
-                .get(&m.sender)
-                .cloned()
-                .unwrap_or((None, None));
+            let (sender_name, avatar_url) =
+                sender_meta.get(&m.sender).cloned().unwrap_or((None, None));
             let edited = latest_replacement.contains_key(&m.event_id);
             let body = latest_replacement
                 .get(&m.event_id)
@@ -161,7 +161,8 @@ pub async fn send_message(
     let client = get_client(&state).await?;
     let room = resolve_room(&client, &room_id)?;
 
-    let content = matrix_sdk::ruma::events::room::message::RoomMessageEventContent::text_plain(&body);
+    let content =
+        matrix_sdk::ruma::events::room::message::RoomMessageEventContent::text_plain(&body);
 
     room.send(content)
         .await
@@ -213,8 +214,7 @@ pub async fn edit_message(
 
     match edit_content {
         AnyMessageLikeEventContent::RoomMessage(content) => {
-            room
-                .send(content)
+            room.send(content)
                 .await
                 .map_err(|e| format!("Failed to send edit: {}", fmt_error_chain(&e)))?;
         }
@@ -236,8 +236,7 @@ pub async fn redact_message(
     let event_id_parsed =
         EventId::parse(&event_id).map_err(|e| format!("Invalid event ID: {e}"))?;
 
-    room
-        .redact(&event_id_parsed, None, None)
+    room.redact(&event_id_parsed, None, None)
         .await
         .map_err(|e| format!("Failed to redact message: {}", fmt_error_chain(&e)))?;
 
@@ -245,7 +244,10 @@ pub async fn redact_message(
 }
 
 #[tauri::command]
-pub async fn start_sync(state: State<'_, Arc<AppState>>, app: tauri::AppHandle) -> Result<(), String> {
+pub async fn start_sync(
+    state: State<'_, Arc<AppState>>,
+    app: tauri::AppHandle,
+) -> Result<(), String> {
     let client = get_client(&state).await?;
 
     // `AppHandle::clone` bumps Tao's `Rc<EventLoopRunner>` — `Rc` is not thread-safe.
@@ -273,7 +275,8 @@ pub async fn start_sync(state: State<'_, Arc<AppState>>, app: tauri::AppHandle) 
             let room_id = room.room_id().to_string();
 
             if let Some(Relation::Replacement(repl)) = &ev.content.relates_to {
-                let new_body = extract_body(&RoomMessageEventContent::from(repl.new_content.clone()));
+                let new_body =
+                    extract_body(&RoomMessageEventContent::from(repl.new_content.clone()));
                 let payload = MessageEditPayload {
                     room_id,
                     target_event_id: repl.event_id.to_string(),
@@ -293,7 +296,8 @@ pub async fn start_sync(state: State<'_, Arc<AppState>>, app: tauri::AppHandle) 
                         member.avatar_url(),
                         member.avatar(matrix_sdk::media::MediaFormat::File),
                         &avatar_cache,
-                    ).await;
+                    )
+                    .await;
                     (name, avatar)
                 }
                 _ => (None, None),
@@ -433,7 +437,9 @@ pub async fn start_sync(state: State<'_, Arc<AppState>>, app: tauri::AppHandle) 
                                 collect_voice_participants_for_joined_voice_rooms(&vc, &ac).await;
                             let _ = ap.emit(
                                 "voice-participants-changed",
-                                VoiceParticipantsChangedPayload { participants_by_room },
+                                VoiceParticipantsChangedPayload {
+                                    participants_by_room,
+                                },
                             );
                         });
 
@@ -478,7 +484,9 @@ pub async fn send_typing_notice(
 }
 
 /// Helper to extract body text from a message event's content.
-fn extract_body(content: &matrix_sdk::ruma::events::room::message::RoomMessageEventContent) -> String {
+fn extract_body(
+    content: &matrix_sdk::ruma::events::room::message::RoomMessageEventContent,
+) -> String {
     use matrix_sdk::ruma::events::room::message::MessageType;
     match &content.msgtype {
         MessageType::Text(text) => text.body.clone(),

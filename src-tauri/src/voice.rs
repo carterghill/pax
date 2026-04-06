@@ -1,3 +1,18 @@
+use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
+use futures_util::StreamExt;
+use livekit::options::TrackPublishOptions;
+use livekit::prelude::*;
+use livekit::track::{LocalAudioTrack, LocalTrack, RemoteTrack, TrackSource};
+use livekit::webrtc::{
+    audio_frame::AudioFrame,
+    audio_source::native::NativeAudioSource,
+    audio_stream::native::NativeAudioStream,
+    prelude::{AudioSourceOptions, RtcAudioSource},
+};
+use nnnoiseless::DenoiseState;
+use once_cell::sync::Lazy;
+use parking_lot::Mutex;
+use serde::Serialize;
 /// Rust-native voice chat using the LiveKit Rust SDK + cpal for audio I/O.
 ///
 /// This module replaces the browser-based livekit-client JS SDK, which cannot
@@ -7,27 +22,12 @@
 ///   Mic:  cpal input → ring buffer → tokio task → NativeAudioSource → LiveKit
 ///   Spkr: LiveKit → NativeAudioStream → per-user volume → mix → ring buffer → cpal output
 use std::collections::{HashMap, VecDeque};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
-use parking_lot::Mutex;
-use serde::Serialize;
 use tauri::{AppHandle, Emitter};
 use tokio::sync::mpsc;
 use tokio::time::{interval_at, Instant as TokioInstant, MissedTickBehavior};
-use livekit::prelude::*;
-use livekit::track::{LocalAudioTrack, LocalTrack, RemoteTrack, TrackSource};
-use livekit::options::TrackPublishOptions;
-use livekit::webrtc::{
-    audio_frame::AudioFrame,
-    audio_source::native::NativeAudioSource,
-    audio_stream::native::NativeAudioStream,
-    prelude::{AudioSourceOptions, RtcAudioSource},
-};
-use futures_util::StreamExt;
-use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
-use nnnoiseless::DenoiseState;
-use once_cell::sync::Lazy;
-use std::sync::atomic::{AtomicBool, Ordering};
 // cpal::Stream is !Send because of platform internals, but we only ever
 // create streams on one thread and drop them (possibly on another).
 // This is safe for our use case.
@@ -70,6 +70,21 @@ pub struct VoiceStateEvent {
     pub is_local_screen_sharing: bool,
     pub error: Option<String>,
     pub participants: Vec<VoiceParticipantInfo>,
+}
+
+#[derive(Clone, Serialize, Debug)]
+#[serde(rename_all = "camelCase")]
+pub struct AudioDeviceInfo {
+    pub id: String,
+    pub name: String,
+    pub is_default: bool,
+}
+
+#[derive(Clone, Serialize, Debug)]
+#[serde(rename_all = "camelCase")]
+pub struct AudioDeviceList {
+    pub input: Vec<AudioDeviceInfo>,
+    pub output: Vec<AudioDeviceInfo>,
 }
 // ─── Internal shared audio state ────────────────────────────────────────────
 struct AudioState {
@@ -165,6 +180,8 @@ impl VoiceManager {
         jwt: String,
         local_identity: String,
         app_handle: AppHandle,
+        input_device_id: Option<String>,
+        output_device_id: Option<String>,
     ) -> Result<(), String> {
         // Disconnect existing session first
         self.disconnect_inner().await;
@@ -172,17 +189,20 @@ impl VoiceManager {
         // and from nested spawns (e.g. video receiver) instead of cloning AppHandle on workers.
         let app_handle = Arc::new(app_handle);
         // Emit "connecting" state
-        let _ = app_handle.emit("voice-state-changed", VoiceStateEvent {
-            connected_room_id: Some(room_id.clone()),
-            is_connecting: true,
-            is_mic_enabled: false,
-            is_deafened: false,
-            is_noise_suppressed: true,
-            screen_sharing_owners: vec![],
-            is_local_screen_sharing: false,
-            error: None,
-            participants: vec![],
-        });
+        let _ = app_handle.emit(
+            "voice-state-changed",
+            VoiceStateEvent {
+                connected_room_id: Some(room_id.clone()),
+                is_connecting: true,
+                is_mic_enabled: false,
+                is_deafened: false,
+                is_noise_suppressed: true,
+                screen_sharing_owners: vec![],
+                is_local_screen_sharing: false,
+                error: None,
+                participants: vec![],
+            },
+        );
         let audio_state = Arc::new(Mutex::new(AudioState::default()));
         // 1. Create audio source for mic
         let audio_source = NativeAudioSource::new(
@@ -221,10 +241,17 @@ impl VoiceManager {
         // Create a channel for mic frames: cpal callback → pump task
         let (mic_frame_tx, mic_frame_rx) = mpsc::channel::<Vec<i16>>(10); // small bounded buffer
         let noise_proc = Arc::new(Mutex::new(NoiseProcessor::new()));
-        noise_proc.lock().set_enabled(audio_state.lock().noise_suppression_enabled);
-        let input_stream = setup_mic_input(audio_state.clone(), noise_proc.clone(), mic_frame_tx)
-            .map_err(|e| format!("Failed to open microphone: {}", e))?;
-        let output_stream = setup_speaker_output(audio_state.clone())
+        noise_proc
+            .lock()
+            .set_enabled(audio_state.lock().noise_suppression_enabled);
+        let input_stream = setup_mic_input(
+            audio_state.clone(),
+            noise_proc.clone(),
+            mic_frame_tx,
+            input_device_id.as_deref(),
+        )
+        .map_err(|e| format!("Failed to open microphone: {}", e))?;
+        let output_stream = setup_speaker_output(audio_state.clone(), output_device_id.as_deref())
             .map_err(|e| format!("Failed to open speakers: {}", e))?;
         // 5. Start mic capture pump (receives frames from cpal callback → LiveKit)
         let mic_source = audio_source.clone();
@@ -253,8 +280,12 @@ impl VoiceManager {
             .await;
         });
         // 7. Start cpal streams and wrap for Send safety
-        input_stream.play().map_err(|e| format!("Mic stream error: {}", e))?;
-        output_stream.play().map_err(|e| format!("Speaker stream error: {}", e))?;
+        input_stream
+            .play()
+            .map_err(|e| format!("Mic stream error: {}", e))?;
+        output_stream
+            .play()
+            .map_err(|e| format!("Speaker stream error: {}", e))?;
         // Wrap in SendStream so VoiceSession is Send+Sync for Tauri State
         let input_stream = SendStream(input_stream);
         let output_stream = SendStream(output_stream);
@@ -328,7 +359,11 @@ impl VoiceManager {
                 continue;
             }
             found_mic = true;
-            log::info!("toggle_mic: setting mic track sid={} muted={}", pub_.sid(), !mic_enabled);
+            log::info!(
+                "toggle_mic: setting mic track sid={} muted={}",
+                pub_.sid(),
+                !mic_enabled
+            );
             if mic_enabled {
                 pub_.unmute();
             } else {
@@ -369,7 +404,10 @@ impl VoiceManager {
     }
 
     /// Update noise suppression parameters (takes effect immediately when in a call).
-    pub fn set_noise_suppression_config(&self, config: NoiseSuppressionConfig) -> Result<(), String> {
+    pub fn set_noise_suppression_config(
+        &self,
+        config: NoiseSuppressionConfig,
+    ) -> Result<(), String> {
         *NOISE_SUPPRESSION_CONFIG.write() = config.clone();
         let guard = self.session.lock();
         if let Some(session) = guard.as_ref() {
@@ -397,7 +435,7 @@ impl VoiceManager {
             let user_part: String = identity.split(':').take(2).collect::<Vec<_>>().join(":");
             let vol_key = format!("{}::{}", user_part, source);
             state.user_volumes.insert(vol_key, clamped);
-        } 
+        }
     }
 
     /// Matrix room id + LiveKit SFU room name (from the joined room; used for admin ListParticipants).
@@ -452,7 +490,11 @@ impl VoiceManager {
                 let _ = lp.unpublish_track(&sid).await;
             }
         }
-        log::info!("voice::start_screen_share: mode={:?} window_title={:?}", mode, window_title);
+        log::info!(
+            "voice::start_screen_share: mode={:?} window_title={:?}",
+            mode,
+            window_title
+        );
         let handle = crate::screen::start_screen_capture(room.clone(), mode, window_title).await?;
         // Video is published inside start_screen_capture (after capture is hot)
         if let Some(audio_track) = &handle.audio_track {
@@ -488,7 +530,15 @@ impl VoiceManager {
             let mut st = audio_state.lock();
             st.is_local_screen_sharing = true;
         }
-        emit_state(app_handle, &room_id, &local_identity, &audio_state, false, true, None);
+        emit_state(
+            app_handle,
+            &room_id,
+            &local_identity,
+            &audio_state,
+            false,
+            true,
+            None,
+        );
         Ok(())
     }
 
@@ -529,7 +579,15 @@ impl VoiceManager {
             let mut st = audio_state.lock();
             st.is_local_screen_sharing = false;
         }
-        emit_state(app_handle, &room_id, &local_identity, &audio_state, false, true, None);
+        emit_state(
+            app_handle,
+            &room_id,
+            &local_identity,
+            &audio_state,
+            false,
+            true,
+            None,
+        );
         Ok(())
     }
 }
@@ -577,21 +635,14 @@ fn ema_speaking_level(prev: f32, instant: f32) -> f32 {
     prev * (1.0 - SPEAKING_LEVEL_EMA) + instant * SPEAKING_LEVEL_EMA
 }
 
-fn merge_speaking_from_level(
-    server_active: bool,
-    level_smooth: f32,
-    allow_level: bool,
-) -> bool {
+fn merge_speaking_from_level(server_active: bool, level_smooth: f32, allow_level: bool) -> bool {
     server_active || (allow_level && level_smooth >= SPEAKING_LEVEL_THRESHOLD)
 }
 
 // ─── Mic capture pump ───────────────────────────────────────────────────────
 /// Receives completed mic frames from the cpal callback channel and sends to LiveKit.
 /// Zero latency added — frames arrive as soon as cpal has enough samples.
-async fn mic_capture_pump(
-    source: NativeAudioSource,
-    mut frame_rx: mpsc::Receiver<Vec<i16>>,
-) {
+async fn mic_capture_pump(source: NativeAudioSource, mut frame_rx: mpsc::Receiver<Vec<i16>>) {
     while let Some(samples) = frame_rx.recv().await {
         let frame = AudioFrame {
             data: samples.into(),
@@ -634,7 +685,8 @@ async fn handle_remote_audio(
             .and_modify(|e| *e = ema_speaking_level(*e, inst))
             .or_insert(inst);
 
-        let buf = st.playback_buffers
+        let buf = st
+            .playback_buffers
             .entry(track_key.clone())
             .or_insert_with(|| VecDeque::with_capacity(SAMPLE_RATE as usize));
 
@@ -664,7 +716,15 @@ async fn run_event_loop(
     reconnect_notify: Arc<tokio::sync::Notify>,
 ) {
     // Emit initial connected state
-    emit_state(app_handle.as_ref(), &room_id, &local_identity, &audio_state, false, true, None);
+    emit_state(
+        app_handle.as_ref(),
+        &room_id,
+        &local_identity,
+        &audio_state,
+        false,
+        true,
+        None,
+    );
     let mut speaking_tick = interval_at(
         TokioInstant::now() + Duration::from_millis(SPEAKING_UI_TICK_MS),
         Duration::from_millis(SPEAKING_UI_TICK_MS),
@@ -902,7 +962,7 @@ async fn adaptive_bitrate_monitor(
     track: livekit::track::LocalVideoTrack,
     shutdown: Arc<AtomicBool>,
 ) {
-    use libwebrtc::stats::{RtcStats, QualityLimitationReason};
+    use libwebrtc::stats::{QualityLimitationReason, RtcStats};
 
     log::info!("ABR: adaptive bitrate monitor started");
 
@@ -930,9 +990,7 @@ async fn adaptive_bitrate_monitor(
         // Find the outbound video RTP stats
         // Find the high-quality outbound video stats (rid="f" for simulcast, empty for single stream)
         let outbound = stats.iter().find_map(|s| match s {
-            RtcStats::OutboundRtp(ob)
-                if ob.outbound.rid == "f" || ob.outbound.rid.is_empty() =>
-            {
+            RtcStats::OutboundRtp(ob) if ob.outbound.rid == "f" || ob.outbound.rid.is_empty() => {
                 Some(ob)
             }
             _ => None,
@@ -1096,7 +1154,8 @@ fn emit_state(
     // Local participant
     if is_connected {
         let server = st.active_speakers.contains(&local_identity.to_string());
-        let level_speaking = merge_speaking_from_level(false, st.local_mic_level_smooth, st.mic_enabled);
+        let level_speaking =
+            merge_speaking_from_level(false, st.local_mic_level_smooth, st.mic_enabled);
         participants.push(VoiceParticipantInfo {
             identity: local_identity.to_string(),
             is_speaking: server || level_speaking,
@@ -1120,7 +1179,11 @@ fn emit_state(
         });
     }
     let event = VoiceStateEvent {
-        connected_room_id: if is_connected || is_connecting { Some(room_id.to_string()) } else { None },
+        connected_room_id: if is_connected || is_connecting {
+            Some(room_id.to_string())
+        } else {
+            None
+        },
         is_connecting,
         is_mic_enabled: st.mic_enabled,
         is_deafened: st.deafened,
@@ -1351,13 +1414,13 @@ fn setup_mic_input(
     audio_state: Arc<Mutex<AudioState>>,
     noise_proc: Arc<Mutex<NoiseProcessor>>,
     frame_tx: mpsc::Sender<Vec<i16>>,
+    preferred_device_id: Option<&str>,
 ) -> Result<cpal::Stream, String> {
     let host = cpal::default_host();
-    let device = host
-        .default_input_device()
-        .ok_or("No microphone found")?;
+    let device = select_input_device(&host, preferred_device_id)?;
     log::info!("Using input device: {:?}", device.name());
-    let default_config = device.default_input_config()
+    let default_config = device
+        .default_input_config()
         .map_err(|e| format!("Failed to get default input config: {}", e))?;
     let channels = default_config.channels();
     let device_rate = default_config.sample_rate().0;
@@ -1366,21 +1429,30 @@ fn setup_mic_input(
         sample_rate: default_config.sample_rate(),
         buffer_size: cpal::BufferSize::Default,
     };
-    log::info!("Mic config: {}ch @ {}Hz (target {}Hz)", channels, device_rate, SAMPLE_RATE);
+    log::info!(
+        "Mic config: {}ch @ {}Hz (target {}Hz)",
+        channels,
+        device_rate,
+        SAMPLE_RATE
+    );
     let needs_resample = device_rate != SAMPLE_RATE;
     if needs_resample {
-        log::info!("Mic resampling enabled: {}Hz → {}Hz", device_rate, SAMPLE_RATE);
+        log::info!(
+            "Mic resampling enabled: {}Hz → {}Hz",
+            device_rate,
+            SAMPLE_RATE
+        );
     }
     // Pre-resample accumulator (f32 mono at device rate) — only used when resampling
-    let raw_buf: Arc<Mutex<Vec<f32>>> = Arc::new(Mutex::new(
-        Vec::with_capacity(SAMPLES_PER_10MS as usize * 2),
-    ));
+    let raw_buf: Arc<Mutex<Vec<f32>>> = Arc::new(Mutex::new(Vec::with_capacity(
+        SAMPLES_PER_10MS as usize * 2,
+    )));
     // Fractional position tracker for linear interpolation resampling
     let resample_frac: Arc<Mutex<f64>> = Arc::new(Mutex::new(0.0));
     // Post-resample frame accumulator (i16 at 48000 Hz)
-    let frame_buf: Arc<Mutex<Vec<i16>>> = Arc::new(Mutex::new(
-        Vec::with_capacity(SAMPLES_PER_10MS as usize * 2),
-    ));
+    let frame_buf: Arc<Mutex<Vec<i16>>> = Arc::new(Mutex::new(Vec::with_capacity(
+        SAMPLES_PER_10MS as usize * 2,
+    )));
     let stream = device
         .build_input_stream(
             &config,
@@ -1398,7 +1470,11 @@ fn setup_mic_input(
                     let mut raw = raw_buf.lock();
                     // Extract mono (channel 0) as f32
                     for frame in data.chunks(ch) {
-                        let sample = if is_muted { 0.0 } else { frame[0].clamp(-1.0, 1.0) };
+                        let sample = if is_muted {
+                            0.0
+                        } else {
+                            frame[0].clamp(-1.0, 1.0)
+                        };
                         raw.push(sample);
                     }
                     // Resample accumulated device-rate samples to 48000 Hz via linear interpolation
@@ -1409,7 +1485,11 @@ fn setup_mic_input(
                         let idx = *frac as usize;
                         let t = *frac - idx as f64;
                         let s0 = raw[idx] as f64;
-                        let s1 = if idx + 1 < raw.len() { raw[idx + 1] as f64 } else { s0 };
+                        let s1 = if idx + 1 < raw.len() {
+                            raw[idx + 1] as f64
+                        } else {
+                            s0
+                        };
                         let sample = (s0 * (1.0 - t) + s1 * t) as f32;
                         buf.push((sample * 32767.0) as i16);
                         *frac += step;
@@ -1422,7 +1502,15 @@ fn setup_mic_input(
                     }
                     drop(frac);
                     // Send completed 480-sample frames
-                    drain_and_send_frames(&mut buf, frame_size, is_muted, noise_suppression_enabled, &noise_proc, &audio_state, &frame_tx);
+                    drain_and_send_frames(
+                        &mut buf,
+                        frame_size,
+                        is_muted,
+                        noise_suppression_enabled,
+                        &noise_proc,
+                        &audio_state,
+                        &frame_tx,
+                    );
                 } else {
                     // ── No resampling needed (device already at 48000 Hz) ──
                     let mut buf = frame_buf.lock();
@@ -1431,7 +1519,15 @@ fn setup_mic_input(
                         let clamped = sample.clamp(-1.0, 1.0);
                         buf.push((clamped * 32767.0) as i16);
                     }
-                    drain_and_send_frames(&mut buf, frame_size, is_muted, noise_suppression_enabled, &noise_proc, &audio_state, &frame_tx);
+                    drain_and_send_frames(
+                        &mut buf,
+                        frame_size,
+                        is_muted,
+                        noise_suppression_enabled,
+                        &noise_proc,
+                        &audio_state,
+                        &frame_tx,
+                    );
                 }
             },
             move |err| {
@@ -1442,14 +1538,16 @@ fn setup_mic_input(
         .map_err(|e| format!("Failed to build input stream: {}", e))?;
     Ok(stream)
 }
-fn setup_speaker_output(audio_state: Arc<Mutex<AudioState>>) -> Result<cpal::Stream, String> {
+fn setup_speaker_output(
+    audio_state: Arc<Mutex<AudioState>>,
+    preferred_device_id: Option<&str>,
+) -> Result<cpal::Stream, String> {
     let host = cpal::default_host();
-    let device = host
-        .default_output_device()
-        .ok_or("No audio output found")?;
+    let device = select_output_device(&host, preferred_device_id)?;
     log::info!("Using output device: {:?}", device.name());
     // Use the device's preferred config (Windows typically requires stereo)
-    let default_config = device.default_output_config()
+    let default_config = device
+        .default_output_config()
         .map_err(|e| format!("Failed to get default output config: {}", e))?;
     let channels = default_config.channels();
     let device_rate = default_config.sample_rate().0;
@@ -1458,10 +1556,19 @@ fn setup_speaker_output(audio_state: Arc<Mutex<AudioState>>) -> Result<cpal::Str
         sample_rate: default_config.sample_rate(),
         buffer_size: cpal::BufferSize::Default,
     };
-    log::info!("Speaker config: {}ch @ {}Hz (buffer at {}Hz)", channels, device_rate, SAMPLE_RATE);
+    log::info!(
+        "Speaker config: {}ch @ {}Hz (buffer at {}Hz)",
+        channels,
+        device_rate,
+        SAMPLE_RATE
+    );
     let needs_resample = device_rate != SAMPLE_RATE;
     if needs_resample {
-        log::info!("Speaker resampling enabled: {}Hz → {}Hz", SAMPLE_RATE, device_rate);
+        log::info!(
+            "Speaker resampling enabled: {}Hz → {}Hz",
+            SAMPLE_RATE,
+            device_rate
+        );
     }
     let state = audio_state.clone();
     // Persistent resampling state: fractional position in the 48000 Hz buffer
@@ -1550,4 +1657,150 @@ fn setup_speaker_output(audio_state: Arc<Mutex<AudioState>>) -> Result<cpal::Str
         )
         .map_err(|e| format!("Failed to build output stream: {}", e))?;
     Ok(stream)
+}
+
+fn device_name(device: &cpal::Device) -> String {
+    device.name().unwrap_or_else(|err| {
+        log::warn!("Failed to read audio device name: {}", err);
+        "Unknown device".to_string()
+    })
+}
+
+fn device_id(name: &str, occurrence: usize) -> String {
+    format!("{}::{}", name, occurrence)
+}
+
+fn sorted_named_devices<I>(devices: I) -> Vec<(String, cpal::Device)>
+where
+    I: Iterator<Item = cpal::Device>,
+{
+    let mut entries: Vec<(String, cpal::Device)> = devices
+        .map(|device| (device_name(&device), device))
+        .collect();
+    entries.sort_by(|a, b| {
+        a.0.to_lowercase()
+            .cmp(&b.0.to_lowercase())
+            .then_with(|| a.0.cmp(&b.0))
+    });
+    entries
+}
+
+fn build_audio_device_infos(
+    entries: &[(String, cpal::Device)],
+    default_name: Option<&str>,
+) -> Vec<AudioDeviceInfo> {
+    let mut seen_names: HashMap<String, usize> = HashMap::new();
+    let mut default_marked = false;
+    let mut devices = Vec::with_capacity(entries.len());
+
+    for (name, _) in entries {
+        let occurrence = seen_names.entry(name.clone()).or_insert(0);
+        let suffix = if *occurrence == 0 {
+            String::new()
+        } else {
+            format!(" ({})", *occurrence + 1)
+        };
+        let is_default = !default_marked
+            && default_name
+                .map(|default| default == name.as_str())
+                .unwrap_or(false);
+        if is_default {
+            default_marked = true;
+        }
+        devices.push(AudioDeviceInfo {
+            id: device_id(name, *occurrence),
+            name: format!("{}{}", name, suffix),
+            is_default,
+        });
+        *occurrence += 1;
+    }
+
+    devices
+}
+
+fn find_device_by_id(
+    entries: Vec<(String, cpal::Device)>,
+    preferred_id: &str,
+) -> Option<cpal::Device> {
+    let mut seen_names: HashMap<String, usize> = HashMap::new();
+
+    for (name, device) in entries {
+        let occurrence = seen_names.entry(name.clone()).or_insert(0);
+        let current_id = device_id(&name, *occurrence);
+        *occurrence += 1;
+        if current_id == preferred_id {
+            return Some(device);
+        }
+    }
+
+    None
+}
+
+fn select_input_device(
+    host: &cpal::Host,
+    preferred_id: Option<&str>,
+) -> Result<cpal::Device, String> {
+    if let Some(preferred_id) = preferred_id {
+        let devices = host
+            .input_devices()
+            .map_err(|e| format!("Failed to enumerate input devices: {}", e))?;
+        if let Some(device) = find_device_by_id(sorted_named_devices(devices), preferred_id) {
+            log::info!("Using preferred input device id={}", preferred_id);
+            return Ok(device);
+        }
+        log::warn!(
+            "Preferred input device id={} was not found, falling back to system default",
+            preferred_id
+        );
+    }
+
+    host.default_input_device()
+        .ok_or_else(|| "No microphone found".to_string())
+}
+
+fn select_output_device(
+    host: &cpal::Host,
+    preferred_id: Option<&str>,
+) -> Result<cpal::Device, String> {
+    if let Some(preferred_id) = preferred_id {
+        let devices = host
+            .output_devices()
+            .map_err(|e| format!("Failed to enumerate output devices: {}", e))?;
+        if let Some(device) = find_device_by_id(sorted_named_devices(devices), preferred_id) {
+            log::info!("Using preferred output device id={}", preferred_id);
+            return Ok(device);
+        }
+        log::warn!(
+            "Preferred output device id={} was not found, falling back to system default",
+            preferred_id
+        );
+    }
+
+    host.default_output_device()
+        .ok_or_else(|| "No audio output found".to_string())
+}
+
+pub fn list_audio_devices() -> Result<AudioDeviceList, String> {
+    let host = cpal::default_host();
+
+    let default_input_name = host
+        .default_input_device()
+        .map(|device| device_name(&device));
+    let input_entries = sorted_named_devices(
+        host.input_devices()
+            .map_err(|e| format!("Failed to enumerate input devices: {}", e))?,
+    );
+
+    let default_output_name = host
+        .default_output_device()
+        .map(|device| device_name(&device));
+    let output_entries = sorted_named_devices(
+        host.output_devices()
+            .map_err(|e| format!("Failed to enumerate output devices: {}", e))?,
+    );
+
+    Ok(AudioDeviceList {
+        input: build_audio_device_infos(&input_entries, default_input_name.as_deref()),
+        output: build_audio_device_infos(&output_entries, default_output_name.as_deref()),
+    })
 }
