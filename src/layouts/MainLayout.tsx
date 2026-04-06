@@ -11,7 +11,7 @@ import { useVoiceCall } from "../hooks/useVoiceCall";
 import { PresenceContext } from "../hooks/PresenceContext";
 import { useState, useCallback, useMemo, useEffect } from "react";
 import { useTheme } from "../theme/ThemeContext";
-import SettingsMenu from "../components/SettingsMenu";
+import SettingsDialog from "../components/SettingsDialog";
 import {
   VOICE_ROOM_TYPE,
   voiceStateLookupKeysForLiveKitIdentity,
@@ -83,6 +83,7 @@ export default function MainLayout({ userId, onSignOut, rooms: { spaces, roomsBy
   const voiceCall = useVoiceCall();
   const [activeSpaceId, setActiveSpaceId] = useState<string | null>(null);
   const [activeRoomBySpace, setActiveRoomBySpace] = useState<Record<string, string | null>>({});
+  const [settingsOpen, setSettingsOpen] = useState(false);
 
   const spaceKey = activeSpaceId ?? "";
   const activeRoomId = activeRoomBySpace[spaceKey] ?? null;
@@ -106,6 +107,12 @@ export default function MainLayout({ userId, onSignOut, rooms: { spaces, roomsBy
   const fetchedAvatarUrl = useUserAvatar();
   const [avatarOverride, setAvatarOverride] = useState<string | null | undefined>(undefined);
   const userAvatarUrl = avatarOverride !== undefined ? avatarOverride : fetchedAvatarUrl;
+
+  useEffect(() => {
+    if (activeRoomId === "settings") {
+      setActiveRoomBySpace((prev) => ({ ...prev, [spaceKey]: null }));
+    }
+  }, [activeRoomId, spaceKey]);
 
   // Resizable room sidebar width, persisted to localStorage
   const [roomSidebarWidth, setRoomSidebarWidth] = useState(() =>
@@ -197,6 +204,14 @@ export default function MainLayout({ userId, onSignOut, rooms: { spaces, roomsBy
     }
   }, [setActiveRoomId, getRoom, connectedVoiceRoomId, connectVoiceCall]);
 
+  const handleOpenSettings = useCallback(() => {
+    setSettingsOpen(true);
+  }, []);
+
+  const handleCloseSettings = useCallback(() => {
+    setSettingsOpen(false);
+  }, []);
+
   return (
     <PresenceContext.Provider value={{ manualStatus, setManualStatus, effectivePresence }}>
       <div style={{
@@ -212,6 +227,7 @@ export default function MainLayout({ userId, onSignOut, rooms: { spaces, roomsBy
           activeSpaceId={activeSpaceId}
           onSelectSpace={handleSelectSpace}
           onSpacesChanged={fetchRooms}
+          onOpenSettings={handleOpenSettings}
         />
         <div style={{ position: "relative", flexShrink: 0, zIndex: 1 }}>
           <RoomSidebar
@@ -264,14 +280,7 @@ export default function MainLayout({ userId, onSignOut, rooms: { spaces, roomsBy
           color: palette.textPrimary,
           display: "flex",
         }}>
-          {activeRoomId === "settings" ? (
-            <SettingsMenu
-              onSignOut={onSignOut}
-              userAvatarUrl={userAvatarUrl}
-              onAvatarChanged={setAvatarOverride}
-              voiceCall={voiceCall}
-            />
-          ) : activeRoom && activeRoom.membership === "invited" ? (
+          {activeRoom && activeRoom.membership === "invited" ? (
             <InvitationView room={activeRoom} onJoined={fetchRooms} />
           ) : activeRoom && activeRoom.roomType === VOICE_ROOM_TYPE ? (
             <VoiceRoomView
@@ -311,6 +320,15 @@ export default function MainLayout({ userId, onSignOut, rooms: { spaces, roomsBy
             </div>
           )}
         </main>
+        {settingsOpen && (
+          <SettingsDialog
+            onClose={handleCloseSettings}
+            onSignOut={onSignOut}
+            userAvatarUrl={userAvatarUrl}
+            onAvatarChanged={setAvatarOverride}
+            voiceCall={voiceCall}
+          />
+        )}
       </div>
     </PresenceContext.Provider>
   );
