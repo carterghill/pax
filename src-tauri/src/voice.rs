@@ -104,6 +104,9 @@ struct AudioState {
     remote_participants: Vec<String>,
     /// Per-remote participant mic mute state (true = muted)
     remote_mic_muted: HashMap<String, bool>,
+    /// Count of subscribed remote audio tracks that are not the participant's microphone.
+    /// When this is non-zero, participant-wide active speaker events are not mic-specific.
+    remote_non_mic_audio_tracks: HashMap<String, usize>,
     /// Per-remote participant deafen state (Pax attribute-based)
     remote_deafened: HashMap<String, bool>,
     /// Whether mic is enabled
@@ -129,6 +132,7 @@ impl Default for AudioState {
             remote_mic_level_smooth: HashMap::new(),
             remote_participants: Vec::new(),
             remote_mic_muted: HashMap::new(),
+            remote_non_mic_audio_tracks: HashMap::new(),
             remote_deafened: HashMap::new(),
             mic_enabled: true,
             deafened: false,
@@ -667,6 +671,7 @@ async fn handle_remote_audio(
     identity: String,
     track_key: String,
     source_tag: String,
+    is_mic_track: bool,
     audio_state: Arc<Mutex<AudioState>>,
 ) {
     let mut stream = NativeAudioStream::new(
@@ -682,12 +687,14 @@ async fn handle_remote_audio(
         let mut st = audio_state.lock();
         let volume = *st.user_volumes.get(&vol_key).unwrap_or(&1.0);
 
-        // Per-track RMS for speaking indicator (only track mic-source audio for levels)
-        let inst = rms_i16_normalized(samples);
-        st.remote_mic_level_smooth
-            .entry(identity.clone())
-            .and_modify(|e| *e = ema_speaking_level(*e, inst))
-            .or_insert(inst);
+        // Only microphone audio should drive mic speaking indicators.
+        if is_mic_track {
+            let inst = rms_i16_normalized(samples);
+            st.remote_mic_level_smooth
+                .entry(identity.clone())
+                .and_modify(|e| *e = ema_speaking_level(*e, inst))
+                .or_insert(inst);
+        }
 
         let buf = st
             .playback_buffers
@@ -755,6 +762,10 @@ async fn run_event_loop(
                                 }
                                 if source == TrackSource::Microphone {
                                     st.remote_mic_muted.insert(identity.clone(), publication.is_muted());
+                                } else {
+                                    *st.remote_non_mic_audio_tracks
+                                        .entry(identity.clone())
+                                        .or_insert(0) += 1;
                                 }
                                 let deafened = participant
                                     .attributes()
@@ -770,8 +781,17 @@ async fn run_event_loop(
                                 TrackSource::ScreenshareAudio => "screenshare_audio".to_string(),
                                 other => format!("{:?}", other).to_lowercase(),
                             };
+                            let is_mic_track = source == TrackSource::Microphone;
                             tokio::spawn(async move {
-                                handle_remote_audio(audio_track, identity, track_key, source_tag, state_clone).await;
+                                handle_remote_audio(
+                                    audio_track,
+                                    identity,
+                                    track_key,
+                                    source_tag,
+                                    is_mic_track,
+                                    state_clone,
+                                )
+                                .await;
                             });
                             emit_state(app_handle.as_ref(), &room_id, &local_identity, &audio_state, false, true, None);
                         } else if let RemoteTrack::Video(video_track) = track {
@@ -831,13 +851,25 @@ async fn run_event_loop(
                             crate::video_recv::clear_frame_buffer_for(&identity);
                             crate::native_overlay::destroy_overlay(&identity);
                             emit_state(app_handle.as_ref(), &room_id, &local_identity, &audio_state, false, true, None);
-                        } else if source == TrackSource::Microphone || source == TrackSource::ScreenshareAudio {
+                        } else if publication.kind() == TrackKind::Audio {
                             let track_key = format!("{}::{:?}", identity, source);
                             let mut st = audio_state.lock();
                             st.playback_buffers.remove(&track_key);
                             if source == TrackSource::Microphone {
                                 st.remote_mic_muted.remove(&identity);
                                 st.remote_mic_level_smooth.remove(&identity);
+                            } else {
+                                let should_remove = if let Some(count) =
+                                    st.remote_non_mic_audio_tracks.get_mut(&identity)
+                                {
+                                    *count = count.saturating_sub(1);
+                                    *count == 0
+                                } else {
+                                    false
+                                };
+                                if should_remove {
+                                    st.remote_non_mic_audio_tracks.remove(&identity);
+                                }
                             }
                             drop(st);
                             emit_state(app_handle.as_ref(), &room_id, &local_identity, &audio_state, false, true, None);
@@ -847,7 +879,8 @@ async fn run_event_loop(
                         if publication.source() == TrackSource::Microphone {
                             let identity = participant.identity().to_string();
                             let mut st = audio_state.lock();
-                            st.remote_mic_muted.insert(identity, true);
+                            st.remote_mic_muted.insert(identity.clone(), true);
+                            st.remote_mic_level_smooth.remove(&identity);
                             drop(st);
                             emit_state(app_handle.as_ref(), &room_id, &local_identity, &audio_state, false, true, None);
                         }
@@ -898,6 +931,7 @@ async fn run_event_loop(
                             let mut st = audio_state.lock();
                             st.remote_participants.retain(|id| id != &identity);
                             st.remote_mic_muted.remove(&identity);
+                            st.remote_non_mic_audio_tracks.remove(&identity);
                             st.remote_deafened.remove(&identity);
                             st.remote_mic_level_smooth.remove(&identity);
                             // Remove all per-track playback buffers for this participant
@@ -1157,12 +1191,15 @@ fn emit_state(
     let mut participants = Vec::new();
     // Local participant
     if is_connected {
-        let server = st.active_speakers.contains(&local_identity.to_string());
+        // ActiveSpeakersChanged is participant-wide, so ignore it while local non-mic
+        // stream audio is live and rely on the mic RMS instead.
+        let server =
+            st.active_speakers.contains(&local_identity.to_string()) && !st.is_local_screen_sharing;
         let level_speaking =
-            merge_speaking_from_level(false, st.local_mic_level_smooth, st.mic_enabled);
+            merge_speaking_from_level(server, st.local_mic_level_smooth, st.mic_enabled);
         participants.push(VoiceParticipantInfo {
             identity: local_identity.to_string(),
-            is_speaking: server || level_speaking,
+            is_speaking: level_speaking,
             is_local: true,
             is_muted: !st.mic_enabled,
             is_deafened: st.deafened,
@@ -1170,13 +1207,16 @@ fn emit_state(
     }
     // Remote participants
     for id in &st.remote_participants {
-        let server = st.active_speakers.contains(id);
+        // LiveKit speaker activity is participant-wide; if this participant has a
+        // separate non-mic audio track, use only the decoded mic RMS for the ring.
+        let server = st.active_speakers.contains(id)
+            && st.remote_non_mic_audio_tracks.get(id).copied().unwrap_or(0) == 0;
         let muted = *st.remote_mic_muted.get(id).unwrap_or(&false);
         let smooth = *st.remote_mic_level_smooth.get(id).unwrap_or(&0.0);
-        let level_speaking = merge_speaking_from_level(false, smooth, !muted);
+        let level_speaking = merge_speaking_from_level(server, smooth, !muted);
         participants.push(VoiceParticipantInfo {
             identity: id.clone(),
-            is_speaking: server || level_speaking,
+            is_speaking: level_speaking,
             is_local: false,
             is_muted: muted,
             is_deafened: *st.remote_deafened.get(id).unwrap_or(&false),

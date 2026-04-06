@@ -344,8 +344,7 @@ async fn start_screen_capture_windows_graphics(
         let (capture_control, target_audio_pid) = match mode {
             ScreenShareMode::Screen => {
                 log::debug!("Using Monitor::primary()");
-                let monitor =
-                    Monitor::primary().map_err(|e| format!("Monitor::primary: {}", e))?;
+                let monitor = Monitor::primary().map_err(|e| format!("Monitor::primary: {}", e))?;
                 let settings = Settings::new(
                     monitor,
                     CursorCaptureSettings::Default,
@@ -633,7 +632,10 @@ async fn start_screen_capture_libwebrtc_or_fallback(
             return Ok(sources.into_iter().next());
         }
 
-        let requested_title = match window_title.map(str::trim).filter(|title| !title.is_empty()) {
+        let requested_title = match window_title
+            .map(str::trim)
+            .filter(|title| !title.is_empty())
+        {
             Some(title) => title,
             None => return Ok(sources.into_iter().next()),
         };
@@ -1560,13 +1562,14 @@ mod windows_picker {
     use windows::Win32::Foundation::{COLORREF, HWND, LPARAM, LRESULT, RECT, WPARAM};
     use windows::Win32::Graphics::Gdi::{
         CreateCompatibleDC, CreateDIBSection, CreateSolidBrush, DeleteDC, DeleteObject, FillRect,
-        SelectObject, SetStretchBltMode, StretchBlt, BI_RGB, BITMAPINFO, BITMAPINFOHEADER,
+        SelectObject, SetStretchBltMode, StretchBlt, BITMAPINFO, BITMAPINFOHEADER, BI_RGB,
         DIB_RGB_COLORS, HBITMAP, HDC, HGDIOBJ, RGBQUAD, SRCCOPY, STRETCH_HALFTONE,
     };
     use windows::Win32::Storage::Xps::{PrintWindow, PRINT_WINDOW_FLAGS, PW_CLIENTONLY};
     use windows::Win32::UI::WindowsAndMessaging::{
-        CopyIcon, DestroyIcon, DrawIconEx, GetClassLongPtrW, GetWindowRect, SendMessageW, DI_NORMAL,
-        GCLP_HICON, GCLP_HICONSM, HICON, ICON_BIG, ICON_SMALL2, PW_RENDERFULLCONTENT, WM_GETICON,
+        CopyIcon, DestroyIcon, DrawIconEx, GetClassLongPtrW, GetWindowRect, SendMessageW,
+        DI_NORMAL, GCLP_HICON, GCLP_HICONSM, HICON, ICON_BIG, ICON_SMALL2, PW_RENDERFULLCONTENT,
+        WM_GETICON,
     };
     use windows_capture::window::Window;
 
@@ -1689,8 +1692,22 @@ mod windows_picker {
 
     fn get_window_icon(hwnd: HWND) -> Option<HICON> {
         let candidates = [
-            unsafe { SendMessageW(hwnd, WM_GETICON, Some(WPARAM(ICON_BIG as usize)), Some(LPARAM(0))) },
-            unsafe { SendMessageW(hwnd, WM_GETICON, Some(WPARAM(ICON_SMALL2 as usize)), Some(LPARAM(0))) },
+            unsafe {
+                SendMessageW(
+                    hwnd,
+                    WM_GETICON,
+                    Some(WPARAM(ICON_BIG as usize)),
+                    Some(LPARAM(0)),
+                )
+            },
+            unsafe {
+                SendMessageW(
+                    hwnd,
+                    WM_GETICON,
+                    Some(WPARAM(ICON_SMALL2 as usize)),
+                    Some(LPARAM(0)),
+                )
+            },
             LRESULT(unsafe { GetClassLongPtrW(hwnd, GCLP_HICON) as isize }),
             LRESULT(unsafe { GetClassLongPtrW(hwnd, GCLP_HICONSM) as isize }),
         ];
@@ -1711,9 +1728,13 @@ mod windows_picker {
     fn capture_window_icon_data_url(hwnd: HWND) -> Option<String> {
         let icon = get_window_icon(hwnd)?;
         let surface = BitmapSurface::new(ICON_SIZE, ICON_SIZE).ok()?;
-        let result = unsafe { DrawIconEx(surface.dc, 0, 0, icon, ICON_SIZE, ICON_SIZE, 0, None, DI_NORMAL) }
-            .ok()
-            .and_then(|_| surface.png_data_url(true));
+        let result = unsafe {
+            DrawIconEx(
+                surface.dc, 0, 0, icon, ICON_SIZE, ICON_SIZE, 0, None, DI_NORMAL,
+            )
+        }
+        .ok()
+        .and_then(|_| surface.png_data_url(true));
         let _ = unsafe { DestroyIcon(icon) };
         result
     }
@@ -1744,11 +1765,10 @@ mod windows_picker {
         let src_h = (rect.bottom - rect.top).max(1);
         let source = BitmapSurface::new(src_w, src_h).ok()?;
 
-        let rendered = unsafe {
-            PrintWindow(hwnd, source.dc, PRINT_WINDOW_FLAGS(PW_RENDERFULLCONTENT))
-        }
-        .as_bool()
-            || unsafe { PrintWindow(hwnd, source.dc, PW_CLIENTONLY) }.as_bool();
+        let rendered =
+            unsafe { PrintWindow(hwnd, source.dc, PRINT_WINDOW_FLAGS(PW_RENDERFULLCONTENT)) }
+                .as_bool()
+                || unsafe { PrintWindow(hwnd, source.dc, PW_CLIENTONLY) }.as_bool();
         if !rendered {
             return None;
         }

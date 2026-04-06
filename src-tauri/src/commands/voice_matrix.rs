@@ -1249,7 +1249,8 @@ pub async fn voice_start_screen_share(
 }
 
 #[tauri::command]
-pub async fn enumerate_screen_share_windows() -> Result<Vec<screen::ScreenShareWindowOption>, String> {
+pub async fn enumerate_screen_share_windows() -> Result<Vec<screen::ScreenShareWindowOption>, String>
+{
     tokio::task::spawn_blocking(screen::enumerate_screen_share_windows)
         .await
         .map_err(|e| format!("Window picker task failed: {}", e))?
