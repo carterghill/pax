@@ -74,7 +74,11 @@ pub(crate) async fn get_or_fetch_avatar(
         }
     }
 
-    let bytes = fetch_bytes.await.ok().flatten()?;
+    let bytes = tokio::time::timeout(std::time::Duration::from_secs(10), fetch_bytes)
+        .await
+        .ok()?
+        .ok()
+        .flatten()?;
     let data_url = encode_avatar_data_url(&bytes);
     avatar_cache.lock().await.insert(mxc, data_url.clone());
     Some(data_url)

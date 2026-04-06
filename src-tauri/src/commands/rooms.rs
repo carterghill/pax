@@ -509,20 +509,42 @@ pub async fn get_rooms(state: State<'_, Arc<AppState>>) -> Result<Vec<RoomInfo>,
     for room in &joined_rooms {
         if room.is_space() {
             let mut children = Vec::new();
-            if let Ok(events) = room.get_state_events(StateEventType::SpaceChild).await {
-                for event in events {
-                    if let Ok(raw) = event.deserialize() {
-                        match raw {
-                            matrix_sdk::deserialized_responses::AnySyncOrStrippedState::Sync(e) => {
-                                children.push(e.state_key().to_string());
-                            }
-                            matrix_sdk::deserialized_responses::AnySyncOrStrippedState::Stripped(
-                                e,
-                            ) => {
-                                children.push(e.state_key().to_string());
+            match tokio::time::timeout(
+                Duration::from_secs(10),
+                room.get_state_events(StateEventType::SpaceChild),
+            )
+            .await
+            {
+                Ok(Ok(events)) => {
+                    for event in events {
+                        if let Ok(raw) = event.deserialize() {
+                            match raw {
+                                matrix_sdk::deserialized_responses::AnySyncOrStrippedState::Sync(
+                                    e,
+                                ) => {
+                                    children.push(e.state_key().to_string());
+                                }
+                                matrix_sdk::deserialized_responses::AnySyncOrStrippedState::Stripped(
+                                    e,
+                                ) => {
+                                    children.push(e.state_key().to_string());
+                                }
                             }
                         }
                     }
+                }
+                Ok(Err(e)) => {
+                    log::warn!(
+                        "get_rooms: failed to fetch m.space.child events for {}: {}",
+                        room.room_id(),
+                        fmt_error_chain(&e)
+                    );
+                }
+                Err(_) => {
+                    log::warn!(
+                        "get_rooms: timed out fetching m.space.child events for {}",
+                        room.room_id()
+                    );
                 }
             }
             space_children.insert(room.room_id().to_string(), children);
@@ -709,13 +731,14 @@ pub async fn get_space_info(
     let resp = state
         .http_client
         .get(&url)
+        .timeout(Duration::from_secs(15))
         .header(
             "Authorization",
             format!("Bearer {}", session.tokens.access_token),
         )
         .send()
         .await
-        .map_err(|e| format!("Hierarchy request failed: {e}"))?;
+        .map_err(|e| format!("Hierarchy request failed: {}", fmt_error_chain(&e)))?;
 
     if !resp.status().is_success() {
         let status = resp.status();
