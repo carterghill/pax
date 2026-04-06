@@ -237,6 +237,7 @@ pub fn run() {
             commands::rooms::register,
             commands::rooms::restore_session,
             commands::rooms::get_rooms,
+            commands::rooms::current_homeserver,
             commands::rooms::join_room,
             commands::rooms::get_space_info,
             commands::rooms::get_history_visibility,

@@ -617,6 +617,12 @@ pub async fn get_rooms(state: State<'_, Arc<AppState>>) -> Result<Vec<RoomInfo>,
 }
 
 #[tauri::command]
+pub async fn current_homeserver(state: State<'_, Arc<AppState>>) -> Result<String, String> {
+    let client = super::get_client(&state).await?;
+    Ok(client.homeserver().to_string())
+}
+
+#[tauri::command]
 pub async fn join_room(
     state: State<'_, Arc<AppState>>,
     room_id: String,

@@ -1,4 +1,4 @@
-import { useState, useRef, useEffect, useCallback } from "react";
+import { useState, useRef, useEffect, useCallback, useMemo } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import type { Room } from "../types/matrix";
 import {
@@ -88,6 +88,16 @@ function mergePublicSpaceResults(results: PublicSpaceResult[][]): PublicSpaceRes
   return Array.from(byId.values());
 }
 
+function buildDefaultSearchServers(currentHomeserver: string | null): string[] {
+  return uniqueNonEmpty([
+    "matrix.org",
+    currentHomeserver,
+    "tchncs.de",
+    "4d2.org",
+    "nope.chat",
+  ]);
+}
+
 type RoomsChangedPayload = {
   joinedRoomId?: string;
   optimisticRoom?: Room;
@@ -153,6 +163,7 @@ export default function CreateSpaceDialog({
   const [joinAddress, setJoinAddress] = useState("");
   const [joiningId, setJoiningId] = useState<string | null>(null);
   const [joinSuccess, setJoinSuccess] = useState<string | null>(null);
+  const [currentHomeserver, setCurrentHomeserver] = useState<string | null>(null);
 
   const fileInputRef = useRef<HTMLInputElement>(null);
 
@@ -164,6 +175,18 @@ export default function CreateSpaceDialog({
     window.addEventListener("keydown", handleKey);
     return () => window.removeEventListener("keydown", handleKey);
   }, [onClose]);
+
+  useEffect(() => {
+    invoke<string>("current_homeserver")
+      .then(setCurrentHomeserver)
+      .catch(() => setCurrentHomeserver(null));
+  }, []);
+
+  const searchServers = useMemo(() => {
+    const explicitServers = parseServerInputs(searchServer);
+    if (explicitServers.length > 0) return explicitServers;
+    return buildDefaultSearchServers(currentHomeserver);
+  }, [searchServer, currentHomeserver]);
 
   // When switching to private, demote "public" or "knock" join rules
   // since those options are disabled for private spaces.
@@ -261,15 +284,14 @@ export default function CreateSpaceDialog({
     setJoinSuccess(null);
 
     try {
-      const servers = parseServerInputs(searchServer);
       const searchTermValue = searchTerm.trim() || null;
 
-      if (servers.length <= 1) {
+      if (searchServers.length <= 1) {
         const result = await invoke<{ chunk: PublicSpaceResult[] }>(
           "search_public_spaces",
           {
             searchTerm: searchTermValue,
-            server: servers[0] || null,
+            server: searchServers[0] || null,
             limit: 20,
           }
         );
@@ -278,7 +300,7 @@ export default function CreateSpaceDialog({
       }
 
       const settled = await Promise.allSettled(
-        servers.map((server) =>
+        searchServers.map((server) =>
           invoke<{ chunk: PublicSpaceResult[] }>("search_public_spaces", {
             searchTerm: searchTermValue,
             server,
@@ -297,7 +319,7 @@ export default function CreateSpaceDialog({
         .map((result) => result.value.chunk || []);
 
       const failedResults = settled
-        .map((result, index) => ({ result, server: servers[index] }))
+        .map((result, index) => ({ result, server: searchServers[index] }))
         .filter(
           (
             entry
@@ -332,7 +354,7 @@ export default function CreateSpaceDialog({
     } finally {
       setSearching(false);
     }
-  }, [searchTerm, searchServer]);
+  }, [searchServers, searchTerm]);
 
   // ── Join a space (by ID or from search result) ──
   const handleJoinSpace = useCallback(
@@ -340,7 +362,7 @@ export default function CreateSpaceDialog({
       const roomId = space.room_id;
       const joinTarget = space.canonical_alias || roomId;
       const viaServers = uniqueNonEmpty([
-        ...parseServerInputs(searchServer),
+        ...searchServers,
         extractMatrixServerName(space.canonical_alias),
         extractMatrixServerName(roomId),
       ]);
@@ -373,7 +395,7 @@ export default function CreateSpaceDialog({
         setJoiningId(null);
       }
     },
-    [onCreated, searchServer]
+    [onCreated, searchServers]
   );
 
   // ── Join by address ──
@@ -612,7 +634,7 @@ export default function CreateSpaceDialog({
                   type="text"
                   value={searchServer}
                   onChange={(e) => setSearchServer(e.target.value)}
-                  placeholder="Server to search (leave empty for your homeserver)"
+                  placeholder="Server(s) to search; leave empty for the default list"
                   style={{
                     ...inputStyle,
                     fontSize: typography.fontSizeSmall,
@@ -626,7 +648,7 @@ export default function CreateSpaceDialog({
                     opacity: 0.7,
                   }}
                 >
-                  e.g. matrix.org, 4d2.org to browse public spaces from multiple servers
+                  Leave blank to search `matrix.org`, your homeserver, `tchncs.de`, `4d2.org`, and `nope.chat`
                 </div>
               </div>
 
