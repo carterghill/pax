@@ -30,6 +30,14 @@ interface SpaceHomeViewProps {
   onRoomsChanged: () => void;
 }
 
+/** Last successful `get_space_info` per space — instant when switching back to a visited space. */
+const spaceHomeInfoCache = new Map<string, SpaceInfo>();
+
+type FetchSpaceInfoOptions = {
+  /** If true, keep showing existing UI and refresh in the background (no full-page loading state). */
+  background?: boolean;
+};
+
 export default function SpaceHomeView({ space, onSelectRoom, onRoomsChanged }: SpaceHomeViewProps) {
   const { palette, typography, spacing } = useTheme();
   const [info, setInfo] = useState<SpaceInfo | null>(null);
@@ -44,35 +52,54 @@ export default function SpaceHomeView({ space, onSelectRoom, onRoomsChanged }: S
   const [showCreateRoom, setShowCreateRoom] = useState(false);
   const permCheckedRef = useRef<string | null>(null);
 
-  const fetchInfo = useCallback(() => {
+  const fetchInfo = useCallback((options?: FetchSpaceInfoOptions) => {
     const requestedId = space.id;
-    setLoading(true);
-    setError(null);
+    const background = options?.background ?? false;
+
+    if (!background) {
+      setLoading(true);
+      setError(null);
+    }
 
     invoke<SpaceInfo>("get_space_info", { spaceId: requestedId })
       .then((data) => {
+        spaceHomeInfoCache.set(requestedId, data);
         if (activeSpaceIdRef.current !== requestedId) return;
         setInfo(data);
+        if (!background) setError(null);
       })
       .catch((e) => {
         if (activeSpaceIdRef.current !== requestedId) return;
+        if (background) {
+          console.error("Background space home refresh failed:", e);
+          return;
+        }
         console.error("Failed to fetch space info:", e);
         setError(String(e));
       })
       .finally(() => {
         if (activeSpaceIdRef.current !== requestedId) return;
-        setLoading(false);
+        if (!background) setLoading(false);
       });
   }, [space.id]);
 
   useEffect(() => {
-    setInfo(null);
-    setError(null);
-    setLoading(true);
     setJoiningRoomId(null);
     setShowCreateRoom(false);
-    fetchInfo();
-  }, [fetchInfo]);
+
+    const cached = spaceHomeInfoCache.get(space.id);
+    if (cached) {
+      setInfo(cached);
+      setError(null);
+      setLoading(false);
+      fetchInfo({ background: true });
+    } else {
+      setInfo(null);
+      setError(null);
+      setLoading(true);
+      fetchInfo();
+    }
+  }, [space.id, fetchInfo]);
 
   // Check whether the user can add rooms to this space
   useEffect(() => {
@@ -89,7 +116,7 @@ export default function SpaceHomeView({ space, onSelectRoom, onRoomsChanged }: S
       await invoke("join_room", { roomId });
       onRoomsChanged();
       // Refresh space info to update membership states
-      fetchInfo();
+      fetchInfo({ background: true });
     } catch (e) {
       console.error("Failed to join room:", e);
     }
@@ -356,7 +383,7 @@ export default function SpaceHomeView({ space, onSelectRoom, onRoomsChanged }: S
           onClose={() => setShowCreateRoom(false)}
           onCreated={() => {
             onRoomsChanged();
-            fetchInfo();
+            fetchInfo({ background: true });
           }}
         />
       )}
