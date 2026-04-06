@@ -1,5 +1,6 @@
 import { useState, useCallback, useEffect, useMemo, useRef } from "react";
 import { Volume2, Mic, MicOff, PhoneOff, Loader2, AudioLines, Monitor, MonitorUp, Headphones, Settings, Slash } from "lucide-react";
+import { createPortal } from "react-dom";
 import { useTheme } from "../theme/ThemeContext";
 import { LivekitVoiceParticipantInfo, Room, VoiceParticipant as MatrixVoiceParticipant } from "../types/matrix";
 import { ScreenShareWindowOption, VoiceCall } from "../hooks/useVoiceCall";
@@ -86,6 +87,7 @@ export default function VoiceRoomView({
   useOverlayObstruction(generalSettingsPopupRef, generalSettingsOpen);
   const [windowList, setWindowList] = useState<ScreenShareWindowOption[]>([]);
   const [windowListLoading, setWindowListLoading] = useState(false);
+  const [screenShareMenuPos, setScreenShareMenuPos] = useState<{ top: number; left: number; width: number } | null>(null);
 
   useEffect(() => {
     onGetLowBandwidthMode().then(setLowBandwidthMode).catch(() => {});
@@ -144,6 +146,42 @@ export default function VoiceRoomView({
       cancelled = true;
     };
   }, [screenShareMenuOpen, isLinux, onEnumerateScreenShareWindows]);
+
+  useEffect(() => {
+    if (!screenShareMenuOpen) {
+      setScreenShareMenuPos(null);
+      return;
+    }
+
+    function updateScreenShareMenuPos() {
+      const anchor = screenShareMenuRef.current;
+      if (!anchor) return;
+      const rect = anchor.getBoundingClientRect();
+      const viewportWidth = window.innerWidth;
+      const gap = spacing.unit * 2;
+      const width = isLinux
+        ? Math.min(320, Math.max(220, viewportWidth - 24))
+        : Math.min(760, Math.max(320, viewportWidth - 24));
+      const minLeft = 12;
+      const maxLeft = Math.max(minLeft, viewportWidth - width - 12);
+      const centeredLeft = rect.left + rect.width / 2 - width / 2;
+      const left = Math.min(Math.max(centeredLeft, minLeft), maxLeft);
+
+      setScreenShareMenuPos({
+        top: rect.top - gap,
+        left,
+        width,
+      });
+    }
+
+    updateScreenShareMenuPos();
+    window.addEventListener("resize", updateScreenShareMenuPos);
+    window.addEventListener("scroll", updateScreenShareMenuPos, true);
+    return () => {
+      window.removeEventListener("resize", updateScreenShareMenuPos);
+      window.removeEventListener("scroll", updateScreenShareMenuPos, true);
+    };
+  }, [screenShareMenuOpen, isLinux, spacing.unit]);
 
   const startShare = useCallback(
     async (mode: "screen" | "window", windowTitle?: string, windowHandle?: string) => {
@@ -209,7 +247,8 @@ export default function VoiceRoomView({
       if (
         screenShareMenuOpen &&
         screenShareMenuRef.current &&
-        !screenShareMenuRef.current.contains(target)
+        !screenShareMenuRef.current.contains(target) &&
+        (!screenShareMenuPopupRef.current || !screenShareMenuPopupRef.current.contains(target))
       ) {
         setScreenShareMenuOpen(false);
       }
@@ -875,14 +914,17 @@ export default function VoiceRoomView({
             >
               {callState.isLocalScreenSharing ? <MonitorUp size={20} /> : <Monitor size={20} />}
             </button>
-            {screenShareMenuOpen && !callState.isLocalScreenSharing && (
+            {screenShareMenuOpen &&
+              !callState.isLocalScreenSharing &&
+              screenShareMenuPos &&
+              createPortal(
               <div
                 ref={screenShareMenuPopupRef}
                 style={{
-                position: "absolute",
-                bottom: `calc(100% + ${spacing.unit * 4}px)`,
-                left: "50%",
-                transform: "translateX(-50%)",
+                position: "fixed",
+                top: screenShareMenuPos.top,
+                left: screenShareMenuPos.left,
+                transform: "translateY(-100%)",
                 backgroundColor: palette.bgSecondary,
                 border: `1px solid ${palette.border}`,
                 borderRadius: spacing.unit * 2,
@@ -890,11 +932,12 @@ export default function VoiceRoomView({
                 display: "flex",
                 flexDirection: "column",
                 gap: spacing.unit * 2,
-                width: isLinux ? undefined : "min(80vw, 760px)",
-                maxWidth: isLinux ? undefined : 760,
-                maxHeight: isLinux ? undefined : "70vh",
-                overflowY: isLinux ? undefined : "auto",
-                zIndex: 10,
+                width: screenShareMenuPos.width,
+                maxWidth: screenShareMenuPos.width,
+                maxHeight: "70vh",
+                overflowY: "auto",
+                zIndex: 2000,
+                boxShadow: "0 12px 36px rgba(0,0,0,0.45)",
               }}
               >
                 <button
@@ -1126,7 +1169,8 @@ export default function VoiceRoomView({
                     )}
                   </>
                 )}
-              </div>
+              </div>,
+              document.body
             )}
           </div>
 
