@@ -4,6 +4,36 @@ import { listen } from "@tauri-apps/api/event";
 import { Room } from "../types/matrix";
 import { loadPersistedRooms, savePersistedRooms } from "../utils/roomsCache";
 
+/** Matches the Rust fallback in `get_rooms` when the SDK has no m.room.name yet. */
+const GENERIC_UNNAMED = "Unnamed";
+
+function isPlaceholderRoomName(name: string): boolean {
+  return !name.trim() || name === GENERIC_UNNAMED;
+}
+
+/** Keep the last non-placeholder name while sync fills in canonical room state. */
+function withStableRoomDisplayName(
+  previous: Room | undefined,
+  incoming: Room
+): Room {
+  if (!previous || previous.id !== incoming.id) return incoming;
+  if (!isPlaceholderRoomName(incoming.name)) return incoming;
+  if (!isPlaceholderRoomName(previous.name)) {
+    return { ...incoming, name: previous.name };
+  }
+  return incoming;
+}
+
+function mergeFetchedRoomsPreserveNames(
+  previousList: Room[],
+  incomingList: Room[]
+): Room[] {
+  const prevById = new Map(previousList.map((r) => [r.id, r]));
+  return incomingList.map((room) =>
+    withStableRoomDisplayName(prevById.get(room.id), room)
+  );
+}
+
 export type RoomsForLayout = {
   spaces: Room[];
   roomsBySpace: (spaceId: string | null) => Room[];
@@ -17,15 +47,18 @@ export function useRooms(userId: string | null) {
   const [optimisticRooms, setOptimisticRooms] = useState<Room[]>([]);
   const [initialLoadComplete, setInitialLoadComplete] = useState(() => !userId);
   const fetchingRef = useRef(false);
+  /** Latest optimistic rows for merge during fetch (state is async). */
+  const optimisticRoomsRef = useRef<Room[]>([]);
+  optimisticRoomsRef.current = optimisticRooms;
 
   const mergeRooms = useCallback((serverRooms: Room[], pendingRooms: Room[]) => {
-    const byId = new Map(serverRooms.map((room) => [room.id, room]));
-    for (const room of pendingRooms) {
-      if (!byId.has(room.id)) {
-        byId.set(room.id, room);
-      }
-    }
-    return Array.from(byId.values());
+    const pendingById = new Map(pendingRooms.map((r) => [r.id, r]));
+    const mergedServer = serverRooms.map((room) =>
+      withStableRoomDisplayName(pendingById.get(room.id), room)
+    );
+    const serverIds = new Set(serverRooms.map((r) => r.id));
+    const orphanPending = pendingRooms.filter((r) => !serverIds.has(r.id));
+    return [...mergedServer, ...orphanPending];
   }, []);
 
   const fetchRooms = useCallback(async (): Promise<Room[]> => {
@@ -34,17 +67,27 @@ export function useRooms(userId: string | null) {
 
     try {
       const list = await invoke<Room[]>("get_rooms");
-      setFetchedRooms(list);
-      savePersistedRooms(userId, list);
-      let merged: Room[] = [];
-      setOptimisticRooms((prev) => {
-        const next = prev.filter(
-          (pending) => !list.some((room) => room.id === pending.id)
-        );
-        merged = mergeRooms(list, next);
-        return next;
+      const optById = new Map(
+        optimisticRoomsRef.current.map((r) => [r.id, r])
+      );
+      const listWithOptNames = list.map((room) =>
+        withStableRoomDisplayName(optById.get(room.id), room)
+      );
+
+      let mergedFetched: Room[] = [];
+      setFetchedRooms((prevFetched) => {
+        mergedFetched = mergeFetchedRoomsPreserveNames(prevFetched, listWithOptNames);
+        savePersistedRooms(userId, mergedFetched);
+        return mergedFetched;
       });
-      return merged;
+
+      let nextOptimistic: Room[] = [];
+      setOptimisticRooms((prev) => {
+        nextOptimistic = prev.filter((p) => !list.some((r) => r.id === p.id));
+        return nextOptimistic;
+      });
+
+      return mergeRooms(mergedFetched, nextOptimistic);
     } catch (e) {
       console.error("Failed to fetch rooms:", e);
       return [];
@@ -85,8 +128,11 @@ export function useRooms(userId: string | null) {
     invoke<Room[]>("get_rooms")
       .then((list) => {
         if (cancelled) return;
-        setFetchedRooms(list);
-        savePersistedRooms(userId, list);
+        setFetchedRooms((prev) => {
+          const merged = mergeFetchedRoomsPreserveNames(prev, list);
+          savePersistedRooms(userId, merged);
+          return merged;
+        });
       })
       .catch((e) => {
         console.error("Failed to fetch rooms:", e);
