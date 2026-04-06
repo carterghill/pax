@@ -65,6 +65,9 @@ pub struct AppState {
     /// The delay_id from the server for the current delayed leave event.
     /// Used by voice_disconnect to fire the leave immediately.
     pub delayed_leave_id: StdMutex<Option<String>>,
+    /// Set false when the homeserver rejects MSC4140 delayed leave (e.g. M_MAX_DELAY_UNSUPPORTED).
+    /// Reset to true at each `voice_connect` so a new server/session is re-probed.
+    pub msc4140_supported: AtomicBool,
 }
 
 impl AppState {
@@ -197,6 +200,7 @@ pub fn run() {
         heartbeat_stop: Arc::new(AtomicBool::new(true)),
         heartbeat_task: StdMutex::new(None),
         delayed_leave_id: StdMutex::new(None),
+        msc4140_supported: AtomicBool::new(true),
     });
 
     tauri::Builder::default()

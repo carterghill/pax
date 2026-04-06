@@ -288,7 +288,7 @@ pub async fn get_voice_participants(
 }
 
 // ─── MSC4140 Delayed Events API ─────────────────────────────────────────────
-// Instead of client-side refresh timers, we use server-side delayed events:
+// When the homeserver supports MSC4140:
 //   1. On join: PUT a delayed leave (empty content, 60s timeout) → get delay_id
 //   2. PUT the actual join state event
 //   3. Heartbeat: POST restart every 15s to keep the delayed leave from firing
@@ -296,6 +296,31 @@ pub async fn get_voice_participants(
 // If the client crashes, the server fires the leave event after 60s automatically.
 // If the client sleeps and the delayed leave fires, the heartbeat loop detects
 // the 404 on restart and re-registers + re-PUTs to recover the session.
+// If the server does not support delayed events (M_MAX_DELAY_UNSUPPORTED), we
+// skip this path and rely on `m.call.member` `expires` plus periodic re-PUT.
+
+#[derive(Debug)]
+enum DelayedLeaveError {
+    Unsupported,
+    Other(String),
+}
+
+fn body_indicates_msc4140_unsupported(body: &str) -> bool {
+    if body.contains("M_MAX_DELAY_UNSUPPORTED") {
+        return true;
+    }
+    if body.contains("Delayed events are not supported") {
+        return true;
+    }
+    if let Ok(v) = serde_json::from_str::<serde_json::Value>(body) {
+        if v.get("org.matrix.msc4140.errcode").and_then(|x| x.as_str())
+            == Some("M_MAX_DELAY_UNSUPPORTED")
+        {
+            return true;
+        }
+    }
+    false
+}
 
 /// PUT a delayed leave event (empty content) for this device.
 /// The server will auto-fire it after `DELAYED_LEAVE_DELAY_MS` unless restarted.
@@ -304,12 +329,15 @@ async fn send_delayed_leave_event(
     client: &Client,
     http: &reqwest::Client,
     room_id: &str,
-) -> Result<String, String> {
-    let user_id = client.user_id().ok_or("No user ID")?;
-    let device_id = client.device_id().ok_or("No device ID")?;
+) -> Result<String, DelayedLeaveError> {
+    let user_id = client.user_id().ok_or_else(|| DelayedLeaveError::Other("No user ID".into()))?;
+    let device_id =
+        client.device_id().ok_or_else(|| DelayedLeaveError::Other("No device ID".into()))?;
     let state_key = format!("_{}_{}_{}", user_id, device_id, "m.call");
     let homeserver = client.homeserver().to_string();
-    let access_token = client.access_token().ok_or("No access token")?;
+    let access_token = client
+        .access_token()
+        .ok_or_else(|| DelayedLeaveError::Other("No access token".into()))?;
 
     // Same state endpoint as a normal PUT, but with the delay query parameter.
     // Body is empty {} (= leave content). Server holds it for DELAYED_LEAVE_DELAY_MS.
@@ -329,23 +357,33 @@ async fn send_delayed_leave_event(
         .json(&serde_json::json!({}))
         .send()
         .await
-        .map_err(|e| format!("send_delayed_leave: {}", fmt_error_chain(&e)))?;
+        .map_err(|e| {
+            DelayedLeaveError::Other(format!("send_delayed_leave: {}", fmt_error_chain(&e)))
+        })?;
 
     if !resp.status().is_success() {
         let status = resp.status();
         let body = resp.text().await.unwrap_or_default();
-        return Err(format!("send_delayed_leave ({}): {}", status, body));
+        if body_indicates_msc4140_unsupported(&body) {
+            return Err(DelayedLeaveError::Unsupported);
+        }
+        return Err(DelayedLeaveError::Other(format!(
+            "send_delayed_leave ({}): {}",
+            status, body
+        )));
     }
 
     let json: serde_json::Value = resp
         .json()
         .await
-        .map_err(|e| format!("send_delayed_leave JSON: {e}"))?;
+        .map_err(|e| DelayedLeaveError::Other(format!("send_delayed_leave JSON: {e}")))?;
 
     json.get("delay_id")
         .and_then(|d| d.as_str())
         .map(|s| s.to_string())
-        .ok_or_else(|| "send_delayed_leave: no delay_id in response".to_string())
+        .ok_or_else(|| {
+            DelayedLeaveError::Other("send_delayed_leave: no delay_id in response".into())
+        })
 }
 
 /// Restart the delayed leave timer (heartbeat). Must be called every ~15s.
@@ -893,18 +931,20 @@ async fn kick_other_devices_from_livekit(
     }
 }
 
-/// Start the MSC4140 heartbeat loop: restart the delayed leave event every 15s.
-/// If the heartbeat stops (crash, network), the server fires the leave after 60s.
+/// Heartbeat loop: when MSC4140 is in use, restart the delayed leave every 15s
+/// (server fires leave after 60s if restarts stop). Otherwise only the membership
+/// refresh below runs on this tick.
 ///
 /// Also re-PUTs the `m.call.member` state event every ~3.5 hours so that the
 /// `origin_server_ts + expires` window never lapses while the user is connected.
 ///
-/// **Recovery after sleep/suspend:** If the delayed event has been fired by the
-/// server (404 on restart), the loop re-registers a new delayed leave and
-/// re-PUTs the call.member state event to rejoin transparently.
+/// **Recovery after sleep/suspend (MSC4140 only):** If the delayed event was
+/// fired (404 on restart), the loop re-registers a delayed leave and re-PUTs
+/// call.member; if the server no longer supports MSC4140, recovery falls back
+/// to membership-only mode.
 fn start_heartbeat_loop(
     state: Arc<AppState>,
-    initial_delay_id: String,
+    initial_delay_id: Option<String>,
     room_id: String,
     reconnect_notify: Arc<tokio::sync::Notify>,
 ) {
@@ -950,42 +990,52 @@ fn start_heartbeat_loop(
                 None => break,
             };
 
-            // 1. Restart the delayed leave (the core heartbeat)
-            match restart_delayed_event(
-                &st.http_client,
-                &homeserver,
-                &access_token,
-                &current_delay_id,
-            )
-            .await
-            {
-                Ok(true) => {
-                    // Normal heartbeat success — nothing else to do
-                }
-                Ok(false) => {
-                    // 404: the delayed event was already fired (computer slept, network
-                    // outage exceeded the timeout, etc.). We need to re-register and
-                    // re-PUT call.member to rejoin the call.
-                    log::warn!("Delayed leave was fired while we were away — recovering session");
-                    match recover_session(c, &st.http_client, &room_id).await {
-                        Ok(new_delay_id) => {
-                            log::info!("Session recovered: new delay_id={}", new_delay_id);
-                            current_delay_id = new_delay_id.clone();
-                            last_membership_refresh = tokio::time::Instant::now();
-                            // Update the shared delay_id so voice_disconnect uses the new one
-                            if let Ok(mut g) = st.delayed_leave_id.lock() {
-                                *g = Some(new_delay_id);
+            // 1. Restart the delayed leave (MSC4140 only)
+            if let Some(ref did) = current_delay_id {
+                match restart_delayed_event(
+                    &st.http_client,
+                    &homeserver,
+                    &access_token,
+                    did,
+                )
+                .await
+                {
+                    Ok(true) => {
+                        // Normal heartbeat success — nothing else to do
+                    }
+                    Ok(false) => {
+                        // 404: the delayed event was already fired (computer slept, network
+                        // outage exceeded the timeout, etc.). Re-register and/or re-PUT.
+                        log::warn!("Delayed leave was fired while we were away — recovering session");
+                        match recover_session(c, &st.http_client, &room_id, &st).await {
+                            Ok(Some(new_delay_id)) => {
+                                log::info!("Session recovered: new delay_id={}", new_delay_id);
+                                current_delay_id = Some(new_delay_id.clone());
+                                last_membership_refresh = tokio::time::Instant::now();
+                                if let Ok(mut g) = st.delayed_leave_id.lock() {
+                                    *g = Some(new_delay_id);
+                                }
+                            }
+                            Ok(None) => {
+                                log::info!(
+                                    "Session recovered without MSC4140 delayed leave (membership only)"
+                                );
+                                current_delay_id = None;
+                                last_membership_refresh = tokio::time::Instant::now();
+                                if let Ok(mut g) = st.delayed_leave_id.lock() {
+                                    *g = None;
+                                }
+                            }
+                            Err(e) => {
+                                log::error!("Session recovery failed: {}", e);
+                                // Will retry on the next tick
                             }
                         }
-                        Err(e) => {
-                            log::error!("Session recovery failed: {}", e);
-                            // Will retry on the next tick
-                        }
                     }
-                }
-                Err(e) => {
-                    log::warn!("Heartbeat restart failed: {}", e);
-                    // Transient error — the next tick will retry.
+                    Err(e) => {
+                        log::warn!("Heartbeat restart failed: {}", e);
+                        // Transient error — the next tick will retry.
+                    }
                 }
             }
 
@@ -1010,18 +1060,30 @@ fn start_heartbeat_loop(
     }
 }
 
-/// Re-register a delayed leave + re-PUT the call.member state event after the
-/// previous delayed leave was fired by the server (e.g. after computer sleep).
+/// Re-register a delayed leave + re-PUT `m.call.member` after the server fired
+/// the previous delayed leave (e.g. sleep). Returns `None` for delay_id if the
+/// server no longer supports MSC4140.
 async fn recover_session(
     client: &Client,
     http: &reqwest::Client,
     room_id: &str,
-) -> Result<String, String> {
-    // 1. Register a new delayed leave (dead man's switch)
-    let new_delay_id = send_delayed_leave_event(client, http, room_id).await?;
-    // 2. Re-PUT the call.member to rejoin
-    matrix_voice_put_call_member(client, http, room_id).await?;
-    Ok(new_delay_id)
+    app: &AppState,
+) -> Result<Option<String>, String> {
+    match send_delayed_leave_event(client, http, room_id).await {
+        Ok(new_delay_id) => {
+            matrix_voice_put_call_member(client, http, room_id).await?;
+            Ok(Some(new_delay_id))
+        }
+        Err(DelayedLeaveError::Unsupported) => {
+            log::warn!(
+                "MSC4140 unsupported during session recovery — re-PUT call.member only"
+            );
+            app.msc4140_supported.store(false, Ordering::SeqCst);
+            matrix_voice_put_call_member(client, http, room_id).await?;
+            Ok(None)
+        }
+        Err(DelayedLeaveError::Other(e)) => Err(e),
+    }
 }
 
 /// Decode a JWT's payload (without signature verification) to log its expiry.
@@ -1072,6 +1134,7 @@ pub async fn voice_connect(
     log::debug!("voice_connect called for room {}", room_id);
     let state_arc: Arc<AppState> = (*state).clone();
     state_arc.stop_heartbeat_loop();
+    state_arc.msc4140_supported.store(true, Ordering::SeqCst);
     let client = super::get_client(&state).await?;
     let http_client = state.http_client.clone();
 
@@ -1108,19 +1171,31 @@ pub async fn voice_connect(
         .await;
     });
 
-    // ── MSC4140 join sequence ──
-    // 1. Send delayed leave event (dead man's switch) — server will fire it
-    //    in 8s unless we keep restarting it via heartbeat.
-    let delay_id = send_delayed_leave_event(&client, &http_client, &room_id).await?;
-    log::info!("Delayed leave registered: delay_id={}", delay_id);
+    // ── Join: delayed leave (MSC4140) when supported, else expires + refresh only ──
+    let delay_id_opt = match send_delayed_leave_event(&client, &http_client, &room_id).await {
+        Ok(id) => {
+            log::info!("Delayed leave registered: delay_id={}", id);
+            Some(id)
+        }
+        Err(DelayedLeaveError::Unsupported) => {
+            log::warn!(
+                "Homeserver does not support MSC4140 delayed leave — using m.call.member \
+                 expires + periodic refresh (ghost cleanup may take up to the expiry window \
+                 if the client crashes)"
+            );
+            state_arc.msc4140_supported.store(false, Ordering::SeqCst);
+            None
+        }
+        Err(DelayedLeaveError::Other(e)) => return Err(e),
+    };
 
-    // 2. PUT the actual join state event + get LiveKit JWT
+    // PUT the actual join state event + get LiveKit JWT
     let result = matrix_voice_join(&client, &http_client, &room_id).await?;
     let identity = client.user_id().ok_or("No user ID")?.to_string();
 
-    // 3. Store the delay_id so voice_disconnect can fire it
+    // Store delay_id so voice_disconnect can fire the delayed event (MSC4140 only)
     if let Ok(mut g) = state_arc.delayed_leave_id.lock() {
-        *g = Some(delay_id.clone());
+        *g = delay_id_opt.clone();
     }
 
     // 4. Connect to LiveKit
@@ -1147,7 +1222,7 @@ pub async fn voice_connect(
         .expect("reconnect_notify missing right after connect");
     start_heartbeat_loop(
         state_arc.clone(),
-        delay_id,
+        delay_id_opt,
         room_id.clone(),
         reconnect_notify,
     );
