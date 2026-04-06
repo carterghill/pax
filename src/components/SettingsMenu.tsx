@@ -2,7 +2,18 @@ import { useState, useEffect, useRef, useCallback } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { useTheme } from "../theme/ThemeContext";
 import { ThemeToggle } from "../theme/ThemeToggle";
-import { Camera, Trash2, Check, X, Pencil } from "lucide-react";
+import {
+  Camera,
+  Trash2,
+  Check,
+  X,
+  Pencil,
+  User,
+  Palette,
+  Volume2,
+  LogOut,
+} from "lucide-react";
+import type { LucideIcon } from "lucide-react";
 import type { VoiceCall } from "../hooks/useVoiceCall";
 import VoiceAudioSettingsSection from "./VoiceAudioSettingsSection";
 
@@ -13,6 +24,17 @@ interface SettingsMenuProps {
   voiceCall: VoiceCall;
 }
 
+type SettingsSection = "user" | "appearance" | "audio" | "account";
+
+interface SettingsNavItem {
+  id: SettingsSection;
+  label: string;
+  description: string;
+  title: string;
+  blurb: string;
+  icon: LucideIcon;
+}
+
 export default function SettingsMenu({
   onSignOut,
   userAvatarUrl,
@@ -20,6 +42,7 @@ export default function SettingsMenu({
   voiceCall,
 }: SettingsMenuProps) {
   const { palette, typography, spacing } = useTheme();
+  const [activeSection, setActiveSection] = useState<SettingsSection>("user");
 
   const reconnectVoiceAfterDeviceChange = useCallback(async () => {
     const rid = voiceCall.connectedRoomId;
@@ -122,29 +145,92 @@ export default function SettingsMenu({
     }
   }
 
-  // ---- Shared styles ----
-  const sectionStyle: React.CSSProperties = {
-    marginBottom: spacing.unit * 6,
-    padding: spacing.unit * 4,
+  const navItems: SettingsNavItem[] = [
+    {
+      id: "user",
+      label: "Profile",
+      description: "Avatar and display name",
+      title: "Profile settings",
+      blurb: "Update how you appear across Pax with a cleaner profile card and name controls.",
+      icon: User,
+    },
+    {
+      id: "appearance",
+      label: "Appearance",
+      description: "Theme and look",
+      title: "Appearance",
+      blurb: "Choose how Pax feels visually. Theme changes apply right away.",
+      icon: Palette,
+    },
+    {
+      id: "audio",
+      label: "Audio",
+      description: "Voice devices and filters",
+      title: "Audio",
+      blurb: "Manage your microphone, speakers, and noise suppression settings from one place.",
+      icon: Volume2,
+    },
+    {
+      id: "account",
+      label: "Account",
+      description: "Session and sign out",
+      title: "Account",
+      blurb: "Control your current session and sign out safely when you are done.",
+      icon: LogOut,
+    },
+  ];
+
+  const activeNavItem =
+    navItems.find((item) => item.id === activeSection) ?? navItems[0];
+
+  const panelStyle = {
     backgroundColor: palette.bgSecondary,
-    borderRadius: 8,
     border: `1px solid ${palette.border}`,
+    borderRadius: 14,
+    padding: spacing.unit * 5,
+    boxShadow: "0 10px 30px rgba(0,0,0,0.16)",
   };
-  const sectionHeading: React.CSSProperties = {
+  const sectionHeadingStyle = {
     margin: 0,
-    marginBottom: spacing.unit * 3,
+    marginBottom: spacing.unit,
+    fontSize: typography.fontSizeLarge,
+    fontWeight: typography.fontWeightBold,
+    color: palette.textHeading,
+  };
+  const sectionDescriptionStyle = {
+    margin: 0,
+    color: palette.textSecondary,
     fontSize: typography.fontSizeBase,
+    lineHeight: 1.55,
+  };
+  const fieldLabelStyle = {
+    fontSize: typography.fontSizeSmall,
     fontWeight: typography.fontWeightMedium,
     color: palette.textSecondary,
+    marginBottom: spacing.unit,
+    textTransform: "uppercase" as const,
+    letterSpacing: 0.5,
   };
-  const smallBtn: React.CSSProperties = {
+  const textInputStyle = {
+    width: "100%",
+    padding: `${spacing.unit * 1.75}px ${spacing.unit * 2}px`,
+    fontSize: typography.fontSizeBase,
+    color: palette.textPrimary,
+    backgroundColor: palette.bgTertiary,
+    border: `1px solid ${palette.border}`,
+    borderRadius: 10,
+    outline: "none",
+    fontFamily: typography.fontFamily,
+    boxSizing: "border-box" as const,
+  };
+  const smallBtn = {
     padding: `${spacing.unit * 1.5}px ${spacing.unit * 3}px`,
     fontSize: typography.fontSizeSmall,
     fontWeight: typography.fontWeightMedium,
     color: palette.textPrimary,
     backgroundColor: palette.bgTertiary,
     border: `1px solid ${palette.border}`,
-    borderRadius: 6,
+    borderRadius: 10,
     cursor: "pointer",
     display: "inline-flex",
     alignItems: "center",
@@ -154,48 +240,83 @@ export default function SettingsMenu({
   return (
     <div
       style={{
-        flex: 1,
+        width: "100%",
+        minHeight: 0,
         display: "flex",
-        flexDirection: "column",
-        padding: spacing.unit * 6,
-        maxWidth: 480,
-        overflowY: "auto",
+        backgroundColor: palette.bgPrimary,
       }}
     >
-      <h2
+      <aside
         style={{
-          margin: 0,
-          marginBottom: spacing.unit * 4,
-          fontSize: typography.fontSizeLarge,
-          fontWeight: typography.fontWeightBold,
-          color: palette.textHeading,
+          width: 232,
+          flexShrink: 0,
+          backgroundColor: palette.bgSecondary,
+          borderRight: `1px solid ${palette.border}`,
+          padding: spacing.unit * 5,
+          display: "flex",
+          flexDirection: "column",
+          gap: spacing.unit * 4,
         }}
       >
-        Settings
-      </h2>
+        <div
+          style={{
+            display: "flex",
+            flexDirection: "column",
+            alignItems: "flex-start",
+            gap: spacing.unit * 2,
+          }}
+        >
+          <div
+            style={{
+              fontSize: typography.fontSizeSmall,
+              fontWeight: typography.fontWeightMedium,
+              textTransform: "uppercase",
+              letterSpacing: 0.6,
+              color: palette.textSecondary,
+            }}
+          >
+            Settings
+          </div>
+          <div
+            style={{
+              fontSize: typography.fontSizeLarge,
+              fontWeight: typography.fontWeightBold,
+              color: palette.textHeading,
+            }}
+          >
+            Preferences
+          </div>
+          <div
+            style={{
+              fontSize: typography.fontSizeSmall,
+              color: palette.textSecondary,
+              lineHeight: 1.5,
+            }}
+          >
+            Manage your profile, appearance, audio, and account from one place.
+          </div>
+        </div>
 
-      {/* ── User ── */}
-      <section style={sectionStyle}>
-        <h3 style={sectionHeading}>User</h3>
-
-        {/* Avatar */}
         <div
           style={{
             display: "flex",
             alignItems: "center",
-            gap: spacing.unit * 4,
-            marginBottom: spacing.unit * 4,
+            gap: spacing.unit * 3,
+            padding: spacing.unit * 3,
+            borderRadius: 12,
+            backgroundColor: palette.bgPrimary,
+            border: `1px solid ${palette.border}`,
           }}
         >
-          <div style={{ position: "relative", flexShrink: 0 }}>
+          <div style={{ flexShrink: 0 }}>
             {userAvatarUrl ? (
               <img
                 src={userAvatarUrl}
                 alt="Your avatar"
                 style={{
                   display: "block",
-                  width: 64,
-                  height: 64,
+                  width: 44,
+                  height: 44,
                   borderRadius: "50%",
                   objectFit: "cover",
                 }}
@@ -203,15 +324,15 @@ export default function SettingsMenu({
             ) : (
               <div
                 style={{
-                  width: 64,
-                  height: 64,
+                  width: 44,
+                  height: 44,
                   borderRadius: "50%",
                   backgroundColor: palette.accent,
                   color: "#fff",
                   display: "flex",
                   alignItems: "center",
                   justifyContent: "center",
-                  fontSize: 24,
+                  fontSize: 18,
                   fontWeight: typography.fontWeightBold,
                 }}
               >
@@ -219,212 +340,486 @@ export default function SettingsMenu({
               </div>
             )}
           </div>
-
-          <div style={{ display: "flex", flexDirection: "column", gap: spacing.unit * 2 }}>
-            <div style={{ display: "flex", gap: spacing.unit * 2 }}>
-              <button
-                style={smallBtn}
-                disabled={avatarUploading}
-                onClick={() => fileInputRef.current?.click()}
-              >
-                <Camera size={14} />
-                {avatarUploading ? "Uploading..." : "Change Avatar"}
-              </button>
-              {userAvatarUrl && (
-                <button
-                  style={{ ...smallBtn, color: "#f23f43" }}
-                  disabled={avatarUploading}
-                  onClick={handleRemoveAvatar}
-                >
-                  <Trash2 size={14} />
-                  Remove
-                </button>
-              )}
-            </div>
-            {avatarError && (
-              <span
-                style={{
-                  fontSize: typography.fontSizeSmall,
-                  color: "#f23f43",
-                }}
-              >
-                {avatarError}
-              </span>
-            )}
-          </div>
-          <input
-            ref={fileInputRef}
-            type="file"
-            accept="image/png,image/jpeg,image/gif,image/webp"
-            style={{ display: "none" }}
-            onChange={(e) => {
-              const file = e.target.files?.[0];
-              if (file) handleAvatarFile(file);
-              // Reset so the same file can be re-selected
-              e.target.value = "";
-            }}
-          />
-        </div>
-
-        {/* Display name */}
-        <div>
-          <div
-            style={{
-              fontSize: typography.fontSizeSmall,
-              fontWeight: typography.fontWeightMedium,
-              color: palette.textSecondary,
-              marginBottom: spacing.unit,
-              textTransform: "uppercase",
-              letterSpacing: 0.5,
-            }}
-          >
-            Display Name
-          </div>
-          {editingName ? (
-            <div style={{ display: "flex", alignItems: "center", gap: spacing.unit * 2 }}>
-              <input
-                ref={nameInputRef}
-                value={draftName}
-                onChange={(e) => setDraftName(e.target.value)}
-                disabled={nameSaving}
-                onKeyDown={(e) => {
-                  if (e.key === "Enter") saveName();
-                  if (e.key === "Escape") cancelEditingName();
-                }}
-                style={{
-                  flex: 1,
-                  padding: `${spacing.unit * 1.5}px ${spacing.unit * 2}px`,
-                  fontSize: typography.fontSizeBase,
-                  color: palette.textPrimary,
-                  backgroundColor: palette.bgTertiary,
-                  border: `1px solid ${palette.border}`,
-                  borderRadius: 4,
-                  outline: "none",
-                  fontFamily: typography.fontFamily,
-                }}
-              />
-              <button
-                style={{
-                  ...smallBtn,
-                  color: "#23a55a",
-                  padding: `${spacing.unit * 1.5}px`,
-                }}
-                disabled={nameSaving}
-                onClick={saveName}
-                title="Save"
-              >
-                <Check size={16} />
-              </button>
-              <button
-                style={{
-                  ...smallBtn,
-                  padding: `${spacing.unit * 1.5}px`,
-                }}
-                disabled={nameSaving}
-                onClick={cancelEditingName}
-                title="Cancel"
-              >
-                <X size={16} />
-              </button>
-            </div>
-          ) : (
-            <div style={{ display: "flex", alignItems: "center", gap: spacing.unit * 2 }}>
-              <span
-                style={{
-                  fontSize: typography.fontSizeBase,
-                  color: palette.textPrimary,
-                }}
-              >
-                {displayName || "Not set"}
-              </span>
-              <button
-                style={{
-                  ...smallBtn,
-                  padding: `${spacing.unit * 1.5}px`,
-                }}
-                onClick={startEditingName}
-                title="Edit display name"
-              >
-                <Pencil size={14} />
-              </button>
-            </div>
-          )}
-          {nameError && (
-            <span
+          <div style={{ minWidth: 0 }}>
+            <div
               style={{
-                fontSize: typography.fontSizeSmall,
-                color: "#f23f43",
-                marginTop: spacing.unit,
-                display: "block",
+                fontSize: typography.fontSizeBase,
+                fontWeight: typography.fontWeightMedium,
+                color: palette.textHeading,
+                overflow: "hidden",
+                textOverflow: "ellipsis",
+                whiteSpace: "nowrap",
               }}
             >
-              {nameError}
-            </span>
-          )}
+              {displayName || "Your account"}
+            </div>
+            <div
+              style={{
+                fontSize: typography.fontSizeSmall,
+                color: palette.textSecondary,
+                marginTop: 2,
+              }}
+            >
+              Personal preferences and voice setup
+            </div>
+          </div>
         </div>
-      </section>
 
-      {/* ── Appearance ── */}
-      <section style={sectionStyle}>
-        <h3 style={sectionHeading}>Appearance</h3>
-        <div
+        <nav
           style={{
             display: "flex",
-            alignItems: "center",
-            gap: spacing.unit * 3,
+            flexDirection: "column",
+            gap: spacing.unit,
           }}
         >
-          <span
-            style={{
-              fontSize: typography.fontSizeBase,
-              color: palette.textPrimary,
-            }}
-          >
-            Theme
-          </span>
-          <ThemeToggle />
-        </div>
-      </section>
+          {navItems.map((item) => {
+            const Icon = item.icon;
+            const isActive = activeSection === item.id;
+            return (
+              <button
+                key={item.id}
+                onClick={() => setActiveSection(item.id)}
+                style={{
+                  width: "100%",
+                  padding: `${spacing.unit * 2}px ${spacing.unit * 2.5}px`,
+                  borderRadius: 12,
+                  border: `1px solid ${isActive ? palette.accent : palette.border}`,
+                  backgroundColor: isActive ? palette.bgActive : "transparent",
+                  color: isActive ? palette.textHeading : palette.textSecondary,
+                  cursor: "pointer",
+                  display: "flex",
+                  alignItems: "flex-start",
+                  gap: spacing.unit * 2,
+                  textAlign: "left",
+                }}
+              >
+                <span
+                  style={{
+                    width: 32,
+                    height: 32,
+                    borderRadius: 10,
+                    backgroundColor: isActive ? palette.accent : palette.bgTertiary,
+                    color: isActive ? "#fff" : palette.textSecondary,
+                    display: "inline-flex",
+                    alignItems: "center",
+                    justifyContent: "center",
+                    flexShrink: 0,
+                  }}
+                >
+                  <Icon size={16} />
+                </span>
+                <span style={{ minWidth: 0 }}>
+                  <div
+                    style={{
+                      fontSize: typography.fontSizeBase,
+                      fontWeight: typography.fontWeightMedium,
+                      color: isActive ? palette.textHeading : palette.textPrimary,
+                    }}
+                  >
+                    {item.label}
+                  </div>
+                  <div
+                    style={{
+                      fontSize: typography.fontSizeSmall,
+                      color: palette.textSecondary,
+                      marginTop: 2,
+                    }}
+                  >
+                    {item.description}
+                  </div>
+                </span>
+              </button>
+            );
+          })}
+        </nav>
+      </aside>
 
-      {/* ── Audio (voice chat) ── */}
-      <section style={sectionStyle}>
-        <h3 style={sectionHeading}>Audio</h3>
-        <VoiceAudioSettingsSection
-          active
-          listAudioDevices={voiceCall.listAudioDevices}
-          getNoiseSuppressionConfig={voiceCall.getNoiseSuppressionConfig}
-          setNoiseSuppressionConfig={voiceCall.setNoiseSuppressionConfig}
-          toggleNoiseSuppression={voiceCall.toggleNoiseSuppression}
-          isNoiseSuppressed={voiceCall.isNoiseSuppressed}
-          onAfterDevicePreferenceChange={reconnectVoiceAfterDeviceChange}
-        />
-      </section>
-
-      {/* ── Account ── */}
-      <section
+      <div
         style={{
-          ...sectionStyle,
-          marginTop: "auto",
-          marginBottom: 0,
+          flex: 1,
+          minWidth: 0,
+          minHeight: 0,
+          overflowY: "auto",
         }}
       >
-        <h3 style={sectionHeading}>Account</h3>
-        <button
-          onClick={onSignOut}
+        <div
           style={{
-            padding: `${spacing.unit * 2}px ${spacing.unit * 4}px`,
-            fontSize: typography.fontSizeBase,
-            fontWeight: typography.fontWeightMedium,
-            color: palette.textPrimary,
-            backgroundColor: palette.bgTertiary,
-            border: `1px solid ${palette.border}`,
-            borderRadius: 6,
-            cursor: "pointer",
+            maxWidth: 760,
+            margin: "0 auto",
+            padding: spacing.unit * 6,
+            display: "flex",
+            flexDirection: "column",
+            gap: spacing.unit * 4,
           }}
         >
-          Sign out
-        </button>
-      </section>
+          <header
+            style={{
+              ...panelStyle,
+              background: `linear-gradient(180deg, ${palette.bgSecondary} 0%, ${palette.bgPrimary} 100%)`,
+            }}
+          >
+            <div
+              style={{
+                fontSize: typography.fontSizeSmall,
+                fontWeight: typography.fontWeightMedium,
+                color: palette.textSecondary,
+                textTransform: "uppercase",
+                letterSpacing: 0.6,
+                marginBottom: spacing.unit * 1.5,
+              }}
+            >
+              Settings
+            </div>
+            <h2 style={sectionHeadingStyle}>{activeNavItem.title}</h2>
+            <p style={sectionDescriptionStyle}>{activeNavItem.blurb}</p>
+          </header>
+
+          {activeSection === "user" && (
+            <>
+              <section style={panelStyle}>
+                <div
+                  style={{
+                    display: "flex",
+                    alignItems: "center",
+                    gap: spacing.unit * 4,
+                    flexWrap: "wrap",
+                  }}
+                >
+                  <div style={{ flexShrink: 0 }}>
+                    {userAvatarUrl ? (
+                      <img
+                        src={userAvatarUrl}
+                        alt="Your avatar"
+                        style={{
+                          display: "block",
+                          width: 84,
+                          height: 84,
+                          borderRadius: "50%",
+                          objectFit: "cover",
+                        }}
+                      />
+                    ) : (
+                      <div
+                        style={{
+                          width: 84,
+                          height: 84,
+                          borderRadius: "50%",
+                          backgroundColor: palette.accent,
+                          color: "#fff",
+                          display: "flex",
+                          alignItems: "center",
+                          justifyContent: "center",
+                          fontSize: 30,
+                          fontWeight: typography.fontWeightBold,
+                        }}
+                      >
+                        {displayName ? displayName.charAt(0).toUpperCase() : "?"}
+                      </div>
+                    )}
+                  </div>
+
+                  <div
+                    style={{
+                      display: "flex",
+                      flexDirection: "column",
+                      gap: spacing.unit * 2,
+                      minWidth: 240,
+                      flex: 1,
+                    }}
+                  >
+                    <div>
+                      <div
+                        style={{
+                          fontSize: typography.fontSizeBase,
+                          fontWeight: typography.fontWeightBold,
+                          color: palette.textHeading,
+                        }}
+                      >
+                        Profile photo
+                      </div>
+                      <div
+                        style={{
+                          marginTop: spacing.unit,
+                          fontSize: typography.fontSizeSmall,
+                          color: palette.textSecondary,
+                          lineHeight: 1.5,
+                        }}
+                      >
+                        Upload an avatar so you are easier to recognize in chats and voice rooms.
+                      </div>
+                    </div>
+                    <div
+                      style={{
+                        display: "flex",
+                        gap: spacing.unit * 2,
+                        flexWrap: "wrap",
+                      }}
+                    >
+                      <button
+                        style={smallBtn}
+                        disabled={avatarUploading}
+                        onClick={() => fileInputRef.current?.click()}
+                      >
+                        <Camera size={14} />
+                        {avatarUploading ? "Uploading..." : "Change Avatar"}
+                      </button>
+                      {userAvatarUrl && (
+                        <button
+                          style={{ ...smallBtn, color: "#f23f43" }}
+                          disabled={avatarUploading}
+                          onClick={handleRemoveAvatar}
+                        >
+                          <Trash2 size={14} />
+                          Remove
+                        </button>
+                      )}
+                    </div>
+                    {avatarError && (
+                      <span
+                        style={{
+                          fontSize: typography.fontSizeSmall,
+                          color: "#f23f43",
+                        }}
+                      >
+                        {avatarError}
+                      </span>
+                    )}
+                  </div>
+                  <input
+                    ref={fileInputRef}
+                    type="file"
+                    accept="image/png,image/jpeg,image/gif,image/webp"
+                    style={{ display: "none" }}
+                    onChange={(e) => {
+                      const file = e.target.files?.[0];
+                      if (file) handleAvatarFile(file);
+                      e.target.value = "";
+                    }}
+                  />
+                </div>
+              </section>
+
+              <section style={panelStyle}>
+                <h3 style={sectionHeadingStyle}>Display name</h3>
+                <p style={{ ...sectionDescriptionStyle, marginBottom: spacing.unit * 3 }}>
+                  This is the name other people will see around the app.
+                </p>
+                <div>
+                  <div style={fieldLabelStyle}>Display Name</div>
+                  {editingName ? (
+                    <div style={{ display: "flex", alignItems: "center", gap: spacing.unit * 2 }}>
+                      <input
+                        ref={nameInputRef}
+                        value={draftName}
+                        onChange={(e) => setDraftName(e.target.value)}
+                        disabled={nameSaving}
+                        onKeyDown={(e) => {
+                          if (e.key === "Enter") saveName();
+                          if (e.key === "Escape") cancelEditingName();
+                        }}
+                        style={{ ...textInputStyle, flex: 1 }}
+                      />
+                      <button
+                        style={{
+                          ...smallBtn,
+                          color: "#23a55a",
+                          padding: `${spacing.unit * 1.5}px`,
+                        }}
+                        disabled={nameSaving}
+                        onClick={saveName}
+                        title="Save"
+                      >
+                        <Check size={16} />
+                      </button>
+                      <button
+                        style={{
+                          ...smallBtn,
+                          padding: `${spacing.unit * 1.5}px`,
+                        }}
+                        disabled={nameSaving}
+                        onClick={cancelEditingName}
+                        title="Cancel"
+                      >
+                        <X size={16} />
+                      </button>
+                    </div>
+                  ) : (
+                    <div
+                      style={{
+                        display: "flex",
+                        alignItems: "center",
+                        justifyContent: "space-between",
+                        gap: spacing.unit * 3,
+                        padding: spacing.unit * 3,
+                        backgroundColor: palette.bgTertiary,
+                        border: `1px solid ${palette.border}`,
+                        borderRadius: 12,
+                      }}
+                    >
+                      <div>
+                        <div
+                          style={{
+                            fontSize: typography.fontSizeBase,
+                            fontWeight: typography.fontWeightMedium,
+                            color: palette.textPrimary,
+                          }}
+                        >
+                          {displayName || "Not set"}
+                        </div>
+                        <div
+                          style={{
+                            marginTop: spacing.unit / 2,
+                            fontSize: typography.fontSizeSmall,
+                            color: palette.textSecondary,
+                          }}
+                        >
+                          Keep it simple and recognizable for spaces and DMs.
+                        </div>
+                      </div>
+                      <button
+                        style={{
+                          ...smallBtn,
+                          padding: `${spacing.unit * 1.5}px`,
+                        }}
+                        onClick={startEditingName}
+                        title="Edit display name"
+                      >
+                        <Pencil size={14} />
+                      </button>
+                    </div>
+                  )}
+                  {nameError && (
+                    <span
+                      style={{
+                        fontSize: typography.fontSizeSmall,
+                        color: "#f23f43",
+                        marginTop: spacing.unit,
+                        display: "block",
+                      }}
+                    >
+                      {nameError}
+                    </span>
+                  )}
+                </div>
+              </section>
+            </>
+          )}
+
+          {activeSection === "appearance" && (
+            <section style={panelStyle}>
+              <h3 style={sectionHeadingStyle}>Theme</h3>
+              <p style={{ ...sectionDescriptionStyle, marginBottom: spacing.unit * 4 }}>
+                Switch between available themes to match your workspace and lighting.
+              </p>
+              <div
+                style={{
+                  display: "flex",
+                  alignItems: "center",
+                  justifyContent: "space-between",
+                  gap: spacing.unit * 3,
+                  padding: spacing.unit * 3,
+                  borderRadius: 12,
+                  backgroundColor: palette.bgTertiary,
+                  border: `1px solid ${palette.border}`,
+                }}
+              >
+                <div>
+                  <div
+                    style={{
+                      fontSize: typography.fontSizeBase,
+                      fontWeight: typography.fontWeightMedium,
+                      color: palette.textPrimary,
+                    }}
+                  >
+                    App theme
+                  </div>
+                  <div
+                    style={{
+                      marginTop: spacing.unit / 2,
+                      fontSize: typography.fontSizeSmall,
+                      color: palette.textSecondary,
+                    }}
+                  >
+                    Theme changes apply immediately across the interface.
+                  </div>
+                </div>
+                <ThemeToggle />
+              </div>
+            </section>
+          )}
+
+          {activeSection === "audio" && (
+            <section style={panelStyle}>
+              <h3 style={sectionHeadingStyle}>Voice preferences</h3>
+              <p style={{ ...sectionDescriptionStyle, marginBottom: spacing.unit * 4 }}>
+                Configure your default input and output devices, plus noise suppression tuning.
+              </p>
+              <VoiceAudioSettingsSection
+                active
+                listAudioDevices={voiceCall.listAudioDevices}
+                getNoiseSuppressionConfig={voiceCall.getNoiseSuppressionConfig}
+                setNoiseSuppressionConfig={voiceCall.setNoiseSuppressionConfig}
+                toggleNoiseSuppression={voiceCall.toggleNoiseSuppression}
+                isNoiseSuppressed={voiceCall.isNoiseSuppressed}
+                onAfterDevicePreferenceChange={reconnectVoiceAfterDeviceChange}
+              />
+            </section>
+          )}
+
+          {activeSection === "account" && (
+            <section style={panelStyle}>
+              <h3 style={sectionHeadingStyle}>Session</h3>
+              <p style={{ ...sectionDescriptionStyle, marginBottom: spacing.unit * 4 }}>
+                Sign out of your current account on this device.
+              </p>
+              <div
+                style={{
+                  padding: spacing.unit * 3,
+                  borderRadius: 12,
+                  backgroundColor: palette.bgTertiary,
+                  border: `1px solid ${palette.border}`,
+                  display: "flex",
+                  alignItems: "center",
+                  justifyContent: "space-between",
+                  gap: spacing.unit * 3,
+                }}
+              >
+                <div>
+                  <div
+                    style={{
+                      fontSize: typography.fontSizeBase,
+                      fontWeight: typography.fontWeightMedium,
+                      color: palette.textPrimary,
+                    }}
+                  >
+                    Sign out
+                  </div>
+                  <div
+                    style={{
+                      marginTop: spacing.unit / 2,
+                      fontSize: typography.fontSizeSmall,
+                      color: palette.textSecondary,
+                    }}
+                  >
+                    You can sign back in again at any time.
+                  </div>
+                </div>
+                <button
+                  onClick={onSignOut}
+                  style={{
+                    ...smallBtn,
+                    color: "#f23f43",
+                    borderColor: "rgba(242,63,67,0.35)",
+                  }}
+                >
+                  <LogOut size={14} />
+                  Sign out
+                </button>
+              </div>
+            </section>
+          )}
+        </div>
+      </div>
     </div>
   );
 }
