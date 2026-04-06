@@ -36,32 +36,41 @@ export default function SpaceHomeView({ space, onSelectRoom, onRoomsChanged }: S
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [joiningRoomId, setJoiningRoomId] = useState<string | null>(null);
-  const fetchingRef = useRef(false);
+  /** Always matches the latest `space.id` so in-flight fetches for an old space are ignored. */
+  const activeSpaceIdRef = useRef(space.id);
+  activeSpaceIdRef.current = space.id;
+
   const [canManageChildren, setCanManageChildren] = useState(false);
   const [showCreateRoom, setShowCreateRoom] = useState(false);
   const permCheckedRef = useRef<string | null>(null);
 
   const fetchInfo = useCallback(() => {
-    if (fetchingRef.current) return;
-    fetchingRef.current = true;
+    const requestedId = space.id;
     setLoading(true);
     setError(null);
 
-    invoke<SpaceInfo>("get_space_info", { spaceId: space.id })
+    invoke<SpaceInfo>("get_space_info", { spaceId: requestedId })
       .then((data) => {
+        if (activeSpaceIdRef.current !== requestedId) return;
         setInfo(data);
       })
       .catch((e) => {
+        if (activeSpaceIdRef.current !== requestedId) return;
         console.error("Failed to fetch space info:", e);
         setError(String(e));
       })
       .finally(() => {
+        if (activeSpaceIdRef.current !== requestedId) return;
         setLoading(false);
-        fetchingRef.current = false;
       });
   }, [space.id]);
 
   useEffect(() => {
+    setInfo(null);
+    setError(null);
+    setLoading(true);
+    setJoiningRoomId(null);
+    setShowCreateRoom(false);
     fetchInfo();
   }, [fetchInfo]);
 
