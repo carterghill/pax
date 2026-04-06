@@ -1,21 +1,32 @@
-import { useState, useEffect, useRef } from "react";
+import { useState, useEffect, useRef, useCallback } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { useTheme } from "../theme/ThemeContext";
 import { ThemeToggle } from "../theme/ThemeToggle";
 import { Camera, Trash2, Check, X, Pencil } from "lucide-react";
+import type { VoiceCall } from "../hooks/useVoiceCall";
+import VoiceAudioSettingsSection from "./VoiceAudioSettingsSection";
 
 interface SettingsMenuProps {
   onSignOut: () => void;
   userAvatarUrl: string | null;
   onAvatarChanged: (newUrl: string | null) => void;
+  voiceCall: VoiceCall;
 }
 
 export default function SettingsMenu({
   onSignOut,
   userAvatarUrl,
   onAvatarChanged,
+  voiceCall,
 }: SettingsMenuProps) {
   const { palette, typography, spacing } = useTheme();
+
+  const reconnectVoiceAfterDeviceChange = useCallback(async () => {
+    const rid = voiceCall.connectedRoomId;
+    if (rid && !voiceCall.isConnecting) {
+      await voiceCall.connect(rid, { forceReconnect: true });
+    }
+  }, [voiceCall.connectedRoomId, voiceCall.isConnecting, voiceCall.connect]);
 
   // ---- Display name ----
   const [displayName, setDisplayName] = useState("");
@@ -373,6 +384,20 @@ export default function SettingsMenu({
           </span>
           <ThemeToggle />
         </div>
+      </section>
+
+      {/* ── Audio (voice chat) ── */}
+      <section style={sectionStyle}>
+        <h3 style={sectionHeading}>Audio</h3>
+        <VoiceAudioSettingsSection
+          active
+          listAudioDevices={voiceCall.listAudioDevices}
+          getNoiseSuppressionConfig={voiceCall.getNoiseSuppressionConfig}
+          setNoiseSuppressionConfig={voiceCall.setNoiseSuppressionConfig}
+          toggleNoiseSuppression={voiceCall.toggleNoiseSuppression}
+          isNoiseSuppressed={voiceCall.isNoiseSuppressed}
+          onAfterDevicePreferenceChange={reconnectVoiceAfterDeviceChange}
+        />
       </section>
 
       {/* ── Account ── */}

@@ -269,6 +269,7 @@ export default function MainLayout({ userId, onSignOut, rooms: { spaces, roomsBy
               onSignOut={onSignOut}
               userAvatarUrl={userAvatarUrl}
               onAvatarChanged={setAvatarOverride}
+              voiceCall={voiceCall}
             />
           ) : activeRoom && activeRoom.membership === "invited" ? (
             <InvitationView room={activeRoom} onJoined={fetchRooms} />
