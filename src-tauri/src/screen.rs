@@ -280,7 +280,7 @@ pub async fn start_screen_capture(
                 e
             ),
         }
-        start_screen_capture_libwebrtc_or_fallback(room, mode, window_title).await
+        start_screen_capture_libwebrtc_or_fallback(room, mode, window_title, window_handle).await
     }
 
     #[cfg(target_os = "linux")]
@@ -295,8 +295,7 @@ pub async fn start_screen_capture(
 
     #[cfg(target_os = "macos")]
     {
-        let _ = window_handle;
-        start_screen_capture_libwebrtc_or_fallback(room, mode, window_title).await
+        start_screen_capture_libwebrtc_or_fallback(room, mode, window_title, window_handle).await
     }
 
     #[cfg(not(any(target_os = "windows", target_os = "macos", target_os = "linux")))]
@@ -332,8 +331,6 @@ async fn start_screen_capture_windows_graphics(
     let video_source = NativeVideoSource::new(resolution, true);
     let shutdown = Arc::new(AtomicBool::new(false));
     let first_frame = Arc::new(AtomicBool::new(false));
-    let flags = (video_source.clone(), shutdown.clone(), first_frame.clone());
-
     let capture_interval_ms = (1000.0 / quality.fps() as f64).round() as u64;
     log::info!(
         "start_screen_capture_windows_graphics: mode={:?} quality={} fps={}",
@@ -342,68 +339,91 @@ async fn start_screen_capture_windows_graphics(
         quality.fps()
     );
 
-    let (capture_control, target_audio_pid) = match mode {
-        ScreenShareMode::Screen => {
-            log::debug!("Using Monitor::primary()");
-            let monitor = Monitor::primary().map_err(|e| format!("Monitor::primary: {}", e))?;
-            let settings = Settings::new(
-                monitor,
-                CursorCaptureSettings::Default,
-                DrawBorderSettings::Default,
-                SecondaryWindowSettings::Default,
-                MinimumUpdateIntervalSettings::Custom(Duration::from_millis(capture_interval_ms)),
-                DirtyRegionSettings::Default,
-                ColorFormat::Bgra8,
-                flags,
-            );
-            (ScreenCaptureHandler::start_free_threaded(settings), None)
-        }
-        ScreenShareMode::Window => {
-            let window = if let Some(ref handle) = window_handle {
-                let hwnd_value = handle
-                    .parse::<usize>()
-                    .map_err(|e| format!("Invalid window handle '{}': {}", handle, e))?;
-                let hwnd = hwnd_value as *mut std::ffi::c_void;
-                log::debug!("Using window handle: {} ({:p})", handle, hwnd);
-                let w = Window::from_raw_hwnd(hwnd);
-                if !w.is_valid() {
-                    return Err("Selected window is no longer available".to_string());
-                }
-                w
-            } else if let Some(ref title) = window_title {
-                log::debug!("Looking up window by title: {}", title);
-                Window::from_name(title)
-                    .or_else(|_| Window::from_contains_name(title))
-                    .map_err(|e| format!("Window '{}': {}", title, e))?
-            } else {
-                log::debug!("Using Window::foreground() (no title specified)");
-                Window::foreground().map_err(|e| format!("Window::foreground: {}", e))?
-            };
-            let win_title = window.title().unwrap_or_else(|_| String::new());
-            let target_audio_pid = window.process_id().ok();
-            log::debug!(
-                "Capturing window: {} (audio PID: {:?})",
-                win_title,
-                target_audio_pid
-            );
-            let settings = Settings::new(
-                window,
-                CursorCaptureSettings::Default,
-                DrawBorderSettings::Default,
-                SecondaryWindowSettings::Default,
-                MinimumUpdateIntervalSettings::Custom(Duration::from_millis(capture_interval_ms)),
-                DirtyRegionSettings::Default,
-                ColorFormat::Bgra8,
-                flags,
-            );
-            (
-                ScreenCaptureHandler::start_free_threaded(settings),
-                target_audio_pid,
-            )
-        }
+    let make_flags = || (video_source.clone(), shutdown.clone(), first_frame.clone());
+    let start_capture_with_interval = |interval: MinimumUpdateIntervalSettings| {
+        let (capture_control, target_audio_pid) = match mode {
+            ScreenShareMode::Screen => {
+                log::debug!("Using Monitor::primary()");
+                let monitor =
+                    Monitor::primary().map_err(|e| format!("Monitor::primary: {}", e))?;
+                let settings = Settings::new(
+                    monitor,
+                    CursorCaptureSettings::Default,
+                    DrawBorderSettings::Default,
+                    SecondaryWindowSettings::Default,
+                    interval,
+                    DirtyRegionSettings::Default,
+                    ColorFormat::Bgra8,
+                    make_flags(),
+                );
+                (ScreenCaptureHandler::start_free_threaded(settings), None)
+            }
+            ScreenShareMode::Window => {
+                let window = if let Some(ref handle) = window_handle {
+                    let hwnd_value = handle
+                        .parse::<usize>()
+                        .map_err(|e| format!("Invalid window handle '{}': {}", handle, e))?;
+                    let hwnd = hwnd_value as *mut std::ffi::c_void;
+                    log::debug!("Using window handle: {} ({:p})", handle, hwnd);
+                    let w = Window::from_raw_hwnd(hwnd);
+                    if !w.is_valid() {
+                        return Err("Selected window is no longer available".to_string());
+                    }
+                    w
+                } else if let Some(ref title) = window_title {
+                    log::debug!("Looking up window by title: {}", title);
+                    Window::from_name(title)
+                        .or_else(|_| Window::from_contains_name(title))
+                        .map_err(|e| format!("Window '{}': {}", title, e))?
+                } else {
+                    log::debug!("Using Window::foreground() (no title specified)");
+                    Window::foreground().map_err(|e| format!("Window::foreground: {}", e))?
+                };
+                let win_title = window.title().unwrap_or_else(|_| String::new());
+                let target_audio_pid = window.process_id().ok();
+                log::debug!(
+                    "Capturing window: {} (audio PID: {:?})",
+                    win_title,
+                    target_audio_pid
+                );
+                let settings = Settings::new(
+                    window,
+                    CursorCaptureSettings::Default,
+                    DrawBorderSettings::Default,
+                    SecondaryWindowSettings::Default,
+                    interval,
+                    DirtyRegionSettings::Default,
+                    ColorFormat::Bgra8,
+                    make_flags(),
+                );
+                (
+                    ScreenCaptureHandler::start_free_threaded(settings),
+                    target_audio_pid,
+                )
+            }
+        };
+
+        capture_control
+            .map(|control| (control, target_audio_pid))
+            .map_err(|e| format!("windows-capture: {}", e))
     };
 
-    let capture_control = capture_control.map_err(|e| format!("windows-capture: {}", e))?;
+    // Older Windows builds support WGC capture but not MinUpdateInterval; retry without it.
+    let (capture_control, target_audio_pid) = match start_capture_with_interval(
+        MinimumUpdateIntervalSettings::Custom(Duration::from_millis(capture_interval_ms)),
+    ) {
+        Ok(values) => values,
+        Err(e)
+            if e.to_ascii_lowercase().contains("minimum update interval")
+                && e.to_ascii_lowercase().contains("not supported") =>
+        {
+            log::warn!(
+                "windows-capture min update interval unsupported; retrying with default interval"
+            );
+            start_capture_with_interval(MinimumUpdateIntervalSettings::Default)?
+        }
+        Err(e) => return Err(e),
+    };
     let capturer_thread = capture_control.into_thread_handle();
 
     // Wait for first frame before publishing - LiveKit needs media flowing for proper SDP negotiation
@@ -550,7 +570,8 @@ impl windows_capture::capture::GraphicsCaptureApiHandler for ScreenCaptureHandle
 async fn start_screen_capture_libwebrtc_or_fallback(
     room: Arc<livekit::Room>,
     mode: ScreenShareMode,
-    _window_title: Option<String>,
+    window_title: Option<String>,
+    _window_handle: Option<String>,
 ) -> Result<ScreenShareHandle, String> {
     let quality = get_screen_share_quality();
     let capture_interval_ms = (1000.0 / quality.fps() as f64).round() as u64;
@@ -599,8 +620,61 @@ async fn start_screen_capture_libwebrtc_or_fallback(
         }
     };
 
+    fn select_source_for_mode(
+        mode: ScreenShareMode,
+        sources: Vec<CaptureSource>,
+        window_title: Option<&str>,
+    ) -> Result<Option<CaptureSource>, String> {
+        if sources.is_empty() {
+            return Ok(None);
+        }
+
+        if mode != ScreenShareMode::Window {
+            return Ok(sources.into_iter().next());
+        }
+
+        let requested_title = match window_title.map(str::trim).filter(|title| !title.is_empty()) {
+            Some(title) => title,
+            None => return Ok(sources.into_iter().next()),
+        };
+        let requested_title_lower = requested_title.to_ascii_lowercase();
+        let mut fuzzy_match = None;
+        let mut available_titles = Vec::new();
+
+        for source in sources {
+            let source_title = source.title();
+            available_titles.push(source_title.clone());
+
+            if source_title.eq_ignore_ascii_case(requested_title) {
+                return Ok(Some(source));
+            }
+
+            if fuzzy_match.is_none()
+                && source_title
+                    .to_ascii_lowercase()
+                    .contains(&requested_title_lower)
+            {
+                fuzzy_match = Some(source);
+            }
+        }
+
+        if let Some(source) = fuzzy_match {
+            log::warn!(
+                "DesktopCapturer fallback matched window '{}' fuzzily to '{}'",
+                requested_title,
+                source.title()
+            );
+            return Ok(Some(source));
+        }
+
+        Err(format!(
+            "Selected window '{}' is no longer available to DesktopCapturer fallback (available: {:?})",
+            requested_title, available_titles
+        ))
+    }
+
     let sources = capturer.get_source_list();
-    let source: Option<CaptureSource> = sources.into_iter().next();
+    let source = select_source_for_mode(mode, sources, window_title.as_deref())?;
     if source.is_none() {
         log::debug!("get_source_list returned empty, trying without explicit source");
     }
