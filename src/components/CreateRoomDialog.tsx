@@ -1,12 +1,22 @@
 import { useState, useRef, useEffect, useCallback } from "react";
 import { invoke } from "@tauri-apps/api/core";
-import { X, Plus, Loader2, Hash, Volume2 } from "lucide-react";
+import {
+  X,
+  Plus,
+  Loader2,
+  Hash,
+  Volume2,
+  Users,
+  Globe,
+  Lock,
+} from "lucide-react";
 import { useTheme } from "../theme/ThemeContext";
 import { useOverlayObstruction } from "../hooks/useOverlayObstruction";
 import { VOICE_ROOM_TYPE } from "../utils/matrix";
 
 type RoomKind = "text" | "voice";
 type HistoryVisibility = "shared" | "joined" | "invited" | "world_readable";
+type SpaceRoomAccess = "space_members" | "public" | "invite";
 
 interface CreateRoomDialogProps {
   spaceId: string;
@@ -26,7 +36,7 @@ export default function CreateRoomDialog({
   const [name, setName] = useState("");
   const [topic, setTopic] = useState("");
   const [roomKind, setRoomKind] = useState<RoomKind>("text");
-  const [isPublic, setIsPublic] = useState(false);
+  const [roomAccess, setRoomAccess] = useState<SpaceRoomAccess>("space_members");
   const [historyVisibility, setHistoryVisibility] =
     useState<HistoryVisibility>("shared");
   const [creating, setCreating] = useState(false);
@@ -62,7 +72,7 @@ export default function CreateRoomDialog({
         spaceId,
         name: name.trim(),
         topic: topic.trim() || null,
-        isPublic,
+        spaceRoomAccess: roomAccess,
         roomType,
         roomAlias: null,
         historyVisibility,
@@ -74,7 +84,7 @@ export default function CreateRoomDialog({
     } finally {
       setCreating(false);
     }
-  }, [name, topic, roomKind, isPublic, historyVisibility, spaceId, onCreated, onClose]);
+  }, [name, topic, roomKind, roomAccess, historyVisibility, spaceId, onCreated, onClose]);
 
   const labelStyle: React.CSSProperties = {
     display: "block",
@@ -219,48 +229,48 @@ export default function CreateRoomDialog({
             />
           </div>
 
-          {/* Privacy */}
+          {/* Access */}
           <div style={{ marginBottom: 16 }}>
-            <label
+            <label style={labelStyle}>Who can find and join</label>
+            <div
               style={{
                 display: "flex",
-                alignItems: "center",
-                gap: 10,
-                cursor: "pointer",
+                flexDirection: "column",
+                gap: 8,
+                width: "100%",
               }}
             >
-              <input
-                type="checkbox"
-                checked={!isPublic}
-                onChange={(e) => setIsPublic(!e.target.checked)}
-                style={{
-                  accentColor: palette.accent,
-                  width: 16,
-                  height: 16,
-                  cursor: "pointer",
-                }}
+              <KindButton
+                icon={<Users size={18} />}
+                label="Space members"
+                description="Not listed in the public directory. Anyone already in this space can see it and join without an invite."
+                selected={roomAccess === "space_members"}
+                onClick={() => setRoomAccess("space_members")}
+                palette={palette}
+                typography={typography}
+                fullWidth
               />
-              <div>
-                <div
-                  style={{
-                    fontSize: typography.fontSizeBase,
-                    color: palette.textPrimary,
-                    fontWeight: typography.fontWeightMedium,
-                  }}
-                >
-                  Private Room
-                </div>
-                <div
-                  style={{
-                    fontSize: typography.fontSizeSmall - 1,
-                    color: palette.textSecondary,
-                    marginTop: 2,
-                  }}
-                >
-                  Only invited members can join this room
-                </div>
-              </div>
-            </label>
+              <KindButton
+                icon={<Globe size={18} />}
+                label="Public"
+                description="Listed in the server's public directory. Anyone can join."
+                selected={roomAccess === "public"}
+                onClick={() => setRoomAccess("public")}
+                palette={palette}
+                typography={typography}
+                fullWidth
+              />
+              <KindButton
+                icon={<Lock size={18} />}
+                label="Invite only"
+                description="Not in the public directory. Only people you invite can join."
+                selected={roomAccess === "invite"}
+                onClick={() => setRoomAccess("invite")}
+                palette={palette}
+                typography={typography}
+                fullWidth
+              />
+            </div>
           </div>
 
           {/* History Visibility */}
@@ -389,6 +399,7 @@ function KindButton({
   onClick,
   palette,
   typography,
+  fullWidth,
 }: {
   icon: React.ReactNode;
   label: string;
@@ -397,12 +408,16 @@ function KindButton({
   onClick: () => void;
   palette: import("../theme/types").ThemePalette;
   typography: import("../theme/types").ThemeTypography;
+  fullWidth?: boolean;
 }) {
   return (
     <button
+      type="button"
       onClick={onClick}
       style={{
-        flex: 1,
+        flex: fullWidth ? undefined : 1,
+        width: fullWidth ? "100%" : undefined,
+        boxSizing: "border-box",
         display: "flex",
         flexDirection: "column",
         alignItems: "flex-start",

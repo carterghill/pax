@@ -1343,13 +1343,19 @@ pub async fn can_manage_space_children(
 /// Creates the room via `POST /createRoom`, then sends an `m.space.child`
 /// state event in the parent space and an `m.space.parent` state event
 /// in the new room to link them bidirectionally.
+///
+/// `space_room_access` controls directory visibility and join rules:
+/// - `space_members` (default): not in the public directory; joined members of
+///   the parent space may join without an invite (`join_rule: restricted`).
+/// - `public`: public directory + open join.
+/// - `invite`: not in the public directory; invite-only.
 #[tauri::command]
 pub async fn create_room_in_space(
     state: State<'_, Arc<AppState>>,
     space_id: String,
     name: String,
     topic: Option<String>,
-    is_public: bool,
+    space_room_access: String,
     room_type: Option<String>,
     room_alias: Option<String>,
     history_visibility: Option<String>,
@@ -1373,10 +1379,35 @@ pub async fn create_room_in_space(
         "type": "m.space.parent",
         "state_key": space_id,
         "content": {
-            "via": [server_name],
+            "via": [server_name.clone()],
             "canonical": true,
         }
     }));
+
+    let access = space_room_access.trim().to_ascii_lowercase();
+    let access = match access.as_str() {
+        "public" => "public",
+        "invite" => "invite",
+        _ => "space_members",
+    };
+
+    // Restricted join: members of the parent space can join without an invite.
+    // Use private_chat preset and override join_rules (same idea as knock in create_space).
+    if access == "space_members" {
+        initial_state.push(serde_json::json!({
+            "type": "m.room.join_rules",
+            "state_key": "",
+            "content": {
+                "join_rule": "restricted",
+                "allow": [
+                    {
+                        "type": "m.room_membership",
+                        "room_id": space_id,
+                    }
+                ]
+            }
+        }));
+    }
 
     // History visibility
     if let Some(hv) = &history_visibility {
@@ -1393,12 +1424,10 @@ pub async fn create_room_in_space(
     }
 
     // Build createRoom body
-    let preset = if is_public {
-        "public_chat"
-    } else {
-        "private_chat"
+    let (preset, visibility) = match access {
+        "public" => ("public_chat", "public"),
+        _ => ("private_chat", "private"),
     };
-    let visibility = if is_public { "public" } else { "private" };
 
     let mut body = serde_json::json!({
         "name": name,
@@ -1406,6 +1435,11 @@ pub async fn create_room_in_space(
         "visibility": visibility,
         "initial_state": initial_state,
     });
+
+    // Room versions that support restricted join rules (MSC3083).
+    if access == "space_members" {
+        body["room_version"] = serde_json::json!("10");
+    }
 
     if let Some(t) = &topic {
         if !t.is_empty() {
@@ -1505,10 +1539,11 @@ pub async fn create_room_in_space(
     }
 
     log::info!(
-        "create_room_in_space: created '{}' → {} in space {} (type={:?})",
+        "create_room_in_space: created '{}' → {} in space {} (access={}, type={:?})",
         name,
         new_room_id,
         space_id,
+        access,
         room_type,
     );
 
