@@ -5,6 +5,7 @@ import VoiceRoomView from "../components/VoiceRoomView";
 import InvitationView from "../layouts/InvitationView";
 import SpaceHomeView from "../layouts/SpaceHomeView";
 import type { RoomsForLayout } from "../hooks/useRooms";
+import type { Room } from "../types/matrix";
 import { usePresence } from "../hooks/usePresence";
 import { useVoiceParticipants } from "../hooks/useVoiceParticipants";
 import { useVoiceCall } from "../hooks/useVoiceCall";
@@ -29,6 +30,11 @@ const MAX_USER_MENU_WIDTH = 400;
 const MIN_CHAT_VIEW_WIDTH = 200;
 const SPACE_SIDEBAR_WIDTH = 72;
 const ROOM_SIDEBAR_RESIZE_HANDLE = 6;
+
+type RoomsChangedPayload = {
+  joinedRoomId?: string;
+  optimisticRoom?: Room;
+};
 
 function getStoredUserMenuWidth(defaultWidth: number): number {
   try {
@@ -78,7 +84,11 @@ interface MainLayoutProps {
   rooms: RoomsForLayout;
 }
 
-export default function MainLayout({ userId, onSignOut, rooms: { spaces, roomsBySpace, getRoom, fetchRooms } }: MainLayoutProps) {
+export default function MainLayout({
+  userId,
+  onSignOut,
+  rooms: { spaces, roomsBySpace, getRoom, fetchRooms, upsertOptimisticRoom },
+}: MainLayoutProps) {
   const { manualStatus, setManualStatus, effectivePresence } = usePresence();
   const voiceCall = useVoiceCall();
   const [activeSpaceId, setActiveSpaceId] = useState<string | null>(null);
@@ -212,6 +222,16 @@ export default function MainLayout({ userId, onSignOut, rooms: { spaces, roomsBy
     setSettingsOpen(false);
   }, []);
 
+  const handleSpacesChanged = useCallback(async (payload?: RoomsChangedPayload) => {
+    if (payload?.optimisticRoom) {
+      upsertOptimisticRoom(payload.optimisticRoom);
+      void fetchRooms();
+      return;
+    }
+
+    await fetchRooms();
+  }, [fetchRooms, upsertOptimisticRoom]);
+
   return (
     <PresenceContext.Provider value={{ manualStatus, setManualStatus, effectivePresence }}>
       <div style={{
@@ -226,7 +246,7 @@ export default function MainLayout({ userId, onSignOut, rooms: { spaces, roomsBy
           spaces={spaces}
           activeSpaceId={activeSpaceId}
           onSelectSpace={handleSelectSpace}
-          onSpacesChanged={fetchRooms}
+          onSpacesChanged={handleSpacesChanged}
           onOpenSettings={handleOpenSettings}
         />
         <div style={{ position: "relative", flexShrink: 0, zIndex: 1 }}>

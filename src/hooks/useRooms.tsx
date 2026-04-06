@@ -7,24 +7,49 @@ export type RoomsForLayout = {
   spaces: Room[];
   roomsBySpace: (spaceId: string | null) => Room[];
   getRoom: (roomId: string) => Room | null;
-  fetchRooms: () => void;
+  fetchRooms: () => Promise<Room[]>;
+  upsertOptimisticRoom: (room: Room) => void;
 };
 
 export function useRooms(userId: string | null) {
-  const [rooms, setRooms] = useState<Room[]>([]);
+  const [fetchedRooms, setFetchedRooms] = useState<Room[]>([]);
+  const [optimisticRooms, setOptimisticRooms] = useState<Room[]>([]);
   const [initialLoadComplete, setInitialLoadComplete] = useState(() => !userId);
   const fetchingRef = useRef(false);
 
-  const fetchRooms = useCallback(() => {
-    if (!userId || fetchingRef.current) return;
+  const mergeRooms = useCallback((serverRooms: Room[], pendingRooms: Room[]) => {
+    const byId = new Map(serverRooms.map((room) => [room.id, room]));
+    for (const room of pendingRooms) {
+      if (!byId.has(room.id)) {
+        byId.set(room.id, room);
+      }
+    }
+    return Array.from(byId.values());
+  }, []);
+
+  const fetchRooms = useCallback(async (): Promise<Room[]> => {
+    if (!userId || fetchingRef.current) return [];
     fetchingRef.current = true;
 
-    invoke<Room[]>("get_rooms").then(setRooms).catch((e) =>
-      console.error("Failed to fetch rooms:", e)
-    ).finally(() => {
+    try {
+      const list = await invoke<Room[]>("get_rooms");
+      const remainingOptimistic = optimisticRooms.filter(
+        (pending) => !list.some((room) => room.id === pending.id)
+      );
+      setFetchedRooms(list);
+      setOptimisticRooms(remainingOptimistic);
+      return mergeRooms(list, remainingOptimistic);
+    } catch (e) {
+      console.error("Failed to fetch rooms:", e);
+      return [];
+    } finally {
       fetchingRef.current = false;
-    });
-  }, [userId]);
+    }
+  }, [userId, optimisticRooms, mergeRooms]);
+
+  const upsertOptimisticRoom = useCallback((room: Room) => {
+    setOptimisticRooms((prev) => [room, ...prev.filter((existing) => existing.id !== room.id)]);
+  }, []);
 
   // Avoid one frame of main UI after login: complete was true while logged out.
   useLayoutEffect(() => {
@@ -36,7 +61,8 @@ export function useRooms(userId: string | null) {
   // Initial fetch when a session exists (must finish before showing the main UI)
   useEffect(() => {
     if (!userId) {
-      setRooms([]);
+      setFetchedRooms([]);
+      setOptimisticRooms([]);
       setInitialLoadComplete(true);
       return;
     }
@@ -46,7 +72,7 @@ export function useRooms(userId: string | null) {
 
     invoke<Room[]>("get_rooms")
       .then((list) => {
-        if (!cancelled) setRooms(list);
+        if (!cancelled) setFetchedRooms(list);
       })
       .catch((e) => {
         console.error("Failed to fetch rooms:", e);
@@ -71,6 +97,11 @@ export function useRooms(userId: string | null) {
       unlisten.then((fn) => fn());
     };
   }, [fetchRooms]);
+
+  const rooms = useMemo(
+    () => mergeRooms(fetchedRooms, optimisticRooms),
+    [fetchedRooms, optimisticRooms, mergeRooms]
+  );
 
   const spaces = useMemo(() => rooms.filter((r) => r.isSpace), [rooms]);
 
@@ -113,6 +144,7 @@ export function useRooms(userId: string | null) {
     roomsBySpace,
     getRoom,
     fetchRooms,
+    upsertOptimisticRoom,
     initialLoadComplete,
   };
 }

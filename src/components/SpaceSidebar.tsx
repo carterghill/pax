@@ -2,14 +2,19 @@ import { useState, useCallback, useEffect, useRef } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { Plus, Settings } from "lucide-react";
 import { useTheme } from "../theme/ThemeContext";
-import { Room } from "../types/matrix";
+import type { Room } from "../types/matrix";
 import CreateSpaceDialog from "./CreateSpaceDialog";
+
+type RoomsChangedPayload = {
+  joinedRoomId?: string;
+  optimisticRoom?: Room;
+};
 
 interface SpaceSidebarProps {
   spaces: Room[];
   activeSpaceId: string | null;
   onSelectSpace: (spaceId: string) => void;
-  onSpacesChanged: () => void;
+  onSpacesChanged: (payload?: RoomsChangedPayload) => void | Promise<void>;
   onOpenSettings: () => void;
 }
 
@@ -102,8 +107,8 @@ export default function SpaceSidebar({
     setShowDialog(false);
   }, []);
 
-  const handleCreated = useCallback(() => {
-    onSpacesChanged();
+  const handleCreated = useCallback((payload?: RoomsChangedPayload) => {
+    return onSpacesChanged(payload);
   }, [onSpacesChanged]);
 
   return (

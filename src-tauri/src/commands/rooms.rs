@@ -599,7 +599,7 @@ pub async fn join_room(
     state: State<'_, Arc<AppState>>,
     room_id: String,
     via_servers: Option<Vec<String>>,
-) -> Result<(), String> {
+) -> Result<String, String> {
     let client = super::get_client(&state).await?;
     let homeserver = client.homeserver().to_string();
     let access_token = client.access_token().ok_or("No access token")?;
@@ -649,7 +649,16 @@ pub async fn join_room(
         return Err(format!("Failed to join room ({}): {}", status, text));
     }
 
-    Ok(())
+    let body: serde_json::Value = resp
+        .json()
+        .await
+        .map_err(|e| format!("Failed to parse join response: {e}"))?;
+    let joined_room_id = body["room_id"]
+        .as_str()
+        .map(String::from)
+        .unwrap_or(room_id);
+
+    Ok(joined_room_id)
 }
 
 /// Convert an MXC URI to an unauthenticated thumbnail URL.

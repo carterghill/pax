@@ -1,5 +1,6 @@
 import { useState, useRef, useEffect, useCallback } from "react";
 import { invoke } from "@tauri-apps/api/core";
+import type { Room } from "../types/matrix";
 import {
   X,
   Plus,
@@ -43,10 +44,31 @@ function uniqueNonEmpty(values: Array<string | null | undefined>): string[] {
   return Array.from(new Set(values.filter((value): value is string => !!value?.trim())));
 }
 
+type RoomsChangedPayload = {
+  joinedRoomId?: string;
+  optimisticRoom?: Room;
+};
+
+function buildOptimisticSpaceRoom(
+  roomId: string,
+  name: string,
+  avatarUrl: string | null
+): Room {
+  return {
+    id: roomId,
+    name,
+    avatarUrl,
+    isSpace: true,
+    parentSpaceIds: [],
+    roomType: "m.space",
+    membership: "joined",
+  };
+}
+
 interface CreateSpaceDialogProps {
   canCreate: boolean;
   onClose: () => void;
-  onCreated: () => void;
+  onCreated: (payload?: RoomsChangedPayload) => void | Promise<void>;
 }
 
 export default function CreateSpaceDialog({
@@ -158,7 +180,7 @@ export default function CreateSpaceDialog({
     setError(null);
 
     try {
-      await invoke<string>("create_space", {
+      const roomId = await invoke<string>("create_space", {
         name: name.trim(),
         topic: topic.trim() || null,
         isPublic,
@@ -170,7 +192,14 @@ export default function CreateSpaceDialog({
         guestAccess,
         joinRule,
       });
-      onCreated();
+      await onCreated({
+        joinedRoomId: roomId,
+        optimisticRoom: buildOptimisticSpaceRoom(
+          roomId,
+          name.trim(),
+          avatarPreview
+        ),
+      });
       onClose();
     } catch (e) {
       setError(String(e));
@@ -221,12 +250,19 @@ export default function CreateSpaceDialog({
       setJoiningId(roomId);
       setJoinSuccess(null);
       try {
-        await invoke("join_room", {
+        const joinedRoomId = await invoke<string>("join_room", {
           roomId: joinTarget,
           viaServers: viaServers.length > 0 ? viaServers : null,
         });
         setJoinSuccess(roomId);
-        onCreated();
+        await onCreated({
+          joinedRoomId,
+          optimisticRoom: buildOptimisticSpaceRoom(
+            joinedRoomId,
+            space.name || space.canonical_alias || joinedRoomId,
+            null
+          ),
+        });
         // Update search results to reflect new membership
         setSearchResults((prev) =>
           prev.map((r) =>
@@ -263,13 +299,13 @@ export default function CreateSpaceDialog({
         searchServer.trim() || null,
         extractMatrixServerName(addr),
       ]);
-      await invoke("join_room", {
+      const joinedRoomId = await invoke<string>("join_room", {
         roomId: addr,
         viaServers: viaServers.length > 0 ? viaServers : null,
       });
       setJoinAddress("");
       setJoinSuccess(addr);
-      onCreated();
+      await onCreated({ joinedRoomId });
     } catch (e) {
       setSearchError(String(e));
     } finally {
