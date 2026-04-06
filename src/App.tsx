@@ -5,6 +5,7 @@ import MainLayout from "./layouts/MainLayout";
 import { ThemeProvider } from "./theme/ThemeContext";
 import { useRooms } from "./hooks/useRooms";
 import { clearMessageCache } from "./hooks/useMessages";
+import { clearPersistedSpaceHomeCache } from "./utils/spaceHomeCache";
 import { useExternalLinkInterceptor } from "./hooks/useExternalLinks";
 
 interface AuthConfig {
@@ -35,6 +36,7 @@ function App() {
     roomsBySpace,
     getRoom,
     fetchRooms,
+    upsertOptimisticRoom,
     initialLoadComplete,
   } = useRooms(userId);
 
@@ -127,6 +129,7 @@ function App() {
     }
     syncStartedRef.current = false;
     clearMessageCache();
+    clearPersistedSpaceHomeCache();
     setUserId(null);
   }
 
@@ -185,7 +188,7 @@ function App() {
         <MainLayout
           userId={userId}
           onSignOut={handleSignOut}
-          rooms={{ spaces, roomsBySpace, getRoom, fetchRooms }}
+          rooms={{ spaces, roomsBySpace, getRoom, fetchRooms, upsertOptimisticRoom }}
         />
       </ThemeProvider>
     );

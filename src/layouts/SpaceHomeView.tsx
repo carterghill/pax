@@ -5,33 +5,14 @@ import { useTheme } from "../theme/ThemeContext";
 import { Room } from "../types/matrix";
 import { VOICE_ROOM_TYPE } from "../utils/matrix";
 import CreateRoomDialog from "../components/CreateRoomDialog";
-
-interface SpaceChildInfo {
-  id: string;
-  name: string;
-  topic: string | null;
-  avatarUrl: string | null;
-  membership: string; // "joined" | "invited" | "none"
-  joinRule: string | null;
-  roomType: string | null;
-  numJoinedMembers: number;
-}
-
-interface SpaceInfo {
-  name: string;
-  topic: string | null;
-  avatarUrl: string | null;
-  children: SpaceChildInfo[];
-}
+import type { SpaceChildInfo, SpaceInfo } from "../utils/spaceHomeCache";
+import { getCachedSpaceInfo, setCachedSpaceInfo } from "../utils/spaceHomeCache";
 
 interface SpaceHomeViewProps {
   space: Room;
   onSelectRoom: (roomId: string) => void;
   onRoomsChanged: () => void;
 }
-
-/** Last successful `get_space_info` per space — instant when switching back to a visited space. */
-const spaceHomeInfoCache = new Map<string, SpaceInfo>();
 
 type FetchSpaceInfoOptions = {
   /** If true, keep showing existing UI and refresh in the background (no full-page loading state). */
@@ -63,7 +44,7 @@ export default function SpaceHomeView({ space, onSelectRoom, onRoomsChanged }: S
 
     invoke<SpaceInfo>("get_space_info", { spaceId: requestedId })
       .then((data) => {
-        spaceHomeInfoCache.set(requestedId, data);
+        setCachedSpaceInfo(requestedId, data);
         if (activeSpaceIdRef.current !== requestedId) return;
         setInfo(data);
         if (!background) setError(null);
@@ -87,7 +68,7 @@ export default function SpaceHomeView({ space, onSelectRoom, onRoomsChanged }: S
     setJoiningRoomId(null);
     setShowCreateRoom(false);
 
-    const cached = spaceHomeInfoCache.get(space.id);
+    const cached = getCachedSpaceInfo(space.id);
     if (cached) {
       setInfo(cached);
       setError(null);
@@ -158,7 +139,7 @@ export default function SpaceHomeView({ space, onSelectRoom, onRoomsChanged }: S
           {error}
         </span>
         <button
-          onClick={fetchInfo}
+          onClick={() => fetchInfo()}
           style={{
             display: "flex",
             alignItems: "center",
