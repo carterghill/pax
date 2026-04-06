@@ -453,11 +453,12 @@ impl VoiceManager {
     }
 
     /// Start sharing screen. Returns error if not in a call or capture fails.
-    /// For Window mode, window_title selects which window (None = foreground).
+    /// For Window mode on Windows, window_handle targets a specific HWND when provided.
     pub async fn start_screen_share(
         &self,
         mode: crate::screen::ScreenShareMode,
         window_title: Option<String>,
+        window_handle: Option<String>,
         app_handle: &AppHandle,
     ) -> Result<(), String> {
         let (room, audio_state, room_id, local_identity, existing_handle) = {
@@ -491,11 +492,14 @@ impl VoiceManager {
             }
         }
         log::info!(
-            "voice::start_screen_share: mode={:?} window_title={:?}",
+            "voice::start_screen_share: mode={:?} window_title={:?} window_handle={:?}",
             mode,
-            window_title
+            window_title,
+            window_handle
         );
-        let handle = crate::screen::start_screen_capture(room.clone(), mode, window_title).await?;
+        let handle =
+            crate::screen::start_screen_capture(room.clone(), mode, window_title, window_handle)
+                .await?;
         // Video is published inside start_screen_capture (after capture is hot)
         if let Some(audio_track) = &handle.audio_track {
             log::info!("Publishing screen share audio track (ScreenshareAudio)");

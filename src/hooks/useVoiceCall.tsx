@@ -50,6 +50,14 @@ export interface VoiceCallState {
   disconnectingFromRoomId: string | null;
 }
 
+export interface ScreenShareWindowOption {
+  id: string;
+  title: string;
+  processName: string;
+  iconDataUrl: string | null;
+  thumbnailDataUrl: string | null;
+}
+
 export interface VoiceCallActions {
   connect: (
     roomId: string,
@@ -59,8 +67,12 @@ export interface VoiceCallActions {
   toggleMic: () => void;
   toggleDeafen: () => void;
   toggleNoiseSuppression: () => void;
-  startScreenShare: (mode: "screen" | "window", windowTitle?: string) => Promise<void>;
-  enumerateScreenShareWindows: () => Promise<[string, string][]>;
+  startScreenShare: (
+    mode: "screen" | "window",
+    windowTitle?: string,
+    windowHandle?: string,
+  ) => Promise<void>;
+  enumerateScreenShareWindows: () => Promise<ScreenShareWindowOption[]>;
   stopScreenShare: () => Promise<void>;
   getLowBandwidthMode: () => Promise<boolean>;
   setLowBandwidthMode: (enabled: boolean) => Promise<void>;
@@ -374,10 +386,18 @@ export function useVoiceCall() {
   }, []);
 
   const startScreenShare = useCallback(
-    async (mode: "screen" | "window", windowTitle?: string): Promise<void> => {
+    async (
+      mode: "screen" | "window",
+      windowTitle?: string,
+      windowHandle?: string,
+    ): Promise<void> => {
       setState((prev) => ({ ...prev, error: null }));
       try {
-        await invoke("voice_start_screen_share", { mode, windowTitle: windowTitle ?? null });
+        await invoke("voice_start_screen_share", {
+          mode,
+          windowTitle: windowTitle ?? null,
+          windowHandle: windowHandle ?? null,
+        });
       } catch (e) {
         console.error("Failed to start screen share:", e);
         setState((prev) => ({ ...prev, error: String(e) }));
@@ -388,7 +408,7 @@ export function useVoiceCall() {
   );
 
   const enumerateScreenShareWindows = useCallback(
-    () => invoke<[string, string][]>("enumerate_screen_share_windows"),
+    () => invoke<ScreenShareWindowOption[]>("enumerate_screen_share_windows"),
     [],
   );
 

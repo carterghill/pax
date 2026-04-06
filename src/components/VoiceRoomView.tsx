@@ -2,7 +2,7 @@ import { useState, useCallback, useEffect, useMemo, useRef } from "react";
 import { Volume2, Mic, MicOff, PhoneOff, Loader2, AudioLines, Monitor, MonitorUp, Headphones, Settings, Slash } from "lucide-react";
 import { useTheme } from "../theme/ThemeContext";
 import { LivekitVoiceParticipantInfo, Room, VoiceParticipant as MatrixVoiceParticipant } from "../types/matrix";
-import { VoiceCall } from "../hooks/useVoiceCall";
+import { ScreenShareWindowOption, VoiceCall } from "../hooks/useVoiceCall";
 import {
   compareByDisplayThenKey,
   extractMatrixUserId,
@@ -74,13 +74,17 @@ export default function VoiceRoomView({
   const screenShareMenuPopupRef = useRef<HTMLDivElement>(null);
   const generalSettingsRef = useRef<HTMLDivElement>(null);
   const generalSettingsPopupRef = useRef<HTMLDivElement>(null);
-  const activeShareRef = useRef<{ mode: "screen" | "window"; windowTitle?: string } | null>(null);
+  const activeShareRef = useRef<{
+    mode: "screen" | "window";
+    windowTitle?: string;
+    windowHandle?: string;
+  } | null>(null);
   const isLinux = navigator.userAgent.includes("Linux");
 
   // Popups are `position: absolute` — parent `getBoundingClientRect()` excludes them; ref the panels.
   useOverlayObstruction(screenShareMenuPopupRef, screenShareMenuOpen);
   useOverlayObstruction(generalSettingsPopupRef, generalSettingsOpen);
-  const [windowList, setWindowList] = useState<[string, string][]>([]);
+  const [windowList, setWindowList] = useState<ScreenShareWindowOption[]>([]);
   const [windowListLoading, setWindowListLoading] = useState(false);
 
   useEffect(() => {
@@ -117,6 +121,7 @@ export default function VoiceRoomView({
   useEffect(() => {
     if (!screenShareMenuOpen || isLinux) return;
     let cancelled = false;
+    setWindowList([]);
     setWindowListLoading(true);
     onEnumerateScreenShareWindows()
       .then((list) => {
@@ -141,11 +146,11 @@ export default function VoiceRoomView({
   }, [screenShareMenuOpen, isLinux, onEnumerateScreenShareWindows]);
 
   const startShare = useCallback(
-    async (mode: "screen" | "window", windowTitle?: string) => {
+    async (mode: "screen" | "window", windowTitle?: string, windowHandle?: string) => {
       setIsStartingScreenShare(true);
-      activeShareRef.current = { mode, windowTitle };
+      activeShareRef.current = { mode, windowTitle, windowHandle };
       try {
-        await onStartScreenShare(mode, windowTitle);
+        await onStartScreenShare(mode, windowTitle, windowHandle);
       } catch (e) {
         setIsStartingScreenShare(false);
         console.error("Failed to start screen share:", e);
@@ -174,7 +179,7 @@ export default function VoiceRoomView({
         const active = activeShareRef.current;
         if (callState.isLocalScreenSharing && active) {
           await onStopScreenShare();
-          await onStartScreenShare(active.mode, active.windowTitle);
+          await onStartScreenShare(active.mode, active.windowTitle, active.windowHandle);
         }
       } catch (e) {
         console.error("Failed to toggle low bandwidth mode:", e);
@@ -884,7 +889,11 @@ export default function VoiceRoomView({
                 padding: spacing.unit * 4,
                 display: "flex",
                 flexDirection: "column",
-                gap: spacing.unit,
+                gap: spacing.unit * 2,
+                width: isLinux ? undefined : "min(80vw, 760px)",
+                maxWidth: isLinux ? undefined : 760,
+                maxHeight: isLinux ? undefined : "70vh",
+                overflowY: isLinux ? undefined : "auto",
                 zIndex: 10,
               }}
               >
@@ -894,17 +903,40 @@ export default function VoiceRoomView({
                     setScreenShareMenuOpen(false);
                   }}
                   style={{
-                    padding: `${spacing.unit}px ${spacing.unit * 2}px`,
-                    border: "none",
-                    borderRadius: spacing.unit,
+                    border: `1px solid ${palette.border}`,
+                    borderRadius: spacing.unit * 1.5,
                     cursor: "pointer",
                     backgroundColor: palette.bgActive,
                     color: palette.textPrimary,
-                    fontSize: typography.fontSizeSmall,
+                    padding: spacing.unit * 2,
+                    display: "flex",
+                    alignItems: "center",
+                    gap: spacing.unit * 2,
                     textAlign: "left",
                   }}
                 >
-                  Share screen...
+                  <div
+                    style={{
+                      width: 40,
+                      height: 40,
+                      borderRadius: spacing.unit * 1.5,
+                      backgroundColor: palette.bgTertiary,
+                      display: "flex",
+                      alignItems: "center",
+                      justifyContent: "center",
+                      flexShrink: 0,
+                    }}
+                  >
+                    <Monitor size={20} color={palette.textPrimary} />
+                  </div>
+                  <div style={{ minWidth: 0 }}>
+                    <div style={{ fontSize: typography.fontSizeSmall, fontWeight: 600 }}>
+                      Share screen
+                    </div>
+                    <div style={{ fontSize: typography.fontSizeSmall - 1, color: palette.textSecondary }}>
+                      Start sharing your primary display immediately
+                    </div>
+                  </div>
                 </button>
                 {isLinux ? (
                   <button
@@ -929,8 +961,7 @@ export default function VoiceRoomView({
                   <>
                     <div
                       style={{
-                        marginTop: spacing.unit,
-                        paddingTop: spacing.unit * 2,
+                        paddingTop: spacing.unit,
                         borderTop: `1px solid ${palette.border}`,
                         fontSize: typography.fontSizeSmall,
                         fontWeight: 600,
@@ -942,45 +973,153 @@ export default function VoiceRoomView({
                     {windowListLoading ? (
                       <div
                         style={{
-                          padding: `${spacing.unit}px ${spacing.unit * 2}px`,
+                          padding: spacing.unit * 2,
                           color: palette.textSecondary,
                           fontSize: typography.fontSizeSmall,
+                          textAlign: "center",
                         }}
                       >
-                        Loading windows...
+                        Loading window previews...
                       </div>
                     ) : windowList.length === 0 ? (
                       <div
                         style={{
-                          padding: `${spacing.unit}px ${spacing.unit * 2}px`,
+                          padding: spacing.unit * 2,
                           color: palette.textSecondary,
                           fontSize: typography.fontSizeSmall,
+                          textAlign: "center",
                         }}
                       >
                         No windows found
                       </div>
                     ) : (
-                      <div style={{ display: "flex", flexDirection: "column", gap: spacing.unit / 2 }}>
-                        {windowList.map(([title, process], i) => (
+                      <div
+                        style={{
+                          display: "grid",
+                          gridTemplateColumns: "repeat(auto-fill, minmax(180px, 1fr))",
+                          gap: spacing.unit * 2,
+                        }}
+                      >
+                        {windowList.map((windowItem) => (
                           <button
-                            key={`${title}-${process}-${i}`}
+                            key={windowItem.id}
                             onClick={() => {
-                              void startShare("window", title);
+                              void startShare("window", windowItem.title, windowItem.id);
                               setScreenShareMenuOpen(false);
                             }}
                             style={{
-                              padding: `${spacing.unit}px ${spacing.unit * 2}px`,
-                              border: "none",
-                              borderRadius: spacing.unit,
+                              border: `1px solid ${palette.border}`,
+                              borderRadius: spacing.unit * 1.5,
                               cursor: "pointer",
                               backgroundColor: palette.bgActive,
                               color: palette.textPrimary,
-                              fontSize: typography.fontSizeSmall,
                               textAlign: "left",
+                              padding: 0,
+                              overflow: "hidden",
+                              display: "flex",
+                              flexDirection: "column",
+                              minWidth: 0,
                             }}
                           >
-                            {title || "(no title)"}
-                            {process && <span style={{ color: palette.textSecondary, fontSize: "0.85em" }}> — {process}</span>}
+                            <div
+                              style={{
+                                height: 110,
+                                backgroundColor: palette.bgTertiary,
+                                display: "flex",
+                                alignItems: "center",
+                                justifyContent: "center",
+                                overflow: "hidden",
+                              }}
+                            >
+                              {windowItem.thumbnailDataUrl ? (
+                                <img
+                                  src={windowItem.thumbnailDataUrl}
+                                  alt=""
+                                  style={{
+                                    width: "100%",
+                                    height: "100%",
+                                    objectFit: "cover",
+                                    display: "block",
+                                  }}
+                                />
+                              ) : windowItem.iconDataUrl ? (
+                                <img
+                                  src={windowItem.iconDataUrl}
+                                  alt=""
+                                  style={{
+                                    width: 40,
+                                    height: 40,
+                                    objectFit: "contain",
+                                    display: "block",
+                                  }}
+                                />
+                              ) : (
+                                <Monitor size={28} color={palette.textSecondary} />
+                              )}
+                            </div>
+                            <div
+                              style={{
+                                display: "flex",
+                                alignItems: "center",
+                                gap: spacing.unit * 1.5,
+                                padding: spacing.unit * 1.5,
+                                minWidth: 0,
+                              }}
+                            >
+                              <div
+                                style={{
+                                  width: 28,
+                                  height: 28,
+                                  borderRadius: 8,
+                                  backgroundColor: palette.bgSecondary,
+                                  display: "flex",
+                                  alignItems: "center",
+                                  justifyContent: "center",
+                                  flexShrink: 0,
+                                  overflow: "hidden",
+                                }}
+                              >
+                                {windowItem.iconDataUrl ? (
+                                  <img
+                                    src={windowItem.iconDataUrl}
+                                    alt=""
+                                    style={{
+                                      width: 20,
+                                      height: 20,
+                                      objectFit: "contain",
+                                      display: "block",
+                                    }}
+                                  />
+                                ) : (
+                                  <Monitor size={14} color={palette.textSecondary} />
+                                )}
+                              </div>
+                              <div style={{ minWidth: 0, flex: 1 }}>
+                                <div
+                                  style={{
+                                    fontSize: typography.fontSizeSmall,
+                                    fontWeight: 600,
+                                    color: palette.textPrimary,
+                                    whiteSpace: "nowrap",
+                                    overflow: "hidden",
+                                    textOverflow: "ellipsis",
+                                  }}
+                                >
+                                  {windowItem.title || "(no title)"}
+                                </div>
+                                <div
+                                  style={{
+                                    fontSize: typography.fontSizeSmall - 1,
+                                    color: palette.textSecondary,
+                                    whiteSpace: "nowrap",
+                                    overflow: "hidden",
+                                    textOverflow: "ellipsis",
+                                  }}
+                                >
+                                  {windowItem.processName || "Application"}
+                                </div>
+                              </div>
+                            </div>
                           </button>
                         ))}
                       </div>

@@ -27,6 +27,16 @@ pub enum ScreenShareMode {
     Window,
 }
 
+#[derive(Debug, Clone, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ScreenShareWindowOption {
+    pub id: String,
+    pub title: String,
+    pub process_name: String,
+    pub icon_data_url: Option<String>,
+    pub thumbnail_data_url: Option<String>,
+}
+
 /// Handle for an active screen share. Holds video and optional audio tracks.
 /// Dropping stops the capture thread and loopback stream.
 pub struct ScreenShareHandle {
@@ -251,11 +261,18 @@ pub async fn start_screen_capture(
     room: Arc<livekit::Room>,
     mode: ScreenShareMode,
     window_title: Option<String>,
+    window_handle: Option<String>,
 ) -> Result<ScreenShareHandle, String> {
     #[cfg(target_os = "windows")]
     {
         // Try windows-capture (Graphics Capture API) first - avoids DXGI/COM conflicts with audio
-        match start_screen_capture_windows_graphics(room.clone(), mode, window_title.clone()).await
+        match start_screen_capture_windows_graphics(
+            room.clone(),
+            mode,
+            window_title.clone(),
+            window_handle.clone(),
+        )
+        .await
         {
             Ok(handle) => return Ok(handle),
             Err(e) => log::warn!(
@@ -268,6 +285,7 @@ pub async fn start_screen_capture(
 
     #[cfg(target_os = "linux")]
     {
+        let _ = window_handle;
         let _ = window_title; // Portal handles window selection natively
                               // Use portal for the native screen/window picker, then GStreamer
                               // pipewiresrc for real-time frame capture. This avoids the pw_init()/GTK
@@ -277,12 +295,13 @@ pub async fn start_screen_capture(
 
     #[cfg(target_os = "macos")]
     {
+        let _ = window_handle;
         start_screen_capture_libwebrtc_or_fallback(room, mode, window_title).await
     }
 
     #[cfg(not(any(target_os = "windows", target_os = "macos", target_os = "linux")))]
     {
-        let _ = (room, mode, window_title);
+        let _ = (room, mode, window_title, window_handle);
         Err("Screen sharing is not supported on this platform".to_string())
     }
 }
@@ -293,6 +312,7 @@ async fn start_screen_capture_windows_graphics(
     room: Arc<livekit::Room>,
     mode: ScreenShareMode,
     window_title: Option<String>,
+    window_handle: Option<String>,
 ) -> Result<ScreenShareHandle, String> {
     use livekit::webrtc::video_source::native::NativeVideoSource;
     use windows_capture::capture::GraphicsCaptureApiHandler;
@@ -339,7 +359,18 @@ async fn start_screen_capture_windows_graphics(
             (ScreenCaptureHandler::start_free_threaded(settings), None)
         }
         ScreenShareMode::Window => {
-            let window = if let Some(ref title) = window_title {
+            let window = if let Some(ref handle) = window_handle {
+                let hwnd_value = handle
+                    .parse::<usize>()
+                    .map_err(|e| format!("Invalid window handle '{}': {}", handle, e))?;
+                let hwnd = hwnd_value as *mut std::ffi::c_void;
+                log::debug!("Using window handle: {} ({:p})", handle, hwnd);
+                let w = Window::from_raw_hwnd(hwnd);
+                if !w.is_valid() {
+                    return Err("Selected window is no longer available".to_string());
+                }
+                w
+            } else if let Some(ref title) = window_title {
                 log::debug!("Looking up window by title: {}", title);
                 Window::from_name(title)
                     .or_else(|_| Window::from_contains_name(title))
@@ -1445,29 +1476,277 @@ fn setup_screen_share_audio_gstreamer(
     (Some(track), audio_thread)
 }
 
-/// Enumerate capturable windows (Windows only). Returns (title, process_name) for each.
 #[cfg(target_os = "windows")]
-pub fn enumerate_screen_share_windows() -> Result<Vec<(String, String)>, String> {
+mod windows_picker {
+    use std::ffi::c_void;
+    use std::mem::size_of;
+    use std::slice;
+
+    use png::{BitDepth, ColorType, Encoder};
+    use windows::Win32::Foundation::{COLORREF, HWND, LPARAM, LRESULT, RECT, WPARAM};
+    use windows::Win32::Graphics::Gdi::{
+        CreateCompatibleDC, CreateDIBSection, CreateSolidBrush, DeleteDC, DeleteObject, FillRect,
+        SelectObject, SetStretchBltMode, StretchBlt, BI_RGB, BITMAPINFO, BITMAPINFOHEADER,
+        DIB_RGB_COLORS, HBITMAP, HDC, HGDIOBJ, RGBQUAD, SRCCOPY, STRETCH_HALFTONE,
+    };
+    use windows::Win32::Storage::Xps::{PrintWindow, PRINT_WINDOW_FLAGS, PW_CLIENTONLY};
+    use windows::Win32::UI::WindowsAndMessaging::{
+        CopyIcon, DestroyIcon, DrawIconEx, GetClassLongPtrW, GetWindowRect, SendMessageW, DI_NORMAL,
+        GCLP_HICON, GCLP_HICONSM, HICON, ICON_BIG, ICON_SMALL2, PW_RENDERFULLCONTENT, WM_GETICON,
+    };
     use windows_capture::window::Window;
 
-    log::debug!("enumerate_screen_share_windows");
-    let windows = Window::enumerate().map_err(|e| format!("Window::enumerate: {}", e))?;
-    let mut out = Vec::new();
-    for w in windows {
-        if !w.is_valid() {
-            continue;
+    use super::ScreenShareWindowOption;
+
+    const THUMBNAIL_WIDTH: i32 = 320;
+    const THUMBNAIL_HEIGHT: i32 = 180;
+    const ICON_SIZE: i32 = 32;
+
+    struct BitmapSurface {
+        dc: HDC,
+        bitmap: HBITMAP,
+        old_object: HGDIOBJ,
+        bits: *mut u8,
+        width: i32,
+        height: i32,
+    }
+
+    impl BitmapSurface {
+        fn new(width: i32, height: i32) -> Result<Self, String> {
+            if width <= 0 || height <= 0 {
+                return Err("Invalid bitmap size".to_string());
+            }
+
+            unsafe {
+                let dc = CreateCompatibleDC(None);
+                if dc.0.is_null() {
+                    return Err("CreateCompatibleDC failed".to_string());
+                }
+
+                let info = BITMAPINFO {
+                    bmiHeader: BITMAPINFOHEADER {
+                        biSize: size_of::<BITMAPINFOHEADER>() as u32,
+                        biWidth: width,
+                        biHeight: -height,
+                        biPlanes: 1,
+                        biBitCount: 32,
+                        biCompression: BI_RGB.0,
+                        ..Default::default()
+                    },
+                    bmiColors: [RGBQUAD::default(); 1],
+                };
+                let mut bits = std::ptr::null_mut();
+                let bitmap = CreateDIBSection(None, &info, DIB_RGB_COLORS, &mut bits, None, 0)
+                    .map_err(|e| format!("CreateDIBSection failed: {e}"))?;
+                let old_object = SelectObject(dc, HGDIOBJ(bitmap.0));
+                if old_object.0.is_null() {
+                    let _ = DeleteObject(HGDIOBJ(bitmap.0));
+                    let _ = DeleteDC(dc);
+                    return Err("SelectObject failed".to_string());
+                }
+
+                Ok(Self {
+                    dc,
+                    bitmap,
+                    old_object,
+                    bits: bits.cast(),
+                    width,
+                    height,
+                })
+            }
         }
-        let title = w.title().unwrap_or_else(|_| String::new());
-        let process = w.process_name().unwrap_or_else(|_| String::new());
-        if !title.is_empty() || !process.is_empty() {
-            out.push((title, process));
+
+        fn fill(&self, color: COLORREF) {
+            unsafe {
+                let brush = CreateSolidBrush(color);
+                if !brush.0.is_null() {
+                    let rect = RECT {
+                        left: 0,
+                        top: 0,
+                        right: self.width,
+                        bottom: self.height,
+                    };
+                    let _ = FillRect(self.dc, &rect, brush);
+                    let _ = DeleteObject(HGDIOBJ(brush.0));
+                }
+            }
+        }
+
+        fn png_data_url(&self, preserve_alpha: bool) -> Option<String> {
+            let len = (self.width * self.height * 4) as usize;
+            let mut rgba = unsafe { slice::from_raw_parts(self.bits, len).to_vec() };
+            for px in rgba.chunks_exact_mut(4) {
+                px.swap(0, 2);
+                if !preserve_alpha {
+                    px[3] = 255;
+                }
+            }
+
+            let mut encoded = Vec::new();
+            let mut encoder = Encoder::new(&mut encoded, self.width as u32, self.height as u32);
+            encoder.set_color(ColorType::Rgba);
+            encoder.set_depth(BitDepth::Eight);
+            let mut writer = encoder.write_header().ok()?;
+            writer.write_image_data(&rgba).ok()?;
+            drop(writer);
+
+            Some(format!(
+                "data:image/png;base64,{}",
+                data_encoding::BASE64.encode(&encoded)
+            ))
         }
     }
-    log::info!("Found {} capturable windows", out.len());
-    Ok(out)
+
+    impl Drop for BitmapSurface {
+        fn drop(&mut self) {
+            unsafe {
+                if !self.old_object.0.is_null() {
+                    let _ = SelectObject(self.dc, self.old_object);
+                }
+                if !self.bitmap.0.is_null() {
+                    let _ = DeleteObject(HGDIOBJ(self.bitmap.0));
+                }
+                if !self.dc.0.is_null() {
+                    let _ = DeleteDC(self.dc);
+                }
+            }
+        }
+    }
+
+    fn get_window_icon(hwnd: HWND) -> Option<HICON> {
+        let candidates = [
+            unsafe { SendMessageW(hwnd, WM_GETICON, Some(WPARAM(ICON_BIG as usize)), Some(LPARAM(0))) },
+            unsafe { SendMessageW(hwnd, WM_GETICON, Some(WPARAM(ICON_SMALL2 as usize)), Some(LPARAM(0))) },
+            LRESULT(unsafe { GetClassLongPtrW(hwnd, GCLP_HICON) as isize }),
+            LRESULT(unsafe { GetClassLongPtrW(hwnd, GCLP_HICONSM) as isize }),
+        ];
+
+        for candidate in candidates {
+            if candidate.0 != 0 {
+                let icon = HICON(candidate.0 as *mut c_void);
+                if let Ok(copy) = unsafe { CopyIcon(icon) } {
+                    if !copy.0.is_null() {
+                        return Some(copy);
+                    }
+                }
+            }
+        }
+        None
+    }
+
+    fn capture_window_icon_data_url(hwnd: HWND) -> Option<String> {
+        let icon = get_window_icon(hwnd)?;
+        let surface = BitmapSurface::new(ICON_SIZE, ICON_SIZE).ok()?;
+        let result = unsafe { DrawIconEx(surface.dc, 0, 0, icon, ICON_SIZE, ICON_SIZE, 0, None, DI_NORMAL) }
+            .ok()
+            .and_then(|_| surface.png_data_url(true));
+        let _ = unsafe { DestroyIcon(icon) };
+        result
+    }
+
+    fn window_rect(hwnd: HWND) -> Option<RECT> {
+        let mut rect = RECT::default();
+        unsafe { GetWindowRect(hwnd, &mut rect) }.ok()?;
+        Some(rect)
+    }
+
+    fn fit_size(src_w: i32, src_h: i32, max_w: i32, max_h: i32) -> (i32, i32) {
+        if src_w <= 0 || src_h <= 0 {
+            return (max_w.max(1), max_h.max(1));
+        }
+        let width_limited = max_w * src_h <= max_h * src_w;
+        if width_limited {
+            let h = (src_h * max_w / src_w).max(1);
+            (max_w.max(1), h)
+        } else {
+            let w = (src_w * max_h / src_h).max(1);
+            (w, max_h.max(1))
+        }
+    }
+
+    fn capture_window_thumbnail_data_url(hwnd: HWND) -> Option<String> {
+        let rect = window_rect(hwnd)?;
+        let src_w = (rect.right - rect.left).max(1);
+        let src_h = (rect.bottom - rect.top).max(1);
+        let source = BitmapSurface::new(src_w, src_h).ok()?;
+
+        let rendered = unsafe {
+            PrintWindow(hwnd, source.dc, PRINT_WINDOW_FLAGS(PW_RENDERFULLCONTENT))
+        }
+        .as_bool()
+            || unsafe { PrintWindow(hwnd, source.dc, PW_CLIENTONLY) }.as_bool();
+        if !rendered {
+            return None;
+        }
+
+        let canvas = BitmapSurface::new(THUMBNAIL_WIDTH, THUMBNAIL_HEIGHT).ok()?;
+        canvas.fill(COLORREF(0x16181d));
+
+        let (scaled_w, scaled_h) = fit_size(src_w, src_h, THUMBNAIL_WIDTH, THUMBNAIL_HEIGHT);
+        let offset_x = (THUMBNAIL_WIDTH - scaled_w) / 2;
+        let offset_y = (THUMBNAIL_HEIGHT - scaled_h) / 2;
+        unsafe {
+            let _ = SetStretchBltMode(canvas.dc, STRETCH_HALFTONE);
+            if !StretchBlt(
+                canvas.dc,
+                offset_x,
+                offset_y,
+                scaled_w,
+                scaled_h,
+                Some(source.dc),
+                0,
+                0,
+                src_w,
+                src_h,
+                SRCCOPY,
+            )
+            .as_bool()
+            {
+                return None;
+            }
+        }
+
+        canvas.png_data_url(false)
+    }
+
+    pub fn enumerate() -> Result<Vec<ScreenShareWindowOption>, String> {
+        log::debug!("enumerate_screen_share_windows");
+        let windows = Window::enumerate().map_err(|e| format!("Window::enumerate: {}", e))?;
+        let mut out = Vec::new();
+        for window in windows {
+            if !window.is_valid() {
+                continue;
+            }
+
+            let hwnd_raw = window.as_raw_hwnd();
+            let hwnd = HWND(hwnd_raw);
+            let title = window.title().unwrap_or_else(|_| String::new());
+            let process_name = window.process_name().unwrap_or_else(|_| String::new());
+            if title.is_empty() && process_name.is_empty() {
+                continue;
+            }
+
+            out.push(ScreenShareWindowOption {
+                id: (hwnd_raw as usize).to_string(),
+                title,
+                process_name,
+                icon_data_url: capture_window_icon_data_url(hwnd),
+                thumbnail_data_url: capture_window_thumbnail_data_url(hwnd),
+            });
+        }
+
+        log::info!("Found {} capturable windows", out.len());
+        Ok(out)
+    }
+}
+
+/// Enumerate capturable windows (Windows only) with thumbnails and icons.
+#[cfg(target_os = "windows")]
+pub fn enumerate_screen_share_windows() -> Result<Vec<ScreenShareWindowOption>, String> {
+    windows_picker::enumerate()
 }
 
 #[cfg(not(target_os = "windows"))]
-pub fn enumerate_screen_share_windows() -> Result<Vec<(String, String)>, String> {
+pub fn enumerate_screen_share_windows() -> Result<Vec<ScreenShareWindowOption>, String> {
     Ok(vec![])
 }

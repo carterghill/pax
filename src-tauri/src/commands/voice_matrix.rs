@@ -1231,24 +1231,28 @@ pub async fn voice_start_screen_share(
     app: tauri::AppHandle,
     mode: String,
     window_title: Option<String>,
+    window_handle: Option<String>,
 ) -> Result<(), String> {
     log::info!(
-        "voice_start_screen_share: mode={} window_title={:?}",
+        "voice_start_screen_share: mode={} window_title={:?} window_handle={:?}",
         mode,
-        window_title
+        window_title,
+        window_handle
     );
     let screen_mode = match mode.as_str() {
         "window" => screen::ScreenShareMode::Window,
         _ => screen::ScreenShareMode::Screen,
     };
     voice_mgr
-        .start_screen_share(screen_mode, window_title, &app)
+        .start_screen_share(screen_mode, window_title, window_handle, &app)
         .await
 }
 
 #[tauri::command]
-pub fn enumerate_screen_share_windows() -> Result<Vec<(String, String)>, String> {
-    screen::enumerate_screen_share_windows()
+pub async fn enumerate_screen_share_windows() -> Result<Vec<screen::ScreenShareWindowOption>, String> {
+    tokio::task::spawn_blocking(screen::enumerate_screen_share_windows)
+        .await
+        .map_err(|e| format!("Window picker task failed: {}", e))?
 }
 
 #[tauri::command]
