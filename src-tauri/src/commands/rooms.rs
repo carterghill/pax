@@ -690,17 +690,42 @@ pub async fn join_room(
 }
 
 /// Convert an MXC URI to an unauthenticated thumbnail URL.
-fn mxc_to_thumbnail_url(homeserver: &str, mxc: &str, width: u32, height: u32) -> Option<String> {
+fn mxc_to_thumbnail_url(base_url: &str, mxc: &str, width: u32, height: u32) -> Option<String> {
     let stripped = mxc.strip_prefix("mxc://")?;
     let (server, media_id) = stripped.split_once('/')?;
     Some(format!(
         "{}/_matrix/media/v3/thumbnail/{}/{}?width={}&height={}&method=crop",
-        homeserver.trim_end_matches('/'),
+        base_url.trim_end_matches('/'),
         server,
         media_id,
         width,
         height,
     ))
+}
+
+async fn mxc_to_discovered_thumbnail_url(
+    http_client: &reqwest::Client,
+    discovery_cache: &mut std::collections::HashMap<String, String>,
+    mxc: &str,
+    width: u32,
+    height: u32,
+) -> Option<String> {
+    let stripped = mxc.strip_prefix("mxc://")?;
+    let (server, _) = stripped.split_once('/')?;
+
+    let base_url = if let Some(base_url) = discovery_cache.get(server) {
+        base_url.clone()
+    } else {
+        let discovered = discover_client_base_urls(http_client, server)
+            .await
+            .into_iter()
+            .next()
+            .unwrap_or_else(|| format!("https://{server}"));
+        discovery_cache.insert(server.to_string(), discovered.clone());
+        discovered
+    };
+
+    mxc_to_thumbnail_url(&base_url, mxc, width, height)
 }
 
 #[tauri::command]
@@ -758,6 +783,7 @@ pub async fn get_space_info(
         .map_err(|e| format!("Failed to parse hierarchy response: {e}"))?;
 
     let mut children = Vec::new();
+    let mut media_base_url_cache = std::collections::HashMap::new();
 
     if let Some(rooms) = body["rooms"].as_array() {
         for room_data in rooms {
@@ -813,9 +839,19 @@ pub async fn get_space_info(
                     None
                 }
             } else {
-                room_data["avatar_url"]
-                    .as_str()
-                    .and_then(|mxc| mxc_to_thumbnail_url(&homeserver, mxc, 64, 64))
+                match room_data["avatar_url"].as_str() {
+                    Some(mxc) => {
+                        mxc_to_discovered_thumbnail_url(
+                            &state.http_client,
+                            &mut media_base_url_cache,
+                            mxc,
+                            64,
+                            64,
+                        )
+                        .await
+                    }
+                    None => None,
+                }
             };
 
             children.push(SpaceChildInfo {
@@ -1563,6 +1599,39 @@ fn enrich_public_rooms_with_membership(
     result
 }
 
+async fn normalize_public_room_avatar_urls(
+    http_client: &reqwest::Client,
+    mut result: serde_json::Value,
+) -> serde_json::Value {
+    let Some(chunk) = result["chunk"].as_array().cloned() else {
+        return result;
+    };
+
+    let mut normalized = Vec::new();
+    let mut media_base_url_cache = std::collections::HashMap::new();
+
+    for room_data in chunk {
+        let mut entry = room_data.clone();
+        if let Some(mxc) = room_data["avatar_url"].as_str() {
+            if let Some(url) = mxc_to_discovered_thumbnail_url(
+                http_client,
+                &mut media_base_url_cache,
+                mxc,
+                64,
+                64,
+            )
+            .await
+            {
+                entry["avatar_url"] = serde_json::json!(url);
+            }
+        }
+        normalized.push(entry);
+    }
+
+    result["chunk"] = serde_json::json!(normalized);
+    result
+}
+
 async fn discover_federation_server_names(
     http_client: &reqwest::Client,
     server_input: &str,
@@ -1889,7 +1958,10 @@ pub async fn search_public_spaces(
             };
 
             match result {
-                Ok(result) => return Ok(enrich_public_rooms_with_membership(&client, result)),
+                Ok(result) => {
+                    let result = normalize_public_room_avatar_urls(&state.http_client, result).await;
+                    return Ok(enrich_public_rooms_with_membership(&client, result));
+                }
                 Err(err) => {
                     log::warn!(
                         "search_public_spaces: federation lookup via '{}' failed: {}",
@@ -1920,7 +1992,10 @@ pub async fn search_public_spaces(
         )
         .await
         {
-            Ok(result) => Ok(enrich_public_rooms_with_membership(&client, result)),
+            Ok(result) => {
+                let result = normalize_public_room_avatar_urls(&state.http_client, result).await;
+                Ok(enrich_public_rooms_with_membership(&client, result))
+            }
             Err(fallback_err) => Err(format!(
                 "{} | Direct lookup fallback failed: {}",
                 primary_err, fallback_err
@@ -1948,6 +2023,7 @@ pub async fn search_public_spaces(
             )),
         }?;
 
+        let result = normalize_public_room_avatar_urls(&state.http_client, result).await;
         Ok(enrich_public_rooms_with_membership(&client, result))
     }
 }

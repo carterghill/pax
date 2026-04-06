@@ -1152,6 +1152,7 @@ function SpaceSearchRow({
   typography: import("../theme/types").ThemeTypography;
 }) {
   const [hovered, setHovered] = useState(false);
+  const [imageFailed, setImageFailed] = useState(false);
   const isJoined = space.membership === "joined" || joinSuccess === space.room_id;
   const isJoining = joiningId === space.room_id;
 
@@ -1170,28 +1171,43 @@ function SpaceSearchRow({
       }}
     >
       {/* Icon */}
-      <div
-        style={{
-          width: 40,
-          height: 40,
-          borderRadius: 12,
-          backgroundColor: palette.bgActive,
-          display: "flex",
-          alignItems: "center",
-          justifyContent: "center",
-          flexShrink: 0,
-          fontSize: 16,
-          fontWeight: 600,
-          color: palette.textSecondary,
-        }}
-      >
-        {(space.name || "?")
-          .split(" ")
-          .map((w) => w[0])
-          .join("")
-          .slice(0, 2)
-          .toUpperCase()}
-      </div>
+      {space.avatar_url && !imageFailed ? (
+        <img
+          src={space.avatar_url}
+          alt={space.name || space.room_id}
+          onError={() => setImageFailed(true)}
+          style={{
+            width: 40,
+            height: 40,
+            borderRadius: 12,
+            objectFit: "cover",
+            flexShrink: 0,
+          }}
+        />
+      ) : (
+        <div
+          style={{
+            width: 40,
+            height: 40,
+            borderRadius: 12,
+            backgroundColor: palette.bgActive,
+            display: "flex",
+            alignItems: "center",
+            justifyContent: "center",
+            flexShrink: 0,
+            fontSize: 16,
+            fontWeight: 600,
+            color: palette.textSecondary,
+          }}
+        >
+          {(space.name || "?")
+            .split(" ")
+            .map((w) => w[0])
+            .join("")
+            .slice(0, 2)
+            .toUpperCase()}
+        </div>
+      )}
 
       {/* Info */}
       <div style={{ flex: 1, minWidth: 0 }}>

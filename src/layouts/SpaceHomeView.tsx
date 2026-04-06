@@ -431,6 +431,7 @@ function RoomRow({
   spacing: ReturnType<typeof useTheme>["spacing"];
 }) {
   const [hovered, setHovered] = useState(false);
+  const [imageFailed, setImageFailed] = useState(false);
   const isVoice = room.roomType === VOICE_ROOM_TYPE;
   const isJoined = room.membership === "joined";
   const isInvited = room.membership === "invited";
@@ -460,10 +461,11 @@ function RoomRow({
       }}
     >
       {/* Room icon or avatar */}
-      {room.avatarUrl ? (
+      {room.avatarUrl && !imageFailed ? (
         <img
           src={room.avatarUrl}
           alt={room.name}
+          onError={() => setImageFailed(true)}
           style={{
             width: 36,
             height: 36,
