@@ -663,9 +663,11 @@ pub async fn join_room(
     via_servers: Option<Vec<String>>,
 ) -> Result<String, String> {
     let client = super::get_client(&state).await?;
-    let homeserver = client.homeserver().to_string();
-    let access_token = client.access_token().ok_or("No access token")?;
 
+    let parsed =
+        matrix_sdk::ruma::RoomId::parse(&room_id).map_err(|e| format!("Invalid room ID: {e}"))?;
+
+    // Federation hints (same discovery as the old raw HTTP join).
     let mut server_names = Vec::new();
     if let Some(via_servers) = via_servers.as_deref() {
         for via_server in via_servers {
@@ -680,47 +682,29 @@ pub async fn join_room(
         }
     }
 
-    let mut url = format!(
-        "{}/_matrix/client/v3/join/{}",
-        homeserver.trim_end_matches('/'),
-        urlencoding::encode(&room_id)
-    );
-    if !server_names.is_empty() {
-        let query = server_names
-            .iter()
-            .map(|server_name| format!("server_name={}", urlencoding::encode(server_name)))
-            .collect::<Vec<_>>()
-            .join("&");
-        url.push('?');
-        url.push_str(&query);
-    }
+    let via: Vec<matrix_sdk::ruma::OwnedServerName> = server_names
+        .iter()
+        .filter_map(|s| matrix_sdk::ruma::OwnedServerName::try_from(s.as_str()).ok())
+        .collect();
 
-    let resp = state
-        .http_client
-        .post(&url)
-        .timeout(Duration::from_secs(15))
-        .bearer_auth(access_token)
-        .json(&serde_json::json!({}))
-        .send()
-        .await
-        .map_err(|e| format!("Failed to join room: {}", fmt_error_chain(&e)))?;
+    // Use the SDK join so `finish_join_room` registers the room in the in-memory client
+    // immediately. A raw POST /join succeeds before sliding sync runs, so `get_room` would
+    // miss and `get_messages` / `get_room_members` returned "Room not found" until sync caught up.
+    let room = if via.is_empty() {
+        client
+            .join_room_by_id(&parsed)
+            .await
+            .map_err(|e| format!("Failed to join room: {}", fmt_error_chain(&e)))?
+    } else {
+        let rid: &matrix_sdk::ruma::RoomId = &*parsed;
+        let id: &matrix_sdk::ruma::RoomOrAliasId = rid.into();
+        client
+            .join_room_by_id_or_alias(id, &via)
+            .await
+            .map_err(|e| format!("Failed to join room: {}", fmt_error_chain(&e)))?
+    };
 
-    if !resp.status().is_success() {
-        let status = resp.status();
-        let text = resp.text().await.unwrap_or_default();
-        return Err(format!("Failed to join room ({}): {}", status, text));
-    }
-
-    let body: serde_json::Value = resp
-        .json()
-        .await
-        .map_err(|e| format!("Failed to parse join response: {e}"))?;
-    let joined_room_id = body["room_id"]
-        .as_str()
-        .map(String::from)
-        .unwrap_or(room_id);
-
-    Ok(joined_room_id)
+    Ok(room.room_id().to_string())
 }
 
 /// Convert an MXC URI to an unauthenticated thumbnail URL.

@@ -34,20 +34,24 @@ export function useRooms(userId: string | null) {
 
     try {
       const list = await invoke<Room[]>("get_rooms");
-      const remainingOptimistic = optimisticRooms.filter(
-        (pending) => !list.some((room) => room.id === pending.id)
-      );
       setFetchedRooms(list);
       savePersistedRooms(userId, list);
-      setOptimisticRooms(remainingOptimistic);
-      return mergeRooms(list, remainingOptimistic);
+      let merged: Room[] = [];
+      setOptimisticRooms((prev) => {
+        const next = prev.filter(
+          (pending) => !list.some((room) => room.id === pending.id)
+        );
+        merged = mergeRooms(list, next);
+        return next;
+      });
+      return merged;
     } catch (e) {
       console.error("Failed to fetch rooms:", e);
       return [];
     } finally {
       fetchingRef.current = false;
     }
-  }, [userId, optimisticRooms, mergeRooms]);
+  }, [userId, mergeRooms]);
 
   const upsertOptimisticRoom = useCallback((room: Room) => {
     setOptimisticRooms((prev) => [room, ...prev.filter((existing) => existing.id !== room.id)]);

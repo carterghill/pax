@@ -1,4 +1,11 @@
-import { useEffect, useState, useCallback, useRef, useMemo } from "react";
+import {
+  useEffect,
+  useLayoutEffect,
+  useState,
+  useCallback,
+  useRef,
+  useMemo,
+} from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { RoomMember } from "../types/matrix";
@@ -16,35 +23,43 @@ export function useRoomMembers(roomId: string) {
   const [members, setMembers] = useState<RoomMember[]>([]);
   const [loading, setLoading] = useState(true);
   const hasFetched = useRef(false);
-  const fetchingRef = useRef<string | null>(null);
   const debounceRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  /** Ignore late responses when the user has switched to another room. */
+  const activeRoomIdRef = useRef(roomId);
+  activeRoomIdRef.current = roomId;
 
   const fetchMembers = useCallback((showLoading: boolean) => {
+    const requestedRoomId = roomId;
     if (showLoading) setLoading(true);
 
-    invoke<RoomMember[]>("get_room_members", { roomId })
+    invoke<RoomMember[]>("get_room_members", { roomId: requestedRoomId })
       .then((result) => {
+        if (activeRoomIdRef.current !== requestedRoomId) return;
         setMembers(result);
-        sessionStorage.setItem(cacheKey(roomId), JSON.stringify(result));
+        sessionStorage.setItem(
+          cacheKey(requestedRoomId),
+          JSON.stringify(result)
+        );
         setLoading(false);
         hasFetched.current = true;
       })
       .catch((e) => {
+        if (activeRoomIdRef.current !== requestedRoomId) return;
         console.error("Failed to fetch room members:", e);
+        setMembers([]);
         setLoading(false);
-      })
-      .finally(() => {
-        fetchingRef.current = null;
       });
+  }, [roomId]);
+
+  // Drop previous room's members before paint so we never flash or persist wrong data.
+  useLayoutEffect(() => {
+    setMembers([]);
+    setLoading(true);
+    hasFetched.current = false;
   }, [roomId]);
 
   // Initial load (prefer cache)
   useEffect(() => {
-    hasFetched.current = false;
-
-    // Prevent StrictMode double-invoke
-    if (fetchingRef.current === roomId) return;
-
     const cached = sessionStorage.getItem(cacheKey(roomId));
 
     if (cached) {
@@ -54,16 +69,14 @@ export function useRoomMembers(roomId: string) {
         setLoading(false);
         hasFetched.current = true;
       } catch {
-        fetchingRef.current = roomId;
         fetchMembers(true);
       }
     } else {
-      fetchingRef.current = roomId;
       fetchMembers(true);
     }
   }, [roomId, fetchMembers]);
 
-  // Persist cache whenever members change
+  // Persist member list for this room only (layout effect above clears on roomId change first).
   useEffect(() => {
     if (members.length > 0) {
       sessionStorage.setItem(cacheKey(roomId), JSON.stringify(members));

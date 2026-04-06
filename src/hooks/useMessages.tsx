@@ -1,4 +1,4 @@
-import { useEffect, useState, useCallback, useRef } from "react";
+import { useEffect, useLayoutEffect, useState, useCallback, useRef } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { Message, MessageBatch } from "../types/matrix";
@@ -90,10 +90,9 @@ export function useMessages(roomId: string | null) {
   const [initialLoading, setInitialLoading] = useState(false);
   const [refreshing, setRefreshing] = useState(false);
   const cacheRef = useRef(globalCache);
-  const fetchingRef = useRef<string | null>(null);
 
-  // Load initial messages when room changes
-  useEffect(() => {
+  // Before paint: never show another room's timeline (or empty while we have no cache).
+  useLayoutEffect(() => {
     if (!roomId) {
       setMessages([]);
       setPrevBatch(null);
@@ -102,27 +101,31 @@ export function useMessages(roomId: string | null) {
       return;
     }
 
-    // Prevent StrictMode double-invoke serialization
-    if (fetchingRef.current === roomId) return;
-
     const cached = cacheRef.current.get(roomId);
-
     if (cached) {
-      // Show cached messages immediately, then fetch new ones in background
       touchRoom(roomId);
       setMessages(cached.messages);
       setPrevBatch(cached.prevBatch);
       setInitialLoading(false);
-      setRefreshing(true);
     } else {
+      setMessages([]);
+      setPrevBatch(null);
       setInitialLoading(true);
-      setRefreshing(false);
     }
+    setRefreshing(false);
+  }, [roomId]);
 
-    fetchingRef.current = roomId;
+  // Fetch from server when room changes (cancelled on switch / unmount).
+  useEffect(() => {
+    if (!roomId) return;
+
+    let cancelled = false;
+    const hadCache = !!cacheRef.current.get(roomId);
+    if (hadCache) setRefreshing(true);
 
     invoke<MessageBatch>("get_messages", { roomId, from: null, limit: 50 })
       .then((batch) => {
+        if (cancelled) return;
         const fetched = batch.messages.reverse();
         const prev = cacheRef.current.get(roomId)?.messages ?? [];
         const merged = mergeLatestServerWindow(prev, fetched);
@@ -131,12 +134,21 @@ export function useMessages(roomId: string | null) {
         setPrevBatch(batch.prevBatch);
         setCachedRoom(roomId, merged, batch.prevBatch);
       })
-      .catch((e) => console.error("Failed to load messages:", e))
+      .catch((e) => {
+        if (cancelled) return;
+        console.error("Failed to load messages:", e);
+        setMessages([]);
+        setPrevBatch(null);
+      })
       .finally(() => {
-        fetchingRef.current = null;
+        if (cancelled) return;
         setInitialLoading(false);
         setRefreshing(false);
       });
+
+    return () => {
+      cancelled = true;
+    };
   }, [roomId]);
 
   // Listen for live message events from the sync loop (new, edit, redact)

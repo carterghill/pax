@@ -1,6 +1,7 @@
 import { useState, useRef, useEffect, useCallback, useMemo } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import type { Room } from "../types/matrix";
+import type { RoomsChangedPayload } from "../types/roomsChanged";
 import {
   X,
   Plus,
@@ -97,11 +98,6 @@ function buildDefaultSearchServers(currentHomeserver: string | null): string[] {
     "nope.chat",
   ]);
 }
-
-type RoomsChangedPayload = {
-  joinedRoomId?: string;
-  optimisticRoom?: Room;
-};
 
 function buildOptimisticSpaceRoom(
   roomId: string,

@@ -13,6 +13,8 @@ import {
 import { useTheme } from "../theme/ThemeContext";
 import { useOverlayObstruction } from "../hooks/useOverlayObstruction";
 import { VOICE_ROOM_TYPE } from "../utils/matrix";
+import type { Room } from "../types/matrix";
+import type { RoomsChangedPayload } from "../types/roomsChanged";
 
 type RoomKind = "text" | "voice";
 type HistoryVisibility = "shared" | "joined" | "invited" | "world_readable";
@@ -21,7 +23,7 @@ type SpaceRoomAccess = "space_members" | "public" | "invite";
 interface CreateRoomDialogProps {
   spaceId: string;
   onClose: () => void;
-  onCreated: () => void;
+  onCreated: (payload?: RoomsChangedPayload) => void | Promise<void>;
 }
 
 export default function CreateRoomDialog({
@@ -68,16 +70,30 @@ export default function CreateRoomDialog({
 
     try {
       const roomType = roomKind === "voice" ? VOICE_ROOM_TYPE : null;
-      await invoke<string>("create_room_in_space", {
+      const trimmedName = name.trim();
+      const trimmedTopic = topic.trim() || null;
+      const roomId = await invoke<string>("create_room_in_space", {
         spaceId,
-        name: name.trim(),
-        topic: topic.trim() || null,
+        name: trimmedName,
+        topic: trimmedTopic,
         spaceRoomAccess: roomAccess,
         roomType,
         roomAlias: null,
         historyVisibility,
       });
-      onCreated();
+      const optimisticRoom: Room = {
+        id: roomId,
+        name: trimmedName,
+        avatarUrl: null,
+        isSpace: false,
+        parentSpaceIds: [spaceId],
+        roomType,
+        membership: "joined",
+      };
+      await onCreated({
+        optimisticRoom,
+        newSpaceChildTopic: trimmedTopic,
+      });
       onClose();
     } catch (e) {
       setError(String(e));

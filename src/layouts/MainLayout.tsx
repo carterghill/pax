@@ -5,7 +5,7 @@ import VoiceRoomView from "../components/VoiceRoomView";
 import InvitationView from "../layouts/InvitationView";
 import SpaceHomeView from "../layouts/SpaceHomeView";
 import type { RoomsForLayout } from "../hooks/useRooms";
-import type { Room } from "../types/matrix";
+import type { RoomsChangedPayload } from "../types/roomsChanged";
 import { usePresence } from "../hooks/usePresence";
 import { useVoiceParticipants } from "../hooks/useVoiceParticipants";
 import { useVoiceCall } from "../hooks/useVoiceCall";
@@ -30,11 +30,6 @@ const MAX_USER_MENU_WIDTH = 400;
 const MIN_CHAT_VIEW_WIDTH = 200;
 const SPACE_SIDEBAR_WIDTH = 72;
 const ROOM_SIDEBAR_RESIZE_HANDLE = 6;
-
-type RoomsChangedPayload = {
-  joinedRoomId?: string;
-  optimisticRoom?: Room;
-};
 
 function getStoredUserMenuWidth(defaultWidth: number): number {
   try {
@@ -326,7 +321,7 @@ export default function MainLayout({
             <SpaceHomeView
               space={activeSpace}
               onSelectRoom={handleSelectRoom}
-              onRoomsChanged={fetchRooms}
+              onRoomsChanged={handleSpacesChanged}
             />
           ) : (
             <div style={{

@@ -3,6 +3,7 @@ import { invoke } from "@tauri-apps/api/core";
 import { Hash, Volume2, Users, LogIn, Check, Mail, RefreshCw, Plus } from "lucide-react";
 import { useTheme } from "../theme/ThemeContext";
 import { Room } from "../types/matrix";
+import type { RoomsChangedPayload } from "../types/roomsChanged";
 import { VOICE_ROOM_TYPE } from "../utils/matrix";
 import CreateRoomDialog from "../components/CreateRoomDialog";
 import type { SpaceChildInfo, SpaceInfo } from "../utils/spaceHomeCache";
@@ -11,7 +12,35 @@ import { getCachedSpaceInfo, setCachedSpaceInfo } from "../utils/spaceHomeCache"
 interface SpaceHomeViewProps {
   space: Room;
   onSelectRoom: (roomId: string) => void;
-  onRoomsChanged: () => void;
+  onRoomsChanged: (payload?: RoomsChangedPayload) => void | Promise<void>;
+}
+
+function mergeCreatedChildIntoSpaceInfo(
+  prev: SpaceInfo,
+  room: Room,
+  topic: string | null
+): SpaceInfo {
+  const child: SpaceChildInfo = {
+    id: room.id,
+    name: room.name,
+    topic,
+    avatarUrl: room.avatarUrl,
+    membership: "joined",
+    joinRule: null,
+    roomType: room.roomType,
+    numJoinedMembers: 1,
+  };
+  const others = prev.children.filter((c) => c.id !== child.id);
+  return { ...prev, children: [child, ...others] };
+}
+
+function mergeJoinedChildIntoSpaceInfo(prev: SpaceInfo, roomId: string): SpaceInfo {
+  return {
+    ...prev,
+    children: prev.children.map((c) =>
+      c.id === roomId ? { ...c, membership: "joined" as const } : c
+    ),
+  };
 }
 
 type FetchSpaceInfoOptions = {
@@ -93,10 +122,25 @@ export default function SpaceHomeView({ space, onSelectRoom, onRoomsChanged }: S
 
   async function handleJoinRoom(roomId: string) {
     setJoiningRoomId(roomId);
+    const childMeta = info?.children.find((c) => c.id === roomId);
     try {
       await invoke("join_room", { roomId });
-      onRoomsChanged();
-      // Refresh space info to update membership states
+      const optimisticRoom: Room = {
+        id: roomId,
+        name: childMeta?.name ?? roomId,
+        avatarUrl: childMeta?.avatarUrl ?? null,
+        isSpace: false,
+        parentSpaceIds: [space.id],
+        roomType: childMeta?.roomType ?? null,
+        membership: "joined",
+      };
+      await onRoomsChanged({ optimisticRoom });
+      setInfo((prev) => {
+        if (!prev) return prev;
+        const next = mergeJoinedChildIntoSpaceInfo(prev, roomId);
+        setCachedSpaceInfo(space.id, next);
+        return next;
+      });
       fetchInfo({ background: true });
     } catch (e) {
       console.error("Failed to join room:", e);
@@ -362,8 +406,20 @@ export default function SpaceHomeView({ space, onSelectRoom, onRoomsChanged }: S
         <CreateRoomDialog
           spaceId={space.id}
           onClose={() => setShowCreateRoom(false)}
-          onCreated={() => {
-            onRoomsChanged();
+          onCreated={async (payload) => {
+            await onRoomsChanged(payload);
+            if (payload?.optimisticRoom) {
+              setInfo((prev) => {
+                if (!prev) return prev;
+                const next = mergeCreatedChildIntoSpaceInfo(
+                  prev,
+                  payload.optimisticRoom!,
+                  payload.newSpaceChildTopic ?? null
+                );
+                setCachedSpaceInfo(space.id, next);
+                return next;
+              });
+            }
             fetchInfo({ background: true });
           }}
         />
