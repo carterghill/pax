@@ -44,6 +44,50 @@ function uniqueNonEmpty(values: Array<string | null | undefined>): string[] {
   return Array.from(new Set(values.filter((value): value is string => !!value?.trim())));
 }
 
+function parseServerInputs(raw: string): string[] {
+  return Array.from(
+    new Set(
+      raw
+        .split(",")
+        .map((value) => value.trim())
+        .filter((value) => value.length > 0)
+    )
+  );
+}
+
+function mergePublicSpaceResults(results: PublicSpaceResult[][]): PublicSpaceResult[] {
+  const byId = new Map<string, PublicSpaceResult>();
+
+  for (const group of results) {
+    for (const room of group) {
+      const existing = byId.get(room.room_id);
+      if (!existing) {
+        byId.set(room.room_id, room);
+        continue;
+      }
+
+      byId.set(room.room_id, {
+        ...existing,
+        ...room,
+        name: existing.name || room.name,
+        topic: existing.topic || room.topic,
+        avatar_url: existing.avatar_url || room.avatar_url,
+        canonical_alias: existing.canonical_alias || room.canonical_alias,
+        room_type: existing.room_type || room.room_type,
+        num_joined_members: existing.num_joined_members ?? room.num_joined_members,
+        membership:
+          existing.membership === "joined" || room.membership === "joined"
+            ? "joined"
+            : existing.membership === "invited" || room.membership === "invited"
+              ? "invited"
+              : existing.membership || room.membership,
+      });
+    }
+  }
+
+  return Array.from(byId.values());
+}
+
 type RoomsChangedPayload = {
   joinedRoomId?: string;
   optimisticRoom?: Room;
@@ -81,9 +125,7 @@ export default function CreateSpaceDialog({
   useOverlayObstruction(modalRef);
 
   // Tab state — if user can't create, only show join (no tabs at all)
-  const [activeTab, setActiveTab] = useState<"join" | "create">(
-    canCreate ? "create" : "join"
-  );
+  const [activeTab, setActiveTab] = useState<"join" | "create">("join");
 
   // ── Create form state ──
   const [name, setName] = useState("");
@@ -219,15 +261,71 @@ export default function CreateSpaceDialog({
     setJoinSuccess(null);
 
     try {
-      const result = await invoke<{ chunk: PublicSpaceResult[] }>(
-        "search_public_spaces",
-        {
-          searchTerm: searchTerm.trim() || null,
-          server: searchServer.trim() || null,
-          limit: 20,
-        }
+      const servers = parseServerInputs(searchServer);
+      const searchTermValue = searchTerm.trim() || null;
+
+      if (servers.length <= 1) {
+        const result = await invoke<{ chunk: PublicSpaceResult[] }>(
+          "search_public_spaces",
+          {
+            searchTerm: searchTermValue,
+            server: servers[0] || null,
+            limit: 20,
+          }
+        );
+        setSearchResults(result.chunk || []);
+        return;
+      }
+
+      const settled = await Promise.allSettled(
+        servers.map((server) =>
+          invoke<{ chunk: PublicSpaceResult[] }>("search_public_spaces", {
+            searchTerm: searchTermValue,
+            server,
+            limit: 20,
+          })
+        )
       );
-      setSearchResults(result.chunk || []);
+
+      const successfulResults = settled
+        .filter(
+          (
+            result
+          ): result is PromiseFulfilledResult<{ chunk: PublicSpaceResult[] }> =>
+            result.status === "fulfilled"
+        )
+        .map((result) => result.value.chunk || []);
+
+      const failedResults = settled
+        .map((result, index) => ({ result, server: servers[index] }))
+        .filter(
+          (
+            entry
+          ): entry is {
+            result: PromiseRejectedResult;
+            server: string;
+          } => entry.result.status === "rejected"
+        );
+
+      if (successfulResults.length === 0) {
+        throw new Error(
+          failedResults
+            .map(({ server, result }) => `${server}: ${String(result.reason)}`)
+            .join(" | ")
+        );
+      }
+
+      setSearchResults(mergePublicSpaceResults(successfulResults));
+
+      if (failedResults.length > 0) {
+        setSearchError(
+          `Some servers failed: ${failedResults
+            .map(({ server, result }) => `${server}: ${String(result.reason)}`)
+            .join(" | ")}`
+        );
+      } else {
+        setSearchError(null);
+      }
     } catch (e) {
       setSearchError(String(e));
       setSearchResults([]);
@@ -242,7 +340,7 @@ export default function CreateSpaceDialog({
       const roomId = space.room_id;
       const joinTarget = space.canonical_alias || roomId;
       const viaServers = uniqueNonEmpty([
-        searchServer.trim() || null,
+        ...parseServerInputs(searchServer),
         extractMatrixServerName(space.canonical_alias),
         extractMatrixServerName(roomId),
       ]);
@@ -296,7 +394,7 @@ export default function CreateSpaceDialog({
 
     try {
       const viaServers = uniqueNonEmpty([
-        searchServer.trim() || null,
+        ...parseServerInputs(searchServer),
         extractMatrixServerName(addr),
       ]);
       const joinedRoomId = await invoke<string>("join_room", {
@@ -528,7 +626,7 @@ export default function CreateSpaceDialog({
                     opacity: 0.7,
                   }}
                 >
-                  e.g. matrix.org to browse their public spaces
+                  e.g. matrix.org, 4d2.org to browse public spaces from multiple servers
                 </div>
               </div>
 
