@@ -1370,6 +1370,273 @@ pub async fn create_room_in_space(
 /// Uses `POST /publicRooms` with `filter.room_types: ["m.space"]` to find
 /// only spaces. Supports an optional search term and a `server` parameter
 /// to browse a remote server's directory over federation.
+fn push_unique(values: &mut Vec<String>, value: String) {
+    if !value.is_empty() && !values.iter().any(|existing| existing == &value) {
+        values.push(value);
+    }
+}
+
+fn parse_server_input_url(input: &str) -> Option<reqwest::Url> {
+    let trimmed = input.trim();
+    if trimmed.is_empty() {
+        return None;
+    }
+
+    if let Ok(url) = reqwest::Url::parse(trimmed) {
+        return Some(url);
+    }
+
+    reqwest::Url::parse(&format!("https://{trimmed}")).ok()
+}
+
+fn normalize_server_name(input: &str) -> Option<String> {
+    let url = parse_server_input_url(input)?;
+    let host = url.host_str()?.to_string();
+    Some(match url.port() {
+        Some(port) => format!("{host}:{port}"),
+        None => host,
+    })
+}
+
+fn canonicalize_homeserver_base_url(input: &str) -> Option<String> {
+    let mut url = parse_server_input_url(input)?;
+    url.set_query(None);
+    url.set_fragment(None);
+    Some(url.to_string().trim_end_matches('/').to_string())
+}
+
+fn discovery_hosts_for_server_input(input: &str) -> Vec<String> {
+    let mut hosts = Vec::new();
+    let Some(url) = parse_server_input_url(input) else {
+        return hosts;
+    };
+    let Some(host) = url.host_str() else {
+        return hosts;
+    };
+
+    push_unique(&mut hosts, host.to_string());
+    if let Some(stripped) = host.strip_prefix("matrix.") {
+        push_unique(&mut hosts, stripped.to_string());
+    }
+
+    hosts
+}
+
+async fn parse_public_rooms_response(resp: reqwest::Response) -> Result<serde_json::Value, String> {
+    if !resp.status().is_success() {
+        let status = resp.status();
+        let text = resp.text().await.unwrap_or_default();
+        return Err(format!("Public rooms query failed ({}): {}", status, text));
+    }
+
+    resp.json()
+        .await
+        .map_err(|e| format!("Failed to parse public rooms response: {e}"))
+}
+
+fn public_room_matches_search(room_data: &serde_json::Value, search_term: Option<&str>) -> bool {
+    let Some(term) = search_term else {
+        return true;
+    };
+
+    [
+        room_data["name"].as_str(),
+        room_data["topic"].as_str(),
+        room_data["canonical_alias"].as_str(),
+        room_data["room_id"].as_str(),
+    ]
+    .into_iter()
+    .flatten()
+    .any(|value| value.to_lowercase().contains(term))
+}
+
+fn enrich_public_rooms_with_membership(
+    client: &Client,
+    mut result: serde_json::Value,
+) -> serde_json::Value {
+    let Some(chunk) = result["chunk"].as_array().cloned() else {
+        return result;
+    };
+
+    let mut enriched = Vec::new();
+    for room_data in &chunk {
+        let mut entry = room_data.clone();
+        let room_id = room_data["room_id"].as_str().unwrap_or("");
+        let membership = if let Ok(rid) = matrix_sdk::ruma::RoomId::parse(room_id) {
+            if let Some(r) = client.get_room(&rid) {
+                match r.state() {
+                    matrix_sdk::RoomState::Joined => "joined",
+                    matrix_sdk::RoomState::Invited => "invited",
+                    _ => "none",
+                }
+            } else {
+                "none"
+            }
+        } else {
+            "none"
+        };
+        entry["membership"] = serde_json::json!(membership);
+        enriched.push(entry);
+    }
+
+    result["chunk"] = serde_json::json!(enriched);
+    result
+}
+
+async fn discover_client_base_urls(
+    http_client: &reqwest::Client,
+    server_input: &str,
+) -> Vec<String> {
+    let mut base_urls = Vec::new();
+
+    for host in discovery_hosts_for_server_input(server_input) {
+        let well_known_url = format!("https://{host}/.well-known/matrix/client");
+        match http_client
+            .get(&well_known_url)
+            .timeout(Duration::from_secs(10))
+            .send()
+            .await
+        {
+            Ok(resp) if resp.status().is_success() => match resp.json::<serde_json::Value>().await {
+                Ok(body) => {
+                    if let Some(base_url) = body["m.homeserver"]["base_url"].as_str() {
+                        if let Some(normalized) = canonicalize_homeserver_base_url(base_url) {
+                            push_unique(&mut base_urls, normalized);
+                        }
+                    }
+                }
+                Err(e) => {
+                    log::warn!(
+                        "search_public_spaces: failed to parse {well_known_url}: {e}"
+                    );
+                }
+            },
+            Ok(resp) => {
+                log::debug!(
+                    "search_public_spaces: {} returned {}",
+                    well_known_url,
+                    resp.status()
+                );
+            }
+            Err(e) => {
+                log::debug!(
+                    "search_public_spaces: failed to fetch {}: {}",
+                    well_known_url,
+                    fmt_error_chain(&e)
+                );
+            }
+        }
+    }
+
+    if let Some(base_url) = canonicalize_homeserver_base_url(server_input) {
+        push_unique(&mut base_urls, base_url);
+    }
+
+    base_urls
+}
+
+async fn search_public_spaces_direct_fallback(
+    state: &AppState,
+    server_input: &str,
+    search_term: Option<&str>,
+    limit: u32,
+) -> Result<serde_json::Value, String> {
+    let base_urls = discover_client_base_urls(&state.http_client, server_input).await;
+    if base_urls.is_empty() {
+        return Err(format!(
+            "No direct homeserver URL could be discovered for {}",
+            server_input
+        ));
+    }
+
+    let normalized_search_term = search_term.map(|term| term.to_lowercase());
+    let per_page = limit.max(50).min(100);
+    let max_pages = if normalized_search_term.is_some() { 5 } else { 2 };
+    let mut last_err: Option<String> = None;
+
+    'base_urls: for base_url in base_urls {
+        let mut matched_spaces = Vec::new();
+        let mut next_batch: Option<String> = None;
+        let mut saw_success = false;
+
+        for _ in 0..max_pages {
+            let mut url = format!("{}/_matrix/client/v3/publicRooms?limit={}", base_url, per_page);
+            if let Some(since) = &next_batch {
+                url.push_str("&since=");
+                url.push_str(&urlencoding::encode(since));
+            }
+
+            let resp = match state
+                .http_client
+                .get(&url)
+                .timeout(Duration::from_secs(15))
+                .send()
+                .await
+            {
+                Ok(resp) => resp,
+                Err(e) => {
+                    let err = format!("Direct public rooms query failed: {}", fmt_error_chain(&e));
+                    if saw_success {
+                        log::warn!("search_public_spaces: {err}");
+                        break;
+                    }
+                    last_err = Some(err);
+                    continue 'base_urls;
+                }
+            };
+
+            let body = match parse_public_rooms_response(resp).await {
+                Ok(body) => body,
+                Err(err) => {
+                    if saw_success {
+                        log::warn!("search_public_spaces: {err}");
+                        break;
+                    }
+                    last_err = Some(err);
+                    continue 'base_urls;
+                }
+            };
+
+            saw_success = true;
+
+            if let Some(chunk) = body["chunk"].as_array() {
+                for room_data in chunk {
+                    if room_data["room_type"].as_str() != Some("m.space") {
+                        continue;
+                    }
+                    if !public_room_matches_search(
+                        room_data,
+                        normalized_search_term.as_deref(),
+                    ) {
+                        continue;
+                    }
+                    matched_spaces.push(room_data.clone());
+                    if matched_spaces.len() >= limit as usize {
+                        break;
+                    }
+                }
+            }
+
+            if matched_spaces.len() >= limit as usize {
+                break;
+            }
+
+            next_batch = body["next_batch"].as_str().map(String::from);
+            if next_batch.is_none() {
+                break;
+            }
+        }
+
+        if saw_success {
+            return Ok(serde_json::json!({ "chunk": matched_spaces }));
+        }
+    }
+
+    Err(last_err.unwrap_or_else(|| {
+        format!("Direct public rooms lookup failed for {}", server_input)
+    }))
+}
+
 #[tauri::command]
 pub async fn search_public_spaces(
     state: State<'_, Arc<AppState>>,
@@ -1380,19 +1647,24 @@ pub async fn search_public_spaces(
     let client = super::get_client(&state).await?;
     let homeserver = client.homeserver().to_string();
     let access_token = client.access_token().ok_or("No access token")?;
+    let limit = limit.unwrap_or(20).clamp(1, 100);
+    let search_term = search_term
+        .map(|term| term.trim().to_string())
+        .filter(|term| !term.is_empty());
+    let server = server
+        .map(|server| server.trim().to_string())
+        .filter(|server| !server.is_empty());
 
     let mut filter = serde_json::json!({
         "room_types": ["m.space"],
     });
     if let Some(term) = &search_term {
-        if !term.is_empty() {
-            filter["generic_search_term"] = serde_json::json!(term);
-        }
+        filter["generic_search_term"] = serde_json::json!(term);
     }
 
     let body = serde_json::json!({
         "filter": filter,
-        "limit": limit.unwrap_or(20),
+        "limit": limit,
     });
 
     // If a server is specified, pass it as a query parameter for federation
@@ -1401,65 +1673,50 @@ pub async fn search_public_spaces(
         homeserver.trim_end_matches('/')
     );
     if let Some(srv) = &server {
-        if !srv.is_empty() {
-            url = format!("{}?server={}", url, urlencoding::encode(srv));
-        }
+        let server_name = normalize_server_name(srv).unwrap_or_else(|| srv.clone());
+        url = format!("{}?server={}", url, urlencoding::encode(&server_name));
     }
 
-    let resp = state
+    let result = match state
         .http_client
         .post(&url)
         .timeout(Duration::from_secs(15))
-        .bearer_auth(access_token.to_string())
+        .bearer_auth(access_token)
         .json(&body)
         .send()
         .await
-        .map_err(|e| {
-            format!(
-                "Failed to search public spaces: {}",
-                super::fmt_error_chain(&e)
-            )
-        })?;
+    {
+        Ok(resp) => parse_public_rooms_response(resp).await,
+        Err(e) => Err(format!(
+            "Failed to search public spaces: {}",
+            super::fmt_error_chain(&e)
+        )),
+    };
 
-    if !resp.status().is_success() {
-        let status = resp.status();
-        let text = resp.text().await.unwrap_or_default();
-        return Err(format!("Public rooms query failed ({}): {}", status, text));
-    }
-
-    let result: serde_json::Value = resp
-        .json()
-        .await
-        .map_err(|e| format!("Failed to parse public rooms response: {e}"))?;
-
-    // Enrich each result with the user's membership status
-    if let Some(chunk) = result["chunk"].as_array() {
-        let mut enriched = Vec::new();
-        for room_data in chunk {
-            let mut entry = room_data.clone();
-            let room_id = room_data["room_id"].as_str().unwrap_or("");
-            let membership = if let Ok(rid) = matrix_sdk::ruma::RoomId::parse(room_id) {
-                if let Some(r) = client.get_room(&rid) {
-                    match r.state() {
-                        matrix_sdk::RoomState::Joined => "joined",
-                        matrix_sdk::RoomState::Invited => "invited",
-                        _ => "none",
-                    }
-                } else {
-                    "none"
-                }
-            } else {
-                "none"
+    match result {
+        Ok(result) => Ok(enrich_public_rooms_with_membership(&client, result)),
+        Err(primary_err) => {
+            let Some(server_input) = server.as_deref() else {
+                return Err(primary_err);
             };
-            entry["membership"] = serde_json::json!(membership);
-            enriched.push(entry);
-        }
-        let mut enriched_result = result.clone();
-        enriched_result["chunk"] = serde_json::json!(enriched);
-        return Ok(enriched_result);
-    }
 
-    Ok(result)
+            log::warn!(
+                "search_public_spaces: federation lookup for '{}' failed: {}; trying direct client lookup",
+                server_input,
+                primary_err
+            );
+
+            match search_public_spaces_direct_fallback(&state, server_input, search_term.as_deref(), limit)
+                .await
+            {
+                Ok(result) => Ok(enrich_public_rooms_with_membership(&client, result)),
+                Err(fallback_err) => Err(format!(
+                    "{} | Direct lookup fallback failed: {}",
+                    primary_err, fallback_err
+                )),
+            }
+        }
+    }
 }
 
 /// Resolve a room alias (e.g. `#my-space:example.com`) to its room ID.
@@ -1501,4 +1758,59 @@ pub async fn resolve_room_alias(
         .map_err(|e| format!("Failed to parse alias response: {e}"))?;
 
     Ok(body)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{
+        canonicalize_homeserver_base_url, discovery_hosts_for_server_input, normalize_server_name,
+        public_room_matches_search,
+    };
+
+    #[test]
+    fn normalizes_server_name_from_plain_host_or_url() {
+        assert_eq!(
+            normalize_server_name("matrix.tchncs.de"),
+            Some("matrix.tchncs.de".to_string())
+        );
+        assert_eq!(
+            normalize_server_name("https://matrix.4d2.org/"),
+            Some("matrix.4d2.org".to_string())
+        );
+        assert_eq!(
+            normalize_server_name("https://matrix.grin.hu:8448/foo"),
+            Some("matrix.grin.hu:8448".to_string())
+        );
+    }
+
+    #[test]
+    fn preserves_homeserver_base_url_path_when_present() {
+        assert_eq!(
+            canonicalize_homeserver_base_url("https://example.com/matrix/"),
+            Some("https://example.com/matrix".to_string())
+        );
+    }
+
+    #[test]
+    fn includes_apex_domain_for_matrix_subdomains() {
+        assert_eq!(
+            discovery_hosts_for_server_input("matrix.tchncs.de"),
+            vec!["matrix.tchncs.de".to_string(), "tchncs.de".to_string()]
+        );
+    }
+
+    #[test]
+    fn matches_search_against_space_metadata() {
+        let room = serde_json::json!({
+            "name": "Privacy Guides",
+            "topic": "Security and privacy discussions",
+            "canonical_alias": "#privacy:privacyguides.org",
+            "room_id": "!abc:privacyguides.org",
+        });
+
+        assert!(public_room_matches_search(&room, Some("privacy")));
+        assert!(public_room_matches_search(&room, Some("security")));
+        assert!(public_room_matches_search(&room, Some("!abc")));
+        assert!(!public_room_matches_search(&room, Some("matrix.org")));
+    }
 }
