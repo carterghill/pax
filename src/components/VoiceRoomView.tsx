@@ -179,7 +179,7 @@ export default function VoiceRoomView({
       setLowBandwidthMode(next);
       try {
         await onSetLowBandwidthMode(next);
-        // Restart active screen share so the new simulcast setting takes effect
+        // Restart active screen share so bitrate/fps settings take effect
         const active = activeShareRef.current;
         if (callState.isLocalScreenSharing && active) {
           await onStopScreenShare();
@@ -1207,7 +1207,11 @@ export default function VoiceRoomView({
                         fontSize: typography.fontSizeSmall,
                       }}
                     >
-                      {lowBandwidthMode ? "On — 500 kbps / 24 fps, no simulcast" : "Off — simulcast enabled"}
+                      {lowBandwidthMode
+                        ? "On — 500 kbps / 24 fps, no simulcast"
+                        : isLinux
+                          ? "Off — full quality, single layer (Linux)"
+                          : "Off — simulcast enabled"}
                     </button>
                   </>
                 )}

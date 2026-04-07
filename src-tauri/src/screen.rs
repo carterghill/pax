@@ -192,8 +192,10 @@ impl Default for ScreenShareQuality {
 static SCREEN_SHARE_QUALITY: Lazy<parking_lot::RwLock<ScreenShareQuality>> =
     Lazy::new(|| parking_lot::RwLock::new(ScreenShareQuality::default()));
 
-/// Low bandwidth mode: disables simulcast and streams at 500 kbps / 24 fps.
-/// When off (default), simulcast is enabled with three layers for per-viewer adaptation.
+/// Low bandwidth mode: 500 kbps / 24 fps.
+/// On Windows (default), screen share uses simulcast unless this is on.
+/// On Linux, screen share never uses simulcast — single layer avoids starving multiple
+/// OpenH264 instances when NVENC is not the active encoder.
 static LOW_BANDWIDTH_MODE: Lazy<parking_lot::RwLock<bool>> =
     Lazy::new(|| parking_lot::RwLock::new(false));
 
@@ -220,8 +222,8 @@ pub fn set_screen_share_quality(quality: ScreenShareQuality) {
 /// Always resets the ABR tier to High — each new stream starts at full quality
 /// and the adaptive bitrate system steps down if needed.
 ///
-/// - Default mode: simulcast ON, 3.5 Mbps / 30 fps.
-/// - Low bandwidth mode: simulcast OFF, 500 kbps / 24 fps.
+/// - Default: 3.5 Mbps / 30 fps; simulcast ON except on Linux (single layer).
+/// - Low bandwidth: 500 kbps / 24 fps; simulcast OFF everywhere.
 fn build_screen_share_publish_options(codec: livekit::options::VideoCodec) -> TrackPublishOptions {
     // Reset ABR tier — every new stream starts at full quality
     set_screen_share_quality(ScreenShareQuality::High);
@@ -230,7 +232,7 @@ fn build_screen_share_publish_options(codec: livekit::options::VideoCodec) -> Tr
     let low_bw = is_low_bandwidth_mode();
     let bitrate = quality.max_bitrate();
     let framerate = quality.fps() as f64;
-    let simulcast = !low_bw;
+    let simulcast = !low_bw && !cfg!(target_os = "linux");
 
     log::info!(
         "Screen share publish options: codec={:?}, {}kbps, {}fps, simulcast={}, low_bw={}",
