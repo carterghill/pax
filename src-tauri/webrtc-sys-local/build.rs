@@ -16,6 +16,33 @@ use std::path::Path;
 use std::path::PathBuf;
 use std::{env, path, process::Command};
 
+/// CUDA toolkit root containing `include/cuda.h`.
+///
+/// Linux distros use different defaults: NVIDIA's installer uses `/usr/local/cuda`;
+/// Arch/Manjaro `cuda` uses `/opt/cuda`.  Without probing these, NVENC is skipped
+/// even when CUDA is installed.
+fn linux_cuda_home_for_nvenc() -> Option<PathBuf> {
+    println!("cargo:rerun-if-env-changed=CUDA_HOME");
+    println!("cargo:rerun-if-env-changed=CUDA_PATH");
+
+    let mut roots: Vec<PathBuf> = Vec::new();
+    if let Ok(p) = env::var("CUDA_HOME") {
+        roots.push(PathBuf::from(p));
+    }
+    if let Ok(p) = env::var("CUDA_PATH") {
+        roots.push(PathBuf::from(p));
+    }
+    roots.push(PathBuf::from("/usr/local/cuda"));
+    roots.push(PathBuf::from("/opt/cuda"));
+
+    for cuda_home in roots {
+        if cuda_home.join("include").join("cuda.h").exists() {
+            return Some(cuda_home);
+        }
+    }
+    None
+}
+
 fn main() {
     if env::var("DOCS_RS").is_ok() {
         return;
@@ -244,14 +271,10 @@ fn main() {
             }
 
             if x86 || arm {
-                let cuda_home = PathBuf::from(match env::var("CUDA_HOME") {
-                    Ok(p) => p,
-                    Err(_) => "/usr/local/cuda".to_owned(),
-                });
-                let cuda_include_dir = cuda_home.join("include");
+                if let Some(cuda_home) = linux_cuda_home_for_nvenc() {
+                    let cuda_include_dir = cuda_home.join("include");
 
-                // libcuda and libnvcuvid are dlopened, so do not link them.
-                if cuda_include_dir.join("cuda.h").exists() {
+                    // libcuda and libnvcuvid are dlopened, so do not link them.
                     builder
                         .include(cuda_include_dir)
                         .flag("-Isrc/nvidia/NvCodec/include")
@@ -275,7 +298,7 @@ fn main() {
                         ["cuda", "nvcuvid"].map(String::from).to_vec(),
                     );
                 } else {
-                    println!("cargo:warning=cuda.h not found; building without hardware accelerated video codec support for NVidia GPUs");
+                    println!("cargo:warning=cuda.h not found (set CUDA_HOME or CUDA_PATH, or install under /opt/cuda or /usr/local/cuda); building without hardware accelerated video codec support for NVidia GPUs");
                 }
             }
 

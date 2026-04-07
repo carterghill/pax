@@ -1,5 +1,31 @@
 /// Read .env at compile time and bake the values into the binary via
 /// `cargo:rustc-env`. The source code then reads them with `option_env!()`.
+
+use std::path::PathBuf;
+
+/// Match webrtc-sys-local: find CUDA toolkit with `include/cuda.h` on Linux.
+fn linux_cuda_toolkit_root() -> Option<PathBuf> {
+    println!("cargo:rerun-if-env-changed=CUDA_HOME");
+    println!("cargo:rerun-if-env-changed=CUDA_PATH");
+
+    let mut roots: Vec<PathBuf> = Vec::new();
+    if let Ok(p) = std::env::var("CUDA_HOME") {
+        roots.push(PathBuf::from(p));
+    }
+    if let Ok(p) = std::env::var("CUDA_PATH") {
+        roots.push(PathBuf::from(p));
+    }
+    roots.push(PathBuf::from("/usr/local/cuda"));
+    roots.push(PathBuf::from("/opt/cuda"));
+
+    for root in roots {
+        if root.join("include").join("cuda.h").exists() {
+            return Some(root);
+        }
+    }
+    None
+}
+
 fn main() {
     tauri_build::build();
 
@@ -72,11 +98,7 @@ fn main() {
             }
 
             if x86 || arm {
-                println!("cargo:rerun-if-env-changed=CUDA_HOME");
-                let cuda_home = std::path::PathBuf::from(
-                    std::env::var("CUDA_HOME").unwrap_or_else(|_| "/usr/local/cuda".into()),
-                );
-                if cuda_home.join("include").join("cuda.h").exists() {
+                if linux_cuda_toolkit_root().is_some() {
                     println!("cargo:rustc-cfg=has_nvenc");
                 }
             }
