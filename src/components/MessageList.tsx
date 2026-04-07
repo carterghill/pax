@@ -83,6 +83,21 @@ export default function MessageList({
   const bottomRef = useRef<HTMLDivElement>(null);
   const containerRef = useRef<HTMLDivElement>(null);
   const shouldAutoScrollRef = useRef(true);
+  /**
+   * Prepend scroll restore: capture scroll metrics only after `loading` is true so the snapshot
+   * includes the "Loading..." row; otherwise the banner swap when fetch finishes skews the delta.
+   */
+  const prependScrollAnchorRef = useRef<
+    | { phase: "pending"; firstEventId: string | undefined }
+    | {
+        phase: "captured";
+        scrollHeight: number;
+        scrollTop: number;
+        firstEventId: string | undefined;
+      }
+    | null
+  >(null);
+  const prevLoadingRef = useRef(loading);
   const [hoveredEventId, setHoveredEventId] = useState<string | null>(null);
   const [openMenuEventId, setOpenMenuEventId] = useState<string | null>(null);
   const [menuFixedPos, setMenuFixedPos] = useState<{ top: number; right: number } | null>(null);
@@ -96,13 +111,58 @@ export default function MessageList({
     return distanceFromBottom < AUTO_SCROLL_THRESHOLD_PX;
   }
 
+  useLayoutEffect(() => {
+    prependScrollAnchorRef.current = null;
+  }, [roomId]);
+
+  useLayoutEffect(() => {
+    if (prevLoadingRef.current && !loading && prependScrollAnchorRef.current) {
+      const s = prependScrollAnchorRef.current;
+      if (messages[0]?.eventId === s.firstEventId) {
+        prependScrollAnchorRef.current = null;
+      }
+    }
+    prevLoadingRef.current = loading;
+  }, [loading, messages[0]?.eventId, roomId]);
+
+  // Record scrollHeight/scrollTop once the loading banner is in the DOM (not before).
+  useLayoutEffect(() => {
+    const container = containerRef.current;
+    const ref = prependScrollAnchorRef.current;
+    if (!container || !ref || ref.phase !== "pending" || !loading) return;
+    if (messages[0]?.eventId !== ref.firstEventId) return;
+
+    prependScrollAnchorRef.current = {
+      phase: "captured",
+      scrollHeight: container.scrollHeight,
+      scrollTop: container.scrollTop,
+      firstEventId: ref.firstEventId,
+    };
+  }, [loading, messages.length, messages[0]?.eventId]);
+
+  // Prepend: keep the same messages in view (adjust scrollTop by height added above).
+  // Otherwise scrollTop stays fixed and the list appears to jump.
   // Scroll to bottom before paint so the user never sees the top-first flash.
   useLayoutEffect(() => {
-    if (!containerRef.current) return;
+    const container = containerRef.current;
+    if (!container) return;
+
+    const snap = prependScrollAnchorRef.current;
+    const prepended =
+      snap !== null &&
+      snap.phase === "captured" &&
+      messages[0]?.eventId !== undefined &&
+      messages[0].eventId !== snap.firstEventId;
+    if (prepended && snap) {
+      const delta = container.scrollHeight - snap.scrollHeight;
+      container.scrollTop = snap.scrollTop + delta;
+      prependScrollAnchorRef.current = null;
+    }
+
     if (shouldAutoScrollRef.current) {
       bottomRef.current?.scrollIntoView();
     }
-  }, [messages.length]);
+  }, [messages.length, messages[0]?.eventId]);
 
   // When the container shrinks (input grew, format menu opened), keep bottom anchored.
   useEffect(() => {
@@ -180,6 +240,10 @@ export default function MessageList({
 
     if (loading || !hasMore) return;
     if (containerRef.current.scrollTop < 100) {
+      prependScrollAnchorRef.current = {
+        phase: "pending",
+        firstEventId: messages[0]?.eventId,
+      };
       onLoadMore();
     }
   }
@@ -217,12 +281,20 @@ export default function MessageList({
       }}
     >
       {hasMore && (
-        <div style={{
-          textAlign: "center",
-          padding: spacing.unit * 2,
-          color: palette.textSecondary,
-          fontSize: typography.fontSizeSmall,
-        }}>
+        <div
+          style={{
+            boxSizing: "border-box",
+            minHeight: spacing.unit * 10,
+            display: "flex",
+            alignItems: "center",
+            justifyContent: "center",
+            textAlign: "center",
+            padding: spacing.unit * 2,
+            color: palette.textSecondary,
+            fontSize: typography.fontSizeSmall,
+            lineHeight: typography.lineHeight,
+          }}
+        >
           {loading ? "Loading..." : "Scroll up for more"}
         </div>
       )}
