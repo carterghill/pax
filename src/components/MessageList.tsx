@@ -64,6 +64,14 @@ function messageAllowsDelete(msg: Message, userId: string, policy: RoomRedaction
 /** Portaled to document.body — high z-index keeps the menu above everything. */
 const MESSAGE_ACTIONS_MENU_Z = 10_000;
 
+/** Matrix event IDs contain `$`, `:`, etc.; `querySelector`/`CSS.escape` attribute selectors break on those. */
+function findMessageRow(container: HTMLElement, eventId: string): HTMLElement | null {
+  for (const el of container.querySelectorAll("[data-message-event-id]")) {
+    if (el.getAttribute("data-message-event-id") === eventId) return el as HTMLElement;
+  }
+  return null;
+}
+
 export default function MessageList({
   messages,
   loading,
@@ -94,6 +102,8 @@ export default function MessageList({
         scrollHeight: number;
         scrollTop: number;
         firstEventId: string | undefined;
+        /** Distance from scroll container top edge to anchor row top (visual, matches what the user sees). */
+        anchorViewportTop: number | null;
       }
     | null
   >(null);
@@ -132,11 +142,22 @@ export default function MessageList({
     if (!container || !ref || ref.phase !== "pending" || !loading) return;
     if (messages[0]?.eventId !== ref.firstEventId) return;
 
+    let anchorViewportTop: number | null = null;
+    if (ref.firstEventId) {
+      const anchorEl = findMessageRow(container, ref.firstEventId);
+      if (anchorEl) {
+        const cr = container.getBoundingClientRect();
+        const ar = anchorEl.getBoundingClientRect();
+        anchorViewportTop = ar.top - cr.top;
+      }
+    }
+
     prependScrollAnchorRef.current = {
       phase: "captured",
       scrollHeight: container.scrollHeight,
       scrollTop: container.scrollTop,
       firstEventId: ref.firstEventId,
+      anchorViewportTop,
     };
   }, [loading, messages.length, messages[0]?.eventId]);
 
@@ -154,9 +175,32 @@ export default function MessageList({
       messages[0]?.eventId !== undefined &&
       messages[0].eventId !== snap.firstEventId;
     if (prepended && snap) {
-      const delta = container.scrollHeight - snap.scrollHeight;
-      container.scrollTop = snap.scrollTop + delta;
+      const {
+        scrollHeight: prevScrollHeight,
+        scrollTop: prevScrollTop,
+        firstEventId: anchorEventId,
+        anchorViewportTop,
+      } = snap;
       prependScrollAnchorRef.current = null;
+
+      const alignAnchorToSavedViewport = (el: HTMLElement) => {
+        if (anchorEventId && anchorViewportTop != null) {
+          const anchorEl = findMessageRow(el, anchorEventId);
+          if (anchorEl) {
+            const cr = el.getBoundingClientRect();
+            const ar = anchorEl.getBoundingClientRect();
+            const cur = ar.top - cr.top;
+            // Increasing scrollTop moves content up → (ar.top - cr.top) decreases by ~the same amount.
+            // We want cur → anchorViewportTop, so ΔscrollTop = cur - anchorViewportTop (not the reverse).
+            el.scrollTop += cur - anchorViewportTop;
+            return;
+          }
+        }
+        const delta = el.scrollHeight - prevScrollHeight;
+        el.scrollTop = prevScrollTop + delta;
+      };
+
+      alignAnchorToSavedViewport(container);
     }
 
     if (shouldAutoScrollRef.current) {
@@ -313,6 +357,7 @@ export default function MessageList({
         return (
           <div
             key={msg.eventId}
+            data-message-event-id={msg.eventId}
             onMouseEnter={() => setHoveredEventId(msg.eventId)}
             onMouseLeave={() => {
               if (openMenuEventId !== msg.eventId) {
