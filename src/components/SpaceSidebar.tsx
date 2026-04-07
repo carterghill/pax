@@ -4,6 +4,7 @@ import { Plus, Settings } from "lucide-react";
 import { useTheme } from "../theme/ThemeContext";
 import type { Room } from "../types/matrix";
 import CreateSpaceDialog from "./CreateSpaceDialog";
+import SpaceContextMenu from "./SpaceContextMenu";
 
 type RoomsChangedPayload = {
   joinedRoomId?: string;
@@ -88,6 +89,11 @@ export default function SpaceSidebar({
   const [canCreate, setCanCreate] = useState(true);
   const [addHovered, setAddHovered] = useState(false);
   const [settingsHovered, setSettingsHovered] = useState(false);
+  const [spaceContextMenu, setSpaceContextMenu] = useState<{
+    x: number;
+    y: number;
+    spaceName: string;
+  } | null>(null);
   const checkedRef = useRef(false);
 
   // Check room creation permission once on mount
@@ -167,7 +173,18 @@ export default function SpaceSidebar({
 
         {/* Space avatars */}
         {spaces.map((space) => (
-          <div key={space.id} onClick={() => onSelectSpace(space.id)}>
+          <div
+            key={space.id}
+            onClick={() => onSelectSpace(space.id)}
+            onContextMenu={(e) => {
+              e.preventDefault();
+              setSpaceContextMenu({
+                x: e.clientX,
+                y: e.clientY,
+                spaceName: space.name,
+              });
+            }}
+          >
             <SpaceAvatar
               space={space}
               isActive={activeSpaceId === space.id}
@@ -245,6 +262,15 @@ export default function SpaceSidebar({
           canCreate={canCreate}
           onClose={handleCloseDialog}
           onCreated={handleCreated}
+        />
+      )}
+
+      {spaceContextMenu && (
+        <SpaceContextMenu
+          x={spaceContextMenu.x}
+          y={spaceContextMenu.y}
+          spaceName={spaceContextMenu.spaceName}
+          onClose={() => setSpaceContextMenu(null)}
         />
       )}
     </>
