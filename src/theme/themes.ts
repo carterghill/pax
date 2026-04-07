@@ -93,7 +93,28 @@ export const discordThemeDefinition: ThemeDefinition = {
   spacing,
 };
 
+/**
+ * Same surfaces as Default, experimental Byzantine purple borders (Tyrian-adjacent, muted for UI).
+ */
+const BYZANTINE_BORDER_DARK = "#453553";
+const BYZANTINE_BORDER_LIGHT = "#a896c4";
+
+export const byzantineThemeDefinition: ThemeDefinition = {
+  id: "byzantine",
+  dark: {
+    ...withDarkerBackgrounds(discordDarkPalette, DEFAULT_DARK_BG_DELTA),
+    border: darkenHex(BYZANTINE_BORDER_DARK, DEFAULT_DARK_BORDER_DELTA),
+  },
+  light: {
+    ...withDarkerBackgrounds(discordLightPalette, 5),
+    border: BYZANTINE_BORDER_LIGHT,
+  },
+  typography,
+  spacing,
+};
+
 export const BUILTIN_THEME_DEFINITIONS: Record<string, ThemeDefinition> = {
   default: defaultThemeDefinition,
   discord: discordThemeDefinition,
+  byzantine: byzantineThemeDefinition,
 };
