@@ -93,6 +93,9 @@ fn credentials_path(app: &tauri::AppHandle) -> Result<std::path::PathBuf, String
 pub async fn logout(state: State<'_, Arc<AppState>>, app: tauri::AppHandle) -> Result<(), String> {
     state.stop_sync_task().await;
     state.stop_heartbeat_loop();
+    if let Ok(mut g) = state.voice_livekit_jwt_service_url.lock() {
+        *g = None;
+    }
     if let Ok(mut m) = state.livekit_matrix_to_sfu_room.lock() {
         m.clear();
     }

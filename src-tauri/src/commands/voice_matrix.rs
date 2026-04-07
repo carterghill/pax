@@ -175,49 +175,66 @@ pub async fn get_all_voice_participants(
     Ok(collect_voice_participants_for_joined_voice_rooms(&client, &state.avatar_cache).await)
 }
 
+/// Result of [discover_livekit_service_url]: URL and whether it came from room state (may be stale).
+pub(crate) struct DiscoveredLivekitServiceUrl {
+    pub url: String,
+    /// True when the URL was taken from an existing `m.call.member` event.
+    pub from_room_state: bool,
+}
+
 /// Discover the LiveKit JWT service URL.
 ///
-/// 1. Scan existing `m.call.member` state events in the room (fast, no network).
+/// 1. Unless `skip_room_state`, scan existing `m.call.member` state events in the room
+///    (fast, no network).
 /// 2. Fall back to the homeserver's `/.well-known/matrix/client` endpoint,
 ///    reading `org.matrix.msc4143.rtc_foci` — the same mechanism Element uses.
 pub(crate) async fn discover_livekit_service_url(
     room: &Room,
     http: &reqwest::Client,
     homeserver: &str,
-) -> Result<String, String> {
+    skip_room_state: bool,
+) -> Result<DiscoveredLivekitServiceUrl, String> {
     // ── 1. Room state scan (existing call.member events) ────────────────
-    for event_type_str in &["org.matrix.msc3401.call.member", "m.call.member"] {
-        let event_type: StateEventType = event_type_str.to_string().into();
-        if let Ok(events) = room.get_state_events(event_type).await {
-            for event in &events {
-                let json = match serde_json::to_value(event) {
-                    Ok(v) => v,
-                    Err(_) => continue,
-                };
+    if !skip_room_state {
+        for event_type_str in &["org.matrix.msc3401.call.member", "m.call.member"] {
+            let event_type: StateEventType = event_type_str.to_string().into();
+            if let Ok(events) = room.get_state_events(event_type).await {
+                for event in &events {
+                    let json = match serde_json::to_value(event) {
+                        Ok(v) => v,
+                        Err(_) => continue,
+                    };
 
-                // Check content.foci_preferred[].livekit_service_url
-                if let Some(url) = json
-                    .get("content")
-                    .and_then(|c| c.get("foci_preferred"))
-                    .and_then(|f| f.as_array())
-                    .and_then(|arr| arr.first())
-                    .and_then(|foci| foci.get("livekit_service_url"))
-                    .and_then(|u| u.as_str())
-                {
-                    return Ok(url.to_string());
-                }
+                    // Check content.foci_preferred[].livekit_service_url
+                    if let Some(url) = json
+                        .get("content")
+                        .and_then(|c| c.get("foci_preferred"))
+                        .and_then(|f| f.as_array())
+                        .and_then(|arr| arr.first())
+                        .and_then(|foci| foci.get("livekit_service_url"))
+                        .and_then(|u| u.as_str())
+                    {
+                        return Ok(DiscoveredLivekitServiceUrl {
+                            url: url.to_string(),
+                            from_room_state: true,
+                        });
+                    }
 
-                // Also check unsigned.prev_content for events where user already left
-                if let Some(url) = json
-                    .get("unsigned")
-                    .and_then(|u| u.get("prev_content"))
-                    .and_then(|c| c.get("foci_preferred"))
-                    .and_then(|f| f.as_array())
-                    .and_then(|arr| arr.first())
-                    .and_then(|foci| foci.get("livekit_service_url"))
-                    .and_then(|u| u.as_str())
-                {
-                    return Ok(url.to_string());
+                    // Also check unsigned.prev_content for events where user already left
+                    if let Some(url) = json
+                        .get("unsigned")
+                        .and_then(|u| u.get("prev_content"))
+                        .and_then(|c| c.get("foci_preferred"))
+                        .and_then(|f| f.as_array())
+                        .and_then(|arr| arr.first())
+                        .and_then(|foci| foci.get("livekit_service_url"))
+                        .and_then(|u| u.as_str())
+                    {
+                        return Ok(DiscoveredLivekitServiceUrl {
+                            url: url.to_string(),
+                            from_room_state: true,
+                        });
+                    }
                 }
             }
         }
@@ -263,7 +280,10 @@ pub(crate) async fn discover_livekit_service_url(
         .and_then(|u| u.as_str())
         .map(|url| {
             log::info!("Discovered livekit_service_url from .well-known: {}", url);
-            url.to_string()
+            DiscoveredLivekitServiceUrl {
+                url: url.to_string(),
+                from_room_state: false,
+            }
         })
         .ok_or_else(|| {
             "No org.matrix.msc4143.rtc_foci with type 'livekit' found in \
@@ -271,6 +291,96 @@ pub(crate) async fn discover_livekit_service_url(
              see https://github.com/element-hq/element-call/blob/livekit/docs/self-hosting.md"
                 .to_string()
         })
+}
+
+/// POST to `{livekit_service_url}/sfu/get` to validate the JWT service and obtain a LiveKit token.
+async fn fetch_livekit_jwt(
+    http: &reqwest::Client,
+    livekit_service_url: &str,
+    room_id: &str,
+    user_id: &matrix_sdk::ruma::UserId,
+    device_id: &matrix_sdk::ruma::DeviceId,
+    openid_access_token: &str,
+    openid_expires_in_secs: u64,
+) -> Result<VoiceJoinResult, String> {
+    let jwt_body = serde_json::json!({
+        "room": room_id,
+        "openid_token": {
+            "access_token": openid_access_token,
+            "token_type": "Bearer",
+            "matrix_server_name": user_id.server_name().to_string(),
+            "expires_in": openid_expires_in_secs,
+        },
+        "device_id": device_id.as_str(),
+    });
+
+    let jwt_url = format!("{}/sfu/get", livekit_service_url.trim_end_matches('/'));
+    let jwt_resp = http
+        .post(&jwt_url)
+        .timeout(Duration::from_secs(30))
+        .json(&jwt_body)
+        .send()
+        .await
+        .map_err(|e| format!("Failed to call lk-jwt-service: {}", fmt_error_chain(&e)))?;
+
+    if !jwt_resp.status().is_success() {
+        let status = jwt_resp.status();
+        let body = jwt_resp.text().await.unwrap_or_default();
+        return Err(format!("lk-jwt-service error ({}): {}", status, body));
+    }
+
+    let jwt_data: serde_json::Value = jwt_resp
+        .json()
+        .await
+        .map_err(|e| format!("Failed to parse lk-jwt-service response: {e}"))?;
+
+    let jwt = jwt_data
+        .get("jwt")
+        .and_then(|j| j.as_str())
+        .ok_or("No 'jwt' field in lk-jwt-service response")?
+        .to_string();
+
+    if let Some(ttl_info) = decode_jwt_expiry(&jwt) {
+        log::info!("LiveKit JWT: {}", ttl_info);
+    }
+
+    let livekit_url = jwt_data
+        .get("url")
+        .and_then(|u| u.as_str())
+        .ok_or("No 'url' field in lk-jwt-service response")?
+        .to_string();
+
+    Ok(VoiceJoinResult { jwt, livekit_url })
+}
+
+/// JWT service URL for membership PUT during heartbeat / recovery: prefer the validated session URL.
+async fn livekit_jwt_service_url_for_refresh(
+    client: &Client,
+    http: &reqwest::Client,
+    room_id: &str,
+    app: &AppState,
+) -> Result<String, String> {
+    if let Some(u) = app
+        .voice_livekit_jwt_service_url
+        .lock()
+        .ok()
+        .and_then(|g| g.clone())
+    {
+        return Ok(u);
+    }
+
+    let room_id_parsed =
+        matrix_sdk::ruma::RoomId::parse(room_id).map_err(|e| format!("Invalid room ID: {e}"))?;
+    let room = client
+        .get_room(&room_id_parsed)
+        .ok_or("Room not found for JWT service URL fallback")?;
+    let homeserver = client.homeserver().to_string();
+    // Prefer well-known over room state — room state may still hold a stale URL.
+    Ok(
+        discover_livekit_service_url(&room, http, &homeserver, true)
+            .await?
+            .url,
+    )
 }
 
 #[tauri::command]
@@ -492,20 +602,22 @@ pub(crate) async fn force_emit_voice_participants(
     );
 }
 
-/// PUT `org.matrix.msc3401.call.member` for this device. Returns the LiveKit JWT service URL.
+/// PUT `org.matrix.msc3401.call.member` for this device using a validated JWT service base URL.
 async fn matrix_voice_put_call_member(
     client: &Client,
     http: &reqwest::Client,
     room_id: &str,
-) -> Result<String, String> {
+    livekit_service_url: &str,
+) -> Result<(), String> {
     let room_id_parsed =
         matrix_sdk::ruma::RoomId::parse(room_id).map_err(|e| format!("Invalid room ID: {e}"))?;
-    let room = client.get_room(&room_id_parsed).ok_or("Room not found")?;
+    let _room = client
+        .get_room(&room_id_parsed)
+        .ok_or("Room not found")?;
     let user_id = client.user_id().ok_or("No user ID")?;
     let device_id = client.device_id().ok_or("No device ID")?;
 
     let homeserver = client.homeserver().to_string();
-    let livekit_service_url = discover_livekit_service_url(&room, http, &homeserver).await?;
     let state_key = format!("_{}_{}_{}", user_id, device_id, "m.call");
     let now_ms = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -519,7 +631,7 @@ async fn matrix_voice_put_call_member(
         "expires": VOICE_CALL_MEMBER_EXPIRES_MS,
         "foci_preferred": [{
             "livekit_alias": room_id,
-            "livekit_service_url": &livekit_service_url,
+            "livekit_service_url": livekit_service_url,
             "type": "livekit"
         }],
         "focus_active": {
@@ -554,22 +666,26 @@ async fn matrix_voice_put_call_member(
         return Err(format!("Failed to send state event ({}): {}", status, body));
     }
 
-    Ok(livekit_service_url)
+    Ok(())
 }
 
-/// Internal helper: do the Matrix state event + JWT exchange.
-/// Returns (jwt, livekit_url).
+/// Discover JWT service URL, validate via `/sfu/get`, then PUT `m.call.member` with the working URL.
+/// Returns the join payload and the validated JWT service base URL (for heartbeat refresh).
 pub(crate) async fn matrix_voice_join(
     client: &Client,
     http: &reqwest::Client,
     room_id: &str,
-) -> Result<VoiceJoinResult, String> {
-    let livekit_service_url = matrix_voice_put_call_member(client, http, room_id).await?;
+) -> Result<(VoiceJoinResult, String), String> {
+    let room_id_parsed =
+        matrix_sdk::ruma::RoomId::parse(room_id).map_err(|e| format!("Invalid room ID: {e}"))?;
+    let room = client
+        .get_room(&room_id_parsed)
+        .ok_or("Room not found")?;
+    let homeserver = client.homeserver().to_string();
 
     let user_id = client.user_id().ok_or("No user ID")?;
     let device_id = client.device_id().ok_or("No device ID")?;
 
-    // 4. Get OpenID token for authenticating with lk-jwt-service
     let openid_request =
         matrix_sdk::ruma::api::client::account::request_openid_token::v3::Request::new(
             user_id.to_owned(),
@@ -579,56 +695,46 @@ pub(crate) async fn matrix_voice_join(
         .await
         .map_err(|e| format!("Failed to get OpenID token: {e}"))?;
 
-    // 5. Exchange OpenID token for a LiveKit JWT
-    let jwt_body = serde_json::json!({
-        "room": room_id,
-        "openid_token": {
-            "access_token": openid.access_token,
-            "token_type": "Bearer",
-            "matrix_server_name": user_id.server_name().to_string(),
-            "expires_in": openid.expires_in.as_secs(),
-        },
-        "device_id": device_id.as_str(),
-    });
+    let openid_expires = openid.expires_in.as_secs();
+    let openid_token = openid.access_token.as_str();
 
-    let jwt_url = format!("{}/sfu/get", livekit_service_url.trim_end_matches('/'));
-    let jwt_resp = http
-        .post(&jwt_url)
-        .timeout(Duration::from_secs(30))
-        .json(&jwt_body)
-        .send()
-        .await
-        .map_err(|e| format!("Failed to call lk-jwt-service: {}", fmt_error_chain(&e)))?;
+    let mut discovered =
+        discover_livekit_service_url(&room, http, &homeserver, false).await?;
 
-    if !jwt_resp.status().is_success() {
-        let status = jwt_resp.status();
-        let body = jwt_resp.text().await.unwrap_or_default();
-        return Err(format!("lk-jwt-service error ({}): {}", status, body));
+    let mut join = fetch_livekit_jwt(
+        http,
+        &discovered.url,
+        room_id,
+        user_id,
+        device_id,
+        openid_token,
+        openid_expires,
+    )
+    .await;
+
+    if join.is_err() && discovered.from_room_state {
+        log::warn!(
+            "lk-jwt-service request failed with URL from room state ({}); retrying from .well-known",
+            discovered.url
+        );
+        discovered = discover_livekit_service_url(&room, http, &homeserver, true).await?;
+        join = fetch_livekit_jwt(
+            http,
+            &discovered.url,
+            room_id,
+            user_id,
+            device_id,
+            openid_token,
+            openid_expires,
+        )
+        .await;
     }
 
-    let jwt_data: serde_json::Value = jwt_resp
-        .json()
-        .await
-        .map_err(|e| format!("Failed to parse lk-jwt-service response: {e}"))?;
+    let join = join?;
+    let service_url = discovered.url;
+    matrix_voice_put_call_member(client, http, room_id, &service_url).await?;
 
-    let jwt = jwt_data
-        .get("jwt")
-        .and_then(|j| j.as_str())
-        .ok_or("No 'jwt' field in lk-jwt-service response")?
-        .to_string();
-
-    // Log the JWT's expiry so we can correlate with ConnectionTimeout kicks
-    if let Some(ttl_info) = decode_jwt_expiry(&jwt) {
-        log::info!("LiveKit JWT: {}", ttl_info);
-    }
-
-    let livekit_url = jwt_data
-        .get("url")
-        .and_then(|u| u.as_str())
-        .ok_or("No 'url' field in lk-jwt-service response")?
-        .to_string();
-
-    Ok(VoiceJoinResult { jwt, livekit_url })
+    Ok((join, service_url))
 }
 
 /// Send a single leave (empty content) for one (event_type, state_key) in a room.
@@ -1042,14 +1148,20 @@ fn start_heartbeat_loop(
             // 2. Periodically re-PUT call.member to bump origin_server_ts
             if last_membership_refresh.elapsed() >= refresh_threshold {
                 log::info!("Refreshing m.call.member to extend expiry window");
-                match matrix_voice_put_call_member(c, &st.http_client, &room_id).await {
-                    Ok(_) => {
-                        log::info!("m.call.member refreshed successfully");
-                        last_membership_refresh = tokio::time::Instant::now();
-                    }
+                match livekit_jwt_service_url_for_refresh(c, &st.http_client, &room_id, &st).await {
+                    Ok(url) => match matrix_voice_put_call_member(c, &st.http_client, &room_id, &url)
+                        .await
+                    {
+                        Ok(()) => {
+                            log::info!("m.call.member refreshed successfully");
+                            last_membership_refresh = tokio::time::Instant::now();
+                        }
+                        Err(e) => {
+                            log::warn!("m.call.member refresh failed: {}", e);
+                        }
+                    },
                     Err(e) => {
-                        log::warn!("m.call.member refresh failed: {}", e);
-                        // Will retry on the next tick that crosses the threshold
+                        log::warn!("m.call.member refresh: no JWT service URL: {}", e);
                     }
                 }
             }
@@ -1071,7 +1183,8 @@ async fn recover_session(
 ) -> Result<Option<String>, String> {
     match send_delayed_leave_event(client, http, room_id).await {
         Ok(new_delay_id) => {
-            matrix_voice_put_call_member(client, http, room_id).await?;
+            let jwt_url = livekit_jwt_service_url_for_refresh(client, http, room_id, app).await?;
+            matrix_voice_put_call_member(client, http, room_id, &jwt_url).await?;
             Ok(Some(new_delay_id))
         }
         Err(DelayedLeaveError::Unsupported) => {
@@ -1079,7 +1192,8 @@ async fn recover_session(
                 "MSC4140 unsupported during session recovery — re-PUT call.member only"
             );
             app.msc4140_supported.store(false, Ordering::SeqCst);
-            matrix_voice_put_call_member(client, http, room_id).await?;
+            let jwt_url = livekit_jwt_service_url_for_refresh(client, http, room_id, app).await?;
+            matrix_voice_put_call_member(client, http, room_id, &jwt_url).await?;
             Ok(None)
         }
         Err(DelayedLeaveError::Other(e)) => Err(e),
@@ -1134,6 +1248,9 @@ pub async fn voice_connect(
     log::debug!("voice_connect called for room {}", room_id);
     let state_arc: Arc<AppState> = (*state).clone();
     state_arc.stop_heartbeat_loop();
+    if let Ok(mut g) = state_arc.voice_livekit_jwt_service_url.lock() {
+        *g = None;
+    }
     state_arc.msc4140_supported.store(true, Ordering::SeqCst);
     let client = super::get_client(&state).await?;
     let http_client = state.http_client.clone();
@@ -1189,8 +1306,8 @@ pub async fn voice_connect(
         Err(DelayedLeaveError::Other(e)) => return Err(e),
     };
 
-    // PUT the actual join state event + get LiveKit JWT
-    let result = matrix_voice_join(&client, &http_client, &room_id).await?;
+    // Discover + validate `/sfu/get`, PUT `m.call.member` with the working JWT service URL
+    let (result, jwt_service_url) = matrix_voice_join(&client, &http_client, &room_id).await?;
     let identity = client.user_id().ok_or("No user ID")?.to_string();
 
     // Store delay_id so voice_disconnect can fire the delayed event (MSC4140 only)
@@ -1198,9 +1315,13 @@ pub async fn voice_connect(
         *g = delay_id_opt.clone();
     }
 
+    if let Ok(mut g) = state_arc.voice_livekit_jwt_service_url.lock() {
+        *g = Some(jwt_service_url);
+    }
+
     // 4. Connect to LiveKit
     let app_handle_for_emit = app_handle.clone();
-    voice_mgr
+    let connect_result = voice_mgr
         .connect(
             room_id.clone(),
             result.livekit_url,
@@ -1210,7 +1331,13 @@ pub async fn voice_connect(
             input_device_id,
             output_device_id,
         )
-        .await?;
+        .await;
+    if connect_result.is_err() {
+        if let Ok(mut g) = state_arc.voice_livekit_jwt_service_url.lock() {
+            *g = None;
+        }
+    }
+    connect_result?;
 
     // 5. Start heartbeat (restarts the delayed leave every 15s, refreshes membership before expiry).
     //    Started after connect so we can pass the reconnect_notify from the VoiceSession —
@@ -1252,6 +1379,9 @@ pub async fn voice_disconnect(
 ) -> Result<(), String> {
     // 1. Stop the heartbeat so the delayed leave fires naturally (or we fire it now)
     state.stop_heartbeat_loop();
+    if let Ok(mut g) = state.voice_livekit_jwt_service_url.lock() {
+        *g = None;
+    }
 
     // 2. Grab the delay_id before disconnecting
     let delay_id = state

@@ -68,6 +68,9 @@ pub struct AppState {
     /// Set false when the homeserver rejects MSC4140 delayed leave (e.g. M_MAX_DELAY_UNSUPPORTED).
     /// Reset to true at each `voice_connect` so a new server/session is re-probed.
     pub msc4140_supported: AtomicBool,
+    /// Validated LiveKit JWT (`/sfu/get`) base URL for the active voice session.
+    /// Used for `m.call.member` refresh so we do not re-read a stale URL from room state.
+    pub voice_livekit_jwt_service_url: StdMutex<Option<String>>,
 }
 
 impl AppState {
@@ -201,6 +204,7 @@ pub fn run() {
         heartbeat_task: StdMutex::new(None),
         delayed_leave_id: StdMutex::new(None),
         msc4140_supported: AtomicBool::new(true),
+        voice_livekit_jwt_service_url: StdMutex::new(None),
     });
 
     tauri::Builder::default()
