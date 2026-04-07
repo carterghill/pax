@@ -101,6 +101,33 @@ fn has_hw_videotoolbox() -> bool {
     cfg!(has_videotoolbox)
 }
 
+/// Returns true if ANY hardware video encoder was compiled into this build.
+/// Used by screen share to decide whether simulcast is safe (hardware encoders
+/// handle multiple layers cheaply; software encoders starve).
+pub fn has_hw_encoder() -> bool {
+    has_hw_h264_nvidia() || has_hw_h264_vaapi() || has_hw_videotoolbox()
+}
+
+/// Returns true if the *resolved* codec will use a hardware encoder.
+/// This is stricter than `has_hw_encoder()` — it checks that the specific
+/// codec selected by auto-detection has a hardware path on this GPU.
+///
+/// Example: NVIDIA + has_vaapi (Linux x86) → vaapi exists but NVIDIA won't
+/// use it, and without has_nvenc the resolved codec is VP9 (software).
+/// Simulcast should be OFF in that case.
+pub fn resolved_codec_is_hw_accelerated() -> bool {
+    let codec = resolve_codec();
+    match codec {
+        VideoCodec::H264 => has_hw_h264_nvidia() || has_hw_h264_vaapi() || has_hw_videotoolbox(),
+        VideoCodec::AV1 => {
+            // AV1 is only selected when we know HW encode is available (NVENC AV1, VA-API AV1)
+            has_hw_h264_nvidia() || has_hw_h264_vaapi()
+        }
+        // VP8 / VP9 are always software (libvpx)
+        _ => false,
+    }
+}
+
 /// Detect the best codec based on GPU adapter name AND what encoders
 /// were actually compiled into this build.
 ///
@@ -112,7 +139,7 @@ fn has_hw_videotoolbox() -> bool {
 ///   NVIDIA + has_nvenc:
 ///     RTX 40xx/50xx → AV1 (NVENC AV1)
 ///     Anything else → H264 (NVENC H264)
-///   NVIDIA without has_nvenc + Linux → H264 (libwebrtc; no CUDA headers required on build host)
+///   NVIDIA without has_nvenc + Linux → VP9 (NVENC not compiled; install cuda & rebuild)
 ///   NVIDIA without has_nvenc + Windows → VP9
 ///
 ///   AMD + has_vaapi (Linux):
@@ -141,8 +168,11 @@ pub fn detect_best_codec(adapter_name: &str) {
                 VideoCodec::H264
             }
         } else if cfg!(target_os = "linux") {
-            eprintln!("[Pax Codec] NVIDIA on Linux → H264 (libwebrtc NVENC)");
-            VideoCodec::H264
+            // CUDA headers weren't found at build time, so NVENC is NOT compiled in.
+            // H264 will use OpenH264 (software) — prefer VP9 (libvpx) which handles
+            // high resolutions better in software and avoids simulcast starvation.
+            eprintln!("[Pax Codec] NVIDIA on Linux but NVENC not compiled (install cuda package & rebuild) — using VP9");
+            VideoCodec::VP9
         } else {
             eprintln!(
                 "[Pax Codec] NVIDIA detected but NVENC not compiled in — falling back to VP9"
