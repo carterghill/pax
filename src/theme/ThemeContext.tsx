@@ -76,6 +76,8 @@ interface ThemeControlContext {
   setThemeId: (id: string) => void;
   addCustomTheme: (theme: ThemeDefinition) => void;
   availableThemeIds: string[];
+  /** Full definitions for each available id (for previews, labels). */
+  availableThemeDefinitions: ThemeDefinition[];
 }
 
 const ThemeValCtx = createContext<ThemeValueContext | null>(null);
@@ -141,6 +143,13 @@ export function ThemeProvider({ children }: { children: ReactNode }) {
     return merged.filter((id, i) => merged.indexOf(id) === i);
   }, [customThemes]);
 
+  const availableThemeDefinitions = useMemo(() => {
+    return availableThemeIds.map((id) => {
+      const custom = customThemes.find((t) => t.id === id);
+      return custom ?? BUILTIN_THEME_DEFINITIONS[id] ?? defaultThemeDefinition;
+    });
+  }, [availableThemeIds, customThemes]);
+
   const themeValue = useMemo<ThemeValueContext>(
     () => ({
       themeId,
@@ -154,8 +163,14 @@ export function ThemeProvider({ children }: { children: ReactNode }) {
   );
 
   const controlValue = useMemo<ThemeControlContext>(
-    () => ({ setMode, setThemeId, addCustomTheme, availableThemeIds }),
-    [setMode, setThemeId, addCustomTheme, availableThemeIds],
+    () => ({
+      setMode,
+      setThemeId,
+      addCustomTheme,
+      availableThemeIds,
+      availableThemeDefinitions,
+    }),
+    [setMode, setThemeId, addCustomTheme, availableThemeIds, availableThemeDefinitions],
   );
 
   return (

@@ -1,7 +1,8 @@
 import { useState, useEffect, useRef, useCallback } from "react";
 import { invoke } from "@tauri-apps/api/core";
-import { useTheme, useThemeControls } from "../theme/ThemeContext";
+import { useTheme } from "../theme/ThemeContext";
 import { ColorModeControl } from "../theme/ColorModeControl";
+import { ThemeSelector } from "../theme/ThemeSelector";
 import {
   Camera,
   Trash2,
@@ -41,8 +42,7 @@ export default function SettingsMenu({
   onAvatarChanged,
   voiceCall,
 }: SettingsMenuProps) {
-  const { palette, typography, spacing, themeId } = useTheme();
-  const { setThemeId, availableThemeIds } = useThemeControls();
+  const { palette, typography, spacing } = useTheme();
   const [activeSection, setActiveSection] = useState<SettingsSection>("user");
 
   const reconnectVoiceAfterDeviceChange = useCallback(async () => {
@@ -755,81 +755,40 @@ export default function SettingsMenu({
                   <ColorModeControl />
                 </div>
 
-                {availableThemeIds.length > 1 && (
-                  <div
-                    style={{
-                      display: "flex",
-                      flexDirection: "column",
-                      gap: spacing.unit * 2,
-                      padding: spacing.unit * 3,
-                      borderRadius: 12,
-                      backgroundColor: palette.bgTertiary,
-                      border: `1px solid ${palette.border}`,
-                    }}
-                  >
-                    <div>
-                      <div
-                        style={{
-                          fontSize: typography.fontSizeBase,
-                          fontWeight: typography.fontWeightMedium,
-                          color: palette.textPrimary,
-                        }}
-                      >
-                        Theme
-                      </div>
-                      <div
-                        style={{
-                          marginTop: spacing.unit / 2,
-                          fontSize: typography.fontSizeSmall,
-                          color: palette.textSecondary,
-                        }}
-                      >
-                        Choose which color bundle to use; color mode still picks light or dark within it.
-                      </div>
-                    </div>
+                <div
+                  style={{
+                    display: "flex",
+                    flexDirection: "column",
+                    gap: spacing.unit * 2,
+                    padding: spacing.unit * 3,
+                    borderRadius: 12,
+                    backgroundColor: palette.bgTertiary,
+                    border: `1px solid ${palette.border}`,
+                  }}
+                >
+                  <div>
                     <div
-                      role="radiogroup"
-                      aria-label="Theme"
                       style={{
-                        display: "flex",
-                        flexWrap: "wrap",
-                        gap: spacing.unit,
+                        fontSize: typography.fontSizeBase,
+                        fontWeight: typography.fontWeightMedium,
+                        color: palette.textPrimary,
                       }}
                     >
-                      {availableThemeIds.map((id) => {
-                        const selected = themeId === id;
-                        const label =
-                          id === "default"
-                            ? "Default"
-                            : id.replace(/[-_]/g, " ").replace(/\b\w/g, (c) => c.toUpperCase());
-                        return (
-                          <button
-                            key={id}
-                            type="button"
-                            role="radio"
-                            aria-checked={selected}
-                            onClick={() => setThemeId(id)}
-                            style={{
-                              padding: `${spacing.unit * 1.25}px ${spacing.unit * 2.5}px`,
-                              borderRadius: 8,
-                              border: `1px solid ${selected ? palette.accent : palette.border}`,
-                              backgroundColor: selected ? palette.bgActive : palette.bgSecondary,
-                              color: selected ? palette.textHeading : palette.textSecondary,
-                              fontSize: typography.fontSizeSmall,
-                              fontWeight: selected
-                                ? typography.fontWeightMedium
-                                : typography.fontWeightNormal,
-                              fontFamily: typography.fontFamily,
-                              cursor: "pointer",
-                            }}
-                          >
-                            {label}
-                          </button>
-                        );
-                      })}
+                      Theme
+                    </div>
+                    <div
+                      style={{
+                        marginTop: spacing.unit / 2,
+                        fontSize: typography.fontSizeSmall,
+                        color: palette.textSecondary,
+                      }}
+                    >
+                      Each preview shows dark and light primary backgrounds. Color mode still picks which
+                      side matches the app right now.
                     </div>
                   </div>
-                )}
+                  <ThemeSelector />
+                </div>
               </div>
             </section>
           )}
