@@ -6,10 +6,11 @@
 //! Cascade:  HW-accelerated H264 → VP9 (libvpx) → VP8 (ultimate fallback)
 //!
 //! The key insight: just because a GPU *supports* hardware encoding doesn't
-//! mean the encoder was compiled in.  On Windows, NVENC requires the CUDA SDK
-//! at build time and VA-API (AMD/Intel) isn't wired up yet.  So an AMD GPU on
-//! Windows gets VP9 (libvpx software, but with a good screen-content mode)
-//! rather than H264 via OpenH264 (which can't keep up at native res).
+//! mean every encoder path was compiled into *our* webrtc-sys fork.  On Windows,
+//! the patched NVENC path requires the CUDA SDK at build time (`has_nvenc`).
+//! On Linux, bundled libwebrtc can still use H264 (including NVENC paths at
+//! runtime) without that cfg, so NVIDIA + Auto still prefers H264 there.
+//! AMD on Windows gets VP9 (libvpx) rather than OpenH264 at high resolutions.
 //!
 //! Compile-time cfg flags from build.rs:
 //!   has_nvenc         — NVIDIA NVENC encoder compiled in
@@ -111,7 +112,8 @@ fn has_hw_videotoolbox() -> bool {
 ///   NVIDIA + has_nvenc:
 ///     RTX 40xx/50xx → AV1 (NVENC AV1)
 ///     Anything else → H264 (NVENC H264)
-///   NVIDIA without has_nvenc → VP9
+///   NVIDIA without has_nvenc + Linux → H264 (libwebrtc; no CUDA headers required on build host)
+///   NVIDIA without has_nvenc + Windows → VP9
 ///
 ///   AMD + has_vaapi (Linux):
 ///     RX 7000+/9000+ → AV1 (if supported)
@@ -138,6 +140,9 @@ pub fn detect_best_codec(adapter_name: &str) {
                 eprintln!("[Pax Codec] NVIDIA → H264 (NVENC)");
                 VideoCodec::H264
             }
+        } else if cfg!(target_os = "linux") {
+            eprintln!("[Pax Codec] NVIDIA on Linux → H264 (libwebrtc NVENC)");
+            VideoCodec::H264
         } else {
             eprintln!(
                 "[Pax Codec] NVIDIA detected but NVENC not compiled in — falling back to VP9"
