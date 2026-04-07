@@ -37,6 +37,7 @@ import {
 import { Picker } from "emoji-mart";
 import data from "@emoji-mart/data";
 import { useTheme } from "../theme/ThemeContext";
+import type { ResolvedColorScheme } from "../theme/types";
 import { EMOJI_ONLY_DISPLAY_SCALE, isOnlyEmojisAndWhitespace } from "../utils/emojifyTwemoji";
 import { hrefLooksLikeDirectImageUrl } from "../utils/directImageUrl";
 import {
@@ -102,7 +103,7 @@ export default function MessageInput({
   const insertEmojiFromPickerRef = useRef<(native: string) => void>(() => {});
   const typingTimeout = useRef<ReturnType<typeof setTimeout> | null>(null);
   const isTyping = useRef(false);
-  const { palette, typography, spacing, name: themeName } = useTheme();
+  const { palette, typography, spacing, resolvedColorScheme } = useTheme();
   const [giphyApiKey, setGiphyApiKey] = useState("");
 
   useEffect(() => {
@@ -274,7 +275,7 @@ export default function MessageInput({
     const mount = emojiPickerMountRef.current;
     if (!mount) return;
     mount.innerHTML = "";
-    const theme = themeName === "light" ? "light" : "dark";
+    const theme = resolvedColorScheme === "light" ? "light" : "dark";
     new Picker({
       parent: mount,
       data,
@@ -291,7 +292,7 @@ export default function MessageInput({
     return () => {
       mount.innerHTML = "";
     };
-  }, [pickerOpen, pickerTab, popoverPos, themeName]);
+  }, [pickerOpen, pickerTab, popoverPos, resolvedColorScheme]);
 
   // ─── Edit message loading ─────────────────────────────────────────────────
 
@@ -465,7 +466,7 @@ export default function MessageInput({
           overflow: "hidden",
           border: `1px solid ${palette.border}`,
           boxShadow:
-            themeName === "light"
+            resolvedColorScheme === "light"
               ? `0 8px 28px rgba(0,0,0,0.12), 0 0 0 1px ${palette.border} inset`
               : `0 12px 44px rgba(0,0,0,0.55), 0 0 0 1px rgba(255,255,255,0.06) inset`,
           backgroundColor: palette.bgTertiary,
@@ -526,7 +527,7 @@ export default function MessageInput({
                 palette={palette}
                 typography={typography}
                 spacing={spacing}
-                themeName={themeName}
+                colorScheme={resolvedColorScheme}
                 onGifSelect={(gifUrl) => {
                   const el = editorRef.current;
                   if (!el) return;
@@ -921,7 +922,7 @@ interface GiphyPickerInnerProps {
   palette: any;
   typography: any;
   spacing: any;
-  themeName: string;
+  colorScheme: ResolvedColorScheme;
   onGifSelect: (gifUrl: string) => void;
 }
 

@@ -1,6 +1,5 @@
-import { Theme, ThemeTypography, ThemeSpacing } from "./types";
+import { ThemeDefinition, ThemeTypography, ThemeSpacing } from "./types";
 
-// Shared across all themes
 const typography: ThemeTypography = {
   fontFamily: '-apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif',
   fontSizeBase: 14,
@@ -19,9 +18,10 @@ const spacing: ThemeSpacing = {
   headerHeight: 54,
 };
 
-export const darkTheme: Theme = {
-  name: "dark",
-  palette: {
+/** Built-in default theme (only one today); more can be added alongside this. */
+export const defaultThemeDefinition: ThemeDefinition = {
+  id: "default",
+  dark: {
     bgPrimary: "#313338",
     bgSecondary: "#2b2d31",
     bgTertiary: "#1e1f22",
@@ -34,13 +34,7 @@ export const darkTheme: Theme = {
     accentHover: "#4752c4",
     border: "#1f2023",
   },
-  typography,
-  spacing,
-};
-
-export const lightTheme: Theme = {
-  name: "light",
-  palette: {
+  light: {
     bgPrimary: "#ffffff",
     bgSecondary: "#f2f3f5",
     bgTertiary: "#e3e5e8",
@@ -55,4 +49,8 @@ export const lightTheme: Theme = {
   },
   typography,
   spacing,
+};
+
+export const BUILTIN_THEME_DEFINITIONS: Record<string, ThemeDefinition> = {
+  default: defaultThemeDefinition,
 };

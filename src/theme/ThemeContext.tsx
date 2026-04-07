@@ -1,91 +1,176 @@
-import { createContext, useContext, useState, useMemo, useCallback, ReactNode } from "react";
-import { Theme, ThemePalette, ThemeTypography, ThemeSpacing } from "./types";
-import { darkTheme, lightTheme } from "./themes";
+import {
+  createContext,
+  useContext,
+  useState,
+  useMemo,
+  useCallback,
+  useEffect,
+  useSyncExternalStore,
+  ReactNode,
+} from "react";
+import {
+  ThemePalette,
+  ThemeTypography,
+  ThemeSpacing,
+  ThemeModePreference,
+  ResolvedColorScheme,
+  ThemeDefinition,
+} from "./types";
+import { BUILTIN_THEME_DEFINITIONS, defaultThemeDefinition } from "./themes";
+
+const STORAGE_MODE = "pax.appearance.mode";
+const STORAGE_THEME_ID = "pax.appearance.themeId";
+
+function readStoredMode(): ThemeModePreference {
+  try {
+    const v = localStorage.getItem(STORAGE_MODE);
+    if (v === "light" || v === "dark" || v === "system") return v;
+  } catch {
+    /* ignore */
+  }
+  return "system";
+}
+
+function readStoredThemeId(): string {
+  try {
+    const v = localStorage.getItem(STORAGE_THEME_ID)?.trim();
+    if (v) return v;
+  } catch {
+    /* ignore */
+  }
+  return defaultThemeDefinition.id;
+}
+
+function subscribeSystemDark(callback: () => void) {
+  const mq = window.matchMedia("(prefers-color-scheme: dark)");
+  mq.addEventListener("change", callback);
+  return () => mq.removeEventListener("change", callback);
+}
+
+function getSystemDarkSnapshot(): boolean {
+  return window.matchMedia("(prefers-color-scheme: dark)").matches;
+}
+
+function getSystemDarkServerSnapshot(): boolean {
+  return false;
+}
 
 /* ------------------------------------------------------------------ */
 /*  Context split: theme values vs. control actions                    */
-/*                                                                     */
-/*  Separating these into two contexts means components that only      */
-/*  *read* theme colors (the vast majority) never re-render when       */
-/*  control-related state changes, and vice versa.                     */
 /* ------------------------------------------------------------------ */
 
 interface ThemeValueContext {
-  name: string;
+  /** Selected visual theme (color sets); today only "default". */
+  themeId: string;
+  /** User preference: light, dark, or follow system. */
+  mode: ThemeModePreference;
+  /** Effective light/dark after resolving system preference. */
+  resolvedColorScheme: ResolvedColorScheme;
   palette: ThemePalette;
   typography: ThemeTypography;
   spacing: ThemeSpacing;
 }
 
 interface ThemeControlContext {
-  setThemeName: (name: string) => void;
-  addCustomTheme: (theme: Theme) => void;
-  availableThemes: string[];
+  setMode: (mode: ThemeModePreference) => void;
+  setThemeId: (id: string) => void;
+  addCustomTheme: (theme: ThemeDefinition) => void;
+  availableThemeIds: string[];
 }
 
 const ThemeValCtx = createContext<ThemeValueContext | null>(null);
 const ThemeCtrlCtx = createContext<ThemeControlContext | null>(null);
 
-const BUILTIN: Record<string, Theme> = { dark: darkTheme, light: lightTheme };
-
 export function ThemeProvider({ children }: { children: ReactNode }) {
-  const [customThemes, setCustomThemes] = useState<Theme[]>([]);
-  const [activeThemeName, setActiveThemeName] = useState("dark");
+  const [customThemes, setCustomThemes] = useState<ThemeDefinition[]>([]);
+  const [mode, setModeState] = useState<ThemeModePreference>(readStoredMode);
+  const [themeId, setThemeIdState] = useState<string>(readStoredThemeId);
 
-  const theme = useMemo(() => {
-    const custom = customThemes.find((t) => t.name === activeThemeName);
-    return custom ?? BUILTIN[activeThemeName] ?? darkTheme;
-  }, [activeThemeName, customThemes]);
-
-  // Referentially stable value — only changes when the resolved theme changes.
-  const themeValue = useMemo<ThemeValueContext>(
-    () => ({
-      name: theme.name,
-      palette: theme.palette,
-      typography: theme.typography,
-      spacing: theme.spacing,
-    }),
-    [theme],
+  const systemPrefersDark = useSyncExternalStore(
+    subscribeSystemDark,
+    getSystemDarkSnapshot,
+    getSystemDarkServerSnapshot,
   );
 
-  const addCustomTheme = useCallback((newTheme: Theme) => {
-    setCustomThemes((prev) => [...prev.filter((t) => t.name !== newTheme.name), newTheme]);
+  const resolvedColorScheme: ResolvedColorScheme = useMemo(() => {
+    if (mode === "light") return "light";
+    if (mode === "dark") return "dark";
+    return systemPrefersDark ? "dark" : "light";
+  }, [mode, systemPrefersDark]);
+
+  const definition = useMemo(() => {
+    const custom = customThemes.find((t) => t.id === themeId);
+    return custom ?? BUILTIN_THEME_DEFINITIONS[themeId] ?? defaultThemeDefinition;
+  }, [themeId, customThemes]);
+
+  const palette =
+    resolvedColorScheme === "light" ? definition.light : definition.dark;
+
+  useEffect(() => {
+    try {
+      localStorage.setItem(STORAGE_MODE, mode);
+    } catch {
+      /* ignore */
+    }
+  }, [mode]);
+
+  useEffect(() => {
+    try {
+      localStorage.setItem(STORAGE_THEME_ID, themeId);
+    } catch {
+      /* ignore */
+    }
+  }, [themeId]);
+
+  const setMode = useCallback((next: ThemeModePreference) => {
+    setModeState(next);
   }, []);
 
-  const availableThemes = useMemo(
-    () => [...Object.keys(BUILTIN), ...customThemes.map((t) => t.name)],
-    [customThemes],
+  const setThemeId = useCallback((id: string) => {
+    setThemeIdState(id);
+  }, []);
+
+  const addCustomTheme = useCallback((newTheme: ThemeDefinition) => {
+    setCustomThemes((prev) => [...prev.filter((t) => t.id !== newTheme.id), newTheme]);
+  }, []);
+
+  const availableThemeIds = useMemo(() => {
+    const fromBuiltin = Object.keys(BUILTIN_THEME_DEFINITIONS);
+    const fromCustom = customThemes.map((t) => t.id);
+    const merged = [...fromBuiltin, ...fromCustom];
+    return merged.filter((id, i) => merged.indexOf(id) === i);
+  }, [customThemes]);
+
+  const themeValue = useMemo<ThemeValueContext>(
+    () => ({
+      themeId,
+      mode,
+      resolvedColorScheme,
+      palette,
+      typography: definition.typography,
+      spacing: definition.spacing,
+    }),
+    [themeId, mode, resolvedColorScheme, palette, definition.typography, definition.spacing],
   );
 
   const controlValue = useMemo<ThemeControlContext>(
-    () => ({ setThemeName: setActiveThemeName, addCustomTheme, availableThemes }),
-    [addCustomTheme, availableThemes],
+    () => ({ setMode, setThemeId, addCustomTheme, availableThemeIds }),
+    [setMode, setThemeId, addCustomTheme, availableThemeIds],
   );
 
   return (
     <ThemeCtrlCtx.Provider value={controlValue}>
-      <ThemeValCtx.Provider value={themeValue}>
-        {children}
-      </ThemeValCtx.Provider>
+      <ThemeValCtx.Provider value={themeValue}>{children}</ThemeValCtx.Provider>
     </ThemeCtrlCtx.Provider>
   );
 }
 
-/**
- * Read theme values (palette, typography, spacing, name).
- * Referentially stable — only triggers a re-render when the active theme changes.
- */
 export function useTheme(): ThemeValueContext {
   const ctx = useContext(ThemeValCtx);
   if (!ctx) throw new Error("useTheme must be used within ThemeProvider");
   return ctx;
 }
 
-/**
- * Access theme controls (switch theme, add custom themes).
- * Separated so that the vast majority of components that only read
- * colors/spacing never re-render when control-related state changes.
- */
 export function useThemeControls(): ThemeControlContext {
   const ctx = useContext(ThemeCtrlCtx);
   if (!ctx) throw new Error("useThemeControls must be used within ThemeProvider");

@@ -66,7 +66,7 @@ function E({ children }: { children: ReactNode }) {
 }
 
 export default function MessageMarkdown({ children, edited = false }: MessageMarkdownProps) {
-  const { palette, typography, spacing, name: themeName } = useTheme();
+  const { palette, typography, spacing, resolvedColorScheme } = useTheme();
 
   const markdownSource = useMemo(() => {
     if (!edited) return children;
@@ -228,7 +228,7 @@ export default function MessageMarkdown({ children, edited = false }: MessageMar
               overflow: "hidden",
               backgroundColor: palette.bgSecondary,
               boxShadow:
-                themeName === "light"
+                resolvedColorScheme === "light"
                   ? "0 1px 2px rgba(0,0,0,0.04)"
                   : "0 2px 8px rgba(0,0,0,0.2)",
             }}
@@ -463,7 +463,7 @@ export default function MessageMarkdown({ children, edited = false }: MessageMar
             overflow: "hidden",
             backgroundColor: palette.bgSecondary,
             boxShadow:
-              themeName === "light"
+              resolvedColorScheme === "light"
                 ? "0 1px 2px rgba(0,0,0,0.04)"
                 : "0 2px 8px rgba(0,0,0,0.15)",
           }}
@@ -549,7 +549,7 @@ export default function MessageMarkdown({ children, edited = false }: MessageMar
         />
       ),
     }),
-    [palette, typography, spacing, themeName, edited],
+    [palette, typography, spacing, resolvedColorScheme, edited],
   );
 
   // Extract embeddable URLs from the raw text and render them below the markdown.

@@ -34,7 +34,7 @@ const MAX_EMBED_HEIGHT = 320;
 /* ------------------------------------------------------------------ */
 
 function IframeEmbedView({ embed, href }: { embed: IframeEmbed; href: string }) {
-  const { palette, spacing, typography, name: themeName } = useTheme();
+  const { palette, spacing, typography, resolvedColorScheme } = useTheme();
   const [loaded, setLoaded] = useState(false);
   const [error, setError] = useState(false);
 
@@ -54,7 +54,7 @@ function IframeEmbedView({ embed, href }: { embed: IframeEmbed; href: string }) 
     marginTop: spacing.unit,
     marginBottom: spacing.unit,
     boxShadow:
-      themeName === "light"
+      resolvedColorScheme === "light"
         ? "0 1px 3px rgba(0,0,0,0.06)"
         : "0 2px 8px rgba(0,0,0,0.25)",
   };
@@ -191,7 +191,7 @@ function MetadataEmbedView({
   embed: Extract<EmbedInfo, { kind: "metadata" }>;
   href: string;
 }) {
-  const { palette, spacing, typography, name: themeName } = useTheme();
+  const { palette, spacing, typography, resolvedColorScheme } = useTheme();
   const [meta, setMeta] = useState<UrlMetadata | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState(false);
@@ -254,7 +254,7 @@ function MetadataEmbedView({
     marginTop: spacing.unit,
     marginBottom: spacing.unit,
     boxShadow:
-      themeName === "light"
+      resolvedColorScheme === "light"
         ? "0 1px 3px rgba(0,0,0,0.06)"
         : "0 2px 8px rgba(0,0,0,0.25)",
   };

@@ -37,9 +37,20 @@ export interface ThemeSpacing {
   headerHeight: number;
 }
 
-export interface Theme {
-  name: string;
-  palette: ThemePalette;
+/** User preference: which color scheme to use (system follows OS). */
+export type ThemeModePreference = "light" | "dark" | "system";
+
+/** Resolved appearance after applying mode (system → light or dark). */
+export type ResolvedColorScheme = "light" | "dark";
+
+/**
+ * One theme: shared typography/spacing plus separate palettes for light and dark.
+ * The active palette is chosen by {@link ThemeModePreference} / system setting.
+ */
+export interface ThemeDefinition {
+  id: string;
+  light: ThemePalette;
+  dark: ThemePalette;
   typography: ThemeTypography;
   spacing: ThemeSpacing;
 }

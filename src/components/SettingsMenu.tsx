@@ -1,7 +1,7 @@
 import { useState, useEffect, useRef, useCallback } from "react";
 import { invoke } from "@tauri-apps/api/core";
-import { useTheme } from "../theme/ThemeContext";
-import { ThemeToggle } from "../theme/ThemeToggle";
+import { useTheme, useThemeControls } from "../theme/ThemeContext";
+import { ColorModeControl } from "../theme/ColorModeControl";
 import {
   Camera,
   Trash2,
@@ -41,7 +41,8 @@ export default function SettingsMenu({
   onAvatarChanged,
   voiceCall,
 }: SettingsMenuProps) {
-  const { palette, typography, spacing } = useTheme();
+  const { palette, typography, spacing, themeId } = useTheme();
+  const { setThemeId, availableThemeIds } = useThemeControls();
   const [activeSection, setActiveSection] = useState<SettingsSection>("user");
 
   const reconnectVoiceAfterDeviceChange = useCallback(async () => {
@@ -157,9 +158,9 @@ export default function SettingsMenu({
     {
       id: "appearance",
       label: "Appearance",
-      description: "Theme and look",
+      description: "Color mode and theme",
       title: "Appearance",
-      blurb: "Choose how Pax feels visually. Theme changes apply right away.",
+      blurb: "Choose color mode and, when more themes exist, which palette set to use.",
       icon: Palette,
     },
     {
@@ -707,43 +708,128 @@ export default function SettingsMenu({
 
           {activeSection === "appearance" && (
             <section style={panelStyle}>
-              <h3 style={sectionHeadingStyle}>Theme</h3>
+              <h3 style={sectionHeadingStyle}>Appearance</h3>
               <p style={{ ...sectionDescriptionStyle, marginBottom: spacing.unit * 4 }}>
-                Switch between available themes to match your workspace and lighting.
+                Color mode picks whether the app uses light colors, dark colors, or follows your system.
+                Each theme stores a matching pair of light and dark palettes; switching mode swaps which
+                pair is active.
               </p>
               <div
                 style={{
                   display: "flex",
-                  alignItems: "center",
-                  justifyContent: "space-between",
+                  flexDirection: "column",
                   gap: spacing.unit * 3,
-                  padding: spacing.unit * 3,
-                  borderRadius: 12,
-                  backgroundColor: palette.bgTertiary,
-                  border: `1px solid ${palette.border}`,
                 }}
               >
-                <div>
-                  <div
-                    style={{
-                      fontSize: typography.fontSizeBase,
-                      fontWeight: typography.fontWeightMedium,
-                      color: palette.textPrimary,
-                    }}
-                  >
-                    App theme
+                <div
+                  style={{
+                    display: "flex",
+                    flexDirection: "column",
+                    gap: spacing.unit * 2,
+                    padding: spacing.unit * 3,
+                    borderRadius: 12,
+                    backgroundColor: palette.bgTertiary,
+                    border: `1px solid ${palette.border}`,
+                  }}
+                >
+                  <div>
+                    <div
+                      style={{
+                        fontSize: typography.fontSizeBase,
+                        fontWeight: typography.fontWeightMedium,
+                        color: palette.textPrimary,
+                      }}
+                    >
+                      Color mode
+                    </div>
+                    <div
+                      style={{
+                        marginTop: spacing.unit / 2,
+                        fontSize: typography.fontSizeSmall,
+                        color: palette.textSecondary,
+                      }}
+                    >
+                      System is the default and tracks light or dark from your OS.
+                    </div>
                   </div>
-                  <div
-                    style={{
-                      marginTop: spacing.unit / 2,
-                      fontSize: typography.fontSizeSmall,
-                      color: palette.textSecondary,
-                    }}
-                  >
-                    Theme changes apply immediately across the interface.
-                  </div>
+                  <ColorModeControl />
                 </div>
-                <ThemeToggle />
+
+                {availableThemeIds.length > 1 && (
+                  <div
+                    style={{
+                      display: "flex",
+                      flexDirection: "column",
+                      gap: spacing.unit * 2,
+                      padding: spacing.unit * 3,
+                      borderRadius: 12,
+                      backgroundColor: palette.bgTertiary,
+                      border: `1px solid ${palette.border}`,
+                    }}
+                  >
+                    <div>
+                      <div
+                        style={{
+                          fontSize: typography.fontSizeBase,
+                          fontWeight: typography.fontWeightMedium,
+                          color: palette.textPrimary,
+                        }}
+                      >
+                        Theme
+                      </div>
+                      <div
+                        style={{
+                          marginTop: spacing.unit / 2,
+                          fontSize: typography.fontSizeSmall,
+                          color: palette.textSecondary,
+                        }}
+                      >
+                        Choose which color bundle to use; color mode still picks light or dark within it.
+                      </div>
+                    </div>
+                    <div
+                      role="radiogroup"
+                      aria-label="Theme"
+                      style={{
+                        display: "flex",
+                        flexWrap: "wrap",
+                        gap: spacing.unit,
+                      }}
+                    >
+                      {availableThemeIds.map((id) => {
+                        const selected = themeId === id;
+                        const label =
+                          id === "default"
+                            ? "Default"
+                            : id.replace(/[-_]/g, " ").replace(/\b\w/g, (c) => c.toUpperCase());
+                        return (
+                          <button
+                            key={id}
+                            type="button"
+                            role="radio"
+                            aria-checked={selected}
+                            onClick={() => setThemeId(id)}
+                            style={{
+                              padding: `${spacing.unit * 1.25}px ${spacing.unit * 2.5}px`,
+                              borderRadius: 8,
+                              border: `1px solid ${selected ? palette.accent : palette.border}`,
+                              backgroundColor: selected ? palette.bgActive : palette.bgSecondary,
+                              color: selected ? palette.textHeading : palette.textSecondary,
+                              fontSize: typography.fontSizeSmall,
+                              fontWeight: selected
+                                ? typography.fontWeightMedium
+                                : typography.fontWeightNormal,
+                              fontFamily: typography.fontFamily,
+                              cursor: "pointer",
+                            }}
+                          >
+                            {label}
+                          </button>
+                        );
+                      })}
+                    </div>
+                  </div>
+                )}
               </div>
             </section>
           )}
