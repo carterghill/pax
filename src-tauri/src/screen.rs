@@ -52,6 +52,12 @@ pub struct ScreenShareHandle {
     pub(crate) _capturer_thread: Option<std::thread::JoinHandle<()>>,
     /// Process loopback audio capture thread handle (Windows).
     pub(crate) _audio_capture_thread: Option<std::thread::JoinHandle<()>>,
+    /// xdg-desktop-portal screencast session — must be closed so the compositor
+    /// clears the recording indicator (dropping the D-Bus proxy alone does not).
+    #[cfg(target_os = "linux")]
+    _linux_portal_session: Option<
+        ashpd::desktop::Session<'static, ashpd::desktop::screencast::Screencast<'static>>,
+    >,
 }
 
 impl ScreenShareHandle {
@@ -64,7 +70,33 @@ impl ScreenShareHandle {
         if let Some(thread) = self._capturer_thread.take() {
             let _ = thread.join();
         }
+        #[cfg(target_os = "linux")]
+        if let Some(session) = self._linux_portal_session.take() {
+            close_linux_screencast_session(session);
+        }
     }
+}
+
+#[cfg(target_os = "linux")]
+fn close_linux_screencast_session(
+    session: ashpd::desktop::Session<'static, ashpd::desktop::screencast::Screencast<'static>>,
+) {
+    // Always run Close on a fresh current-thread runtime in a dedicated thread.
+    // `stop()` is often invoked from a Tokio worker while holding locks; using
+    // `Handle::block_on` there can panic or deadlock.
+    let join = std::thread::spawn(move || {
+        match tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+        {
+            Ok(rt) => match rt.block_on(session.close()) {
+                Ok(()) => log::info!("Linux screencast portal session closed"),
+                Err(e) => log::warn!("Linux screencast portal session close failed: {}", e),
+            },
+            Err(e) => log::warn!("Could not build runtime for portal session close: {}", e),
+        }
+    });
+    let _ = join.join();
 }
 
 impl Drop for ScreenShareHandle {
@@ -795,6 +827,8 @@ async fn start_screen_capture_libwebrtc_or_fallback(
         _shutdown: shutdown,
         _capturer_thread: Some(capturer_thread),
         _audio_capture_thread: audio_capture_thread,
+        #[cfg(target_os = "linux")]
+        _linux_portal_session: None,
     })
 }
 
@@ -912,6 +946,8 @@ async fn start_screen_capture_screenshots_fallback(
         _shutdown: shutdown,
         _capturer_thread: Some(capturer_thread),
         _audio_capture_thread: audio_capture_thread,
+        #[cfg(target_os = "linux")]
+        _linux_portal_session: None,
     })
 }
 
@@ -1184,10 +1220,6 @@ async fn start_screen_capture_linux(
         portal_stream.size()
     );
 
-    // Keep the portal session alive — dropping ends the screencast.
-    let session_box = Box::new(session);
-    std::mem::forget(session_box);
-
     // --- 2. Set up GStreamer pipeline ---
     use gstreamer::prelude::*;
 
@@ -1376,6 +1408,7 @@ async fn start_screen_capture_linux(
         _shutdown: shutdown,
         _capturer_thread: Some(capturer_thread),
         _audio_capture_thread: audio_thread,
+        _linux_portal_session: Some(session),
     })
 }
 
