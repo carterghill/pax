@@ -5,6 +5,7 @@ import { useTheme } from "../theme/ThemeContext";
 import type { Room } from "../types/matrix";
 import CreateSpaceDialog from "./CreateSpaceDialog";
 import SpaceContextMenu from "./SpaceContextMenu";
+import SpaceSettingsDialog from "./SpaceSettingsDialog";
 
 type RoomsChangedPayload = {
   joinedRoomId?: string;
@@ -92,6 +93,11 @@ export default function SpaceSidebar({
   const [spaceContextMenu, setSpaceContextMenu] = useState<{
     x: number;
     y: number;
+    spaceId: string;
+    spaceName: string;
+  } | null>(null);
+  const [spaceSettingsTarget, setSpaceSettingsTarget] = useState<{
+    spaceId: string;
     spaceName: string;
   } | null>(null);
   const checkedRef = useRef(false);
@@ -181,6 +187,7 @@ export default function SpaceSidebar({
               setSpaceContextMenu({
                 x: e.clientX,
                 y: e.clientY,
+                spaceId: space.id,
                 spaceName: space.name,
               });
             }}
@@ -270,7 +277,22 @@ export default function SpaceSidebar({
           x={spaceContextMenu.x}
           y={spaceContextMenu.y}
           spaceName={spaceContextMenu.spaceName}
+          onOpenSpaceSettings={() =>
+            setSpaceSettingsTarget({
+              spaceId: spaceContextMenu.spaceId,
+              spaceName: spaceContextMenu.spaceName,
+            })
+          }
           onClose={() => setSpaceContextMenu(null)}
+        />
+      )}
+
+      {spaceSettingsTarget && (
+        <SpaceSettingsDialog
+          spaceId={spaceSettingsTarget.spaceId}
+          titleFallback={spaceSettingsTarget.spaceName}
+          onClose={() => setSpaceSettingsTarget(null)}
+          onSaved={() => onSpacesChanged()}
         />
       )}
     </>

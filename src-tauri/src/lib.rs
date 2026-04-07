@@ -248,6 +248,8 @@ pub fn run() {
             commands::rooms::current_homeserver,
             commands::rooms::join_room,
             commands::rooms::get_space_info,
+            commands::rooms::get_space_settings,
+            commands::rooms::apply_space_settings,
             commands::rooms::get_history_visibility,
             commands::rooms::set_history_visibility,
             commands::rooms::can_create_rooms,

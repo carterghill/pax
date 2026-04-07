@@ -7,6 +7,7 @@ interface SpaceContextMenuProps {
   x: number;
   y: number;
   spaceName: string;
+  onOpenSpaceSettings: () => void;
   onClose: () => void;
 }
 
@@ -14,6 +15,7 @@ export default function SpaceContextMenu({
   x,
   y,
   spaceName,
+  onOpenSpaceSettings,
   onClose,
 }: SpaceContextMenuProps) {
   const { palette, spacing, typography } = useTheme();
@@ -95,7 +97,10 @@ export default function SpaceContextMenu({
 
       <button
         type="button"
-        onClick={onClose}
+        onClick={() => {
+          onOpenSpaceSettings();
+          onClose();
+        }}
         style={{
           display: "flex",
           alignItems: "center",

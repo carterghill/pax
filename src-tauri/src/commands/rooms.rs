@@ -1004,6 +1004,579 @@ pub async fn set_history_visibility(
     Ok(())
 }
 
+// ─── Space settings (edit existing space; excludes m.federate — immutable after creation) ───
+
+#[derive(Debug, Clone, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SpaceSettingsSnapshot {
+    pub name: String,
+    pub topic: String,
+    pub avatar_url: Option<String>,
+    pub join_rule: String,
+    pub history_visibility: String,
+    pub guest_access: String,
+    pub listed_in_directory: bool,
+    pub room_alias_local: Option<String>,
+    pub homeserver_name: String,
+}
+
+#[derive(Debug, Clone, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SpaceSettingsPermissions {
+    pub name: bool,
+    pub topic: bool,
+    pub avatar: bool,
+    pub join_rules: bool,
+    pub history_visibility: bool,
+    pub guest_access: bool,
+    pub directory_listing: bool,
+    pub room_alias: bool,
+}
+
+#[derive(Debug, Clone, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SpaceSettingsData {
+    pub snapshot: SpaceSettingsSnapshot,
+    pub permissions: SpaceSettingsPermissions,
+}
+
+#[derive(Debug, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ApplySpaceSettingsPatch {
+    pub name: Option<String>,
+    pub topic: Option<String>,
+    pub avatar_data: Option<String>,
+    pub avatar_mime: Option<String>,
+    #[serde(default)]
+    pub remove_avatar: bool,
+    pub listed_in_directory: Option<bool>,
+    pub join_rule: Option<String>,
+    pub room_alias_local: Option<String>,
+    pub history_visibility: Option<String>,
+    pub guest_access: Option<String>,
+}
+
+fn homeserver_name_from_room_id(room_id: &str) -> String {
+    room_id
+        .rsplit_once(':')
+        .map(|(_, s)| s.to_string())
+        .unwrap_or_else(|| "localhost".to_string())
+}
+
+fn alias_local_part(canonical_alias: &str) -> Option<String> {
+    let s = canonical_alias.strip_prefix('#')?;
+    s.split_once(':').map(|(local, _)| local.to_string())
+}
+
+fn power_level_for_user(pl: &serde_json::Value, user_id: &str) -> i64 {
+    pl.get("users")
+        .and_then(|u| u.get(user_id))
+        .and_then(|v| v.as_i64())
+        .unwrap_or_else(|| {
+            pl.get("users_default")
+                .and_then(|v| v.as_i64())
+                .unwrap_or(0)
+        })
+}
+
+fn power_required_for_state_event(pl: &serde_json::Value, event_type: &str) -> i64 {
+    pl.get("events")
+        .and_then(|e| e.get(event_type))
+        .and_then(|v| v.as_i64())
+        .unwrap_or_else(|| {
+            pl.get("state_default")
+                .and_then(|v| v.as_i64())
+                .unwrap_or(50)
+        })
+}
+
+async fn http_get_room_state(
+    http_client: &reqwest::Client,
+    homeserver: &str,
+    access_token: &str,
+    room_id: &str,
+    event_path: &str,
+) -> Result<Option<serde_json::Value>, String> {
+    let state_url = format!(
+        "{}/_matrix/client/v3/rooms/{}/state/{}",
+        homeserver.trim_end_matches('/'),
+        urlencoding::encode(room_id),
+        event_path
+    );
+    let resp = http_client
+        .get(&state_url)
+        .timeout(Duration::from_secs(15))
+        .bearer_auth(access_token.to_string())
+        .send()
+        .await
+        .map_err(|e| format!("State GET failed: {}", fmt_error_chain(&e)))?;
+    if resp.status().as_u16() == 404 {
+        return Ok(None);
+    }
+    if !resp.status().is_success() {
+        let status = resp.status();
+        let t = resp.text().await.unwrap_or_default();
+        return Err(format!("State GET error ({}): {}", status, t));
+    }
+    let body: serde_json::Value = resp
+        .json()
+        .await
+        .map_err(|e| format!("State GET parse: {e}"))?;
+    Ok(Some(body))
+}
+
+async fn http_put_room_state(
+    http_client: &reqwest::Client,
+    homeserver: &str,
+    access_token: &str,
+    room_id: &str,
+    event_path: &str,
+    body: &serde_json::Value,
+) -> Result<(), String> {
+    let state_url = format!(
+        "{}/_matrix/client/v3/rooms/{}/state/{}",
+        homeserver.trim_end_matches('/'),
+        urlencoding::encode(room_id),
+        event_path
+    );
+    let resp = http_client
+        .put(&state_url)
+        .timeout(Duration::from_secs(30))
+        .bearer_auth(access_token.to_string())
+        .json(body)
+        .send()
+        .await
+        .map_err(|e| format!("State PUT failed: {}", fmt_error_chain(&e)))?;
+    if !resp.status().is_success() {
+        let status = resp.status();
+        let t = resp.text().await.unwrap_or_default();
+        return Err(format!("State PUT error ({}): {}", status, t));
+    }
+    Ok(())
+}
+
+/// Snapshot and per-field edit permissions for a space room (from `m.room.power_levels`).
+#[tauri::command]
+pub async fn get_space_settings(
+    state: State<'_, Arc<AppState>>,
+    space_id: String,
+) -> Result<SpaceSettingsData, String> {
+    let client = super::get_client(&state).await?;
+    let parsed =
+        matrix_sdk::ruma::RoomId::parse(&space_id).map_err(|e| format!("Invalid room ID: {e}"))?;
+    let room = client.get_room(&parsed).ok_or("Space not found")?;
+
+    let user_id = client
+        .user_id()
+        .ok_or("No user ID")?
+        .to_string();
+    let homeserver = client.homeserver().to_string();
+    let access_token = client.access_token().ok_or("No access token")?;
+    let hs_trim = homeserver.trim_end_matches('/');
+
+    let pl_body = http_get_room_state(
+        &state.http_client,
+        hs_trim,
+        &access_token,
+        &space_id,
+        "m.room.power_levels/",
+    )
+    .await?;
+
+    let (_user_pl, perms) = if let Some(pl) = pl_body {
+        let u = power_level_for_user(&pl, &user_id);
+        let join_editable = {
+            let jr = http_get_room_state(
+                &state.http_client,
+                hs_trim,
+                &access_token,
+                &space_id,
+                "m.room.join_rules/",
+            )
+            .await
+            .ok()
+            .flatten();
+            let rule = jr
+                .as_ref()
+                .and_then(|b| b.get("join_rule"))
+                .and_then(|v| v.as_str())
+                .unwrap_or("invite");
+            matches!(rule, "public" | "invite" | "knock")
+        };
+        (
+            u,
+            SpaceSettingsPermissions {
+                name: u >= power_required_for_state_event(&pl, "m.room.name"),
+                topic: u >= power_required_for_state_event(&pl, "m.room.topic"),
+                avatar: u >= power_required_for_state_event(&pl, "m.room.avatar"),
+                join_rules: join_editable
+                    && u >= power_required_for_state_event(&pl, "m.room.join_rules"),
+                history_visibility: u
+                    >= power_required_for_state_event(&pl, "m.room.history_visibility"),
+                guest_access: u >= power_required_for_state_event(&pl, "m.room.guest_access"),
+                directory_listing: u >= power_required_for_state_event(&pl, "m.room.join_rules"),
+                room_alias: u >= power_required_for_state_event(&pl, "m.room.canonical_alias"),
+            },
+        )
+    } else {
+        (
+            0i64,
+            SpaceSettingsPermissions {
+                name: false,
+                topic: false,
+                avatar: false,
+                join_rules: false,
+                history_visibility: false,
+                guest_access: false,
+                directory_listing: false,
+                room_alias: false,
+            },
+        )
+    };
+
+    let name_state = http_get_room_state(
+        &state.http_client,
+        hs_trim,
+        &access_token,
+        &space_id,
+        "m.room.name/",
+    )
+    .await?;
+    let name = name_state
+        .as_ref()
+        .and_then(|b| b.get("name"))
+        .and_then(|v| v.as_str())
+        .map(|s| s.to_string())
+        .or_else(|| room.name())
+        .unwrap_or_else(|| "Unnamed".to_string());
+
+    let topic_state = http_get_room_state(
+        &state.http_client,
+        hs_trim,
+        &access_token,
+        &space_id,
+        "m.room.topic/",
+    )
+    .await?;
+    let topic = topic_state
+        .as_ref()
+        .and_then(|b| b.get("topic"))
+        .and_then(|v| v.as_str())
+        .unwrap_or("")
+        .to_string();
+
+    let avatar_state = http_get_room_state(
+        &state.http_client,
+        hs_trim,
+        &access_token,
+        &space_id,
+        "m.room.avatar/",
+    )
+    .await?;
+    let avatar_mxc = avatar_state
+        .as_ref()
+        .and_then(|b| b.get("url"))
+        .and_then(|v| v.as_str())
+        .filter(|s| !s.is_empty());
+
+    let avatar_url = if let Some(mxc) = avatar_mxc {
+        mxc_to_thumbnail_url(hs_trim, mxc, 96, 96)
+    } else {
+        get_or_fetch_avatar(
+            room.avatar_url().as_deref(),
+            room.avatar(matrix_sdk::media::MediaFormat::File),
+            &state.avatar_cache,
+        )
+        .await
+    };
+
+    let join_body = http_get_room_state(
+        &state.http_client,
+        hs_trim,
+        &access_token,
+        &space_id,
+        "m.room.join_rules/",
+    )
+    .await?;
+    let join_rule = join_body
+        .as_ref()
+        .and_then(|b| b.get("join_rule"))
+        .and_then(|v| v.as_str())
+        .unwrap_or("invite")
+        .to_string();
+
+    let guest_body = http_get_room_state(
+        &state.http_client,
+        hs_trim,
+        &access_token,
+        &space_id,
+        "m.room.guest_access/",
+    )
+    .await?;
+    let guest_access = guest_body
+        .as_ref()
+        .and_then(|b| b.get("guest_access"))
+        .and_then(|v| v.as_str())
+        .unwrap_or("forbidden")
+        .to_string();
+
+    let history_body = http_get_room_state(
+        &state.http_client,
+        hs_trim,
+        &access_token,
+        &space_id,
+        "m.room.history_visibility/",
+    )
+    .await?;
+    let history_visibility = history_body
+        .as_ref()
+        .and_then(|b| b.get("history_visibility"))
+        .and_then(|v| v.as_str())
+        .unwrap_or("shared")
+        .to_string();
+
+    let dir_url = format!(
+        "{}/_matrix/client/v3/directory/list/room/{}",
+        hs_trim,
+        urlencoding::encode(&space_id)
+    );
+    let dir_resp = state
+        .http_client
+        .get(&dir_url)
+        .timeout(Duration::from_secs(15))
+        .bearer_auth(access_token.to_string())
+        .send()
+        .await
+        .map_err(|e| format!("Directory GET failed: {}", fmt_error_chain(&e)))?;
+    let listed_in_directory = dir_resp.status().is_success();
+
+    let canon_body = http_get_room_state(
+        &state.http_client,
+        hs_trim,
+        &access_token,
+        &space_id,
+        "m.room.canonical_alias/",
+    )
+    .await?;
+    let room_alias_local = canon_body
+        .as_ref()
+        .and_then(|b| b.get("alias"))
+        .and_then(|v| v.as_str())
+        .and_then(|a| alias_local_part(a));
+
+    let homeserver_name = homeserver_name_from_room_id(&space_id);
+
+    Ok(SpaceSettingsData {
+        snapshot: SpaceSettingsSnapshot {
+            name,
+            topic,
+            avatar_url,
+            join_rule,
+            history_visibility,
+            guest_access,
+            listed_in_directory,
+            room_alias_local,
+            homeserver_name,
+        },
+        permissions: perms,
+    })
+}
+
+/// Apply updates to space profile, join rules, directory listing, history, and guest access.
+#[tauri::command]
+pub async fn apply_space_settings(
+    state: State<'_, Arc<AppState>>,
+    space_id: String,
+    patch: ApplySpaceSettingsPatch,
+) -> Result<(), String> {
+    let client = super::get_client(&state).await?;
+    let parsed =
+        matrix_sdk::ruma::RoomId::parse(&space_id).map_err(|e| format!("Invalid room ID: {e}"))?;
+    client.get_room(&parsed).ok_or("Space not found")?;
+
+    let homeserver = client.homeserver().to_string();
+    let access_token = client.access_token().ok_or("No access token")?;
+    let hs_trim = homeserver.trim_end_matches('/');
+    let http = &state.http_client;
+
+    if let Some(name) = &patch.name {
+        let t = name.trim();
+        if t.is_empty() {
+            return Err("Space name cannot be empty.".to_string());
+        }
+        http_put_room_state(
+            http,
+            hs_trim,
+            &access_token,
+            &space_id,
+            "m.room.name/",
+            &serde_json::json!({ "name": t }),
+        )
+        .await?;
+    }
+
+    if let Some(topic) = &patch.topic {
+        http_put_room_state(
+            http,
+            hs_trim,
+            &access_token,
+            &space_id,
+            "m.room.topic/",
+            &serde_json::json!({ "topic": topic }),
+        )
+        .await?;
+    }
+
+    if patch.remove_avatar {
+        http_put_room_state(
+            http,
+            hs_trim,
+            &access_token,
+            &space_id,
+            "m.room.avatar/",
+            &serde_json::json!({}),
+        )
+        .await?;
+    } else if let (Some(data), Some(mime)) = (&patch.avatar_data, &patch.avatar_mime) {
+        let bytes = data_encoding::BASE64
+            .decode(data.as_bytes())
+            .map_err(|e| format!("Invalid base64 avatar data: {e}"))?;
+
+        let upload_url = format!("{}/_matrix/media/v3/upload", hs_trim);
+        let resp = http
+            .post(&upload_url)
+            .timeout(Duration::from_secs(30))
+            .bearer_auth(access_token.to_string())
+            .header("Content-Type", mime.as_str())
+            .body(bytes)
+            .send()
+            .await
+            .map_err(|e| format!("Avatar upload failed: {}", fmt_error_chain(&e)))?;
+        if !resp.status().is_success() {
+            let status = resp.status();
+            let text = resp.text().await.unwrap_or_default();
+            return Err(format!("Avatar upload failed ({}): {}", status, text));
+        }
+        let body: serde_json::Value = resp
+            .json()
+            .await
+            .map_err(|e| format!("Upload response parse: {e}"))?;
+        let mxc = body["content_uri"]
+            .as_str()
+            .ok_or("No content_uri in upload response")?;
+        http_put_room_state(
+            http,
+            hs_trim,
+            &access_token,
+            &space_id,
+            "m.room.avatar/",
+            &serde_json::json!({ "url": mxc }),
+        )
+        .await?;
+    }
+
+    if let Some(jr) = &patch.join_rule {
+        let valid = ["public", "invite", "knock"];
+        if !valid.contains(&jr.as_str()) {
+            return Err(format!(
+                "Invalid join_rule '{}'. Must be one of: {}",
+                jr,
+                valid.join(", ")
+            ));
+        }
+        http_put_room_state(
+            http,
+            hs_trim,
+            &access_token,
+            &space_id,
+            "m.room.join_rules/",
+            &serde_json::json!({ "join_rule": jr }),
+        )
+        .await?;
+    }
+
+    if let Some(ga) = &patch.guest_access {
+        let valid = ["can_join", "forbidden"];
+        if !valid.contains(&ga.as_str()) {
+            return Err(format!(
+                "Invalid guest_access '{}'. Must be one of: {}",
+                ga,
+                valid.join(", ")
+            ));
+        }
+        http_put_room_state(
+            http,
+            hs_trim,
+            &access_token,
+            &space_id,
+            "m.room.guest_access/",
+            &serde_json::json!({ "guest_access": ga }),
+        )
+        .await?;
+    }
+
+    if let Some(hv) = &patch.history_visibility {
+        set_history_visibility(state.clone(), space_id.clone(), hv.clone()).await?;
+    }
+
+    if let Some(local_raw) = &patch.room_alias_local {
+        let local = local_raw.trim();
+        if !local.is_empty() {
+            let server = homeserver_name_from_room_id(&space_id);
+            let alias = format!("#{local}:{server}");
+            http_put_room_state(
+                http,
+                hs_trim,
+                &access_token,
+                &space_id,
+                "m.room.canonical_alias/",
+                &serde_json::json!({ "alias": alias }),
+            )
+            .await?;
+        }
+    }
+
+    if let Some(listed) = patch.listed_in_directory {
+        let dir_url = format!(
+            "{}/_matrix/client/v3/directory/list/room/{}",
+            hs_trim,
+            urlencoding::encode(&space_id)
+        );
+        if !listed {
+            let resp = http
+                .delete(&dir_url)
+                .timeout(Duration::from_secs(30))
+                .bearer_auth(access_token.to_string())
+                .send()
+                .await
+                .map_err(|e| format!("Directory DELETE failed: {}", fmt_error_chain(&e)))?;
+            let status = resp.status();
+            if !status.is_success() && status.as_u16() != 404 {
+                let t = resp.text().await.unwrap_or_default();
+                return Err(format!("Directory DELETE ({}): {}", status, t));
+            }
+        } else {
+            let body = serde_json::json!({ "visibility": "public" });
+            let resp = http
+                .put(&dir_url)
+                .timeout(Duration::from_secs(30))
+                .bearer_auth(access_token.to_string())
+                .json(&body)
+                .send()
+                .await
+                .map_err(|e| format!("Directory PUT failed: {}", fmt_error_chain(&e)))?;
+            if !resp.status().is_success() {
+                let status = resp.status();
+                let t = resp.text().await.unwrap_or_default();
+                return Err(format!("Directory PUT ({}): {}", status, t));
+            }
+        }
+    }
+
+    log::info!("apply_space_settings: applied patch for room {}", space_id);
+    Ok(())
+}
+
 /// Check whether the logged-in user is allowed to create rooms on the homeserver.
 ///
 /// There is no standard Matrix client API to query this permission directly.
