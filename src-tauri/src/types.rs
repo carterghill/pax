@@ -10,6 +10,8 @@ pub struct RoomInfo {
     pub is_space: bool,
     pub parent_space_ids: Vec<String>,
     pub room_type: Option<String>,
+    /// `m.room.topic` when known (spaces and rooms).
+    pub topic: Option<String>,
     /// "joined" or "invited"
     pub membership: String,
 }

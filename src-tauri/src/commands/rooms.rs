@@ -595,6 +595,7 @@ pub async fn get_rooms(state: State<'_, Arc<AppState>>) -> Result<Vec<RoomInfo>,
                     is_space: room.is_space(),
                     parent_space_ids,
                     room_type: room_type_str,
+                    topic: room.topic(),
                     membership: "joined".to_string(),
                 };
                 (idx, info)
@@ -634,6 +635,7 @@ pub async fn get_rooms(state: State<'_, Arc<AppState>>) -> Result<Vec<RoomInfo>,
                     is_space: room.is_space(),
                     parent_space_ids,
                     room_type: room_type_str,
+                    topic: room.topic(),
                     membership: "invited".to_string(),
                 };
                 (idx, info)

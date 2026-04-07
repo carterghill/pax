@@ -5,6 +5,8 @@ export interface Room {
   isSpace: boolean;
   parentSpaceIds: string[];
   roomType: string | null;
+  /** `m.room.topic` when the homeserver includes it (e.g. after sync). */
+  topic?: string | null;
   /** "joined" or "invited" */
   membership: string;
 }

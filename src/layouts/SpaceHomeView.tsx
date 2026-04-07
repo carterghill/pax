@@ -120,6 +120,21 @@ export default function SpaceHomeView({ space, onSelectRoom, onRoomsChanged }: S
       .catch(() => setCanManageChildren(false));
   }, [space.id]);
 
+  // When `get_rooms` includes `topic` (after sync / space settings), merge into space home state.
+  // Skip if `topic` is absent on `Room` so we don't clear data from `get_space_info`.
+  useEffect(() => {
+    if (space.topic === undefined) return;
+    const t = (space.topic ?? "").trim() || null;
+    setInfo((prev) => {
+      if (!prev) return prev;
+      const prevT = prev.topic?.trim() || null;
+      if (prevT === t) return prev;
+      const next = { ...prev, topic: t };
+      setCachedSpaceInfo(space.id, next);
+      return next;
+    });
+  }, [space.id, space.topic]);
+
   async function handleJoinRoom(roomId: string) {
     setJoiningRoomId(roomId);
     const childMeta = info?.children.find((c) => c.id === roomId);
@@ -210,6 +225,7 @@ export default function SpaceHomeView({ space, onSelectRoom, onRoomsChanged }: S
   const joinedRooms = info.children.filter((c) => c.membership === "joined");
   const invitedRooms = info.children.filter((c) => c.membership === "invited");
   const availableRooms = info.children.filter((c) => c.membership === "none");
+  const spaceDescription = (info.topic ?? "").trim();
 
   return (
     <div style={{
@@ -218,27 +234,6 @@ export default function SpaceHomeView({ space, onSelectRoom, onRoomsChanged }: S
       flexDirection: "column",
       overflow: "hidden",
     }}>
-      {/* Header */}
-      <div style={{
-        padding: `0 ${spacing.unit * 4}px`,
-        height: spacing.headerHeight,
-        borderBottom: `1px solid ${palette.border}`,
-        display: "flex",
-        alignItems: "center",
-        gap: spacing.unit * 3,
-        boxSizing: "border-box",
-        flexShrink: 0,
-      }}>
-        <span style={{
-          fontWeight: typography.fontWeightBold,
-          color: palette.textHeading,
-          fontSize: typography.fontSizeBase,
-        }}>
-          {info.name}
-        </span>
-      </div>
-
-      {/* Scrollable content */}
       <div style={{
         flex: 1,
         overflowY: "auto",
@@ -288,17 +283,19 @@ export default function SpaceHomeView({ space, onSelectRoom, onRoomsChanged }: S
           }}>
             {info.name}
           </div>
-          {info.topic && (
+          {spaceDescription ? (
             <div style={{
               fontSize: typography.fontSizeBase,
               color: palette.textSecondary,
               textAlign: "center",
               maxWidth: 500,
               lineHeight: typography.lineHeight,
+              whiteSpace: "pre-wrap",
+              wordBreak: "break-word",
             }}>
-              {info.topic}
+              {spaceDescription}
             </div>
-          )}
+          ) : null}
         </div>
 
         {/* Create room button */}
