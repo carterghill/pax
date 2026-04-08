@@ -79,13 +79,15 @@ export function useRoomMembers(roomId: string) {
     }
   }, [roomId, fetchMembers]);
 
-  // Persist member list for this room only (layout effect above clears on roomId change first).
+  // Persist member list for this room only (debounced to avoid blocking main thread).
   useEffect(() => {
-    if (members.length > 0) {
+    if (members.length === 0) return;
+    const timer = setTimeout(() => {
       try {
         sessionStorage.setItem(cacheKey(roomId), JSON.stringify(members.map(({ avatarUrl, ...rest }) => rest)));
       } catch { /* quota exceeded – non-fatal */ }
-    }
+    }, 1000);
+    return () => clearTimeout(timer);
   }, [members, roomId]);
 
   // Silently re-fetch on rooms-changed, debounced

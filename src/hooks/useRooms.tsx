@@ -147,14 +147,19 @@ export function useRooms(userId: string | null) {
     };
   }, [userId]);
 
-  // Re-fetch whenever the sync loop signals a change
+  // Re-fetch whenever the sync loop signals a change (debounced to coalesce rapid events)
   useEffect(() => {
+    let debounceTimer: ReturnType<typeof setTimeout> | null = null;
     const unlisten = listen("rooms-changed", () => {
-      fetchRooms();
+      if (debounceTimer) clearTimeout(debounceTimer);
+      debounceTimer = setTimeout(() => {
+        fetchRooms();
+      }, 500);
     });
 
     return () => {
       unlisten.then((fn) => fn());
+      if (debounceTimer) clearTimeout(debounceTimer);
     };
   }, [fetchRooms]);
 

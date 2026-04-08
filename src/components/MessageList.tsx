@@ -1,4 +1,4 @@
-import { useEffect, useLayoutEffect, useRef, useState } from "react";
+import { useEffect, useLayoutEffect, useRef, useState, useCallback, memo } from "react";
 import { createPortal } from "react-dom";
 import { invoke } from "@tauri-apps/api/core";
 import { MoreVertical, Pencil, Trash2 } from "lucide-react";
@@ -62,16 +62,184 @@ function messageAllowsDelete(msg: Message, userId: string, policy: RoomRedaction
   return policy.canRedactOther;
 }
 
-/** Portaled to document.body — high z-index keeps the menu above everything. */
 const MESSAGE_ACTIONS_MENU_Z = 10_000;
 
-/** Matrix event IDs contain `$`, `:`, etc.; `querySelector`/`CSS.escape` attribute selectors break on those. */
 function findMessageRow(container: HTMLElement, eventId: string): HTMLElement | null {
   for (const el of container.querySelectorAll("[data-message-event-id]")) {
     if (el.getAttribute("data-message-event-id") === eventId) return el as HTMLElement;
   }
   return null;
 }
+
+/* ------------------------------------------------------------------ */
+/*  Memoized message row                                              */
+/* ------------------------------------------------------------------ */
+
+interface MessageRowProps {
+  msg: Message;
+  showHeader: boolean;
+  showMessageActions: boolean;
+  isMenuOpen: boolean;
+  onOpenMenu: (eventId: string) => void;
+  menuAnchorRef: React.RefObject<HTMLButtonElement | null>;
+  rowHighlight: string;
+  spacingUnit: number;
+  palette: ReturnType<typeof useTheme>["palette"];
+  typography: ReturnType<typeof useTheme>["typography"];
+  resolvedColorScheme: string;
+}
+
+const MessageRow = memo(function MessageRow({
+  msg,
+  showHeader,
+  showMessageActions,
+  isMenuOpen,
+  onOpenMenu,
+  menuAnchorRef,
+  rowHighlight,
+  spacingUnit,
+  palette,
+  typography,
+  resolvedColorScheme,
+}: MessageRowProps) {
+  const menuBtn = spacingUnit * 7;
+
+  return (
+    <div
+      data-message-event-id={msg.eventId}
+      className="pax-message-row"
+      style={{
+        position: "relative",
+        ...(showHeader
+          ? {
+              paddingTop: spacingUnit * 3,
+              paddingRight: spacingUnit * 2,
+              paddingBottom: spacingUnit,
+              paddingLeft: spacingUnit * 4,
+            }
+          : {
+              paddingTop: spacingUnit / 2,
+              paddingRight: spacingUnit * 2,
+              paddingBottom: spacingUnit / 2,
+              paddingLeft: spacingUnit * 4,
+            }),
+        display: "flex",
+        gap: spacingUnit * 3,
+        marginTop: showHeader ? spacingUnit : 0,
+        borderRadius: spacingUnit * 1.5,
+        backgroundColor: isMenuOpen ? rowHighlight : "transparent",
+        transition: "background-color 0.12s ease",
+      }}
+    >
+      <div style={{ width: 40, flexShrink: 0 }}>
+        {showHeader && (
+          msg.avatarUrl ? (
+            <img
+              src={msg.avatarUrl}
+              alt={msg.senderName ?? msg.sender}
+              style={{
+                display: "block",
+                width: 40,
+                height: 40,
+                borderRadius: "50%",
+                objectFit: "cover",
+              }}
+            />
+          ) : (
+            <div style={{
+              width: 40,
+              height: 40,
+              borderRadius: "50%",
+              backgroundColor: palette.accent,
+              color: "#fff",
+              display: "flex",
+              alignItems: "center",
+              justifyContent: "center",
+              fontSize: typography.fontSizeBase,
+              fontWeight: typography.fontWeightBold,
+            }}>
+              {(msg.senderName ?? msg.sender).charAt(0).toUpperCase()}
+            </div>
+          )
+        )}
+      </div>
+
+      <div style={{ flex: 1, minWidth: 0 }}>
+        {showHeader && (
+          <div style={{ display: "flex", alignItems: "baseline", gap: spacingUnit * 2 }}>
+            <span style={{
+              fontWeight: typography.fontWeightMedium,
+              color: palette.textHeading,
+              fontSize: typography.fontSizeBase,
+            }}>
+              {msg.senderName ?? msg.sender}
+            </span>
+            <span style={{
+              fontSize: typography.fontSizeSmall,
+              color: palette.textSecondary,
+            }}>
+              {formatTime(msg.timestamp)}
+            </span>
+          </div>
+        )}
+        {msg.imageMediaRequest != null ? (
+          <>
+            <MessageMatrixImage request={msg.imageMediaRequest} />
+            {msg.body.trim().length > 0 ? (
+              <MessageMarkdown edited={Boolean(msg.edited)}>{msg.body}</MessageMarkdown>
+            ) : null}
+          </>
+        ) : (
+          <MessageMarkdown edited={Boolean(msg.edited)}>{msg.body}</MessageMarkdown>
+        )}
+      </div>
+
+      {showMessageActions && (
+        <div
+          data-message-actions-root
+          className="pax-message-actions"
+          style={{
+            position: "absolute",
+            top: 0,
+            right: spacingUnit * 2,
+            transform: "translateY(-50%)",
+            zIndex: 2,
+            ...(isMenuOpen ? { opacity: 1, pointerEvents: "auto" as const } : {}),
+          }}
+        >
+          <button
+            ref={isMenuOpen ? menuAnchorRef : undefined}
+            type="button"
+            title="Message actions"
+            aria-expanded={isMenuOpen}
+            aria-haspopup="menu"
+            onMouseDown={(e) => e.preventDefault()}
+            onClick={() => onOpenMenu(msg.eventId)}
+            style={{
+              display: "flex",
+              alignItems: "center",
+              justifyContent: "center",
+              width: menuBtn,
+              height: menuBtn,
+              padding: 0,
+              border: `1px solid ${palette.border}`,
+              borderRadius: spacingUnit * 1.25,
+              backgroundColor: isMenuOpen ? palette.bgHover : palette.bgTertiary,
+              color: palette.textSecondary,
+              cursor: "pointer",
+              boxShadow:
+                resolvedColorScheme === "light"
+                  ? "0 1px 3px rgba(0,0,0,0.08)"
+                  : "0 2px 8px rgba(0,0,0,0.35)",
+            }}
+          >
+            <MoreVertical size={18} strokeWidth={2} />
+          </button>
+        </div>
+      )}
+    </div>
+  );
+});
 
 export default function MessageList({
   messages,
@@ -92,10 +260,6 @@ export default function MessageList({
   const bottomRef = useRef<HTMLDivElement>(null);
   const containerRef = useRef<HTMLDivElement>(null);
   const shouldAutoScrollRef = useRef(true);
-  /**
-   * Prepend scroll restore: capture scroll metrics only after `loading` is true so the snapshot
-   * includes the "Loading..." row; otherwise the banner swap when fetch finishes skews the delta.
-   */
   const prependScrollAnchorRef = useRef<
     | { phase: "pending"; firstEventId: string | undefined }
     | {
@@ -103,16 +267,16 @@ export default function MessageList({
         scrollHeight: number;
         scrollTop: number;
         firstEventId: string | undefined;
-        /** Distance from scroll container top edge to anchor row top (visual, matches what the user sees). */
         anchorViewportTop: number | null;
       }
     | null
   >(null);
   const prevLoadingRef = useRef(loading);
-  const [hoveredEventId, setHoveredEventId] = useState<string | null>(null);
   const [openMenuEventId, setOpenMenuEventId] = useState<string | null>(null);
   const [menuFixedPos, setMenuFixedPos] = useState<{ top: number; right: number } | null>(null);
   const menuAnchorRef = useRef<HTMLButtonElement>(null);
+
+  const scrollRafRef = useRef<number | null>(null);
 
   function isNearBottom(): boolean {
     const container = containerRef.current;
@@ -136,7 +300,6 @@ export default function MessageList({
     prevLoadingRef.current = loading;
   }, [loading, messages[0]?.eventId, roomId]);
 
-  // Record scrollHeight/scrollTop once the loading banner is in the DOM (not before).
   useLayoutEffect(() => {
     const container = containerRef.current;
     const ref = prependScrollAnchorRef.current;
@@ -162,9 +325,6 @@ export default function MessageList({
     };
   }, [loading, messages.length, messages[0]?.eventId]);
 
-  // Prepend: keep the same messages in view (adjust scrollTop by height added above).
-  // Otherwise scrollTop stays fixed and the list appears to jump.
-  // Scroll to bottom before paint so the user never sees the top-first flash.
   useLayoutEffect(() => {
     const container = containerRef.current;
     if (!container) return;
@@ -191,8 +351,6 @@ export default function MessageList({
             const cr = el.getBoundingClientRect();
             const ar = anchorEl.getBoundingClientRect();
             const cur = ar.top - cr.top;
-            // Increasing scrollTop moves content up → (ar.top - cr.top) decreases by ~the same amount.
-            // We want cur → anchorViewportTop, so ΔscrollTop = cur - anchorViewportTop (not the reverse).
             el.scrollTop += cur - anchorViewportTop;
             return;
           }
@@ -209,7 +367,6 @@ export default function MessageList({
     }
   }, [messages.length, messages[0]?.eventId]);
 
-  // When the container shrinks (input grew, format menu opened), keep bottom anchored.
   useEffect(() => {
     const el = containerRef.current;
     if (!el) return;
@@ -278,20 +435,46 @@ export default function MessageList({
   const openMenuMsg =
     openMenuEventId === null ? undefined : messages.find((m) => m.eventId === openMenuEventId);
 
-  function handleScroll() {
-    if (!containerRef.current) return;
+  // Use refs for values that change often but are only read inside the rAF callback
+  const loadingRef = useRef(loading);
+  loadingRef.current = loading;
+  const hasMoreRef = useRef(hasMore);
+  hasMoreRef.current = hasMore;
+  const messagesRef = useRef(messages);
+  messagesRef.current = messages;
+  const onLoadMoreRef = useRef(onLoadMore);
+  onLoadMoreRef.current = onLoadMore;
 
-    shouldAutoScrollRef.current = isNearBottom();
+  const handleScroll = useCallback(() => {
+    if (scrollRafRef.current !== null) return;
+    scrollRafRef.current = requestAnimationFrame(() => {
+      scrollRafRef.current = null;
+      if (!containerRef.current) return;
 
-    if (loading || !hasMore) return;
-    if (containerRef.current.scrollTop < 100) {
-      prependScrollAnchorRef.current = {
-        phase: "pending",
-        firstEventId: messages[0]?.eventId,
-      };
-      onLoadMore();
-    }
-  }
+      shouldAutoScrollRef.current = isNearBottom();
+
+      if (loadingRef.current || !hasMoreRef.current) return;
+      if (containerRef.current.scrollTop < 100) {
+        prependScrollAnchorRef.current = {
+          phase: "pending",
+          firstEventId: messagesRef.current[0]?.eventId,
+        };
+        onLoadMoreRef.current();
+      }
+    });
+  }, []);
+
+  useEffect(() => {
+    return () => {
+      if (scrollRafRef.current !== null) {
+        cancelAnimationFrame(scrollRafRef.current);
+      }
+    };
+  }, []);
+
+  const handleOpenMenu = useCallback((eventId: string) => {
+    setOpenMenuEventId((id) => (id === eventId ? null : eventId));
+  }, []);
 
   if (initialLoading) {
     return (
@@ -325,6 +508,21 @@ export default function MessageList({
         paddingRight: 0,
       }}
     >
+      {/* CSS-driven hover — no React state changes on mouse move */}
+      <style>{`
+        .pax-message-row:hover {
+          background-color: ${rowHighlight} !important;
+        }
+        .pax-message-row .pax-message-actions {
+          opacity: 0;
+          pointer-events: none;
+        }
+        .pax-message-row:hover .pax-message-actions {
+          opacity: 1;
+          pointer-events: auto;
+        }
+      `}</style>
+
       {hasMore && (
         <div
           style={{
@@ -349,150 +547,22 @@ export default function MessageList({
         const canEdit = messageAllowsEdit(msg, userId);
         const canDelete = messageAllowsDelete(msg, userId, redactionPolicy);
         const showMessageActions = canEdit || canDelete;
-        const rowActive =
-          hoveredEventId === msg.eventId || openMenuEventId === msg.eventId;
-        const menuOpen = openMenuEventId === msg.eventId;
-
-        const menuBtn = spacing.unit * 7;
 
         return (
-          <div
+          <MessageRow
             key={msg.eventId}
-            data-message-event-id={msg.eventId}
-            onMouseEnter={() => setHoveredEventId(msg.eventId)}
-            onMouseLeave={() => {
-              if (openMenuEventId !== msg.eventId) {
-                setHoveredEventId((h) => (h === msg.eventId ? null : h));
-              }
-            }}
-            style={{
-              position: "relative",
-              ...(showHeader
-                ? {
-                    paddingTop: spacing.unit * 3,
-                    paddingRight: spacing.unit * 2,
-                    paddingBottom: spacing.unit,
-                    paddingLeft: spacing.unit * 4,
-                  }
-                : {
-                    paddingTop: spacing.unit / 2,
-                    paddingRight: spacing.unit * 2,
-                    paddingBottom: spacing.unit / 2,
-                    paddingLeft: spacing.unit * 4,
-                  }),
-              display: "flex",
-              gap: spacing.unit * 3,
-              marginTop: showHeader ? spacing.unit : 0,
-              borderRadius: spacing.unit * 1.5,
-              backgroundColor: rowActive ? rowHighlight : "transparent",
-              transition: "background-color 0.12s ease",
-            }}
-          >
-            <div style={{ width: 40, flexShrink: 0 }}>
-              {showHeader && (
-                msg.avatarUrl ? (
-                  <img
-                    src={msg.avatarUrl}
-                    alt={msg.senderName ?? msg.sender}
-                    style={{
-                      display: "block",
-                      width: 40,
-                      height: 40,
-                      borderRadius: "50%",
-                      objectFit: "cover",
-                    }}
-                  />
-                ) : (
-                  <div style={{
-                    width: 40,
-                    height: 40,
-                    borderRadius: "50%",
-                    backgroundColor: palette.accent,
-                    color: "#fff",
-                    display: "flex",
-                    alignItems: "center",
-                    justifyContent: "center",
-                    fontSize: typography.fontSizeBase,
-                    fontWeight: typography.fontWeightBold,
-                  }}>
-                    {(msg.senderName ?? msg.sender).charAt(0).toUpperCase()}
-                  </div>
-                )
-              )}
-            </div>
-
-            <div style={{ flex: 1, minWidth: 0 }}>
-              {showHeader && (
-                <div style={{ display: "flex", alignItems: "baseline", gap: spacing.unit * 2 }}>
-                  <span style={{
-                    fontWeight: typography.fontWeightMedium,
-                    color: palette.textHeading,
-                    fontSize: typography.fontSizeBase,
-                  }}>
-                    {msg.senderName ?? msg.sender}
-                  </span>
-                  <span style={{
-                    fontSize: typography.fontSizeSmall,
-                    color: palette.textSecondary,
-                  }}>
-                    {formatTime(msg.timestamp)}
-                  </span>
-                </div>
-              )}
-              {msg.imageMediaRequest != null ? (
-                <>
-                  <MessageMatrixImage request={msg.imageMediaRequest} />
-                  {msg.body.trim().length > 0 ? (
-                    <MessageMarkdown edited={Boolean(msg.edited)}>{msg.body}</MessageMarkdown>
-                  ) : null}
-                </>
-              ) : (
-                <MessageMarkdown edited={Boolean(msg.edited)}>{msg.body}</MessageMarkdown>
-              )}
-            </div>
-
-            {showMessageActions && rowActive && (
-              <div
-                data-message-actions-root
-                style={{
-                  position: "absolute",
-                  top: 0,
-                  right: spacing.unit * 2,
-                  transform: "translateY(-50%)",
-                  zIndex: 2,
-                }}
-              >
-                <button
-                  ref={menuOpen ? menuAnchorRef : undefined}
-                  type="button"
-                  title="Message actions"
-                  aria-expanded={menuOpen}
-                  aria-haspopup="menu"
-                  onMouseDown={(e) => e.preventDefault()}
-                  onClick={() => setOpenMenuEventId((id) => (id === msg.eventId ? null : msg.eventId))}
-                  style={{
-                    display: "flex",
-                    alignItems: "center",
-                    justifyContent: "center",
-                    width: menuBtn,
-                    height: menuBtn,
-                    padding: 0,
-                    border: `1px solid ${rowActive ? palette.border : "transparent"}`,
-                    borderRadius: spacing.unit * 1.25,
-                    backgroundColor: menuOpen ? palette.bgHover : palette.bgTertiary,
-                    color: palette.textSecondary,
-                    cursor: "pointer",
-                    boxShadow:
-                      resolvedColorScheme === "light"
-                        ? "0 1px 3px rgba(0,0,0,0.08)"
-                        : "0 2px 8px rgba(0,0,0,0.35)",
-                  }}
-                >
-                  <MoreVertical size={18} strokeWidth={2} />
-                </button>
-              </div>
-            )}
-          </div>
+            msg={msg}
+            showHeader={showHeader}
+            showMessageActions={showMessageActions}
+            isMenuOpen={openMenuEventId === msg.eventId}
+            onOpenMenu={handleOpenMenu}
+            menuAnchorRef={menuAnchorRef}
+            rowHighlight={rowHighlight}
+            spacingUnit={spacing.unit}
+            palette={palette}
+            typography={typography}
+            resolvedColorScheme={resolvedColorScheme}
+          />
         );
       })}
 

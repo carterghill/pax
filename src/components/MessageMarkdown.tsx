@@ -1,4 +1,4 @@
-import { useMemo, isValidElement, type ReactNode } from "react";
+import { useMemo, isValidElement, memo, type ReactNode } from "react";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
 import type { Components } from "react-markdown";
@@ -65,7 +65,7 @@ function E({ children }: { children: ReactNode }) {
   return <>{emojifyMarkdownChildren(children)}</>;
 }
 
-export default function MessageMarkdown({ children, edited = false }: MessageMarkdownProps) {
+export default memo(function MessageMarkdown({ children, edited = false }: MessageMarkdownProps) {
   const { palette, typography, spacing, resolvedColorScheme } = useTheme();
 
   const markdownSource = useMemo(() => {
@@ -590,4 +590,4 @@ export default function MessageMarkdown({ children, edited = false }: MessageMar
       ))}
     </div>
   );
-}
+});
