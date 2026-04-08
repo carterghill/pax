@@ -36,10 +36,13 @@ export function useRoomMembers(roomId: string) {
       .then((result) => {
         if (activeRoomIdRef.current !== requestedRoomId) return;
         setMembers(result);
-        sessionStorage.setItem(
-          cacheKey(requestedRoomId),
-          JSON.stringify(result)
-        );
+        // Cache without avatarUrl (base64 data URLs blow past sessionStorage quota)
+        try {
+          sessionStorage.setItem(
+            cacheKey(requestedRoomId),
+            JSON.stringify(result.map(({ avatarUrl, ...rest }) => rest))
+          );
+        } catch { /* quota exceeded – non-fatal */ }
         setLoading(false);
         hasFetched.current = true;
       })
@@ -79,7 +82,9 @@ export function useRoomMembers(roomId: string) {
   // Persist member list for this room only (layout effect above clears on roomId change first).
   useEffect(() => {
     if (members.length > 0) {
-      sessionStorage.setItem(cacheKey(roomId), JSON.stringify(members));
+      try {
+        sessionStorage.setItem(cacheKey(roomId), JSON.stringify(members.map(({ avatarUrl, ...rest }) => rest)));
+      } catch { /* quota exceeded – non-fatal */ }
     }
   }, [members, roomId]);
 
