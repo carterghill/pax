@@ -1,5 +1,6 @@
 use std::collections::HashMap;
 use std::sync::Arc;
+use std::time::Duration;
 
 use matrix_sdk::room::edit::EditedContent;
 use matrix_sdk::room::MessagesOptions;
@@ -24,6 +25,28 @@ use crate::AppState;
 
 use super::voice_matrix::collect_voice_participants_for_joined_voice_rooms;
 use super::{fmt_error_chain, get_client, get_or_fetch_avatar, resolve_room, sniff_image_mime};
+
+/// matrix-sdk sets **no HTTP timeout** for media downloads (`Duration::MAX` in
+/// `Media::get_media_content`), so slow or stuck federation can block the UI for a very long time.
+/// We wrap each fetch so the app fails fast with a clear message instead.
+const MATRIX_IMAGE_THUMB_FETCH_TIMEOUT: Duration = Duration::from_secs(45);
+const MATRIX_IMAGE_FULL_FETCH_TIMEOUT: Duration = Duration::from_secs(75);
+
+async fn get_matrix_media_bytes_with_timeout(
+    client: &matrix_sdk::Client,
+    params: &MediaRequestParameters,
+    use_cache: bool,
+    timeout: Duration,
+) -> Result<Vec<u8>, String> {
+    match tokio::time::timeout(timeout, client.media().get_media_content(params, use_cache)).await {
+        Ok(Ok(bytes)) => Ok(bytes),
+        Ok(Err(e)) => Err(fmt_error_chain(&e)),
+        Err(_) => Err(format!(
+            "timed out after {}s (media download; federation can be slow)",
+            timeout.as_secs()
+        )),
+    }
+}
 
 #[tauri::command]
 pub async fn get_messages(
@@ -507,11 +530,13 @@ fn extract_message_display(
                 .unwrap_or_default();
             // Prefer a bounded thumbnail from the homeserver (smaller download; avoids huge JSON IPC
             // if we later served base64 — we write to disk + asset:// instead).
+            // Keep dimensions modest: large thumbs stress remote-media federation (resize + transfer)
+            // and Synapse sometimes returns 500s under that load.
             let req = MediaRequestParameters {
                 source: img.source.clone(),
                 format: MediaFormat::Thumbnail(MediaThumbnailSettings::new(
-                    UInt::from(1200u32),
-                    UInt::from(1200u32),
+                    UInt::from(800u32),
+                    UInt::from(800u32),
                 )),
             };
             let json = serde_json::to_value(&req).ok();
@@ -567,7 +592,14 @@ pub async fn get_matrix_image_path(
 
     let client = get_client(&state).await?;
 
-    let bytes = match client.media().get_media_content(&params, true).await {
+    let bytes = match get_matrix_media_bytes_with_timeout(
+        &client,
+        &params,
+        true,
+        MATRIX_IMAGE_THUMB_FETCH_TIMEOUT,
+    )
+    .await
+    {
         Ok(b) => b,
         Err(e) => {
             if matches!(&params.format, MediaFormat::Thumbnail(_)) {
@@ -575,20 +607,26 @@ pub async fn get_matrix_image_path(
                     source: params.source.clone(),
                     format: MediaFormat::File,
                 };
-                match client.media().get_media_content(&fallback, true).await {
+                match get_matrix_media_bytes_with_timeout(
+                    &client,
+                    &fallback,
+                    true,
+                    MATRIX_IMAGE_FULL_FETCH_TIMEOUT,
+                )
+                .await
+                {
                     Ok(b) => b,
                     Err(e2) => {
                         let msg = format!(
                             "Thumbnail failed: {} | Full image failed: {}",
-                            fmt_error_chain(&e),
-                            fmt_error_chain(&e2)
+                            e, e2
                         );
                         log::warn!("Matrix image: {msg}");
                         return Err(msg);
                     }
                 }
             } else {
-                let msg = format!("Failed to load image: {}", fmt_error_chain(&e));
+                let msg = format!("Failed to load image: {e}");
                 log::warn!("Matrix image: {msg}");
                 return Err(msg);
             }
