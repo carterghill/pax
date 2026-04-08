@@ -14,7 +14,7 @@ import { useUserVolume } from "../hooks/useUserVolume";
 import VolumeContextMenu from "./VolumeContextMenu";
 import VoiceAudioSettingsSection from "./VoiceAudioSettingsSection";
 import ScreenShareGrid from "./ScreenShareGrid";
-import { useOverlayObstruction } from "../hooks/useOverlayObstruction";
+import { useOverlayObstruction, registerObstruction, unregisterObstruction } from "../hooks/useOverlayObstruction";
 
 interface VoiceRoomViewProps {
   room: Room;
@@ -70,7 +70,21 @@ export default function VoiceRoomView({
   const isLinux = navigator.userAgent.includes("Linux");
 
   // Popups are `position: absolute` — parent `getBoundingClientRect()` excludes them; ref the panels.
-  useOverlayObstruction(screenShareMenuPopupRef, screenShareMenuOpen);
+  // Screen share popup obstruction is managed via callback ref below
+  // because the portal doesn't mount until screenShareMenuPos is set
+  // (async in useEffect), so useOverlayObstruction's useLayoutEffect
+  // fires before the ref is populated and never re-runs.
+  const screenShareObsIdRef = useRef<number | null>(null);
+  const screenSharePopupCallbackRef = useCallback((el: HTMLDivElement | null) => {
+    // Also keep the regular ref updated for click-outside detection
+    screenShareMenuPopupRef.current = el;
+    if (el) {
+      screenShareObsIdRef.current = registerObstruction(el);
+    } else if (screenShareObsIdRef.current !== null) {
+      unregisterObstruction(screenShareObsIdRef.current);
+      screenShareObsIdRef.current = null;
+    }
+  }, []);
   useOverlayObstruction(generalSettingsPopupRef, generalSettingsOpen);
   const [windowList, setWindowList] = useState<ScreenShareWindowOption[]>([]);
   const [windowListLoading, setWindowListLoading] = useState(false);
@@ -843,7 +857,7 @@ export default function VoiceRoomView({
               screenShareMenuPos &&
               createPortal(
               <div
-                ref={screenShareMenuPopupRef}
+                ref={screenSharePopupCallbackRef}
                 style={{
                 position: "fixed",
                 top: screenShareMenuPos.top,
