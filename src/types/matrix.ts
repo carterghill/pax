@@ -20,6 +20,8 @@ export interface Message {
   avatarUrl: string | null;
   /** True when the latest content comes from an m.replace edit */
   edited?: boolean;
+  /** Matrix `m.image` payload: serialized `MediaRequestParameters` for authenticated download. */
+  imageMediaRequest?: unknown;
 }
 
 export interface MessageBatch {

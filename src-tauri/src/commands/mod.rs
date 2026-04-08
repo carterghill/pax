@@ -52,8 +52,29 @@ pub(crate) fn resolve_room(client: &Client, room_id: &str) -> Result<Room, Strin
 }
 
 pub(crate) fn encode_avatar_data_url(bytes: &[u8]) -> String {
+    encode_bytes_data_url(bytes, "image/png")
+}
+
+pub(crate) fn encode_bytes_data_url(bytes: &[u8], mime_type: &str) -> String {
     let b64 = BASE64.encode(bytes);
-    format!("data:image/png;base64,{}", b64)
+    format!("data:{mime_type};base64,{b64}")
+}
+
+/// Guess image MIME type from magic bytes; falls back to `application/octet-stream`.
+pub(crate) fn sniff_image_mime(bytes: &[u8]) -> &'static str {
+    if bytes.len() >= 3 && bytes[0] == 0xFF && bytes[1] == 0xD8 && bytes[2] == 0xFF {
+        return "image/jpeg";
+    }
+    if bytes.len() >= 8 && bytes[0] == 0x89 && &bytes[1..4] == b"PNG" {
+        return "image/png";
+    }
+    if bytes.len() >= 6 && (&bytes[0..6] == b"GIF87a" || &bytes[0..6] == b"GIF89a") {
+        return "image/gif";
+    }
+    if bytes.len() >= 12 && &bytes[0..4] == b"RIFF" && &bytes[8..12] == b"WEBP" {
+        return "image/webp";
+    }
+    "application/octet-stream"
 }
 
 /// Fetch an avatar by MXC URI, with cache.

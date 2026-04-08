@@ -12,6 +12,7 @@ interface MessageEditPayload {
   roomId: string;
   targetEventId: string;
   body: string;
+  imageMediaRequest: unknown | null;
 }
 
 interface MessageRedactedPayload {
@@ -167,13 +168,18 @@ export function useMessages(roomId: string | null) {
     });
 
     const unlistenEdit = listen<MessageEditPayload>("room-message-edit", (event) => {
-      const { roomId: rid, targetEventId, body } = event.payload;
+      const { roomId: rid, targetEventId, body, imageMediaRequest } = event.payload;
       if (rid !== roomId) return;
 
       setMessages((prev) => {
-        const next = prev.map((m) =>
-          m.eventId === targetEventId ? { ...m, body, edited: true } : m,
-        );
+        const next = prev.map((m) => {
+          if (m.eventId !== targetEventId) return m;
+          if (imageMediaRequest != null) {
+            return { ...m, body, edited: true, imageMediaRequest };
+          }
+          const { imageMediaRequest: _img, ...rest } = m;
+          return { ...rest, body, edited: true };
+        });
         setCachedRoom(roomId, next, cacheRef.current.get(roomId)?.prevBatch ?? null);
         return next;
       });

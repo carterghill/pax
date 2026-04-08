@@ -10,10 +10,11 @@ use matrix_sdk::ruma::events::room::message::RoomMessageEventContentWithoutRelat
 use matrix_sdk::ruma::events::room::redaction::OriginalSyncRoomRedactionEvent;
 use matrix_sdk::ruma::events::typing::SyncTypingEvent;
 use matrix_sdk::ruma::events::AnyMessageLikeEventContent;
+use matrix_sdk::media::{MediaFormat, MediaRequestParameters, MediaThumbnailSettings, UniqueKey};
 use matrix_sdk::ruma::EventId;
 use matrix_sdk::ruma::UInt;
 use matrix_sdk::Room;
-use tauri::{Emitter, State};
+use tauri::{AppHandle, Emitter, Manager, State};
 
 use crate::types::{
     MessageBatch, MessageEditPayload, MessageInfo, MessageRedactedPayload, PresencePayload,
@@ -22,7 +23,7 @@ use crate::types::{
 use crate::AppState;
 
 use super::voice_matrix::collect_voice_participants_for_joined_voice_rooms;
-use super::{fmt_error_chain, get_client, get_or_fetch_avatar, resolve_room};
+use super::{fmt_error_chain, get_client, get_or_fetch_avatar, resolve_room, sniff_image_mime};
 
 #[tauri::command]
 pub async fn get_messages(
@@ -53,12 +54,14 @@ pub async fn get_messages(
         sender: String,
         body: String,
         timestamp: u64,
+        image_media_request: Option<serde_json::Value>,
     }
     let mut raw_msgs = Vec::new();
     let mut unique_senders = Vec::new();
     let mut seen_senders = std::collections::HashSet::new();
-    // target event id -> (replacement body, origin_server_ts); keep latest edit per target
-    let mut latest_replacement: HashMap<String, (String, u64)> = HashMap::new();
+    // target event id -> (replacement body, image request, origin_server_ts); keep latest edit per target
+    let mut latest_replacement: HashMap<String, (String, Option<serde_json::Value>, u64)> =
+        HashMap::new();
 
     for event in response.chunk {
         let raw = match event.raw().deserialize() {
@@ -77,15 +80,16 @@ pub async fn get_messages(
 
             if let Some(Relation::Replacement(repl)) = &original.content.relates_to {
                 let target = repl.event_id.to_string();
-                let new_body =
-                    extract_body(&RoomMessageEventContent::from(repl.new_content.clone()));
+                let (new_body, new_image) = extract_message_display(&RoomMessageEventContent::from(
+                    repl.new_content.clone(),
+                ));
                 let ts: u64 = original.origin_server_ts.0.into();
                 let replace = match latest_replacement.get(&target) {
                     None => true,
-                    Some((_, prev_ts)) => ts >= *prev_ts,
+                    Some((_, _, prev_ts)) => ts >= *prev_ts,
                 };
                 if replace {
-                    latest_replacement.insert(target, (new_body, ts));
+                    latest_replacement.insert(target, (new_body, new_image, ts));
                 }
                 continue;
             }
@@ -95,11 +99,13 @@ pub async fn get_messages(
                 unique_senders.push(original.sender.clone());
             }
 
+            let (body, image_media_request) = extract_message_display(&original.content);
             raw_msgs.push(RawMsg {
                 event_id: original.event_id.to_string(),
                 sender: sender_str,
-                body: extract_body(&original.content),
+                body,
                 timestamp: original.origin_server_ts.0.into(),
+                image_media_request,
             });
         }
     }
@@ -130,10 +136,10 @@ pub async fn get_messages(
             let (sender_name, avatar_url) =
                 sender_meta.get(&m.sender).cloned().unwrap_or((None, None));
             let edited = latest_replacement.contains_key(&m.event_id);
-            let body = latest_replacement
+            let (body, image_media_request) = latest_replacement
                 .get(&m.event_id)
-                .map(|(b, _)| b.clone())
-                .unwrap_or(m.body);
+                .map(|(b, img, _)| (b.clone(), img.clone()))
+                .unwrap_or_else(|| (m.body.clone(), m.image_media_request.clone()));
             MessageInfo {
                 event_id: m.event_id,
                 sender: m.sender,
@@ -142,6 +148,7 @@ pub async fn get_messages(
                 timestamp: m.timestamp,
                 avatar_url,
                 edited,
+                image_media_request,
             }
         })
         .collect();
@@ -275,18 +282,21 @@ pub async fn start_sync(
             let room_id = room.room_id().to_string();
 
             if let Some(Relation::Replacement(repl)) = &ev.content.relates_to {
-                let new_body =
-                    extract_body(&RoomMessageEventContent::from(repl.new_content.clone()));
+                let (new_body, new_image) = extract_message_display(&RoomMessageEventContent::from(
+                    repl.new_content.clone(),
+                ));
+                let image_media_request = new_image.unwrap_or(serde_json::Value::Null);
                 let payload = MessageEditPayload {
                     room_id,
                     target_event_id: repl.event_id.to_string(),
                     body: new_body,
+                    image_media_request,
                 };
                 let _ = app.emit("room-message-edit", payload);
                 return;
             }
 
-            let body = extract_body(&ev.content);
+            let (body, image_media_request) = extract_message_display(&ev.content);
             let sender = ev.sender.to_string();
 
             let (sender_name, avatar_url) = match room.get_member_no_sync(&ev.sender).await {
@@ -315,6 +325,7 @@ pub async fn start_sync(
                     timestamp,
                     avatar_url,
                     edited: false,
+                    image_media_request,
                 },
             };
             let _ = app.emit("room-message", payload);
@@ -483,19 +494,134 @@ pub async fn send_typing_notice(
     Ok(())
 }
 
-/// Helper to extract body text from a message event's content.
-fn extract_body(
+/// Body text for the timeline plus optional image download descriptor (`m.room.message` `m.image`).
+fn extract_message_display(
     content: &matrix_sdk::ruma::events::room::message::RoomMessageEventContent,
-) -> String {
+) -> (String, Option<serde_json::Value>) {
     use matrix_sdk::ruma::events::room::message::MessageType;
     match &content.msgtype {
-        MessageType::Text(text) => text.body.clone(),
-        MessageType::Notice(notice) => notice.body.clone(),
-        MessageType::Emote(emote) => format!("* {}", emote.body),
-        MessageType::Image(_) => "[Image]".to_string(),
-        MessageType::File(_) => "[File]".to_string(),
-        MessageType::Video(_) => "[Video]".to_string(),
-        MessageType::Audio(_) => "[Audio]".to_string(),
-        _ => "[Unsupported message]".to_string(),
+        MessageType::Image(img) => {
+            let body = img
+                .caption()
+                .map(|s| s.to_string())
+                .unwrap_or_default();
+            // Prefer a bounded thumbnail from the homeserver (smaller download; avoids huge JSON IPC
+            // if we later served base64 — we write to disk + asset:// instead).
+            let req = MediaRequestParameters {
+                source: img.source.clone(),
+                format: MediaFormat::Thumbnail(MediaThumbnailSettings::new(
+                    UInt::from(1200u32),
+                    UInt::from(1200u32),
+                )),
+            };
+            let json = serde_json::to_value(&req).ok();
+            (body, json)
+        }
+        MessageType::Text(text) => (text.body.clone(), None),
+        MessageType::Notice(notice) => (notice.body.clone(), None),
+        MessageType::Emote(emote) => (format!("* {}", emote.body), None),
+        MessageType::File(_) => ("[File]".to_string(), None),
+        MessageType::Video(_) => ("[Video]".to_string(), None),
+        MessageType::Audio(_) => ("[Audio]".to_string(), None),
+        _ => ("[Unsupported message]".to_string(), None),
     }
+}
+
+fn mime_to_file_ext(mime: &str) -> &'static str {
+    match mime {
+        "image/jpeg" => "jpg",
+        "image/png" => "png",
+        "image/gif" => "gif",
+        "image/webp" => "webp",
+        _ => "bin",
+    }
+}
+
+/// Download Matrix media and return a temp **filesystem path** for [`convertFileSrc`].
+///
+/// Returning multi‑MB `data:` URLs over Tauri’s JSON IPC is slow and often fails or OOMs; the
+/// timeline uses temp files under `$TEMP` (see `tauri.conf.json` `assetProtocol.scope`).
+#[tauri::command]
+pub async fn get_matrix_image_path(
+    app: AppHandle,
+    state: State<'_, Arc<AppState>>,
+    request: serde_json::Value,
+) -> Result<String, String> {
+    let params: MediaRequestParameters = serde_json::from_value(request)
+        .map_err(|e| format!("Invalid media request: {e}"))?;
+
+    let cache_key = format!("mmedia:{}", params.unique_key());
+
+    {
+        let mut cache = state.avatar_cache.lock().await;
+        if let Some(existing) = cache.get(&cache_key).cloned() {
+            if existing.starts_with("data:") {
+                cache.remove(&cache_key);
+            } else if std::path::Path::new(&existing).is_file() {
+                return Ok(existing);
+            } else {
+                cache.remove(&cache_key);
+            }
+        }
+    }
+
+    let client = get_client(&state).await?;
+
+    let bytes = match client.media().get_media_content(&params, true).await {
+        Ok(b) => b,
+        Err(e) => {
+            if matches!(&params.format, MediaFormat::Thumbnail(_)) {
+                let fallback = MediaRequestParameters {
+                    source: params.source.clone(),
+                    format: MediaFormat::File,
+                };
+                match client.media().get_media_content(&fallback, true).await {
+                    Ok(b) => b,
+                    Err(e2) => {
+                        let msg = format!(
+                            "Thumbnail failed: {} | Full image failed: {}",
+                            fmt_error_chain(&e),
+                            fmt_error_chain(&e2)
+                        );
+                        log::warn!("Matrix image: {msg}");
+                        return Err(msg);
+                    }
+                }
+            } else {
+                let msg = format!("Failed to load image: {}", fmt_error_chain(&e));
+                log::warn!("Matrix image: {msg}");
+                return Err(msg);
+            }
+        }
+    };
+
+    let mime = sniff_image_mime(&bytes);
+    let ext = mime_to_file_ext(mime);
+
+    let temp_dir = app
+        .path()
+        .temp_dir()
+        .map_err(|e| format!("Failed to get temp dir: {e}"))?;
+    std::fs::create_dir_all(&temp_dir).map_err(|e| format!("Failed to create temp dir: {e}"))?;
+
+    let path = temp_dir.join(format!(
+        "pax_matrix_img_{}.{}",
+        uuid::Uuid::new_v4(),
+        ext
+    ));
+
+    std::fs::write(&path, &bytes).map_err(|e| format!("Failed to write image temp file: {e}"))?;
+
+    let path_str = path
+        .to_str()
+        .ok_or("Temp file path is not valid UTF-8")?
+        .to_string();
+
+    state
+        .avatar_cache
+        .lock()
+        .await
+        .insert(cache_key, path_str.clone());
+
+    Ok(path_str)
 }

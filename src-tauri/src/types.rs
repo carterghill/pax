@@ -26,6 +26,9 @@ pub struct MessageInfo {
     pub timestamp: u64,
     pub avatar_url: Option<String>,
     pub edited: bool,
+    /// When set, the message is an image; the frontend fetches a data URL via `get_matrix_media_data_url`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub image_media_request: Option<serde_json::Value>,
 }
 
 #[derive(Serialize)]
@@ -65,6 +68,8 @@ pub struct MessageEditPayload {
     pub room_id: String,
     pub target_event_id: String,
     pub body: String,
+    /// `null` when the edited event is no longer an image; otherwise the same shape as `MessageInfo.image_media_request`.
+    pub image_media_request: serde_json::Value,
 }
 
 /// Remove a timeline row when an event is redacted (e.g. message deleted).

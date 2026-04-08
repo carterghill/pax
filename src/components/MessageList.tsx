@@ -5,6 +5,7 @@ import { MoreVertical, Pencil, Trash2 } from "lucide-react";
 import { Message, RoomRedactionPolicy } from "../types/matrix";
 import { useTheme } from "../theme/ThemeContext";
 import MessageMarkdown from "./MessageMarkdown";
+import MessageMatrixImage from "./MessageMatrixImage";
 
 interface MessageListProps {
   messages: Message[];
@@ -22,7 +23,6 @@ interface MessageListProps {
 }
 
 const NON_EDITABLE_BODIES = new Set([
-  "[Image]",
   "[File]",
   "[Video]",
   "[Audio]",
@@ -53,6 +53,7 @@ function shouldShowHeader(msg: Message, prevMsg: Message | null): boolean {
 
 function messageAllowsEdit(msg: Message, userId: string): boolean {
   if (msg.sender !== userId) return false;
+  if (msg.imageMediaRequest != null) return false;
   return !NON_EDITABLE_BODIES.has(msg.body.trim());
 }
 
@@ -438,7 +439,16 @@ export default function MessageList({
                   </span>
                 </div>
               )}
-              <MessageMarkdown edited={Boolean(msg.edited)}>{msg.body}</MessageMarkdown>
+              {msg.imageMediaRequest != null ? (
+                <>
+                  <MessageMatrixImage request={msg.imageMediaRequest} />
+                  {msg.body.trim().length > 0 ? (
+                    <MessageMarkdown edited={Boolean(msg.edited)}>{msg.body}</MessageMarkdown>
+                  ) : null}
+                </>
+              ) : (
+                <MessageMarkdown edited={Boolean(msg.edited)}>{msg.body}</MessageMarkdown>
+              )}
             </div>
 
             {showMessageActions && rowActive && (
