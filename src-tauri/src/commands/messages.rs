@@ -505,14 +505,19 @@ fn extract_message_display(
                 .caption()
                 .map(|s| s.to_string())
                 .unwrap_or_default();
-            // Prefer a bounded thumbnail from the homeserver (smaller download; avoids huge JSON IPC
-            // if we later served base64 — we write to disk + asset:// instead).
+            // Thumbnails are often a single static frame for GIFs (and sometimes transcoded to PNG/JPEG).
+            // Request the original file for GIFs so the WebView can animate them.
+            let format = if matrix_image_is_gif(img) {
+                MediaFormat::File
+            } else {
+                MediaFormat::Thumbnail(MediaThumbnailSettings::new(
+                    UInt::from(1200u32),
+                    UInt::from(1200u32),
+                ))
+            };
             let req = MediaRequestParameters {
                 source: img.source.clone(),
-                format: MediaFormat::Thumbnail(MediaThumbnailSettings::new(
-                    UInt::from(1200u32),
-                    UInt::from(1200u32),
-                )),
+                format,
             };
             let json = serde_json::to_value(&req).ok();
             (body, json)
@@ -525,6 +530,20 @@ fn extract_message_display(
         MessageType::Audio(_) => ("[Audio]".to_string(), None),
         _ => ("[Unsupported message]".to_string(), None),
     }
+}
+
+fn matrix_image_is_gif(
+    img: &matrix_sdk::ruma::events::room::message::ImageMessageEventContent,
+) -> bool {
+    if let Some(info) = img.info.as_ref() {
+        if let Some(mime) = info.mimetype.as_ref() {
+            // `mimetype` is a typed value in Ruma; compare via string without ambiguous `AsRef`.
+            if mime.to_string().eq_ignore_ascii_case("image/gif") {
+                return true;
+            }
+        }
+    }
+    img.filename().to_ascii_lowercase().ends_with(".gif")
 }
 
 fn mime_to_file_ext(mime: &str) -> &'static str {
