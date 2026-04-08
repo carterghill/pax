@@ -528,16 +528,21 @@ fn extract_message_display(
                 .caption()
                 .map(|s| s.to_string())
                 .unwrap_or_default();
-            // Prefer a bounded thumbnail from the homeserver (smaller download; avoids huge JSON IPC
-            // if we later served base64 — we write to disk + asset:// instead).
-            // Keep dimensions modest: large thumbs stress remote-media federation (resize + transfer)
-            // and Synapse sometimes returns 500s under that load.
+            // Thumbnails are often a single static frame for GIFs (and sometimes transcoded to PNG/JPEG).
+            // Request the original file for GIFs so the WebView can animate them.
+            // Non-GIF: modest thumbnail size — large thumbs stress remote-media federation and some
+            // homeservers return 500s under that load.
+            let format = if matrix_image_is_gif(img) {
+                MediaFormat::File
+            } else {
+                MediaFormat::Thumbnail(MediaThumbnailSettings::new(
+                    UInt::from(800u32),
+                    UInt::from(800u32),
+                ))
+            };
             let req = MediaRequestParameters {
                 source: img.source.clone(),
-                format: MediaFormat::Thumbnail(MediaThumbnailSettings::new(
-                    UInt::from(800u32),
-                    UInt::from(800u32),
-                )),
+                format,
             };
             let json = serde_json::to_value(&req).ok();
             (body, json)
@@ -550,6 +555,20 @@ fn extract_message_display(
         MessageType::Audio(_) => ("[Audio]".to_string(), None),
         _ => ("[Unsupported message]".to_string(), None),
     }
+}
+
+fn matrix_image_is_gif(
+    img: &matrix_sdk::ruma::events::room::message::ImageMessageEventContent,
+) -> bool {
+    if let Some(info) = img.info.as_ref() {
+        if let Some(mime) = info.mimetype.as_ref() {
+            // `mimetype` is a typed value in Ruma; compare via string without ambiguous `AsRef`.
+            if mime.to_string().eq_ignore_ascii_case("image/gif") {
+                return true;
+            }
+        }
+    }
+    img.filename().to_ascii_lowercase().ends_with(".gif")
 }
 
 fn mime_to_file_ext(mime: &str) -> &'static str {
@@ -592,11 +611,16 @@ pub async fn get_matrix_image_path(
 
     let client = get_client(&state).await?;
 
+    let first_timeout = match &params.format {
+        MediaFormat::Thumbnail(_) => MATRIX_IMAGE_THUMB_FETCH_TIMEOUT,
+        MediaFormat::File => MATRIX_IMAGE_FULL_FETCH_TIMEOUT,
+    };
+
     let bytes = match get_matrix_media_bytes_with_timeout(
         &client,
         &params,
         true,
-        MATRIX_IMAGE_THUMB_FETCH_TIMEOUT,
+        first_timeout,
     )
     .await
     {
