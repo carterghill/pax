@@ -699,6 +699,7 @@ pub async fn upload_and_send_file(
     file_name: String,
     mime_type: String,
     data: String,
+    caption: Option<String>,
 ) -> Result<(), String> {
     let client = get_client(&state).await?;
     let room = resolve_room(&client, &room_id)?;
@@ -761,6 +762,16 @@ pub async fn upload_and_send_file(
     use matrix_sdk::ruma::events::room::message::MessageType;
     use matrix_sdk::ruma::events::room::MediaSource;
 
+    // When there's a caption, it becomes the message body and the filename
+    // is set separately. This makes the caption appear as message text with the
+    // media attachment below it in clients that support it.
+    let body_text = caption
+        .as_deref()
+        .filter(|c| !c.is_empty())
+        .map(|c| c.to_string())
+        .unwrap_or_else(|| file_name.clone());
+    let has_caption = caption.as_deref().map_or(false, |c| !c.is_empty());
+
     let content = if content_type.type_() == mime::IMAGE {
         use matrix_sdk::ruma::events::room::message::ImageMessageEventContent;
         use matrix_sdk::ruma::events::room::ImageInfo;
@@ -770,47 +781,58 @@ pub async fn upload_and_send_file(
         info.size = file_size;
 
         let mut img = ImageMessageEventContent::new(
-            file_name,
+            body_text,
             MediaSource::Plain(mxc_uri),
         );
         img.info = Some(Box::new(info));
+        if has_caption {
+            img.filename = Some(file_name);
+        }
         RoomMessageEventContent::new(MessageType::Image(img))
     } else if content_type.type_() == mime::VIDEO {
         use matrix_sdk::ruma::events::room::message::VideoMessageEventContent;
 
         let mut vid = VideoMessageEventContent::new(
-            file_name,
+            body_text,
             MediaSource::Plain(mxc_uri),
         );
-        // VideoInfo lives on the content type directly
         let mut info = vid.info.take().unwrap_or_default();
         info.mimetype = Some(content_type.to_string());
         info.size = file_size;
         vid.info = Some(info);
+        if has_caption {
+            vid.filename = Some(file_name);
+        }
         RoomMessageEventContent::new(MessageType::Video(vid))
     } else if content_type.type_() == mime::AUDIO {
         use matrix_sdk::ruma::events::room::message::AudioMessageEventContent;
 
         let mut aud = AudioMessageEventContent::new(
-            file_name,
+            body_text,
             MediaSource::Plain(mxc_uri),
         );
         let mut info = aud.info.take().unwrap_or_default();
         info.mimetype = Some(content_type.to_string());
         info.size = file_size;
         aud.info = Some(info);
+        if has_caption {
+            aud.filename = Some(file_name);
+        }
         RoomMessageEventContent::new(MessageType::Audio(aud))
     } else {
         use matrix_sdk::ruma::events::room::message::FileMessageEventContent;
 
         let mut file_msg = FileMessageEventContent::new(
-            file_name,
+            body_text,
             MediaSource::Plain(mxc_uri),
         );
         let mut info = file_msg.info.take().unwrap_or_default();
         info.mimetype = Some(content_type.to_string());
         info.size = file_size;
         file_msg.info = Some(info);
+        if has_caption {
+            file_msg.filename = Some(file_name);
+        }
         RoomMessageEventContent::new(MessageType::File(file_msg))
     };
 

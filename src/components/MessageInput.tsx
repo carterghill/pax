@@ -393,19 +393,18 @@ export default function MessageInput({
 
     setSending(true);
     try {
-      // Upload pending file first if present
       if (pendingFile) {
+        // Single message: file with optional caption (typed text)
         await invoke("upload_and_send_file", {
           roomId,
           fileName: pendingFile.name,
           mimeType: pendingFile.mimeType,
           data: pendingFile.base64,
+          caption: trimmed || null,
         });
         clearPendingFile();
-      }
-
-      // Send text message if there's text
-      if (trimmed) {
+      } else if (trimmed) {
+        // Text-only message
         if (editingMessage) {
           await invoke("edit_message", {
             roomId,
@@ -687,12 +686,15 @@ export default function MessageInput({
             <div
               style={{
                 position: "relative",
-                display: "inline-block",
+                display: "inline-flex",
+                flexDirection: "column",
+                alignItems: "center",
                 backgroundColor: palette.bgTertiary,
                 borderRadius: spacing.unit,
                 border: `1px solid ${palette.border}`,
                 overflow: "hidden",
                 maxWidth: 200,
+                padding: spacing.unit,
               }}
             >
               {/* Delete button */}
@@ -736,22 +738,25 @@ export default function MessageInput({
                   alt={pendingFile.name}
                   style={{
                     display: "block",
-                    maxWidth: 200,
+                    maxWidth: 200 - spacing.unit * 2,
                     maxHeight: 150,
                     objectFit: "contain",
                     borderRadius: spacing.unit,
+                    margin: spacing.unit,
                   }}
                 />
               ) : null}
 
               <div
                 style={{
-                  padding: `${spacing.unit}px ${spacing.unit * 1.5}px`,
+                  padding: `${spacing.unit * 0.5}px ${spacing.unit}px`,
                   fontSize: typography.fontSizeSmall,
                   color: palette.textSecondary,
                   whiteSpace: "nowrap",
                   overflow: "hidden",
                   textOverflow: "ellipsis",
+                  maxWidth: "100%",
+                  boxSizing: "border-box",
                 }}
               >
                 {pendingFile.name}
@@ -779,8 +784,9 @@ export default function MessageInput({
         />
         <button
           type="button"
-          title="Upload file"
-          aria-label="Upload file"
+          title={pendingFile ? "File attached" : "Upload file"}
+          aria-label={pendingFile ? "File attached" : "Upload file"}
+          disabled={!!pendingFile}
           onMouseDown={(e) => e.preventDefault()}
           onClick={() => fileInputRef.current?.click()}
           style={{
@@ -795,17 +801,20 @@ export default function MessageInput({
             marginRight: 0,
             border: "none",
             borderRadius: inputToolBtnRadius,
-            backgroundColor: pendingFile ? palette.bgHover : "transparent",
-            color: pendingFile ? palette.textPrimary : palette.textSecondary,
-            cursor: "pointer",
+            backgroundColor: "transparent",
+            color: palette.textSecondary,
+            cursor: pendingFile ? "not-allowed" : "pointer",
+            opacity: pendingFile ? 0.35 : 1,
           }}
           onMouseEnter={(e) => {
+            if (pendingFile) return;
             e.currentTarget.style.backgroundColor = palette.bgHover;
             e.currentTarget.style.color = palette.textPrimary;
           }}
           onMouseLeave={(e) => {
-            e.currentTarget.style.backgroundColor = pendingFile ? palette.bgHover : "transparent";
-            e.currentTarget.style.color = pendingFile ? palette.textPrimary : palette.textSecondary;
+            if (pendingFile) return;
+            e.currentTarget.style.backgroundColor = "transparent";
+            e.currentTarget.style.color = palette.textSecondary;
           }}
         >
           <Paperclip size={inputToolIconSize} strokeWidth={2} />
