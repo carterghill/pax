@@ -212,6 +212,7 @@ export default function RoomSidebar({
       width,
       minWidth: width,
       backgroundColor: palette.bgSecondary,
+      borderRight: `1px solid ${palette.border}`,
       display: "flex",
       flexDirection: "column",
       height: "100vh",
