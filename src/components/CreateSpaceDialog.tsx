@@ -31,6 +31,7 @@ interface PublicSpaceResult {
   avatar_url?: string;
   canonical_alias?: string;
   room_type?: string;
+  join_rule?: string;
   membership?: string;
 }
 
@@ -366,27 +367,42 @@ export default function CreateSpaceDialog({
       setJoiningId(roomId);
       setJoinSuccess(null);
       try {
-        const joinedRoomId = await invoke<string>("join_room", {
-          roomId: joinTarget,
-          viaServers: viaServers.length > 0 ? viaServers : null,
-        });
+        const isKnock = space.join_rule === "knock";
+        let joinedRoomId: string;
+
+        if (isKnock) {
+          joinedRoomId = await invoke<string>("knock_room", {
+            roomId: joinTarget,
+            viaServers: viaServers.length > 0 ? viaServers : null,
+          });
+        } else {
+          joinedRoomId = await invoke<string>("join_room", {
+            roomId: joinTarget,
+            viaServers: viaServers.length > 0 ? viaServers : null,
+          });
+        }
+
         setJoinSuccess(roomId);
-        await onCreated({
-          joinedRoomId,
-          optimisticRoom: buildOptimisticSpaceRoom(
+        if (!isKnock) {
+          await onCreated({
             joinedRoomId,
-            space.name || space.canonical_alias || joinedRoomId,
-            null
-          ),
-        });
+            optimisticRoom: buildOptimisticSpaceRoom(
+              joinedRoomId,
+              space.name || space.canonical_alias || joinedRoomId,
+              null
+            ),
+          });
+        }
         // Update search results to reflect new membership
         setSearchResults((prev) =>
           prev.map((r) =>
-            r.room_id === roomId ? { ...r, membership: "joined" } : r
+            r.room_id === roomId
+              ? { ...r, membership: isKnock ? "knocked" : "joined" }
+              : r
           )
         );
       } catch (e) {
-        setSearchError(`Failed to join: ${e}`);
+        setSearchError(`Failed to ${space.join_rule === "knock" ? "request to join" : "join"}: ${e}`);
       } finally {
         setJoiningId(null);
       }
@@ -1150,7 +1166,9 @@ function SpaceSearchRow({
   const [hovered, setHovered] = useState(false);
   const [imageFailed, setImageFailed] = useState(false);
   const isJoined = space.membership === "joined" || joinSuccess === space.room_id;
+  const isKnocked = space.membership === "knocked" || (joinSuccess === space.room_id && space.join_rule === "knock");
   const isJoining = joiningId === space.room_id;
+  const isKnock = space.join_rule === "knock";
 
   return (
     <div
@@ -1255,7 +1273,7 @@ function SpaceSearchRow({
 
       {/* Action */}
       <div style={{ flexShrink: 0 }}>
-        {isJoined ? (
+        {isJoined && !isKnock ? (
           <span
             style={{
               display: "flex",
@@ -1267,6 +1285,19 @@ function SpaceSearchRow({
           >
             <Check size={14} />
             Joined
+          </span>
+        ) : isKnocked ? (
+          <span
+            style={{
+              display: "flex",
+              alignItems: "center",
+              gap: 4,
+              fontSize: typography.fontSizeSmall,
+              color: palette.textSecondary,
+            }}
+          >
+            <Check size={14} />
+            Requested
           </span>
         ) : (
           <button
@@ -1296,7 +1327,9 @@ function SpaceSearchRow({
             ) : (
               <LogIn size={13} />
             )}
-            {isJoining ? "Joining…" : "Join"}
+            {isJoining
+              ? isKnock ? "Requesting…" : "Joining…"
+              : isKnock ? "Request to Join" : "Join"}
           </button>
         )}
       </div>

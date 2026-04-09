@@ -709,6 +709,79 @@ pub async fn join_room(
     Ok(room.room_id().to_string())
 }
 
+#[tauri::command]
+pub async fn knock_room(
+    state: State<'_, Arc<AppState>>,
+    room_id: String,
+    reason: Option<String>,
+    via_servers: Option<Vec<String>>,
+) -> Result<String, String> {
+    let client = super::get_client(&state).await?;
+    let access_token = client.access_token().ok_or("No access token")?;
+    let homeserver = client.homeserver().to_string();
+    let hs_trim = homeserver.trim_end_matches('/');
+
+    let encoded = urlencoding::encode(&room_id);
+    let mut url = format!("{}/_matrix/client/v3/knock/{}", hs_trim, encoded);
+
+    // Add via servers as query params
+    let mut via_parts = Vec::new();
+    if let Some(servers) = via_servers.as_deref() {
+        for server in servers {
+            for discovered in discover_federation_server_names(&state.http_client, server).await {
+                if !via_parts.contains(&discovered) {
+                    via_parts.push(discovered);
+                }
+            }
+        }
+    }
+    if let Some((_, server_name)) = room_id.rsplit_once(':') {
+        for discovered in discover_federation_server_names(&state.http_client, server_name).await {
+            if !via_parts.contains(&discovered) {
+                via_parts.push(discovered);
+            }
+        }
+    }
+    if !via_parts.is_empty() {
+        let query: Vec<String> = via_parts
+            .iter()
+            .map(|s| format!("server_name={}", urlencoding::encode(s)))
+            .collect();
+        url = format!("{}?{}", url, query.join("&"));
+    }
+
+    let mut body = serde_json::json!({});
+    if let Some(reason) = reason {
+        body["reason"] = serde_json::json!(reason);
+    }
+
+    let resp = state
+        .http_client
+        .post(&url)
+        .timeout(std::time::Duration::from_secs(30))
+        .bearer_auth(access_token)
+        .json(&body)
+        .send()
+        .await
+        .map_err(|e| format!("Knock failed: {}", fmt_error_chain(&e)))?;
+
+    if !resp.status().is_success() {
+        let status = resp.status();
+        let text = resp.text().await.unwrap_or_default();
+        return Err(format!("Knock failed ({status}): {text}"));
+    }
+
+    let result: serde_json::Value = resp
+        .json()
+        .await
+        .map_err(|e| format!("Failed to parse knock response: {e}"))?;
+
+    Ok(result["room_id"]
+        .as_str()
+        .unwrap_or(&room_id)
+        .to_string())
+}
+
 /// Convert an MXC URI to an unauthenticated thumbnail URL.
 fn mxc_to_thumbnail_url(base_url: &str, mxc: &str, width: u32, height: u32) -> Option<String> {
     let stripped = mxc.strip_prefix("mxc://")?;
