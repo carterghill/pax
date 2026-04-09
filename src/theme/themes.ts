@@ -93,28 +93,126 @@ export const discordThemeDefinition: ThemeDefinition = {
   spacing,
 };
 
-/**
- * Same surfaces as Default, experimental Byzantine purple borders (Tyrian-adjacent, muted for UI).
- */
-const BYZANTINE_BORDER_DARK = "#453553";
-const BYZANTINE_BORDER_LIGHT = "#a896c4";
+/* ─── Element (Matrix green) ─────────────────────────────────────────────── */
 
-export const byzantineThemeDefinition: ThemeDefinition = {
-  id: "byzantine",
-  dark: {
-    ...withDarkerBackgrounds(discordDarkPalette, DEFAULT_DARK_BG_DELTA),
-    border: darkenHex(BYZANTINE_BORDER_DARK, DEFAULT_DARK_BORDER_DELTA),
-  },
-  light: {
-    ...withDarkerBackgrounds(discordLightPalette, 5),
-    border: BYZANTINE_BORDER_LIGHT,
-  },
+const elementDarkPalette: ThemePalette = {
+  bgPrimary: "#15191e",
+  bgSecondary: "#1a1f27",
+  bgTertiary: "#111519",
+  bgHover: "#1e2530",
+  bgActive: "#253040",
+  textPrimary: "#e3e8f0",
+  textSecondary: "#8d99a8",
+  textHeading: "#f4f7fa",
+  accent: "#0dbd8b",
+  accentHover: "#0a9a72",
+  border: "#212832",
+};
+
+const elementLightPalette: ThemePalette = {
+  bgPrimary: "#ffffff",
+  bgSecondary: "#f3f8f6",
+  bgTertiary: "#e8f0ec",
+  bgHover: "#eaf5f0",
+  bgActive: "#d0e8de",
+  textPrimary: "#17191c",
+  textSecondary: "#5e6775",
+  textHeading: "#0b0d0f",
+  accent: "#0dbd8b",
+  accentHover: "#0a9a72",
+  border: "#c8d5ce",
+};
+
+export const elementThemeDefinition: ThemeDefinition = {
+  id: "element",
+  dark: { ...elementDarkPalette },
+  light: { ...elementLightPalette },
   typography,
   spacing,
 };
 
+/* ─── Notepad (legal pad yellow) ─────────────────────────────────────────── */
+
+const notepadDarkPalette: ThemePalette = {
+  bgPrimary: "#2a2520",
+  bgSecondary: "#24201b",
+  bgTertiary: "#1c1915",
+  bgHover: "#332e27",
+  bgActive: "#3d3730",
+  textPrimary: "#e8dfc8",
+  textSecondary: "#a69a80",
+  textHeading: "#f5ecd4",
+  accent: "#d4a843",
+  accentHover: "#b8922e",
+  border: "#3a342b",
+};
+
+const notepadLightPalette: ThemePalette = {
+  bgPrimary: "#fff9e0",
+  bgSecondary: "#fff4c8",
+  bgTertiary: "#ffeeb0",
+  bgHover: "#fff1c0",
+  bgActive: "#ffe89c",
+  textPrimary: "#3b3326",
+  textSecondary: "#7a6b50",
+  textHeading: "#2a2318",
+  accent: "#c4922a",
+  accentHover: "#a87b1e",
+  border: "#e0d09a",
+};
+
+export const notepadThemeDefinition: ThemeDefinition = {
+  id: "notepad",
+  dark: { ...notepadDarkPalette },
+  light: { ...notepadLightPalette },
+  typography,
+  spacing,
+};
+
+/* ─── Solarized (Ethan Schoonover's palette) ─────────────────────────────── */
+
+const solarizedDarkPalette: ThemePalette = {
+  bgPrimary: "#002b36",   // base03
+  bgSecondary: "#073642", // base02
+  bgTertiary: "#002028",  // slightly darker than base03
+  bgHover: "#0a3f4e",
+  bgActive: "#0e4d5e",
+  textPrimary: "#839496", // base0
+  textSecondary: "#586e75", // base01
+  textHeading: "#93a1a1", // base1
+  accent: "#268bd2",      // blue
+  accentHover: "#1e75b3",
+  border: "#094452",
+};
+
+const solarizedLightPalette: ThemePalette = {
+  bgPrimary: "#fdf6e3",   // base3
+  bgSecondary: "#eee8d5", // base2
+  bgTertiary: "#e6dfcc",
+  bgHover: "#f0e9d4",
+  bgActive: "#ddd6c1",
+  textPrimary: "#657b83", // base00
+  textSecondary: "#93a1a1", // base1
+  textHeading: "#586e75", // base01
+  accent: "#268bd2",      // blue
+  accentHover: "#1e75b3",
+  border: "#d3cab7",
+};
+
+export const solarizedThemeDefinition: ThemeDefinition = {
+  id: "solarized",
+  dark: { ...solarizedDarkPalette },
+  light: { ...solarizedLightPalette },
+  typography,
+  spacing,
+};
+
+/* ─── Registry ───────────────────────────────────────────────────────────── */
+
 export const BUILTIN_THEME_DEFINITIONS: Record<string, ThemeDefinition> = {
   default: defaultThemeDefinition,
   discord: discordThemeDefinition,
-  byzantine: byzantineThemeDefinition,
+  element: elementThemeDefinition,
+  notepad: notepadThemeDefinition,
+  solarized: solarizedThemeDefinition,
 };
