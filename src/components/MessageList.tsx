@@ -126,7 +126,10 @@ const MessageRow = memo(function MessageRow({
         display: "flex",
         gap: spacingUnit * 3,
         marginTop: showHeader ? spacingUnit : 0,
-        borderRadius: spacingUnit * 1.5,
+        borderTopLeftRadius: 0,
+        borderBottomLeftRadius: 0,
+        borderTopRightRadius: spacingUnit * 1.5,
+        borderBottomRightRadius: spacingUnit * 1.5,
         backgroundColor: isMenuOpen ? rowHighlight : "transparent",
         transition: "background-color 0.12s ease",
       }}
