@@ -687,3 +687,136 @@ pub async fn get_matrix_image_path(
 
     Ok(path_str)
 }
+
+/// Upload a file to the Matrix media repo and send it as an `m.room.message`.
+///
+/// The frontend sends file bytes as base64 (same pattern as avatar upload).
+/// Based on MIME type, we send `m.image`, `m.video`, `m.audio`, or `m.file`.
+#[tauri::command]
+pub async fn upload_and_send_file(
+    state: State<'_, Arc<AppState>>,
+    room_id: String,
+    file_name: String,
+    mime_type: String,
+    data: String,
+) -> Result<(), String> {
+    let client = get_client(&state).await?;
+    let room = resolve_room(&client, &room_id)?;
+
+    let bytes = data_encoding::BASE64
+        .decode(data.as_bytes())
+        .map_err(|e| format!("Invalid base64: {e}"))?;
+
+    let content_type: mime::Mime = mime_type
+        .parse()
+        .unwrap_or(mime::APPLICATION_OCTET_STREAM);
+
+    log::info!(
+        "[Pax Upload] file={} mime={} size={}",
+        file_name, content_type, bytes.len()
+    );
+
+    let file_size = UInt::try_from(bytes.len() as u64).ok();
+
+    // Upload to the Matrix media repository via direct HTTP (avoids SDK hangs).
+    let homeserver = client.homeserver().to_string();
+    let access_token = client.access_token().ok_or("No access token")?;
+
+    let upload_url = format!(
+        "{}/_matrix/media/v3/upload?filename={}",
+        homeserver.trim_end_matches('/'),
+        urlencoding::encode(&file_name),
+    );
+
+    let resp = state
+        .http_client
+        .post(&upload_url)
+        .timeout(Duration::from_secs(120))
+        .bearer_auth(access_token.to_string())
+        .header("Content-Type", content_type.to_string())
+        .body(bytes)
+        .send()
+        .await
+        .map_err(|e| format!("Failed to upload file: {}", fmt_error_chain(&e)))?;
+
+    if !resp.status().is_success() {
+        let status = resp.status();
+        let body = resp.text().await.unwrap_or_default();
+        return Err(format!("Upload failed ({}): {}", status, body));
+    }
+
+    #[derive(serde::Deserialize)]
+    struct UploadResponse {
+        content_uri: String,
+    }
+
+    let upload_result: UploadResponse = resp
+        .json()
+        .await
+        .map_err(|e| format!("Failed to parse upload response: {e}"))?;
+
+    let mxc_uri = matrix_sdk::ruma::OwnedMxcUri::from(upload_result.content_uri);
+    log::info!("[Pax Upload] uploaded → {}", mxc_uri);
+
+    use matrix_sdk::ruma::events::room::message::MessageType;
+    use matrix_sdk::ruma::events::room::MediaSource;
+
+    let content = if content_type.type_() == mime::IMAGE {
+        use matrix_sdk::ruma::events::room::message::ImageMessageEventContent;
+        use matrix_sdk::ruma::events::room::ImageInfo;
+
+        let mut info = ImageInfo::new();
+        info.mimetype = Some(content_type.to_string());
+        info.size = file_size;
+
+        let mut img = ImageMessageEventContent::new(
+            file_name,
+            MediaSource::Plain(mxc_uri),
+        );
+        img.info = Some(Box::new(info));
+        RoomMessageEventContent::new(MessageType::Image(img))
+    } else if content_type.type_() == mime::VIDEO {
+        use matrix_sdk::ruma::events::room::message::VideoMessageEventContent;
+
+        let mut vid = VideoMessageEventContent::new(
+            file_name,
+            MediaSource::Plain(mxc_uri),
+        );
+        // VideoInfo lives on the content type directly
+        let mut info = vid.info.take().unwrap_or_default();
+        info.mimetype = Some(content_type.to_string());
+        info.size = file_size;
+        vid.info = Some(info);
+        RoomMessageEventContent::new(MessageType::Video(vid))
+    } else if content_type.type_() == mime::AUDIO {
+        use matrix_sdk::ruma::events::room::message::AudioMessageEventContent;
+
+        let mut aud = AudioMessageEventContent::new(
+            file_name,
+            MediaSource::Plain(mxc_uri),
+        );
+        let mut info = aud.info.take().unwrap_or_default();
+        info.mimetype = Some(content_type.to_string());
+        info.size = file_size;
+        aud.info = Some(info);
+        RoomMessageEventContent::new(MessageType::Audio(aud))
+    } else {
+        use matrix_sdk::ruma::events::room::message::FileMessageEventContent;
+
+        let mut file_msg = FileMessageEventContent::new(
+            file_name,
+            MediaSource::Plain(mxc_uri),
+        );
+        let mut info = file_msg.info.take().unwrap_or_default();
+        info.mimetype = Some(content_type.to_string());
+        info.size = file_size;
+        file_msg.info = Some(info);
+        RoomMessageEventContent::new(MessageType::File(file_msg))
+    };
+
+    room.send(content)
+        .await
+        .map_err(|e| format!("Failed to send file message: {}", fmt_error_chain(&e)))?;
+
+    Ok(())
+}

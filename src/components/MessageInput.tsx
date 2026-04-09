@@ -27,6 +27,7 @@ import {
   Minus,
   Send,
   Smile,
+  Paperclip,
 } from "lucide-react";
 import {
   Grid as GiphyGrid,
@@ -105,6 +106,8 @@ export default function MessageInput({
   const isTyping = useRef(false);
   const { palette, typography, spacing, resolvedColorScheme } = useTheme();
   const [giphyApiKey, setGiphyApiKey] = useState("");
+  const fileInputRef = useRef<HTMLInputElement>(null);
+  const [uploading, setUploading] = useState(false);
 
   useEffect(() => {
     invoke<string>("get_giphy_api_key").then(setGiphyApiKey).catch(() => {});
@@ -438,6 +441,39 @@ export default function MessageInput({
     }
   }
 
+  // ─── File upload ──────────────────────────────────────────────────────────
+
+  async function handleFileSelected(e: React.ChangeEvent<HTMLInputElement>) {
+    const file = e.target.files?.[0];
+    if (!file) return;
+    // Reset so the same file can be re-selected
+    e.target.value = "";
+
+    setUploading(true);
+    try {
+      const arrayBuffer = await file.arrayBuffer();
+      const bytes = new Uint8Array(arrayBuffer);
+      // Convert to base64 in chunks to avoid O(n²) string concat
+      const CHUNK = 8192;
+      const parts: string[] = [];
+      for (let i = 0; i < bytes.length; i += CHUNK) {
+        parts.push(String.fromCharCode(...bytes.subarray(i, i + CHUNK)));
+      }
+      const base64 = btoa(parts.join(""));
+
+      await invoke("upload_and_send_file", {
+        roomId,
+        fileName: file.name,
+        mimeType: file.type || "application/octet-stream",
+        data: base64,
+      });
+      onMessageSent();
+    } catch (err) {
+      console.error("Failed to upload file:", err);
+    }
+    setUploading(false);
+  }
+
   // ─── Layout constants ─────────────────────────────────────────────────────
 
   const formatBtnGap = spacing.unit * 0.75;
@@ -626,6 +662,50 @@ export default function MessageInput({
             overflowX: "auto",
           }}
         >
+        {/* File upload button (left of editor) */}
+        <input
+          ref={fileInputRef}
+          type="file"
+          style={{ display: "none" }}
+          onChange={handleFileSelected}
+        />
+        <button
+          type="button"
+          title="Upload file"
+          aria-label="Upload file"
+          disabled={uploading}
+          onMouseDown={(e) => e.preventDefault()}
+          onClick={() => fileInputRef.current?.click()}
+          style={{
+            flexShrink: 0,
+            display: "flex",
+            alignItems: "center",
+            justifyContent: "center",
+            width: inputToolBtnSize,
+            height: inputToolBtnSize,
+            padding: 0,
+            marginLeft: spacing.unit * 2,
+            marginRight: 0,
+            border: "none",
+            borderRadius: inputToolBtnRadius,
+            backgroundColor: "transparent",
+            color: palette.textSecondary,
+            cursor: uploading ? "not-allowed" : "pointer",
+            opacity: uploading ? 0.45 : 1,
+          }}
+          onMouseEnter={(e) => {
+            if (uploading) return;
+            e.currentTarget.style.backgroundColor = palette.bgHover;
+            e.currentTarget.style.color = palette.textPrimary;
+          }}
+          onMouseLeave={(e) => {
+            if (uploading) return;
+            e.currentTarget.style.backgroundColor = "transparent";
+            e.currentTarget.style.color = palette.textSecondary;
+          }}
+        >
+          <Paperclip size={inputToolIconSize} strokeWidth={2} />
+        </button>
         <div
           style={{
             position: "relative",
@@ -642,7 +722,7 @@ export default function MessageInput({
                 left: 0,
                 top: 0,
                 right: 0,
-                padding: `${spacing.unit * 3}px ${spacing.unit * 2}px ${spacing.unit * 3}px ${spacing.unit * 4}px`,
+                padding: `${spacing.unit * 3}px ${spacing.unit * 2}px ${spacing.unit * 3}px ${spacing.unit * 2}px`,
                 pointerEvents: "none",
                 color: palette.textSecondary,
                 fontSize: emojiOnlyComposer
@@ -692,7 +772,7 @@ export default function MessageInput({
                 : typography.fontSizeBase,
               fontFamily: `${typography.fontFamily}, var(--pax-twemoji-font-stack)`,
               lineHeight: typography.lineHeight,
-              padding: `${spacing.unit * 3}px ${spacing.unit * 2}px ${spacing.unit * 3}px ${spacing.unit * 4}px`,
+              padding: `${spacing.unit * 3}px ${spacing.unit * 2}px ${spacing.unit * 3}px ${spacing.unit * 2}px`,
               maxHeight: composerMaxHeightPx,
               overflowY: "auto",
               boxSizing: "border-box",
