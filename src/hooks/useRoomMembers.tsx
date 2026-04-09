@@ -15,9 +15,8 @@ interface PresencePayload {
   presence: string;
 }
 
-function cacheKey(roomId: string) {
-  return `room-members-${roomId}`;
-}
+/** In-memory cache — no quota limits, holds avatar data URLs across room switches. */
+const memberCache = new Map<string, RoomMember[]>();
 
 export function useRoomMembers(roomId: string) {
   const [members, setMembers] = useState<RoomMember[]>([]);
@@ -36,13 +35,7 @@ export function useRoomMembers(roomId: string) {
       .then((result) => {
         if (activeRoomIdRef.current !== requestedRoomId) return;
         setMembers(result);
-        // Cache without avatarUrl (base64 data URLs blow past sessionStorage quota)
-        try {
-          sessionStorage.setItem(
-            cacheKey(requestedRoomId),
-            JSON.stringify(result.map(({ avatarUrl, ...rest }) => rest))
-          );
-        } catch { /* quota exceeded – non-fatal */ }
+        memberCache.set(requestedRoomId, result);
         setLoading(false);
         hasFetched.current = true;
       })
@@ -63,31 +56,21 @@ export function useRoomMembers(roomId: string) {
 
   // Initial load (prefer cache)
   useEffect(() => {
-    const cached = sessionStorage.getItem(cacheKey(roomId));
+    const cached = memberCache.get(roomId);
 
     if (cached) {
-      try {
-        const parsed = JSON.parse(cached) as RoomMember[];
-        setMembers(parsed);
-        setLoading(false);
-        hasFetched.current = true;
-      } catch {
-        fetchMembers(true);
-      }
+      setMembers(cached);
+      setLoading(false);
+      hasFetched.current = true;
     } else {
       fetchMembers(true);
     }
   }, [roomId, fetchMembers]);
 
-  // Persist member list for this room only (debounced to avoid blocking main thread).
+  // Update cache when members change
   useEffect(() => {
     if (members.length === 0) return;
-    const timer = setTimeout(() => {
-      try {
-        sessionStorage.setItem(cacheKey(roomId), JSON.stringify(members.map(({ avatarUrl, ...rest }) => rest)));
-      } catch { /* quota exceeded – non-fatal */ }
-    }, 1000);
-    return () => clearTimeout(timer);
+    memberCache.set(roomId, members);
   }, [members, roomId]);
 
   // Silently re-fetch on rooms-changed, debounced
