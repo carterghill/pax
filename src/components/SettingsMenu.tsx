@@ -251,6 +251,10 @@ export default function SettingsMenu({
         style={{
           width: 232,
           flexShrink: 0,
+          minHeight: 0,
+          alignSelf: "stretch",
+          overflowY: "auto",
+          overflowX: "hidden",
           backgroundColor: palette.bgSecondary,
           borderRight: `1px solid ${palette.border}`,
           padding: spacing.unit * 5,
