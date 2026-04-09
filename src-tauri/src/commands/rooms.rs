@@ -1011,6 +1011,7 @@ pub async fn set_history_visibility(
 #[derive(Debug, Clone, serde::Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct SpaceSettingsSnapshot {
+    pub room_id: String,
     pub name: String,
     pub topic: String,
     pub avatar_url: Option<String>,
@@ -1342,15 +1343,22 @@ pub async fn get_space_settings(
         hs_trim,
         urlencoding::encode(&space_id)
     );
-    let dir_resp = state
+    let listed_in_directory = match state
         .http_client
         .get(&dir_url)
         .timeout(Duration::from_secs(15))
         .bearer_auth(access_token.to_string())
         .send()
         .await
-        .map_err(|e| format!("Directory GET failed: {}", fmt_error_chain(&e)))?;
-    let listed_in_directory = dir_resp.status().is_success();
+    {
+        Ok(resp) if resp.status().is_success() => resp
+            .json::<serde_json::Value>()
+            .await
+            .ok()
+            .and_then(|b| b.get("visibility").and_then(|v| v.as_str()).map(|v| v == "public"))
+            .unwrap_or(false),
+        _ => false,
+    };
 
     let canon_body = http_get_room_state(
         &state.http_client,
@@ -1370,6 +1378,7 @@ pub async fn get_space_settings(
 
     Ok(SpaceSettingsData {
         snapshot: SpaceSettingsSnapshot {
+            room_id: space_id.clone(),
             name,
             topic,
             avatar_url,
@@ -1526,6 +1535,29 @@ pub async fn apply_space_settings(
         if !local.is_empty() {
             let server = homeserver_name_from_room_id(&space_id);
             let alias = format!("#{local}:{server}");
+            let encoded_alias = urlencoding::encode(&alias);
+
+            // Create the alias mapping in the room directory first
+            let alias_url = format!(
+                "{}/_matrix/client/v3/directory/room/{}",
+                hs_trim, encoded_alias
+            );
+            let alias_resp = http
+                .put(&alias_url)
+                .timeout(Duration::from_secs(15))
+                .bearer_auth(access_token.to_string())
+                .json(&serde_json::json!({ "room_id": space_id }))
+                .send()
+                .await
+                .map_err(|e| format!("Alias PUT failed: {}", fmt_error_chain(&e)))?;
+            let alias_status = alias_resp.status();
+            // 409 means alias already exists, which is fine
+            if !alias_status.is_success() && alias_status.as_u16() != 409 {
+                let t = alias_resp.text().await.unwrap_or_default();
+                return Err(format!("Failed to create alias ({alias_status}): {t}"));
+            }
+
+            // Now set it as canonical
             http_put_room_state(
                 http,
                 hs_trim,

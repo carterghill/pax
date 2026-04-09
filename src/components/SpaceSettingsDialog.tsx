@@ -17,6 +17,7 @@ type GuestAccess = "can_join" | "forbidden";
 type JoinRule = "public" | "invite" | "knock";
 
 interface SpaceSettingsSnapshot {
+  roomId: string;
   name: string;
   topic: string;
   avatarUrl: string | null;
@@ -779,6 +780,26 @@ export default function SpaceSettingsDialog({
                         <option value="forbidden">Guests cannot join</option>
                         <option value="can_join">Guests can join</option>
                       </select>
+                    </div>
+
+                    <div>
+                      <label style={labelStyle}>Room ID</label>
+                      <div
+                        style={{
+                          fontSize: typography.fontSizeSmall - 1,
+                          color: palette.textSecondary,
+                          userSelect: "all",
+                          wordBreak: "break-all",
+                          cursor: "pointer",
+                          opacity: 0.7,
+                        }}
+                        title="Click to copy"
+                        onClick={() => {
+                          navigator.clipboard.writeText(snap.roomId);
+                        }}
+                      >
+                        {snap.roomId}
+                      </div>
                     </div>
                   </div>
                 )}

@@ -345,6 +345,40 @@ export default function RoomSettingsModal({
             )}
           </div>
 
+          {/* Room ID */}
+          <div
+            style={{
+              marginTop: spacing.unit * 3,
+              paddingTop: spacing.unit * 2,
+              borderTop: `1px solid ${palette.border}`,
+            }}
+          >
+            <label
+              style={{
+                fontSize: typography.fontSizeSmall,
+                color: palette.textSecondary,
+                fontWeight: typography.fontWeightMedium,
+              }}
+            >
+              Room ID
+            </label>
+            <div
+              style={{
+                fontSize: typography.fontSizeSmall - 1,
+                color: palette.textSecondary,
+                userSelect: "all",
+                wordBreak: "break-all",
+                cursor: "pointer",
+                opacity: 0.7,
+                marginTop: 2,
+              }}
+              title="Click to copy"
+              onClick={() => navigator.clipboard.writeText(roomId)}
+            >
+              {roomId}
+            </div>
+          </div>
+
           {/* Error message */}
           {error && (
             <div
