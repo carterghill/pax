@@ -1,6 +1,7 @@
 import { useState, useEffect, useRef, useCallback } from "react";
 import { invoke } from "@tauri-apps/api/core";
-import { Hash, Volume2, Users, LogIn, Check, Mail, RefreshCw, Plus } from "lucide-react";
+import { listen } from "@tauri-apps/api/event";
+import { Hash, Volume2, Users, LogIn, Check, Mail, RefreshCw, Plus, X, Loader2 } from "lucide-react";
 import { useTheme } from "../theme/ThemeContext";
 import { Room } from "../types/matrix";
 import type { RoomsChangedPayload } from "../types/roomsChanged";
@@ -48,6 +49,19 @@ type FetchSpaceInfoOptions = {
   background?: boolean;
 };
 
+interface KnockMember {
+  userId: string;
+  displayName: string | null;
+  avatarUrl: string | null;
+  reason: string | null;
+}
+
+interface KnockData {
+  members: KnockMember[];
+  canInvite: boolean;
+  canKick: boolean;
+}
+
 export default function SpaceHomeView({ space, onSelectRoom, onRoomsChanged }: SpaceHomeViewProps) {
   const { palette, typography, spacing } = useTheme();
   const [info, setInfo] = useState<SpaceInfo | null>(null);
@@ -61,6 +75,10 @@ export default function SpaceHomeView({ space, onSelectRoom, onRoomsChanged }: S
   const [canManageChildren, setCanManageChildren] = useState(false);
   const [showCreateRoom, setShowCreateRoom] = useState(false);
   const permCheckedRef = useRef<string | null>(null);
+
+  // ── Knock requests ──
+  const [knockData, setKnockData] = useState<KnockData | null>(null);
+  const [knockActionId, setKnockActionId] = useState<string | null>(null);
 
   const fetchInfo = useCallback((options?: FetchSpaceInfoOptions) => {
     const requestedId = space.id;
@@ -118,6 +136,59 @@ export default function SpaceHomeView({ space, onSelectRoom, onRoomsChanged }: S
     invoke<boolean>("can_manage_space_children", { spaceId: space.id })
       .then(setCanManageChildren)
       .catch(() => setCanManageChildren(false));
+  }, [space.id]);
+
+  // ── Fetch knock requests for this space ──
+  const fetchKnocks = useCallback(() => {
+    const target = space.id;
+    invoke<KnockData>("get_knock_members", { roomId: target })
+      .then((result) => {
+        if (activeSpaceIdRef.current === target) setKnockData(result);
+      })
+      .catch(() => {
+        if (activeSpaceIdRef.current === target) {
+          setKnockData({ members: [], canInvite: false, canKick: false });
+        }
+      });
+  }, [space.id]);
+
+  useEffect(() => {
+    setKnockData(null);
+    fetchKnocks();
+  }, [space.id, fetchKnocks]);
+
+  // Refetch knocks on membership changes
+  useEffect(() => {
+    const unlisten = listen("rooms-changed", () => { fetchKnocks(); });
+    return () => { unlisten.then((fn) => fn()); };
+  }, [fetchKnocks]);
+
+  const handleAcceptKnock = useCallback(async (knockUserId: string) => {
+    setKnockActionId(knockUserId);
+    try {
+      await invoke("invite_user", { roomId: space.id, userId: knockUserId });
+      setKnockData((prev) =>
+        prev ? { ...prev, members: prev.members.filter((m) => m.userId !== knockUserId) } : prev
+      );
+    } catch (e) {
+      console.error("Failed to accept knock:", e);
+    } finally {
+      setKnockActionId(null);
+    }
+  }, [space.id]);
+
+  const handleDenyKnock = useCallback(async (knockUserId: string) => {
+    setKnockActionId(knockUserId);
+    try {
+      await invoke("kick_user", { roomId: space.id, userId: knockUserId, reason: "Join request denied" });
+      setKnockData((prev) =>
+        prev ? { ...prev, members: prev.members.filter((m) => m.userId !== knockUserId) } : prev
+      );
+    } catch (e) {
+      console.error("Failed to deny knock:", e);
+    } finally {
+      setKnockActionId(null);
+    }
   }, [space.id]);
 
   // When `get_rooms` includes `topic` (after sync / space settings), merge into space home state.
@@ -383,6 +454,46 @@ export default function SpaceHomeView({ space, onSelectRoom, onRoomsChanged }: S
             typography={typography}
             spacing={spacing}
           />
+        )}
+
+        {/* ── Join Requests ── */}
+        {knockData && knockData.members.length > 0 && (knockData.canInvite || knockData.canKick) && (
+          <div style={{ marginBottom: spacing.unit * 6 }}>
+            <div style={{
+              fontSize: typography.fontSizeSmall,
+              fontWeight: typography.fontWeightBold,
+              color: palette.textSecondary,
+              textTransform: "uppercase" as const,
+              letterSpacing: "0.02em",
+              padding: `${spacing.unit * 2}px ${spacing.unit * 2}px`,
+              marginBottom: spacing.unit,
+            }}>
+              Join Requests — {knockData.members.length}
+            </div>
+            <div style={{
+              display: "flex",
+              flexDirection: "column",
+              gap: spacing.unit,
+            }}>
+              {knockData.members.map((knock) => {
+                const isActing = knockActionId === knock.userId;
+                return (
+                  <KnockRow
+                    key={knock.userId}
+                    knock={knock}
+                    isActing={isActing}
+                    canInvite={knockData.canInvite}
+                    canKick={knockData.canKick}
+                    onAccept={() => handleAcceptKnock(knock.userId)}
+                    onDeny={() => handleDenyKnock(knock.userId)}
+                    palette={palette}
+                    typography={typography}
+                    spacing={spacing}
+                  />
+                );
+              })}
+            </div>
+          </div>
         )}
 
         {info.children.length === 0 && (
@@ -663,6 +774,158 @@ function RoomRow({
             {isJoining ? "Joining..." : "Join"}
           </button>
         ) : null}
+      </div>
+    </div>
+  );
+}
+
+function KnockRow({
+  knock,
+  isActing,
+  canInvite,
+  canKick,
+  onAccept,
+  onDeny,
+  palette,
+  typography,
+  spacing,
+}: {
+  knock: { userId: string; displayName: string | null; avatarUrl: string | null; reason: string | null };
+  isActing: boolean;
+  canInvite: boolean;
+  canKick: boolean;
+  onAccept: () => void;
+  onDeny: () => void;
+  palette: ReturnType<typeof useTheme>["palette"];
+  typography: ReturnType<typeof useTheme>["typography"];
+  spacing: ReturnType<typeof useTheme>["spacing"];
+}) {
+  const [hovered, setHovered] = useState(false);
+
+  return (
+    <div
+      onMouseEnter={() => setHovered(true)}
+      onMouseLeave={() => setHovered(false)}
+      style={{
+        display: "flex",
+        alignItems: "center",
+        gap: spacing.unit * 3,
+        padding: `${spacing.unit * 2.5}px ${spacing.unit * 3}px`,
+        borderRadius: spacing.unit * 1.5,
+        backgroundColor: hovered ? palette.bgHover : "transparent",
+        transition: "background-color 0.1s",
+      }}
+    >
+      {/* Avatar */}
+      {knock.avatarUrl ? (
+        <img
+          src={knock.avatarUrl}
+          alt={knock.displayName ?? knock.userId}
+          style={{
+            width: 36,
+            height: 36,
+            borderRadius: "50%",
+            objectFit: "cover",
+            flexShrink: 0,
+          }}
+        />
+      ) : (
+        <div style={{
+          width: 36,
+          height: 36,
+          borderRadius: "50%",
+          backgroundColor: palette.accent,
+          color: "#fff",
+          display: "flex",
+          alignItems: "center",
+          justifyContent: "center",
+          flexShrink: 0,
+          fontSize: typography.fontSizeSmall,
+          fontWeight: typography.fontWeightBold,
+        }}>
+          {(knock.displayName ?? knock.userId).charAt(0).toUpperCase()}
+        </div>
+      )}
+
+      {/* Name + reason */}
+      <div style={{ flex: 1, minWidth: 0 }}>
+        <span style={{
+          fontSize: typography.fontSizeBase,
+          fontWeight: typography.fontWeightMedium,
+          color: palette.textHeading,
+          overflow: "hidden",
+          textOverflow: "ellipsis",
+          whiteSpace: "nowrap",
+        }}>
+          {knock.displayName ?? knock.userId}
+        </span>
+        {knock.reason && (
+          <div style={{
+            fontSize: typography.fontSizeSmall,
+            color: palette.textSecondary,
+            overflow: "hidden",
+            textOverflow: "ellipsis",
+            whiteSpace: "nowrap",
+          }}>
+            {knock.reason}
+          </div>
+        )}
+      </div>
+
+      {/* Accept / Deny */}
+      <div style={{ display: "flex", gap: spacing.unit, flexShrink: 0 }}>
+        {canInvite && (
+          <button
+            onClick={onAccept}
+            disabled={isActing}
+            title="Accept"
+            style={{
+              display: "flex",
+              alignItems: "center",
+              gap: spacing.unit,
+              padding: `${spacing.unit * 1.5}px ${spacing.unit * 3}px`,
+              borderRadius: spacing.unit * 1.5,
+              border: "none",
+              backgroundColor: "#23a55a",
+              color: "#fff",
+              fontSize: typography.fontSizeSmall,
+              fontWeight: typography.fontWeightBold,
+              cursor: isActing ? "default" : "pointer",
+              opacity: isActing ? 0.7 : 1,
+            }}
+          >
+            {isActing ? (
+              <Loader2 size={13} style={{ animation: "spin 1s linear infinite" }} />
+            ) : (
+              <Check size={13} />
+            )}
+            Accept
+          </button>
+        )}
+        {canKick && (
+          <button
+            onClick={onDeny}
+            disabled={isActing}
+            title="Deny"
+            style={{
+              display: "flex",
+              alignItems: "center",
+              gap: spacing.unit,
+              padding: `${spacing.unit * 1.5}px ${spacing.unit * 3}px`,
+              borderRadius: spacing.unit * 1.5,
+              border: "none",
+              backgroundColor: "#ed4245",
+              color: "#fff",
+              fontSize: typography.fontSizeSmall,
+              fontWeight: typography.fontWeightBold,
+              cursor: isActing ? "default" : "pointer",
+              opacity: isActing ? 0.7 : 1,
+            }}
+          >
+            <X size={13} />
+            Deny
+          </button>
+        )}
       </div>
     </div>
   );
