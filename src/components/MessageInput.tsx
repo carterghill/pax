@@ -28,6 +28,7 @@ import {
   Send,
   Smile,
   Paperclip,
+  X,
 } from "lucide-react";
 import {
   Grid as GiphyGrid,
@@ -107,7 +108,12 @@ export default function MessageInput({
   const { palette, typography, spacing, resolvedColorScheme } = useTheme();
   const [giphyApiKey, setGiphyApiKey] = useState("");
   const fileInputRef = useRef<HTMLInputElement>(null);
-  const [uploading, setUploading] = useState(false);
+  const [pendingFile, setPendingFile] = useState<{
+    name: string;
+    mimeType: string;
+    base64: string;
+    previewUrl: string | null;
+  } | null>(null);
 
   useEffect(() => {
     invoke<string>("get_giphy_api_key").then(setGiphyApiKey).catch(() => {});
@@ -178,6 +184,13 @@ export default function MessageInput({
       }
     };
   }, [roomId, onLocalTypingActive]);
+
+  // Clean up pending file preview URL on unmount
+  useEffect(() => {
+    return () => {
+      if (pendingFile?.previewUrl) URL.revokeObjectURL(pendingFile.previewUrl);
+    };
+  }, [pendingFile]);
 
   useEffect(() => {
     if (!editingMessage) return;
@@ -371,7 +384,7 @@ export default function MessageInput({
     if (!el) return;
     const markdown = serializeComposerEditor(el);
     const trimmed = markdown.trim();
-    if (!trimmed || sending) return;
+    if ((!trimmed && !pendingFile) || sending) return;
 
     // Close picker but keep format toolbar open across sends.
     setPickerOpen(false);
@@ -380,15 +393,29 @@ export default function MessageInput({
 
     setSending(true);
     try {
-      if (editingMessage) {
-        await invoke("edit_message", {
+      // Upload pending file first if present
+      if (pendingFile) {
+        await invoke("upload_and_send_file", {
           roomId,
-          eventId: editingMessage.eventId,
-          body: trimmed,
+          fileName: pendingFile.name,
+          mimeType: pendingFile.mimeType,
+          data: pendingFile.base64,
         });
-        onCancelEdit?.();
-      } else {
-        await invoke("send_message", { roomId, body: trimmed });
+        clearPendingFile();
+      }
+
+      // Send text message if there's text
+      if (trimmed) {
+        if (editingMessage) {
+          await invoke("edit_message", {
+            roomId,
+            eventId: editingMessage.eventId,
+            body: trimmed,
+          });
+          onCancelEdit?.();
+        } else {
+          await invoke("send_message", { roomId, body: trimmed });
+        }
       }
       const prevFormats = getActiveFormats(el);
       el.innerHTML = "";
@@ -446,32 +473,31 @@ export default function MessageInput({
   async function handleFileSelected(e: React.ChangeEvent<HTMLInputElement>) {
     const file = e.target.files?.[0];
     if (!file) return;
-    // Reset so the same file can be re-selected
     e.target.value = "";
 
-    setUploading(true);
     try {
       const arrayBuffer = await file.arrayBuffer();
       const bytes = new Uint8Array(arrayBuffer);
-      // Convert to base64 in chunks to avoid O(n²) string concat
       const CHUNK = 8192;
       const parts: string[] = [];
       for (let i = 0; i < bytes.length; i += CHUNK) {
         parts.push(String.fromCharCode(...bytes.subarray(i, i + CHUNK)));
       }
       const base64 = btoa(parts.join(""));
+      const mimeType = file.type || "application/octet-stream";
+      const previewUrl = mimeType.startsWith("image/")
+        ? URL.createObjectURL(file)
+        : null;
 
-      await invoke("upload_and_send_file", {
-        roomId,
-        fileName: file.name,
-        mimeType: file.type || "application/octet-stream",
-        data: base64,
-      });
-      onMessageSent();
+      setPendingFile({ name: file.name, mimeType, base64, previewUrl });
     } catch (err) {
-      console.error("Failed to upload file:", err);
+      console.error("Failed to read file:", err);
     }
-    setUploading(false);
+  }
+
+  function clearPendingFile() {
+    if (pendingFile?.previewUrl) URL.revokeObjectURL(pendingFile.previewUrl);
+    setPendingFile(null);
   }
 
   // ─── Layout constants ─────────────────────────────────────────────────────
@@ -486,7 +512,7 @@ export default function MessageInput({
     e.currentTarget.style.backgroundColor = enter ? palette.bgHover : "transparent";
     e.currentTarget.style.color = enter ? palette.textPrimary : palette.textSecondary;
   };
-  const canSend = (plainText.trim().length > 0 || hasComposerMedia) && !sending;
+  const canSend = (plainText.trim().length > 0 || hasComposerMedia || !!pendingFile) && !sending;
 
   // ─── Picker portal (emoji + GIF tabs) ─────────────────────────────────────
 
@@ -651,6 +677,88 @@ export default function MessageInput({
           minWidth: 0,
         }}
       >
+        {/* Attachment preview */}
+        {pendingFile && (
+          <div
+            style={{
+              padding: `${spacing.unit * 2}px ${spacing.unit * 3}px 0`,
+            }}
+          >
+            <div
+              style={{
+                position: "relative",
+                display: "inline-block",
+                backgroundColor: palette.bgTertiary,
+                borderRadius: spacing.unit,
+                border: `1px solid ${palette.border}`,
+                overflow: "hidden",
+                maxWidth: 200,
+              }}
+            >
+              {/* Delete button */}
+              <button
+                type="button"
+                title="Remove attachment"
+                aria-label="Remove attachment"
+                onMouseDown={(e) => e.preventDefault()}
+                onClick={clearPendingFile}
+                style={{
+                  position: "absolute",
+                  top: spacing.unit * 0.5,
+                  right: spacing.unit * 0.5,
+                  width: 24,
+                  height: 24,
+                  display: "flex",
+                  alignItems: "center",
+                  justifyContent: "center",
+                  padding: 0,
+                  border: "none",
+                  borderRadius: "50%",
+                  backgroundColor: palette.bgPrimary,
+                  color: palette.textSecondary,
+                  cursor: "pointer",
+                  zIndex: 1,
+                  boxShadow: "0 1px 4px rgba(0,0,0,0.3)",
+                }}
+                onMouseEnter={(e) => {
+                  e.currentTarget.style.color = palette.textPrimary;
+                }}
+                onMouseLeave={(e) => {
+                  e.currentTarget.style.color = palette.textSecondary;
+                }}
+              >
+                <X size={14} strokeWidth={2.5} />
+              </button>
+
+              {pendingFile.previewUrl ? (
+                <img
+                  src={pendingFile.previewUrl}
+                  alt={pendingFile.name}
+                  style={{
+                    display: "block",
+                    maxWidth: 200,
+                    maxHeight: 150,
+                    objectFit: "contain",
+                    borderRadius: spacing.unit,
+                  }}
+                />
+              ) : null}
+
+              <div
+                style={{
+                  padding: `${spacing.unit}px ${spacing.unit * 1.5}px`,
+                  fontSize: typography.fontSizeSmall,
+                  color: palette.textSecondary,
+                  whiteSpace: "nowrap",
+                  overflow: "hidden",
+                  textOverflow: "ellipsis",
+                }}
+              >
+                {pendingFile.name}
+              </div>
+            </div>
+          </div>
+        )}
         {/* Top row: editor + toolbar buttons */}
         <div
           style={{
@@ -673,7 +781,6 @@ export default function MessageInput({
           type="button"
           title="Upload file"
           aria-label="Upload file"
-          disabled={uploading}
           onMouseDown={(e) => e.preventDefault()}
           onClick={() => fileInputRef.current?.click()}
           style={{
@@ -688,20 +795,17 @@ export default function MessageInput({
             marginRight: 0,
             border: "none",
             borderRadius: inputToolBtnRadius,
-            backgroundColor: "transparent",
-            color: palette.textSecondary,
-            cursor: uploading ? "not-allowed" : "pointer",
-            opacity: uploading ? 0.45 : 1,
+            backgroundColor: pendingFile ? palette.bgHover : "transparent",
+            color: pendingFile ? palette.textPrimary : palette.textSecondary,
+            cursor: "pointer",
           }}
           onMouseEnter={(e) => {
-            if (uploading) return;
             e.currentTarget.style.backgroundColor = palette.bgHover;
             e.currentTarget.style.color = palette.textPrimary;
           }}
           onMouseLeave={(e) => {
-            if (uploading) return;
-            e.currentTarget.style.backgroundColor = "transparent";
-            e.currentTarget.style.color = palette.textSecondary;
+            e.currentTarget.style.backgroundColor = pendingFile ? palette.bgHover : "transparent";
+            e.currentTarget.style.color = pendingFile ? palette.textPrimary : palette.textSecondary;
           }}
         >
           <Paperclip size={inputToolIconSize} strokeWidth={2} />
