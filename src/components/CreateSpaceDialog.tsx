@@ -161,8 +161,14 @@ export default function CreateSpaceDialog({
   const [joiningId, setJoiningId] = useState<string | null>(null);
   const [joinSuccess, setJoinSuccess] = useState<string | null>(null);
   const [currentHomeserver, setCurrentHomeserver] = useState<string | null>(null);
+  const [homeserverBrowseLoading, setHomeserverBrowseLoading] = useState(false);
+  const [homeserverBrowseDone, setHomeserverBrowseDone] = useState(false);
 
   const fileInputRef = useRef<HTMLInputElement>(null);
+  /** One automatic public-space list per dialog open; avoids clobbering results after a manual search when switching tabs. */
+  const homeserverPublicListFetchedRef = useRef(false);
+  /** When the user runs a manual search, ignore in-flight homeserver auto-list results. */
+  const homeserverAutoStaleRef = useRef(false);
 
   // Close on Escape
   useEffect(() => {
@@ -178,6 +184,51 @@ export default function CreateSpaceDialog({
       .then(setCurrentHomeserver)
       .catch(() => setCurrentHomeserver(null));
   }, []);
+
+  // Light, one-time listing of public spaces on your homeserver when the join tab is shown.
+  useEffect(() => {
+    if (
+      activeTab !== "join" ||
+      !currentHomeserver ||
+      homeserverPublicListFetchedRef.current
+    ) {
+      return;
+    }
+
+    let cancelled = false;
+    setHomeserverBrowseLoading(true);
+
+    (async () => {
+      try {
+        const result = await invoke<{ chunk: PublicSpaceResult[] }>(
+          "search_public_spaces",
+          {
+            searchTerm: null,
+            server: currentHomeserver,
+            limit: 20,
+          }
+        );
+        if (!cancelled && !homeserverAutoStaleRef.current) {
+          setSearchResults(result.chunk || []);
+        }
+      } catch {
+        if (!cancelled && !homeserverAutoStaleRef.current) {
+          setSearchResults([]);
+        }
+      } finally {
+        if (!cancelled) {
+          setHomeserverBrowseLoading(false);
+          setHomeserverBrowseDone(true);
+          homeserverPublicListFetchedRef.current = true;
+        }
+      }
+    })();
+
+    return () => {
+      cancelled = true;
+      setHomeserverBrowseLoading(false);
+    };
+  }, [activeTab, currentHomeserver]);
 
   const searchServers = useMemo(() => {
     const explicitServers = parseServerInputs(searchServer);
@@ -275,6 +326,7 @@ export default function CreateSpaceDialog({
 
   // ── Search public spaces ──
   const handleSearch = useCallback(async () => {
+    homeserverAutoStaleRef.current = true;
     setSearching(true);
     setSearchError(null);
     setHasSearched(true);
@@ -681,6 +733,29 @@ export default function CreateSpaceDialog({
                 </div>
               )}
 
+              {(homeserverBrowseLoading || searching) && (
+                <div
+                  style={{
+                    color: palette.textSecondary,
+                    textAlign: "center",
+                    padding: "12px 0",
+                    fontSize: typography.fontSizeSmall,
+                    display: "flex",
+                    alignItems: "center",
+                    justifyContent: "center",
+                    gap: 8,
+                  }}
+                >
+                  <Loader2
+                    size={16}
+                    style={{ animation: "spin 1s linear infinite" }}
+                  />
+                  {searching
+                    ? "Searching…"
+                    : "Loading public spaces from your homeserver…"}
+                </div>
+              )}
+
               {/* Results */}
               {searchResults.length > 0 && (
                 <div
@@ -705,7 +780,28 @@ export default function CreateSpaceDialog({
                 </div>
               )}
 
-              {hasSearched && searchResults.length === 0 && !searching && !searchError && (
+              {homeserverBrowseDone &&
+                !hasSearched &&
+                searchResults.length === 0 &&
+                !homeserverBrowseLoading &&
+                !searching &&
+                !searchError && (
+                <div
+                  style={{
+                    color: palette.textSecondary,
+                    textAlign: "center",
+                    padding: "16px 0",
+                    fontSize: typography.fontSizeBase,
+                  }}
+                >
+                  No public spaces on your homeserver.
+                </div>
+              )}
+
+              {hasSearched &&
+                searchResults.length === 0 &&
+                !searching &&
+                !searchError && (
                 <div
                   style={{
                     color: palette.textSecondary,
