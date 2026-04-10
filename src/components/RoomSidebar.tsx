@@ -3,6 +3,7 @@ import { invoke } from "@tauri-apps/api/core";
 import {
   Hash,
   House,
+  MessageCircle,
   Volume2,
   Monitor,
   MicOff,
@@ -25,6 +26,7 @@ import LeaveConfirmDialog from "./LeaveConfirmDialog";
 import { useUserVolume } from "../hooks/useUserVolume";
 import {
   VOICE_ROOM_TYPE,
+  isPendingDmRoomId,
   voiceStateLookupKeysForParticipant,
 } from "../utils/matrix";
 import { userInitialAvatarBackground } from "../utils/userAvatarColor";
@@ -235,6 +237,7 @@ function ChannelBlock({
   indent?: boolean;
 }) {
   const isVoice = room.roomType === VOICE_ROOM_TYPE;
+  const isDraftDmRow = isPendingDmRoomId(room.id);
   const participants = isVoice ? (voiceParticipants[room.id] ?? []) : [];
   const isConnectedHere = connectedVoiceRoomId === room.id;
   const padLeft = indent ? spacing.unit * 6 : spacing.unit * 3;
@@ -243,7 +246,10 @@ function ChannelBlock({
     <div>
       <div
         onClick={() => onSelectRoom(room.id)}
-        onContextMenu={(e) => onRoomContextMenu(room.id, room.name, e)}
+        onContextMenu={(e) => {
+          if (isDraftDmRow) return;
+          onRoomContextMenu(room.id, room.name, e);
+        }}
         style={{
           padding: `${spacing.unit * 2}px ${spacing.unit * 3}px`,
           paddingLeft: padLeft,
@@ -269,6 +275,11 @@ function ChannelBlock({
                     ? palette.textHeading
                     : palette.textSecondary
               }
+            />
+          ) : isDraftDmRow ? (
+            <MessageCircle
+              size={16}
+              color={activeRoomId === room.id ? palette.textHeading : palette.textSecondary}
             />
           ) : (
             <Hash

@@ -1,4 +1,4 @@
-import { useState, useEffect, useRef, useCallback } from "react";
+import { useState, useEffect, useRef, useCallback, type CSSProperties } from "react";
 import { useRoomRedactionPolicy } from "../hooks/useRoomRedactionPolicy";
 import { listen } from "@tauri-apps/api/event";
 import { ArrowLeft, Hash, MessageCircle, Users } from "lucide-react";
@@ -15,6 +15,16 @@ const USER_MENU_DEFAULT_WIDTH = 240;
 const MIN_USER_MENU_WIDTH = 180;
 const MAX_USER_MENU_WIDTH = 400;
 const USER_MENU_RESIZE_HANDLE = 6;
+
+function displayInitials(name: string): string {
+  const t = name.trim();
+  if (!t) return "?";
+  const parts = t.split(/\s+/).filter(Boolean);
+  if (parts.length >= 2) {
+    return `${parts[0][0] ?? ""}${parts[1][0] ?? ""}`.slice(0, 2).toUpperCase();
+  }
+  return t.slice(0, 2).toUpperCase();
+}
 
 interface ChatViewProps {
   userId: string;
@@ -188,14 +198,20 @@ export default function ChatView({
     [onDraftDmResolved],
   );
 
+  const dmBannerStyle: CSSProperties = {
+    padding: `${spacing.unit * 2}px ${spacing.unit * 4}px`,
+    minHeight: spacing.headerHeight,
+    borderBottom: `1px solid ${palette.border}`,
+    display: "flex",
+    alignItems: "center",
+    gap: spacing.unit * 2,
+    boxSizing: "border-box",
+    minWidth: 0,
+  };
+
   if (isDraft && draftDm) {
     const hint = draftDm.displayNameHint.trim() || draftDm.peerUserId;
-    const initials = hint
-      .split(/\s+/)
-      .map((w) => w[0])
-      .join("")
-      .slice(0, 2)
-      .toUpperCase() || "?";
+    const initials = displayInitials(hint);
 
     return (
       <div ref={containerRef} style={{
@@ -207,17 +223,7 @@ export default function ChatView({
         minWidth: 0,
         overflow: "hidden",
       }}>
-        <div style={{
-          padding: `0 ${spacing.unit * 4}px`,
-          height: spacing.headerHeight,
-          borderBottom: `1px solid ${palette.border}`,
-          display: "flex",
-          position: "relative",
-          alignItems: "center",
-          gap: spacing.unit * 2,
-          boxSizing: "border-box",
-          minWidth: 0,
-        }}>
+        <div style={dmBannerStyle}>
           <button
             type="button"
             onClick={() => onCancelDraftDm?.()}
@@ -266,7 +272,7 @@ export default function ChatView({
               fontSize: typography.fontSizeSmall,
               color: palette.textSecondary,
             }}>
-              Direct message · no room until you send
+              Direct message
             </div>
           </div>
           <MessageCircle size={20} color={palette.textSecondary} style={{ flexShrink: 0 }} />
@@ -323,22 +329,12 @@ export default function ChatView({
       minWidth: 0,
       overflow: "hidden",
     }}>
-      {/* Channel header */}
-      <div style={{
-        padding: `0 ${spacing.unit * 4}px`,
-        height: spacing.headerHeight,
-        borderBottom: `1px solid ${palette.border}`,
-        display: "flex",
-        position: "relative",
-        alignItems: "center",
-        gap: spacing.unit * 3,
-        boxSizing: "border-box",
-        minWidth: 0,
-      }}>
-        {activeRoom.isDirect ? (
+      {/* Channel header — 1:1 DM matches draft banner (no member list toggle) */}
+      {activeRoom.isDirect ? (
+        <div style={dmBannerStyle}>
           <div style={{
-            width: 28,
-            height: 28,
+            width: 32,
+            height: 32,
             borderRadius: "50%",
             backgroundColor: activeRoom.dmPeerUserId
               ? userInitialAvatarBackground(activeRoom.dmPeerUserId, resolvedColorScheme)
@@ -347,7 +343,7 @@ export default function ChatView({
             alignItems: "center",
             justifyContent: "center",
             flexShrink: 0,
-            fontSize: 11,
+            fontSize: typography.fontSizeSmall,
             fontWeight: typography.fontWeightBold,
             color: palette.textPrimary,
             overflow: "hidden",
@@ -359,49 +355,80 @@ export default function ChatView({
                 style={{ width: "100%", height: "100%", objectFit: "cover" }}
               />
             ) : (
-              (activeRoom.name || "?").slice(0, 2).toUpperCase()
+              displayInitials(activeRoom.name || "?")
             )}
           </div>
-        ) : (
-          <Hash size={20} color={palette.textSecondary} style={{ flexShrink: 0 }} />
-        )}
-        <span style={{
-          fontWeight: typography.fontWeightBold,
-          color: palette.textHeading,
-          fontSize: typography.fontSizeBase,
-          flex: 1,
+          <div style={{ flex: 1, minWidth: 0 }}>
+            <div style={{
+              fontWeight: typography.fontWeightBold,
+              color: palette.textHeading,
+              fontSize: typography.fontSizeBase,
+              overflow: "hidden",
+              textOverflow: "ellipsis",
+              whiteSpace: "nowrap",
+            }}>
+              {activeRoom.name}
+            </div>
+            <div style={{
+              fontSize: typography.fontSizeSmall,
+              color: palette.textSecondary,
+            }}>
+              Direct message
+            </div>
+          </div>
+          <MessageCircle size={20} color={palette.textSecondary} style={{ flexShrink: 0 }} />
+        </div>
+      ) : (
+        <div style={{
+          padding: `0 ${spacing.unit * 4}px`,
+          height: spacing.headerHeight,
+          borderBottom: `1px solid ${palette.border}`,
+          display: "flex",
+          position: "relative",
+          alignItems: "center",
+          gap: spacing.unit * 3,
+          boxSizing: "border-box",
           minWidth: 0,
-          overflow: "hidden",
-          textOverflow: "ellipsis",
-          whiteSpace: "nowrap",
-          paddingRight: spacing.unit * 8,
         }}>
-          {activeRoom.name}
-        </span>
-        <button
-          onClick={() => setShowUsers((prev) => !prev)}
-          title="Toggle member list"
-          style={{
-            background: "none",
-            border: "none",
-            cursor: "pointer",
-            padding: spacing.unit,
-            borderRadius: spacing.unit,
-            display: "flex",
-            alignItems: "center",
-            justifyContent: "center",
-            flexShrink: 0,
-            position: "absolute",
-            right: spacing.unit * 2,
-          }}
-        >
-          <Users
-            size={20}
-            color={showUsers ? palette.textHeading : palette.textSecondary}
-            fontWeight={showUsers ? typography.fontWeightBold : typography.fontWeightNormal}
-          />
-        </button>
-      </div>
+          <Hash size={20} color={palette.textSecondary} style={{ flexShrink: 0 }} />
+          <span style={{
+            fontWeight: typography.fontWeightBold,
+            color: palette.textHeading,
+            fontSize: typography.fontSizeBase,
+            flex: 1,
+            minWidth: 0,
+            overflow: "hidden",
+            textOverflow: "ellipsis",
+            whiteSpace: "nowrap",
+            paddingRight: spacing.unit * 8,
+          }}>
+            {activeRoom.name}
+          </span>
+          <button
+            onClick={() => setShowUsers((prev) => !prev)}
+            title="Toggle member list"
+            style={{
+              background: "none",
+              border: "none",
+              cursor: "pointer",
+              padding: spacing.unit,
+              borderRadius: spacing.unit,
+              display: "flex",
+              alignItems: "center",
+              justifyContent: "center",
+              flexShrink: 0,
+              position: "absolute",
+              right: spacing.unit * 2,
+            }}
+          >
+            <Users
+              size={20}
+              color={showUsers ? palette.textHeading : palette.textSecondary}
+              fontWeight={showUsers ? typography.fontWeightBold : typography.fontWeightNormal}
+            />
+          </button>
+        </div>
+      )}
 
       {/* Content area: messages + optional user menu */}
       <div style={{
@@ -451,8 +478,8 @@ export default function ChatView({
           </div>
         </div>
 
-        {/* User menu panel with resizable inside border */}
-        {showUsers && (
+        {/* User menu panel with resizable inside border (not for 1:1 DMs) */}
+        {showUsers && !activeRoom.isDirect && (
           <div style={{
             position: "relative",
             flexShrink: 0,

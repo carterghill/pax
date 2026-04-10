@@ -6,6 +6,7 @@ import InvitationView from "../layouts/InvitationView";
 import SpaceHomeView from "../layouts/SpaceHomeView";
 import type { RoomsForLayout } from "../hooks/useRooms";
 import type { RoomsChangedPayload } from "../types/roomsChanged";
+import type { Room } from "../types/matrix";
 import { usePresence } from "../hooks/usePresence";
 import { useVoiceParticipants } from "../hooks/useVoiceParticipants";
 import { useVoiceCall } from "../hooks/useVoiceCall";
@@ -16,6 +17,7 @@ import SettingsDialog from "../components/SettingsDialog";
 import {
   VOICE_ROOM_TYPE,
   compareByDisplayThenKey,
+  pendingDmRoomId,
   voiceStateLookupKeysForLiveKitIdentity,
 } from "../utils/matrix";
 import { useLivekitVoiceSnapshots } from "../hooks/useLivekitVoiceSnapshots";
@@ -204,9 +206,33 @@ export default function MainLayout({
   }, [childJoinedSubspaces, roomsBySpace]);
 
   const visibleRooms = useMemo(() => {
-    if (!activeSpaceId) return roomsBySpace(activeSpaceId);
-    return roomsBySpace(activeSpaceId).filter((r) => !subSpaceRoomIdSet.has(r.id));
-  }, [activeSpaceId, roomsBySpace, subSpaceRoomIdSet]);
+    let base: Room[];
+    if (!activeSpaceId) {
+      base = roomsBySpace(activeSpaceId);
+    } else {
+      base = roomsBySpace(activeSpaceId).filter((r) => !subSpaceRoomIdSet.has(r.id));
+    }
+    if (!activeSpaceId && pendingDm) {
+      const fakeId = pendingDmRoomId(pendingDm.peerUserId);
+      if (!base.some((r) => r.id === fakeId)) {
+        const fake: Room = {
+          id: fakeId,
+          name: pendingDm.displayNameHint,
+          avatarUrl: null,
+          isSpace: false,
+          parentSpaceIds: [],
+          roomType: null,
+          membership: "joined",
+          isDirect: true,
+          dmPeerUserId: pendingDm.peerUserId,
+        };
+        const merged = [...base, fake];
+        merged.sort((a, b) => compareByDisplayThenKey(a.name, a.id, b.name, b.id));
+        return merged;
+      }
+    }
+    return base;
+  }, [activeSpaceId, pendingDm, roomsBySpace, subSpaceRoomIdSet]);
 
   const subSpaceSections = useMemo(
     () =>
@@ -220,6 +246,10 @@ export default function MainLayout({
   );
 
   const activeRoom = activeRoomId ? getRoom(activeRoomId) : null;
+
+  const draftRoomId = pendingDm ? pendingDmRoomId(pendingDm.peerUserId) : null;
+  const showingDraftDm =
+    !!pendingDm && draftRoomId !== null && activeRoomId === draftRoomId;
 
   // Collect voice room IDs in the current space for participant tracking
   const voiceRoomIds = useMemo(() => {
@@ -293,7 +323,12 @@ export default function MainLayout({
   }, [setActiveRoomId, getRoom, connectedVoiceRoomId, connectVoiceCall]);
 
   const handleStartDirectMessage = useCallback((peerUserId: string, displayNameHint: string) => {
-    setPendingDm({ peerUserId, displayNameHint });
+    const draftId = pendingDmRoomId(peerUserId);
+    startTransition(() => {
+      setPendingDm({ peerUserId, displayNameHint });
+      setActiveSpaceId(null);
+      setActiveRoomBySpace((prev) => ({ ...prev, "": draftId }));
+    });
   }, []);
 
   const handleDraftDmResolved = useCallback(
@@ -306,7 +341,12 @@ export default function MainLayout({
   );
 
   const handleCancelDraftDm = useCallback(() => {
-    setPendingDm(null);
+    setPendingDm((prev) => {
+      if (!prev) return null;
+      const did = pendingDmRoomId(prev.peerUserId);
+      setActiveRoomBySpace((p) => (p[""] === did ? { ...p, "": null } : p));
+      return null;
+    });
   }, []);
 
   const handleOpenSettings = useCallback(() => {
@@ -428,7 +468,7 @@ export default function MainLayout({
           color: palette.textPrimary,
           display: "flex",
         }}>
-          {pendingDm ? (
+          {showingDraftDm && pendingDm ? (
             <ChatView
               draftDm={pendingDm}
               userId={userId}

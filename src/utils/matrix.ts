@@ -128,3 +128,14 @@ export const SPACE_ROOM_TYPE = "m.space";
    add(localpartFromUserId(mxid.startsWith("@") ? mxid : `@${mxid}`));
    return [...keys];
  }
+
+/** Synthetic room id for a DM draft before the Matrix room exists (must not collide with real ids). */
+export const PENDING_DM_ROOM_PREFIX = "__pax_dm_draft:";
+
+export function pendingDmRoomId(peerUserId: string): string {
+  return `${PENDING_DM_ROOM_PREFIX}${peerUserId}`;
+}
+
+export function isPendingDmRoomId(roomId: string): boolean {
+  return roomId.startsWith(PENDING_DM_ROOM_PREFIX);
+}
