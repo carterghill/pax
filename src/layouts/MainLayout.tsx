@@ -290,6 +290,14 @@ export default function MainLayout({
     }
   }, [setActiveRoomId, getRoom, connectedVoiceRoomId, connectVoiceCall]);
 
+  const handleOpenDirectMessage = useCallback(
+    async (dmRoomId: string) => {
+      await fetchRooms();
+      setActiveRoomId(dmRoomId);
+    },
+    [fetchRooms, setActiveRoomId],
+  );
+
   const handleOpenSettings = useCallback(() => {
     setSettingsOpen(true);
   }, []);
@@ -428,6 +436,7 @@ export default function MainLayout({
                 const clamped = Math.max(MIN_USER_MENU_WIDTH, Math.min(MAX_USER_MENU_WIDTH, next));
                 setUserMenuWidth(clamped);
               }}
+              onOpenDirectMessage={handleOpenDirectMessage}
             />
           ) : activeSpace && activeSpace.membership === "invited" ? (
             <InvitationView room={activeSpace} onJoined={fetchRooms} />

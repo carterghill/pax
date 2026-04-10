@@ -20,6 +20,7 @@ interface ChatViewProps {
   userId: string;
   userMenuWidth: number;
   onUserMenuWidthChange: (width: number) => void;
+  onOpenDirectMessage: (roomId: string) => void | Promise<void>;
 }
 
 interface TypingPayload {
@@ -118,6 +119,7 @@ export default function ChatView({
   userId,
   userMenuWidth,
   onUserMenuWidthChange,
+  onOpenDirectMessage,
 }: ChatViewProps) {
   const {
     messages,
@@ -290,7 +292,12 @@ export default function ChatView({
             minHeight: 0,
             height: "100%",
           }}>
-            <UserMenu width={userMenuWidth} roomId={room.id} userId={userId} />
+            <UserMenu
+              width={userMenuWidth}
+              roomId={room.id}
+              userId={userId}
+              onOpenDirectMessage={onOpenDirectMessage}
+            />
             <div
               onMouseDown={userMenuResize.onMouseDown}
               onDoubleClick={() => onUserMenuWidthChange(USER_MENU_DEFAULT_WIDTH)}

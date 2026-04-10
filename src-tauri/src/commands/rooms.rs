@@ -709,6 +709,29 @@ pub async fn join_room(
     Ok(room.room_id().to_string())
 }
 
+/// Return an existing 1:1 DM with `peer_user_id`, or create one (invite + `is_direct`).
+#[tauri::command]
+pub async fn open_direct_message(
+    state: State<'_, Arc<AppState>>,
+    peer_user_id: String,
+) -> Result<String, String> {
+    let client = super::get_client(&state).await?;
+    let me = client.user_id().ok_or("Not logged in")?;
+    let peer = matrix_sdk::ruma::UserId::parse(peer_user_id.trim())
+        .map_err(|e| format!("Invalid user ID: {e}"))?;
+    if peer == me {
+        return Err("You cannot start a direct message with yourself.".to_string());
+    }
+    if let Some(room) = client.get_dm_room(&peer) {
+        return Ok(room.room_id().to_string());
+    }
+    let room = client
+        .create_dm(&peer)
+        .await
+        .map_err(|e| format!("Failed to create direct message: {}", fmt_error_chain(&e)))?;
+    Ok(room.room_id().to_string())
+}
+
 #[tauri::command]
 pub async fn leave_room(
     state: State<'_, Arc<AppState>>,

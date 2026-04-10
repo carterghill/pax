@@ -247,6 +247,7 @@ pub fn run() {
             commands::rooms::get_rooms,
             commands::rooms::current_homeserver,
             commands::rooms::join_room,
+            commands::rooms::open_direct_message,
             commands::rooms::leave_room,
             commands::rooms::knock_room,
             commands::rooms::get_space_info,

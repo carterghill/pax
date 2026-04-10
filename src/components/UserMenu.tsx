@@ -14,6 +14,8 @@ interface UserMenuProps {
   width: number;
   roomId: string;
   userId: string;
+  /** After resolving or creating a 1:1 DM, switch the main view to that room. */
+  onOpenDirectMessage: (roomId: string) => void | Promise<void>;
 }
 
 interface KnockMember {
@@ -137,7 +139,7 @@ function computeWindow(
   return [start, end];
 }
 
-export default function UserMenu({ width, roomId, userId }: UserMenuProps) {
+export default function UserMenu({ width, roomId, userId, onOpenDirectMessage }: UserMenuProps) {
   const { palette, typography, spacing, resolvedColorScheme } = useTheme();
   const { members, loading, avatarOverrides } = useRoomMembers(roomId);
   const { effectivePresence } = usePresenceContext();
@@ -149,6 +151,7 @@ export default function UserMenu({ width, roomId, userId }: UserMenuProps) {
     x: number; y: number; userId: string; displayName: string;
   } | null>(null);
   const [profileUserId, setProfileUserId] = useState<string | null>(null);
+  const [dmOpening, setDmOpening] = useState(false);
   const activeRoomRef = useRef(roomId);
   activeRoomRef.current = roomId;
 
@@ -218,6 +221,7 @@ export default function UserMenu({ width, roomId, userId }: UserMenuProps) {
     setKnockData(null);
     setMemberContextMenu(null);
     setProfileUserId(null);
+    setDmOpening(false);
     fetchKnocks();
   }, [roomId, fetchKnocks]);
 
@@ -253,6 +257,21 @@ export default function UserMenu({ width, roomId, userId }: UserMenuProps) {
       setMemberContextMenu({ x: e.clientX, y: e.clientY, userId: uid, displayName });
     }, []
   );
+
+  const handleOpenDirectMessage = useCallback(async () => {
+    if (!memberContextMenu) return;
+    const peerId = memberContextMenu.userId;
+    setDmOpening(true);
+    try {
+      const rid = await invoke<string>("open_direct_message", { peerUserId: peerId });
+      setMemberContextMenu(null);
+      await onOpenDirectMessage(rid);
+    } catch (e) {
+      console.error("Failed to open direct message:", e);
+    } finally {
+      setDmOpening(false);
+    }
+  }, [memberContextMenu, onOpenDirectMessage]);
 
   // Override current user's presence locally
   const displayMembers = useMemo(
@@ -447,6 +466,12 @@ export default function UserMenu({ width, roomId, userId }: UserMenuProps) {
             setMemberContextMenu(null);
             setProfileUserId(id);
           }}
+          onSendMessage={
+            memberContextMenu.userId.trim().toLowerCase() !== userId.trim().toLowerCase()
+              ? handleOpenDirectMessage
+              : undefined
+          }
+          sendMessageBusy={dmOpening}
         />
       )}
       {profileUserId && (
