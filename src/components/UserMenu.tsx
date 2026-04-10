@@ -5,6 +5,7 @@ import { Check, X, Loader2 } from "lucide-react";
 import { useTheme } from "../theme/ThemeContext";
 import { useRoomMembers } from "../hooks/useRoomMembers";
 import { usePresenceContext } from "../hooks/PresenceContext";
+import MemberContextMenu from "./MemberContextMenu";
 
 interface UserMenuProps {
   width: number;
@@ -40,6 +41,12 @@ export default function UserMenu({ width, roomId, userId }: UserMenuProps) {
   // ── Knock requests state ──
   const [knockData, setKnockData] = useState<KnockMembersResponse | null>(null);
   const [actionInProgress, setActionInProgress] = useState<string | null>(null);
+  const [memberContextMenu, setMemberContextMenu] = useState<{
+    x: number;
+    y: number;
+    userId: string;
+    displayName: string;
+  } | null>(null);
   const activeRoomRef = useRef(roomId);
   activeRoomRef.current = roomId;
 
@@ -60,6 +67,7 @@ export default function UserMenu({ width, roomId, userId }: UserMenuProps) {
   // Reset + fetch on room change
   useEffect(() => {
     setKnockData(null);
+    setMemberContextMenu(null);
     fetchKnocks();
   }, [roomId, fetchKnocks]);
 
@@ -125,6 +133,7 @@ export default function UserMenu({ width, roomId, userId }: UserMenuProps) {
   const showKnocks = knockMembers.length > 0 && (canInvite || canKick);
 
   return (
+    <>
     <div style={{
       width,
       minWidth: width,
@@ -325,6 +334,15 @@ export default function UserMenu({ width, roomId, userId }: UserMenuProps) {
                   margin: `0 ${spacing.unit * 2}px`,
                   opacity: member.presence === "offline" ? 0.5 : 1,
                 }}
+                onContextMenu={(e) => {
+                  e.preventDefault();
+                  setMemberContextMenu({
+                    x: e.clientX,
+                    y: e.clientY,
+                    userId: member.userId,
+                    displayName: member.displayName ?? member.userId,
+                  });
+                }}
                 onMouseEnter={(e) => {
                   (e.currentTarget as HTMLDivElement).style.backgroundColor = palette.bgHover;
                 }}
@@ -389,5 +407,15 @@ export default function UserMenu({ width, roomId, userId }: UserMenuProps) {
         ))
       )}
     </div>
+    {memberContextMenu && (
+      <MemberContextMenu
+        x={memberContextMenu.x}
+        y={memberContextMenu.y}
+        displayName={memberContextMenu.displayName}
+        userId={memberContextMenu.userId}
+        onClose={() => setMemberContextMenu(null)}
+      />
+    )}
+    </>
   );
 }
