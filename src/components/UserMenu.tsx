@@ -1,4 +1,4 @@
-import { useState, useEffect, useCallback, useRef } from "react";
+import { useState, useEffect, useCallback, useRef, useMemo, useDeferredValue } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { Check, X, Loader2 } from "lucide-react";
@@ -37,7 +37,15 @@ const presenceColor: Record<string, string> = {
 
 export default function UserMenu({ width, roomId, userId }: UserMenuProps) {
   const { palette, typography, spacing, resolvedColorScheme } = useTheme();
-  const { members, loading } = useRoomMembers(roomId);
+  const {
+    members,
+    loading,
+    listPartial,
+    cachedPresenceForHeader,
+    totalJoinedCount,
+  } = useRoomMembers(roomId);
+  /** Lets React yield so applying a huge member list does not block the main thread in one frame. */
+  const deferredMembers = useDeferredValue(members);
   const { effectivePresence } = usePresenceContext();
 
   // ── Knock requests state ──
@@ -116,19 +124,36 @@ export default function UserMenu({ width, roomId, userId }: UserMenuProps) {
   }, [roomId]);
 
   // Override the current user's presence with local intent (instant, no server round-trip)
-  const displayMembers = members.map((m) =>
+  const displayMembers = deferredMembers.map((m) =>
     m.userId === userId ? { ...m, presence: effectivePresence } : m
   );
 
-  // Group members by presence
+  /** Section header counts: use last full snapshot while list is capped so totals match room size. */
+  const presenceForGroupLabels = useMemo(() => {
+    if (listPartial && cachedPresenceForHeader) {
+      return cachedPresenceForHeader;
+    }
+    const online = displayMembers.filter((m) => m.presence === "online" || m.presence === "dnd").length;
+    const unavailable = displayMembers.filter((m) => m.presence === "unavailable").length;
+    const offline = displayMembers.filter((m) => m.presence === "offline").length;
+    return { online, unavailable, offline };
+  }, [listPartial, cachedPresenceForHeader, displayMembers]);
+
+  // Group members by presence (rows are always from the loaded slice only)
   const online = displayMembers.filter((m) => m.presence === "online" || m.presence === "dnd");
   const unavailable = displayMembers.filter((m) => m.presence === "unavailable");
   const offline = displayMembers.filter((m) => m.presence === "offline");
 
+  const showAwaySection =
+    unavailable.length > 0 ||
+    (listPartial && presenceForGroupLabels.unavailable > 0);
+
   const groups = [
-    { label: `Online — ${online.length}`, members: online },
-    ...(unavailable.length > 0 ? [{ label: `Away — ${unavailable.length}`, members: unavailable }] : []),
-    { label: `Offline — ${offline.length}`, members: offline },
+    { label: `Online — ${presenceForGroupLabels.online}`, members: online },
+    ...(showAwaySection
+      ? [{ label: `Away — ${presenceForGroupLabels.unavailable}`, members: unavailable }]
+      : []),
+    { label: `Offline — ${presenceForGroupLabels.offline}`, members: offline },
   ];
 
   const knockMembers = knockData?.members ?? [];
@@ -312,7 +337,17 @@ export default function UserMenu({ width, roomId, userId }: UserMenuProps) {
           Loading members...
         </div>
       ) : (
-        groups.map((group) => (
+        <>
+        {listPartial && totalJoinedCount > displayMembers.length && (
+          <div style={{
+            color: palette.textSecondary,
+            fontSize: typography.fontSizeSmall,
+            padding: `${spacing.unit * 2}px ${spacing.unit * 4}px ${spacing.unit * 3}px`,
+          }}>
+            Showing {displayMembers.length} of {totalJoinedCount} members
+          </div>
+        )}
+        {groups.map((group) => (
           <div key={group.label}>
             <div style={{
               padding: `${spacing.unit * 4}px ${spacing.unit * 4}px ${spacing.unit * 2}px`,
@@ -408,7 +443,8 @@ export default function UserMenu({ width, roomId, userId }: UserMenuProps) {
               </div>
             ))}
           </div>
-        ))
+        ))}
+        </>
       )}
     </div>
     {memberContextMenu && (

@@ -10,7 +10,7 @@ import { usePresence } from "../hooks/usePresence";
 import { useVoiceParticipants } from "../hooks/useVoiceParticipants";
 import { useVoiceCall } from "../hooks/useVoiceCall";
 import { PresenceContext } from "../hooks/PresenceContext";
-import { useState, useCallback, useMemo, useEffect } from "react";
+import { useState, useCallback, useMemo, useEffect, startTransition } from "react";
 import { useTheme } from "../theme/ThemeContext";
 import SettingsDialog from "../components/SettingsDialog";
 import {
@@ -109,17 +109,21 @@ export default function MainLayout({
   const activeRoomId = activeRoomBySpace[spaceKey] ?? null;
 
   const setActiveRoomId = useCallback((roomId: string | null) => {
-    setActiveRoomBySpace((prev) => ({ ...prev, [spaceKey]: roomId }));
+    startTransition(() => {
+      setActiveRoomBySpace((prev) => ({ ...prev, [spaceKey]: roomId }));
+    });
   }, [spaceKey]);
 
   // Clicking the already-active space clears room selection to show the space home
   const handleSelectSpace = useCallback((spaceId: string) => {
     const id = spaceId || null;
-    if (id === activeSpaceId) {
-      // Re-clicking same space: clear room selection
-      setActiveRoomBySpace((prev) => ({ ...prev, [spaceId || ""]: null }));
-    }
-    setActiveSpaceId(id);
+    startTransition(() => {
+      if (id === activeSpaceId) {
+        // Re-clicking same space: clear room selection
+        setActiveRoomBySpace((prev) => ({ ...prev, [spaceId || ""]: null }));
+      }
+      setActiveSpaceId(id);
+    });
   }, [activeSpaceId]);
 
   const { palette, spacing } = useTheme();

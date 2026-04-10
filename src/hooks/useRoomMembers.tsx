@@ -5,22 +5,68 @@ import {
   useCallback,
   useRef,
   useMemo,
+  startTransition,
 } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { RoomMember } from "../types/matrix";
+import {
+  dedupeMembersByUserId,
+  sortMembersForDisplay,
+  countPresenceForGroups,
+  processRoomMembersRaw,
+  type MemberPresenceCounts,
+} from "../utils/roomMembersProcess";
+import { processRoomMembersForFetch } from "../utils/roomMembersWorkerClient";
 
 interface PresencePayload {
   userId: string;
   presence: string;
 }
 
-/** In-memory cache — no quota limits, holds avatar data URLs across room switches. */
-const memberCache = new Map<string, RoomMember[]>();
+export type { MemberPresenceCounts };
+
+/** Keep at most this many members when the user leaves a room (reduces lag when returning). */
+const MAX_MEMBER_CACHE_OFFLINE = 20;
+
+interface MemberCacheEntry {
+  members: RoomMember[];
+  /** True when we only retained a small slice for performance after navigating away. */
+  partial: boolean;
+  /** Joined member count from the last full member list (kept when partial). */
+  totalJoinedCount?: number;
+  /** Presence distribution from the last full list (used for headers while partial). */
+  presenceCounts?: MemberPresenceCounts;
+}
+
+/** In-memory cache — trimmed when switching rooms so huge rooms don't freeze navigation. */
+const memberCache = new Map<string, MemberCacheEntry>();
+
+function shrinkMemberCacheForRoom(roomId: string) {
+  const entry = memberCache.get(roomId);
+  if (!entry || entry.partial) return;
+  const deduped = dedupeMembersByUserId(entry.members);
+  if (deduped.length <= MAX_MEMBER_CACHE_OFFLINE) return;
+  const sorted = sortMembersForDisplay(deduped);
+  const presenceCounts = countPresenceForGroups(deduped);
+  memberCache.set(roomId, {
+    members: sorted.slice(0, MAX_MEMBER_CACHE_OFFLINE),
+    partial: true,
+    totalJoinedCount: deduped.length,
+    presenceCounts,
+  });
+}
 
 export function useRoomMembers(roomId: string) {
   const [members, setMembers] = useState<RoomMember[]>([]);
   const [loading, setLoading] = useState(true);
+  /** True while we only have a capped slice; headers use cached totals. */
+  const [listPartial, setListPartial] = useState(false);
+  /** Snapshot from cache for section labels when listPartial (React state; Map is not reactive). */
+  const [cachedPresenceForHeader, setCachedPresenceForHeader] =
+    useState<MemberPresenceCounts | null>(null);
+  const [cachedTotalJoined, setCachedTotalJoined] = useState<number | null>(null);
+
   const hasFetched = useRef(false);
   const debounceRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   /** Ignore late responses when the user has switched to another room. */
@@ -32,45 +78,123 @@ export function useRoomMembers(roomId: string) {
     if (showLoading) setLoading(true);
 
     invoke<RoomMember[]>("get_room_members", { roomId: requestedRoomId })
-      .then((result) => {
+      .then(async (result) => {
         if (activeRoomIdRef.current !== requestedRoomId) return;
-        setMembers(result);
-        memberCache.set(requestedRoomId, result);
+
+        let processed: ReturnType<typeof processRoomMembersRaw>;
+        try {
+          processed = await processRoomMembersForFetch(result);
+        } catch {
+          processed = processRoomMembersRaw(result);
+        }
+
+        if (activeRoomIdRef.current !== requestedRoomId) return;
+
+        memberCache.set(requestedRoomId, {
+          members: processed.members,
+          partial: false,
+          totalJoinedCount: processed.totalJoinedCount,
+          presenceCounts: processed.presenceCounts,
+        });
+
         setLoading(false);
         hasFetched.current = true;
+
+        startTransition(() => {
+          setMembers(processed.members);
+          setListPartial(false);
+          setCachedPresenceForHeader(null);
+          setCachedTotalJoined(null);
+        });
       })
       .catch((e) => {
         if (activeRoomIdRef.current !== requestedRoomId) return;
         console.error("Failed to fetch room members:", e);
         setMembers([]);
+        setListPartial(false);
+        setCachedPresenceForHeader(null);
+        setCachedTotalJoined(null);
         setLoading(false);
       });
+  }, [roomId]);
+
+  // When leaving a room (switch room or unmount), cap cached members so returning doesn't lag.
+  useEffect(() => {
+    return () => {
+      shrinkMemberCacheForRoom(roomId);
+    };
   }, [roomId]);
 
   // Drop previous room's members before paint so we never flash or persist wrong data.
   useLayoutEffect(() => {
     setMembers([]);
     setLoading(true);
+    setListPartial(false);
+    setCachedPresenceForHeader(null);
+    setCachedTotalJoined(null);
     hasFetched.current = false;
   }, [roomId]);
 
-  // Initial load (prefer cache)
+  // Initial load (prefer cache; partial cache triggers a background full fetch)
   useEffect(() => {
-    const cached = memberCache.get(roomId);
+    const entry = memberCache.get(roomId);
 
-    if (cached) {
-      setMembers(cached);
-      setLoading(false);
-      hasFetched.current = true;
+    if (entry) {
+      const deduped = dedupeMembersByUserId(entry.members);
+      const sorted = sortMembersForDisplay(deduped);
+      startTransition(() => {
+        setMembers(sorted);
+      });
+      if (entry.partial) {
+        setListPartial(true);
+        setCachedPresenceForHeader(entry.presenceCounts ?? null);
+        setCachedTotalJoined(entry.totalJoinedCount ?? deduped.length);
+        setLoading(false);
+        hasFetched.current = true;
+        fetchMembers(false);
+      } else {
+        setListPartial(false);
+        setCachedPresenceForHeader(null);
+        setCachedTotalJoined(null);
+        setLoading(false);
+        hasFetched.current = true;
+      }
     } else {
       fetchMembers(true);
     }
   }, [roomId, fetchMembers]);
 
-  // Update cache when members change
+  // Keep cache aligned with in-memory list (presence patches, etc.)
   useEffect(() => {
     if (members.length === 0) return;
-    memberCache.set(roomId, members);
+    const cached = memberCache.get(roomId);
+    const partial =
+      cached?.partial === true && members.length <= MAX_MEMBER_CACHE_OFFLINE;
+
+    if (partial) {
+      memberCache.set(roomId, {
+        members,
+        partial: true,
+        totalJoinedCount: cached?.totalJoinedCount,
+        presenceCounts: cached?.presenceCounts,
+      });
+      return;
+    }
+
+    const deduped = dedupeMembersByUserId(members);
+    if (deduped.length !== members.length) {
+      startTransition(() => {
+        setMembers(sortMembersForDisplay(deduped));
+      });
+      return;
+    }
+
+    memberCache.set(roomId, {
+      members: deduped,
+      partial: false,
+      totalJoinedCount: deduped.length,
+      presenceCounts: countPresenceForGroups(deduped),
+    });
   }, [members, roomId]);
 
   // Silently re-fetch on rooms-changed, debounced
@@ -91,7 +215,7 @@ export function useRoomMembers(roomId: string) {
     };
   }, [fetchMembers]);
 
-  // Live presence updates — patch in place
+  // Live presence updates — patch in place; useMemo below re-sorts for display order
   useEffect(() => {
     const unlisten = listen<PresencePayload>("presence", (event) => {
       const { userId, presence } = event.payload;
@@ -108,20 +232,19 @@ export function useRoomMembers(roomId: string) {
     };
   }, []);
 
-  // Sort members
-  const sorted = useMemo(() => [...members].sort((a, b) => {
-    const order: Record<string, number> = { online: 0, unavailable: 1, offline: 2 };
+  const sorted = useMemo(() => sortMembersForDisplay(members), [members]);
 
-    const aOrder = order[a.presence] ?? 2;
-    const bOrder = order[b.presence] ?? 2;
+  const totalJoinedCount =
+    listPartial && cachedTotalJoined != null ? cachedTotalJoined : sorted.length;
 
-    if (aOrder !== bOrder) return aOrder - bOrder;
-
-    const aName = (a.displayName ?? a.userId).toLowerCase();
-    const bName = (b.displayName ?? b.userId).toLowerCase();
-
-    return aName.localeCompare(bName);
-  }), [members]);
-
-  return { members: sorted, loading };
+  return {
+    members: sorted,
+    loading,
+    /** True while only a capped slice is shown; full fetch is in flight or pending. */
+    listPartial,
+    /** For section headers when listPartial — distribution from last full list. */
+    cachedPresenceForHeader,
+    /** Total joined members (room size), including people not in the current slice. */
+    totalJoinedCount,
+  };
 }
