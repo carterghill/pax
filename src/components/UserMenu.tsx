@@ -37,21 +37,21 @@ const presenceColor: Record<string, string> = {
 };
 
 // ── Row heights (spacing.unit = 4) ──
-const MEMBER_HEIGHT = 44; // 6px pad top + 32px avatar + 6px pad bottom
-const HEADER_HEIGHT = 38; // 16px pad top + 14px text + 8px pad bottom
+const MEMBER_HEIGHT = 44;
+const HEADER_HEIGHT = 38;
 const OVERSCAN = 8;
 
-// ── Virtual row types ──
 type VRow =
   | { type: "header"; key: string; label: string }
   | { type: "member"; key: string; member: RoomMember };
 
 interface MemberRowProps {
   member: RoomMember;
+  avatarUrl: string | null;
   onContextMenu: (e: React.MouseEvent, userId: string, displayName: string) => void;
 }
 
-const MemberRow = memo(function MemberRow({ member, onContextMenu }: MemberRowProps) {
+const MemberRow = memo(function MemberRow({ member, avatarUrl, onContextMenu }: MemberRowProps) {
   const { palette, typography, spacing, resolvedColorScheme } = useTheme();
   return (
     <div
@@ -79,40 +79,24 @@ const MemberRow = memo(function MemberRow({ member, onContextMenu }: MemberRowPr
       }}
     >
       <div style={{ position: "relative", flexShrink: 0 }}>
-        {member.avatarUrl ? (
+        {avatarUrl ? (
           <img
-            src={member.avatarUrl}
+            src={avatarUrl}
             alt={member.displayName ?? member.userId}
-            style={{
-              display: "block",
-              width: 32,
-              height: 32,
-              borderRadius: "50%",
-              objectFit: "cover",
-            }}
+            style={{ display: "block", width: 32, height: 32, borderRadius: "50%", objectFit: "cover" }}
           />
         ) : (
           <div style={{
-            width: 32,
-            height: 32,
-            borderRadius: "50%",
+            width: 32, height: 32, borderRadius: "50%",
             backgroundColor: userInitialAvatarBackground(member.userId, resolvedColorScheme),
-            color: "#fff",
-            display: "flex",
-            alignItems: "center",
-            justifyContent: "center",
-            fontSize: typography.fontSizeSmall,
-            fontWeight: typography.fontWeightBold,
+            color: "#fff", display: "flex", alignItems: "center", justifyContent: "center",
+            fontSize: typography.fontSizeSmall, fontWeight: typography.fontWeightBold,
           }}>
             {(member.displayName ?? member.userId).charAt(0).toUpperCase()}
           </div>
         )}
         <div style={{
-          position: "absolute",
-          bottom: -1,
-          right: -1,
-          width: 10,
-          height: 10,
+          position: "absolute", bottom: -1, right: -1, width: 10, height: 10,
           borderRadius: "50%",
           backgroundColor: presenceColor[member.presence] ?? presenceColor.offline,
           border: `2px solid ${palette.bgSecondary}`,
@@ -120,12 +104,9 @@ const MemberRow = memo(function MemberRow({ member, onContextMenu }: MemberRowPr
       </div>
 
       <span style={{
-        fontSize: typography.fontSizeBase,
-        fontWeight: typography.fontWeightMedium,
+        fontSize: typography.fontSizeBase, fontWeight: typography.fontWeightMedium,
         color: member.presence === "offline" ? palette.textSecondary : palette.textPrimary,
-        overflow: "hidden",
-        textOverflow: "ellipsis",
-        whiteSpace: "nowrap",
+        overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap",
       }}>
         {member.displayName ?? member.userId}
       </span>
@@ -135,17 +116,14 @@ const MemberRow = memo(function MemberRow({ member, onContextMenu }: MemberRowPr
 
 export default function UserMenu({ width, roomId, userId }: UserMenuProps) {
   const { palette, typography, spacing, resolvedColorScheme } = useTheme();
-  const { members, loading } = useRoomMembers(roomId);
+  const { members, loading, avatarOverrides } = useRoomMembers(roomId);
   const { effectivePresence } = usePresenceContext();
 
   // ── Knock requests state ──
   const [knockData, setKnockData] = useState<KnockMembersResponse | null>(null);
   const [actionInProgress, setActionInProgress] = useState<string | null>(null);
   const [memberContextMenu, setMemberContextMenu] = useState<{
-    x: number;
-    y: number;
-    userId: string;
-    displayName: string;
+    x: number; y: number; userId: string; displayName: string;
   } | null>(null);
   const [profileUserId, setProfileUserId] = useState<string | null>(null);
   const activeRoomRef = useRef(roomId);
@@ -161,14 +139,11 @@ export default function UserMenu({ width, roomId, userId }: UserMenuProps) {
     if (el) setScrollTop(el.scrollTop);
   }, []);
 
-  // Measure container height
   useEffect(() => {
     const el = scrollRef.current;
     if (!el) return;
     const ro = new ResizeObserver((entries) => {
-      for (const entry of entries) {
-        setViewHeight(entry.contentRect.height);
-      }
+      for (const entry of entries) setViewHeight(entry.contentRect.height);
     });
     ro.observe(el);
     setViewHeight(el.clientHeight);
@@ -183,9 +158,8 @@ export default function UserMenu({ width, roomId, userId }: UserMenuProps) {
       })
       .catch((e) => {
         console.error("Failed to fetch knock members:", e);
-        if (activeRoomRef.current === target) {
+        if (activeRoomRef.current === target)
           setKnockData({ members: [], canInvite: false, canKick: false });
-        }
       });
   }, [roomId]);
 
@@ -208,11 +182,8 @@ export default function UserMenu({ width, roomId, userId }: UserMenuProps) {
       setKnockData((prev) =>
         prev ? { ...prev, members: prev.members.filter((m) => m.userId !== knockUserId) } : prev
       );
-    } catch (e) {
-      console.error("Failed to accept knock:", e);
-    } finally {
-      setActionInProgress(null);
-    }
+    } catch (e) { console.error("Failed to accept knock:", e); }
+    finally { setActionInProgress(null); }
   }, [roomId]);
 
   const handleDeny = useCallback(async (knockUserId: string) => {
@@ -222,18 +193,14 @@ export default function UserMenu({ width, roomId, userId }: UserMenuProps) {
       setKnockData((prev) =>
         prev ? { ...prev, members: prev.members.filter((m) => m.userId !== knockUserId) } : prev
       );
-    } catch (e) {
-      console.error("Failed to deny knock:", e);
-    } finally {
-      setActionInProgress(null);
-    }
+    } catch (e) { console.error("Failed to deny knock:", e); }
+    finally { setActionInProgress(null); }
   }, [roomId]);
 
   const handleMemberContextMenu = useCallback(
     (e: React.MouseEvent, uid: string, displayName: string) => {
       setMemberContextMenu({ x: e.clientX, y: e.clientY, userId: uid, displayName });
-    },
-    []
+    }, []
   );
 
   // Override current user's presence locally
@@ -243,6 +210,7 @@ export default function UserMenu({ width, roomId, userId }: UserMenuProps) {
   );
 
   // ── Build flat virtual row list with offsets ──
+  // This only re-runs when displayMembers changes (fetch or presence), NOT on avatar updates.
   const { rows, offsets, totalHeight } = useMemo(() => {
     const online = displayMembers.filter((m) => m.presence === "online" || m.presence === "dnd");
     const unavailable = displayMembers.filter((m) => m.presence === "unavailable");
@@ -259,9 +227,7 @@ export default function UserMenu({ width, roomId, userId }: UserMenuProps) {
     const r: VRow[] = [];
     for (const g of groups) {
       r.push({ type: "header", key: `h:${g.label}`, label: g.label });
-      for (const m of g.members) {
-        r.push({ type: "member", key: m.userId, member: m });
-      }
+      for (const m of g.members) r.push({ type: "member", key: m.userId, member: m });
     }
 
     const o = new Float64Array(r.length);
@@ -270,15 +236,12 @@ export default function UserMenu({ width, roomId, userId }: UserMenuProps) {
       o[i] = h;
       h += r[i].type === "header" ? HEADER_HEIGHT : MEMBER_HEIGHT;
     }
-
     return { rows: r, offsets: o, totalHeight: h };
   }, [displayMembers]);
 
   // ── Compute visible window ──
   const { startIdx, endIdx } = useMemo(() => {
     if (rows.length === 0) return { startIdx: 0, endIdx: -1 };
-
-    // Binary search for first visible row
     let lo = 0, hi = rows.length - 1;
     while (lo < hi) {
       const mid = (lo + hi) >>> 1;
@@ -287,13 +250,10 @@ export default function UserMenu({ width, roomId, userId }: UserMenuProps) {
       else hi = mid;
     }
     const start = Math.max(0, lo - OVERSCAN);
-
-    // Find last visible
     const bottomEdge = scrollTop + viewHeight;
     let end = lo;
     while (end < rows.length && offsets[end] < bottomEdge) end++;
     end = Math.min(rows.length - 1, end + OVERSCAN);
-
     return { startIdx: start, endIdx: end };
   }, [rows, offsets, scrollTop, viewHeight]);
 
@@ -308,15 +268,9 @@ export default function UserMenu({ width, roomId, userId }: UserMenuProps) {
         ref={scrollRef}
         onScroll={handleScroll}
         style={{
-          width,
-          minWidth: width,
-          minHeight: 0,
-          height: "100%",
-          flexShrink: 0,
-          backgroundColor: palette.bgSecondary,
-          borderLeft: `1px solid ${palette.border}`,
-          overflowY: "auto",
-          boxSizing: "border-box",
+          width, minWidth: width, minHeight: 0, height: "100%", flexShrink: 0,
+          backgroundColor: palette.bgSecondary, borderLeft: `1px solid ${palette.border}`,
+          overflowY: "auto", boxSizing: "border-box",
         }}
       >
         {/* ── Knock Requests (not virtualized — always small) ── */}
@@ -324,36 +278,23 @@ export default function UserMenu({ width, roomId, userId }: UserMenuProps) {
           <div style={{ marginBottom: spacing.unit * 2, paddingTop: spacing.unit * 4 }}>
             <div style={{
               padding: `0 ${spacing.unit * 4}px ${spacing.unit * 2}px`,
-              fontSize: typography.fontSizeSmall,
-              fontWeight: typography.fontWeightBold,
-              color: palette.textSecondary,
-              textTransform: "uppercase",
-              letterSpacing: 0.5,
+              fontSize: typography.fontSizeSmall, fontWeight: typography.fontWeightBold,
+              color: palette.textSecondary, textTransform: "uppercase", letterSpacing: 0.5,
             }}>
               Requests — {knockMembers.length}
             </div>
-
             {knockMembers.map((knock) => {
               const isActing = actionInProgress === knock.userId;
               return (
-                <div
-                  key={knock.userId}
-                  style={{
-                    display: "flex",
-                    alignItems: "center",
-                    gap: spacing.unit * 2,
-                    padding: `${spacing.unit * 2}px ${spacing.unit * 4}px`,
-                    margin: `0 ${spacing.unit * 2}px`,
-                    borderRadius: spacing.unit,
-                  }}
-                >
+                <div key={knock.userId} style={{
+                  display: "flex", alignItems: "center", gap: spacing.unit * 2,
+                  padding: `${spacing.unit * 2}px ${spacing.unit * 4}px`,
+                  margin: `0 ${spacing.unit * 2}px`, borderRadius: spacing.unit,
+                }}>
                   <div style={{ flexShrink: 0 }}>
                     {knock.avatarUrl ? (
-                      <img
-                        src={knock.avatarUrl}
-                        alt={knock.displayName ?? knock.userId}
-                        style={{ display: "block", width: 32, height: 32, borderRadius: "50%", objectFit: "cover" }}
-                      />
+                      <img src={knock.avatarUrl} alt={knock.displayName ?? knock.userId}
+                        style={{ display: "block", width: 32, height: 32, borderRadius: "50%", objectFit: "cover" }} />
                     ) : (
                       <div style={{
                         width: 32, height: 32, borderRadius: "50%",
@@ -415,8 +356,7 @@ export default function UserMenu({ width, roomId, userId }: UserMenuProps) {
         {/* ── Member list (virtualized) ── */}
         {loading ? (
           <div style={{
-            color: palette.textSecondary,
-            fontSize: typography.fontSizeSmall,
+            color: palette.textSecondary, fontSize: typography.fontSizeSmall,
             padding: `${spacing.unit * 6}px ${spacing.unit * 4}px`,
           }}>
             Loading members...
@@ -429,40 +369,24 @@ export default function UserMenu({ width, roomId, userId }: UserMenuProps) {
 
               if (row.type === "header") {
                 return (
-                  <div
-                    key={row.key}
-                    style={{
-                      position: "absolute",
-                      top,
-                      left: 0,
-                      right: 0,
-                      height: HEADER_HEIGHT,
-                      padding: `${spacing.unit * 4}px ${spacing.unit * 4}px ${spacing.unit * 2}px`,
-                      fontSize: typography.fontSizeSmall,
-                      fontWeight: typography.fontWeightBold,
-                      color: palette.textSecondary,
-                      textTransform: "uppercase",
-                      letterSpacing: 0.5,
-                      boxSizing: "border-box",
-                    }}
-                  >
+                  <div key={row.key} style={{
+                    position: "absolute", top, left: 0, right: 0, height: HEADER_HEIGHT,
+                    padding: `${spacing.unit * 4}px ${spacing.unit * 4}px ${spacing.unit * 2}px`,
+                    fontSize: typography.fontSizeSmall, fontWeight: typography.fontWeightBold,
+                    color: palette.textSecondary, textTransform: "uppercase", letterSpacing: 0.5,
+                    boxSizing: "border-box",
+                  }}>
                     {row.label}
                   </div>
                 );
               }
 
+              // Resolve avatar: override (from background fetch) > initial (from Rust cache) > null
+              const resolvedAvatar = avatarOverrides.get(row.member.userId) ?? row.member.avatarUrl;
+
               return (
-                <div
-                  key={row.key}
-                  style={{
-                    position: "absolute",
-                    top,
-                    left: 0,
-                    right: 0,
-                    height: MEMBER_HEIGHT,
-                  }}
-                >
-                  <MemberRow member={row.member} onContextMenu={handleMemberContextMenu} />
+                <div key={row.key} style={{ position: "absolute", top, left: 0, right: 0, height: MEMBER_HEIGHT }}>
+                  <MemberRow member={row.member} avatarUrl={resolvedAvatar} onContextMenu={handleMemberContextMenu} />
                 </div>
               );
             })}
@@ -472,10 +396,8 @@ export default function UserMenu({ width, roomId, userId }: UserMenuProps) {
 
       {memberContextMenu && (
         <MemberContextMenu
-          x={memberContextMenu.x}
-          y={memberContextMenu.y}
-          displayName={memberContextMenu.displayName}
-          userId={memberContextMenu.userId}
+          x={memberContextMenu.x} y={memberContextMenu.y}
+          displayName={memberContextMenu.displayName} userId={memberContextMenu.userId}
           onClose={() => setMemberContextMenu(null)}
           onProfile={() => {
             const id = memberContextMenu.userId;
@@ -486,10 +408,8 @@ export default function UserMenu({ width, roomId, userId }: UserMenuProps) {
       )}
       {profileUserId && (
         <UserProfileDialog
-          roomId={roomId}
-          userId={profileUserId}
-          currentUserId={userId}
-          onClose={() => setProfileUserId(null)}
+          roomId={roomId} userId={profileUserId}
+          currentUserId={userId} onClose={() => setProfileUserId(null)}
         />
       )}
     </>

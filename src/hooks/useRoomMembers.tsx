@@ -39,19 +39,22 @@ function sortMembersForDisplay(members: RoomMember[]): RoomMember[] {
   });
 }
 
-/** Simple cache — last fetched member list per room. Written only on fetch, not on every event. */
+/** Simple cache — last fetched member list per room. */
 const memberCache = new Map<string, RoomMember[]>();
 
 export function useRoomMembers(roomId: string) {
+  // ── Members state (triggers sort/filter pipeline — only changes on fetch or presence) ──
   const [members, setMembers] = useState<RoomMember[]>([]);
   const [loading, setLoading] = useState(true);
+
+  // ── Avatar overrides (cheap to update — does NOT trigger sort/filter) ──
+  const [avatarOverrides, setAvatarOverrides] = useState<Map<string, string>>(new Map());
 
   const hasFetched = useRef(false);
   const debounceRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const activeRoomIdRef = useRef(roomId);
   activeRoomIdRef.current = roomId;
 
-  /** Set of userIds in the current member list — for fast "is this user relevant?" checks. */
   const memberIdsRef = useRef<Set<string>>(new Set());
 
   const fetchMembers = useCallback(
@@ -78,10 +81,10 @@ export function useRoomMembers(roomId: string) {
     [roomId]
   );
 
-  // On room switch: always clear synchronously to prevent wrong-room flash.
-  // Cache is restored in the useEffect below (after paint, non-blocking).
+  // Clear on room switch (sync, before paint — prevents wrong-room flash)
   useLayoutEffect(() => {
     setMembers([]);
+    setAvatarOverrides(new Map());
     setLoading(true);
     hasFetched.current = false;
     memberIdsRef.current = new Set();
@@ -94,14 +97,13 @@ export function useRoomMembers(roomId: string) {
       memberIdsRef.current = new Set(cached.map((m) => m.userId));
       setMembers(cached);
       setLoading(false);
-      // Still refresh in the background
       fetchMembers(false);
     } else {
       fetchMembers(true);
     }
   }, [roomId, fetchMembers]);
 
-  // Background re-fetch on rooms-changed, debounced
+  // Background re-fetch on rooms-changed
   useEffect(() => {
     const unlisten = listen("rooms-changed", () => {
       if (!hasFetched.current) return;
@@ -114,82 +116,86 @@ export function useRoomMembers(roomId: string) {
     };
   }, [fetchMembers]);
 
-  // ── Batched event patches (once per frame, skip non-members) ──
+  // ── Presence updates (affect sort order → update members state) ──
+  // Batched per frame, skip non-members.
   const pendingPresence = useRef<Map<string, string>>(new Map());
-  const pendingAvatars = useRef<Map<string, string>>(new Map());
-  const flushRaf = useRef<number | null>(null);
-
-  const scheduleFlush = useCallback(() => {
-    if (flushRaf.current != null) return;
-    flushRaf.current = requestAnimationFrame(() => {
-      flushRaf.current = null;
-      const pres = pendingPresence.current;
-      const av = pendingAvatars.current;
-      if (pres.size === 0 && av.size === 0) return;
-      const presSnap = new Map(pres);
-      const avSnap = new Map(av);
-      pres.clear();
-      av.clear();
-
-      setMembers((prev) => {
-        let changed = false;
-        const next = prev.map((m) => {
-          const newPres = presSnap.get(m.userId);
-          const newAv = avSnap.get(m.userId);
-          if (!newPres && !newAv) return m;
-          if (newPres && m.presence === newPres && !newAv) return m;
-          changed = true;
-          return {
-            ...m,
-            ...(newPres ? { presence: newPres } : undefined),
-            ...(newAv ? { avatarUrl: newAv } : undefined),
-          };
-        });
-        return changed ? next : prev;
-      });
-    });
-  }, []);
+  const presenceRaf = useRef<number | null>(null);
 
   useEffect(() => {
     const unlisten = listen<PresencePayload>("presence", (event) => {
       const { userId, presence } = event.payload;
-      // Skip if this user isn't in the current room's member list
       if (!memberIdsRef.current.has(userId)) return;
       pendingPresence.current.set(userId, presence);
-      scheduleFlush();
+
+      if (presenceRaf.current == null) {
+        presenceRaf.current = requestAnimationFrame(() => {
+          presenceRaf.current = null;
+          const patches = new Map(pendingPresence.current);
+          pendingPresence.current.clear();
+          if (patches.size === 0) return;
+
+          setMembers((prev) => {
+            let changed = false;
+            const next = prev.map((m) => {
+              const p = patches.get(m.userId);
+              if (!p || m.presence === p) return m;
+              changed = true;
+              return { ...m, presence: p };
+            });
+            if (!changed) return prev;
+            memberCache.set(activeRoomIdRef.current, next);
+            return next;
+          });
+        });
+      }
     });
-    return () => { unlisten.then((fn) => fn()); };
-  }, [scheduleFlush]);
+    return () => {
+      unlisten.then((fn) => fn());
+      if (presenceRaf.current != null) cancelAnimationFrame(presenceRaf.current);
+    };
+  }, []);
+
+  // ── Avatar backfill (does NOT affect sort → separate state, cheap updates) ──
+  const pendingAvatars = useRef<Map<string, string>>(new Map());
+  const avatarRaf = useRef<number | null>(null);
 
   useEffect(() => {
     const unlisten = listen<AvatarPayload>("member-avatar-updated", (event) => {
       const { roomId: rid, userId, avatarUrl } = event.payload;
       if (rid !== activeRoomIdRef.current) return;
       pendingAvatars.current.set(userId, avatarUrl);
-      scheduleFlush();
-    });
-    return () => { unlisten.then((fn) => fn()); };
-  }, [scheduleFlush]);
 
-  // Cleanup on room switch and unmount
-  useEffect(() => {
-    return () => {
-      pendingPresence.current.clear();
-      pendingAvatars.current.clear();
-      if (flushRaf.current != null) {
-        cancelAnimationFrame(flushRaf.current);
-        flushRaf.current = null;
+      if (avatarRaf.current == null) {
+        avatarRaf.current = requestAnimationFrame(() => {
+          avatarRaf.current = null;
+          const patches = new Map(pendingAvatars.current);
+          pendingAvatars.current.clear();
+          if (patches.size === 0) return;
+
+          setAvatarOverrides((prev) => {
+            const next = new Map(prev);
+            for (const [uid, url] of patches) next.set(uid, url);
+            return next;
+          });
+        });
       }
-    };
-  }, [roomId]);
-
-  useEffect(() => {
+    });
     return () => {
-      if (flushRaf.current != null) cancelAnimationFrame(flushRaf.current);
+      unlisten.then((fn) => fn());
+      if (avatarRaf.current != null) cancelAnimationFrame(avatarRaf.current);
     };
   }, []);
 
+  // Cleanup on unmount
+  useEffect(() => {
+    return () => {
+      if (presenceRaf.current != null) cancelAnimationFrame(presenceRaf.current);
+      if (avatarRaf.current != null) cancelAnimationFrame(avatarRaf.current);
+    };
+  }, []);
+
+  // Sort only re-runs when members change (fetch or presence), NOT on avatar updates.
   const sorted = useMemo(() => sortMembersForDisplay(members), [members]);
 
-  return { members: sorted, loading };
+  return { members: sorted, loading, avatarOverrides };
 }
