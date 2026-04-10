@@ -114,6 +114,29 @@ const MemberRow = memo(function MemberRow({ member, avatarUrl, onContextMenu }: 
   );
 });
 
+// ── Compute visible window from scroll position ──
+function computeWindow(
+  rows: VRow[],
+  offsets: Float64Array,
+  scrollTop: number,
+  viewHeight: number,
+): [number, number] {
+  if (rows.length === 0) return [0, -1];
+  let lo = 0, hi = rows.length - 1;
+  while (lo < hi) {
+    const mid = (lo + hi) >>> 1;
+    const rowBottom = offsets[mid] + (rows[mid].type === "header" ? HEADER_HEIGHT : MEMBER_HEIGHT);
+    if (rowBottom <= scrollTop) lo = mid + 1;
+    else hi = mid;
+  }
+  const start = Math.max(0, lo - OVERSCAN);
+  const bottomEdge = scrollTop + viewHeight;
+  let end = lo;
+  while (end < rows.length && offsets[end] < bottomEdge) end++;
+  end = Math.min(rows.length - 1, end + OVERSCAN);
+  return [start, end];
+}
+
 export default function UserMenu({ width, roomId, userId }: UserMenuProps) {
   const { palette, typography, spacing, resolvedColorScheme } = useTheme();
   const { members, loading, avatarOverrides } = useRoomMembers(roomId);
@@ -129,25 +152,53 @@ export default function UserMenu({ width, roomId, userId }: UserMenuProps) {
   const activeRoomRef = useRef(roomId);
   activeRoomRef.current = roomId;
 
-  // ── Virtualization scroll state ──
+  // ── Virtualization: scroll position lives in refs, not state ──
   const scrollRef = useRef<HTMLDivElement>(null);
-  const [scrollTop, setScrollTop] = useState(0);
-  const [viewHeight, setViewHeight] = useState(600);
+  const scrollTopRef = useRef(0);
+  const viewHeightRef = useRef(600);
+  // React state only for the visible window boundaries — updates only when they change
+  const [visibleWindow, setVisibleWindow] = useState<[number, number]>([0, -1]);
+  // Refs to current rows/offsets for the scroll handler (avoids stale closure)
+  const rowsRef = useRef<VRow[]>([]);
+  const offsetsRef = useRef<Float64Array>(new Float64Array(0));
+  const scrollRaf = useRef<number | null>(null);
+
+  const syncVisibleWindow = useCallback(() => {
+    const [s, e] = computeWindow(
+      rowsRef.current, offsetsRef.current, scrollTopRef.current, viewHeightRef.current,
+    );
+    setVisibleWindow((prev) => (prev[0] === s && prev[1] === e ? prev : [s, e]));
+  }, []);
 
   const handleScroll = useCallback(() => {
     const el = scrollRef.current;
-    if (el) setScrollTop(el.scrollTop);
-  }, []);
+    if (!el) return;
+    scrollTopRef.current = el.scrollTop;
+    if (scrollRaf.current == null) {
+      scrollRaf.current = requestAnimationFrame(() => {
+        scrollRaf.current = null;
+        syncVisibleWindow();
+      });
+    }
+  }, [syncVisibleWindow]);
 
   useEffect(() => {
     const el = scrollRef.current;
     if (!el) return;
     const ro = new ResizeObserver((entries) => {
-      for (const entry of entries) setViewHeight(entry.contentRect.height);
+      for (const entry of entries) {
+        viewHeightRef.current = entry.contentRect.height;
+        syncVisibleWindow();
+      }
     });
     ro.observe(el);
-    setViewHeight(el.clientHeight);
+    viewHeightRef.current = el.clientHeight;
     return () => ro.disconnect();
+  }, [syncVisibleWindow]);
+
+  // Cleanup RAF
+  useEffect(() => {
+    return () => { if (scrollRaf.current != null) cancelAnimationFrame(scrollRaf.current); };
   }, []);
 
   const fetchKnocks = useCallback(() => {
@@ -210,7 +261,6 @@ export default function UserMenu({ width, roomId, userId }: UserMenuProps) {
   );
 
   // ── Build flat virtual row list with offsets ──
-  // This only re-runs when displayMembers changes (fetch or presence), NOT on avatar updates.
   const { rows, offsets, totalHeight } = useMemo(() => {
     const online = displayMembers.filter((m) => m.presence === "online" || m.presence === "dnd");
     const unavailable = displayMembers.filter((m) => m.presence === "unavailable");
@@ -236,26 +286,20 @@ export default function UserMenu({ width, roomId, userId }: UserMenuProps) {
       o[i] = h;
       h += r[i].type === "header" ? HEADER_HEIGHT : MEMBER_HEIGHT;
     }
+
+    // Update refs for the scroll handler
+    rowsRef.current = r;
+    offsetsRef.current = o;
+
     return { rows: r, offsets: o, totalHeight: h };
   }, [displayMembers]);
 
-  // ── Compute visible window ──
-  const { startIdx, endIdx } = useMemo(() => {
-    if (rows.length === 0) return { startIdx: 0, endIdx: -1 };
-    let lo = 0, hi = rows.length - 1;
-    while (lo < hi) {
-      const mid = (lo + hi) >>> 1;
-      const rowBottom = offsets[mid] + (rows[mid].type === "header" ? HEADER_HEIGHT : MEMBER_HEIGHT);
-      if (rowBottom <= scrollTop) lo = mid + 1;
-      else hi = mid;
-    }
-    const start = Math.max(0, lo - OVERSCAN);
-    const bottomEdge = scrollTop + viewHeight;
-    let end = lo;
-    while (end < rows.length && offsets[end] < bottomEdge) end++;
-    end = Math.min(rows.length - 1, end + OVERSCAN);
-    return { startIdx: start, endIdx: end };
-  }, [rows, offsets, scrollTop, viewHeight]);
+  // Recompute visible window when rows change
+  useEffect(() => {
+    syncVisibleWindow();
+  }, [rows, syncVisibleWindow]);
+
+  const [startIdx, endIdx] = visibleWindow;
 
   const knockMembers = knockData?.members ?? [];
   const canInvite = knockData?.canInvite ?? false;
@@ -363,7 +407,7 @@ export default function UserMenu({ width, roomId, userId }: UserMenuProps) {
           </div>
         ) : (
           <div style={{ height: totalHeight, position: "relative" }}>
-            {rows.slice(startIdx, endIdx + 1).map((row, i) => {
+            {endIdx >= startIdx && rows.slice(startIdx, endIdx + 1).map((row, i) => {
               const idx = startIdx + i;
               const top = offsets[idx];
 
@@ -381,7 +425,6 @@ export default function UserMenu({ width, roomId, userId }: UserMenuProps) {
                 );
               }
 
-              // Resolve avatar: override (from background fetch) > initial (from Rust cache) > null
               const resolvedAvatar = avatarOverrides.get(row.member.userId) ?? row.member.avatarUrl;
 
               return (
