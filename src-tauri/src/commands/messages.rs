@@ -201,6 +201,38 @@ pub async fn send_message(
     Ok(())
 }
 
+/// Create a 1:1 DM only if one does not exist, then send the first (or next) text message.
+/// Returns the room id (Element-style: room may not exist until this runs).
+#[tauri::command]
+pub async fn send_first_direct_message(
+    state: State<'_, Arc<AppState>>,
+    peer_user_id: String,
+    body: String,
+) -> Result<String, String> {
+    let client = get_client(&state).await?;
+    let me = client.user_id().ok_or("Not logged in")?;
+    let peer = matrix_sdk::ruma::UserId::parse(peer_user_id.trim())
+        .map_err(|e| format!("Invalid user ID: {e}"))?;
+    if peer == me {
+        return Err("You cannot message yourself.".to_string());
+    }
+    let room = if let Some(r) = client.get_dm_room(&peer) {
+        r
+    } else {
+        client
+            .create_dm(&peer)
+            .await
+            .map_err(|e| format!("Failed to create direct message: {}", fmt_error_chain(&e)))?
+    };
+    let room_id = room.room_id().to_string();
+    let content =
+        matrix_sdk::ruma::events::room::message::RoomMessageEventContent::text_plain(&body);
+    room.send(content)
+        .await
+        .map_err(|e| format!("Failed to send message: {}", fmt_error_chain(&e)))?;
+    Ok(room_id)
+}
+
 #[tauri::command]
 pub async fn get_room_redaction_policy(
     state: State<'_, Arc<AppState>>,

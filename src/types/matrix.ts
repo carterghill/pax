@@ -9,6 +9,10 @@ export interface Room {
   topic?: string | null;
   /** "joined" or "invited" */
   membership: string;
+  /** 1:1 DM: `name` / `avatarUrl` are the peer; use for sidebar/home display. */
+  isDirect?: boolean;
+  dmPeerUserId?: string | null;
+  dmPeerPresence?: string | null;
 }
 
 export interface Message {

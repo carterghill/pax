@@ -104,6 +104,8 @@ export default function MainLayout({
   const [activeSpaceId, setActiveSpaceId] = useState<string | null>(null);
   const [activeRoomBySpace, setActiveRoomBySpace] = useState<Record<string, string | null>>({});
   const [settingsOpen, setSettingsOpen] = useState(false);
+  /** DM composer before the Matrix room exists (first send creates the room). */
+  const [pendingDm, setPendingDm] = useState<{ peerUserId: string; displayNameHint: string } | null>(null);
 
   const spaceKey = activeSpaceId ?? "";
   const activeRoomId = activeRoomBySpace[spaceKey] ?? null;
@@ -290,13 +292,22 @@ export default function MainLayout({
     }
   }, [setActiveRoomId, getRoom, connectedVoiceRoomId, connectVoiceCall]);
 
-  const handleOpenDirectMessage = useCallback(
+  const handleStartDirectMessage = useCallback((peerUserId: string, displayNameHint: string) => {
+    setPendingDm({ peerUserId, displayNameHint });
+  }, []);
+
+  const handleDraftDmResolved = useCallback(
     async (dmRoomId: string) => {
+      setPendingDm(null);
       await fetchRooms();
       setActiveRoomId(dmRoomId);
     },
     [fetchRooms, setActiveRoomId],
   );
+
+  const handleCancelDraftDm = useCallback(() => {
+    setPendingDm(null);
+  }, []);
 
   const handleOpenSettings = useCallback(() => {
     setSettingsOpen(true);
@@ -417,7 +428,20 @@ export default function MainLayout({
           color: palette.textPrimary,
           display: "flex",
         }}>
-          {activeRoom && activeRoom.membership === "invited" ? (
+          {pendingDm ? (
+            <ChatView
+              draftDm={pendingDm}
+              userId={userId}
+              userMenuWidth={userMenuWidth}
+              onUserMenuWidthChange={(next: number) => {
+                const clamped = Math.max(MIN_USER_MENU_WIDTH, Math.min(MAX_USER_MENU_WIDTH, next));
+                setUserMenuWidth(clamped);
+              }}
+              onStartDirectMessage={handleStartDirectMessage}
+              onDraftDmResolved={handleDraftDmResolved}
+              onCancelDraftDm={handleCancelDraftDm}
+            />
+          ) : activeRoom && activeRoom.membership === "invited" ? (
             <InvitationView room={activeRoom} onJoined={fetchRooms} />
           ) : activeRoom && activeRoom.roomType === VOICE_ROOM_TYPE ? (
             <VoiceRoomView
@@ -436,7 +460,7 @@ export default function MainLayout({
                 const clamped = Math.max(MIN_USER_MENU_WIDTH, Math.min(MAX_USER_MENU_WIDTH, next));
                 setUserMenuWidth(clamped);
               }}
-              onOpenDirectMessage={handleOpenDirectMessage}
+              onStartDirectMessage={handleStartDirectMessage}
             />
           ) : activeSpace && activeSpace.membership === "invited" ? (
             <InvitationView room={activeSpace} onJoined={fetchRooms} />

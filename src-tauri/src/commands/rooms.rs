@@ -3,10 +3,11 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use futures_util::stream::{self, StreamExt};
+use tokio::sync::Mutex;
 use matrix_sdk::authentication::matrix::MatrixSession;
 use matrix_sdk::authentication::SessionTokens;
 use matrix_sdk::ruma::events::StateEventType;
-use matrix_sdk::{config::SyncSettings, Client, SessionMeta};
+use matrix_sdk::{config::SyncSettings, Client, RoomMemberships, SessionMeta};
 use tauri::{Manager, State};
 
 use crate::types::{RoomInfo, SpaceChildInfo, SpaceInfo};
@@ -542,6 +543,50 @@ async fn fetch_space_children_for_room(
 const GET_ROOMS_SPACE_CHILD_CONCURRENCY: usize = 16;
 const GET_ROOMS_AVATAR_CONCURRENCY: usize = 24;
 
+/// 1:1 direct message: use peer display name, avatar, and presence (like Element).
+async fn dm_one_to_one_peer_summary(
+    room: &matrix_sdk::Room,
+    avatar_cache: &Arc<Mutex<HashMap<String, String>>>,
+    presence_map: &Arc<Mutex<HashMap<String, String>>>,
+) -> Option<(String, Option<String>, String, String)> {
+    if room.is_space() {
+        return None;
+    }
+    let is_dm = room.is_direct().await.ok()?;
+    if !is_dm {
+        return None;
+    }
+    let client = room.client();
+    let me = client.user_id()?;
+    let members = room.members(RoomMemberships::JOIN).await.ok()?;
+    let others: Vec<_> = members
+        .into_iter()
+        .filter(|m| m.user_id() != me)
+        .collect();
+    if others.len() != 1 {
+        return None;
+    }
+    let m = others.into_iter().next()?;
+    let peer_id = m.user_id().to_string();
+    let display = m
+        .display_name()
+        .map(|s| s.to_string())
+        .unwrap_or_else(|| peer_id.clone());
+    let avatar = get_or_fetch_avatar(
+        m.avatar_url(),
+        m.avatar(matrix_sdk::media::MediaFormat::File),
+        avatar_cache,
+    )
+    .await;
+    let presence = presence_map
+        .lock()
+        .await
+        .get(&peer_id)
+        .cloned()
+        .unwrap_or_else(|| "offline".to_string());
+    Some((display, avatar, peer_id, presence))
+}
+
 #[tauri::command]
 pub async fn get_rooms(state: State<'_, Arc<AppState>>) -> Result<Vec<RoomInfo>, String> {
     let client = super::get_client(&state).await?;
@@ -549,6 +594,7 @@ pub async fn get_rooms(state: State<'_, Arc<AppState>>) -> Result<Vec<RoomInfo>,
     let joined_rooms = client.joined_rooms();
     let invited_rooms = client.invited_rooms();
     let avatar_cache = state.avatar_cache.clone();
+    let presence_map = state.presence_map.clone();
 
     let space_rooms: Vec<matrix_sdk::Room> = joined_rooms
         .iter()
@@ -574,13 +620,8 @@ pub async fn get_rooms(state: State<'_, Arc<AppState>>) -> Result<Vec<RoomInfo>,
         joined_rooms.into_iter().enumerate().map(|(idx, room)| {
             let sc = space_children.clone();
             let ac = avatar_cache.clone();
+            let pm = presence_map.clone();
             async move {
-                let avatar_url = get_or_fetch_avatar(
-                    room.avatar_url().as_deref(),
-                    room.avatar(matrix_sdk::media::MediaFormat::File),
-                    &ac,
-                )
-                .await;
                 let room_id_str = room.room_id().to_string();
                 let parent_space_ids: Vec<String> = sc
                     .iter()
@@ -588,15 +629,41 @@ pub async fn get_rooms(state: State<'_, Arc<AppState>>) -> Result<Vec<RoomInfo>,
                     .map(|(space_id, _)| space_id.clone())
                     .collect();
                 let room_type_str = room.room_type().map(|rt| rt.to_string());
+                let topic = room.topic();
+
+                let mut name = room.name().unwrap_or_else(|| "Unnamed".to_string());
+                let mut avatar_url = get_or_fetch_avatar(
+                    room.avatar_url().as_deref(),
+                    room.avatar(matrix_sdk::media::MediaFormat::File),
+                    &ac,
+                )
+                .await;
+                let mut is_direct = false;
+                let mut dm_peer_user_id: Option<String> = None;
+                let mut dm_peer_presence: Option<String> = None;
+
+                if let Some((dname, dav, pid, pres)) =
+                    dm_one_to_one_peer_summary(&room, &ac, &pm).await
+                {
+                    name = dname;
+                    avatar_url = dav;
+                    is_direct = true;
+                    dm_peer_user_id = Some(pid);
+                    dm_peer_presence = Some(pres);
+                }
+
                 let info = RoomInfo {
                     id: room_id_str,
-                    name: room.name().unwrap_or_else(|| "Unnamed".to_string()),
+                    name,
                     avatar_url,
                     is_space: room.is_space(),
                     parent_space_ids,
                     room_type: room_type_str,
-                    topic: room.topic(),
+                    topic,
                     membership: "joined".to_string(),
+                    is_direct,
+                    dm_peer_user_id,
+                    dm_peer_presence,
                 };
                 (idx, info)
             }
@@ -614,13 +681,8 @@ pub async fn get_rooms(state: State<'_, Arc<AppState>>) -> Result<Vec<RoomInfo>,
         invited_rooms.into_iter().enumerate().map(|(idx, room)| {
             let sc = space_children.clone();
             let ac = avatar_cache.clone();
+            let pm = presence_map.clone();
             async move {
-                let avatar_url = get_or_fetch_avatar(
-                    room.avatar_url().as_deref(),
-                    room.avatar(matrix_sdk::media::MediaFormat::File),
-                    &ac,
-                )
-                .await;
                 let room_id_str = room.room_id().to_string();
                 let parent_space_ids: Vec<String> = sc
                     .iter()
@@ -628,15 +690,41 @@ pub async fn get_rooms(state: State<'_, Arc<AppState>>) -> Result<Vec<RoomInfo>,
                     .map(|(space_id, _)| space_id.clone())
                     .collect();
                 let room_type_str = room.room_type().map(|rt| rt.to_string());
+                let topic = room.topic();
+
+                let mut name = room.name().unwrap_or_else(|| "Unnamed".to_string());
+                let mut avatar_url = get_or_fetch_avatar(
+                    room.avatar_url().as_deref(),
+                    room.avatar(matrix_sdk::media::MediaFormat::File),
+                    &ac,
+                )
+                .await;
+                let mut is_direct = false;
+                let mut dm_peer_user_id: Option<String> = None;
+                let mut dm_peer_presence: Option<String> = None;
+
+                if let Some((dname, dav, pid, pres)) =
+                    dm_one_to_one_peer_summary(&room, &ac, &pm).await
+                {
+                    name = dname;
+                    avatar_url = dav;
+                    is_direct = true;
+                    dm_peer_user_id = Some(pid);
+                    dm_peer_presence = Some(pres);
+                }
+
                 let info = RoomInfo {
                     id: room_id_str,
-                    name: room.name().unwrap_or_else(|| "Unnamed".to_string()),
+                    name,
                     avatar_url,
                     is_space: room.is_space(),
                     parent_space_ids,
                     room_type: room_type_str,
-                    topic: room.topic(),
+                    topic,
                     membership: "invited".to_string(),
+                    is_direct,
+                    dm_peer_user_id,
+                    dm_peer_presence,
                 };
                 (idx, info)
             }
@@ -706,29 +794,6 @@ pub async fn join_room(
             .map_err(|e| format!("Failed to join room: {}", fmt_error_chain(&e)))?
     };
 
-    Ok(room.room_id().to_string())
-}
-
-/// Return an existing 1:1 DM with `peer_user_id`, or create one (invite + `is_direct`).
-#[tauri::command]
-pub async fn open_direct_message(
-    state: State<'_, Arc<AppState>>,
-    peer_user_id: String,
-) -> Result<String, String> {
-    let client = super::get_client(&state).await?;
-    let me = client.user_id().ok_or("Not logged in")?;
-    let peer = matrix_sdk::ruma::UserId::parse(peer_user_id.trim())
-        .map_err(|e| format!("Invalid user ID: {e}"))?;
-    if peer == me {
-        return Err("You cannot start a direct message with yourself.".to_string());
-    }
-    if let Some(room) = client.get_dm_room(&peer) {
-        return Ok(room.room_id().to_string());
-    }
-    let room = client
-        .create_dm(&peer)
-        .await
-        .map_err(|e| format!("Failed to create direct message: {}", fmt_error_chain(&e)))?;
     Ok(room.room_id().to_string())
 }
 
@@ -943,7 +1008,7 @@ pub async fn get_space_info(
                 continue;
             }
 
-            let name = room_data["name"].as_str().unwrap_or("Unnamed").to_string();
+            let mut name = room_data["name"].as_str().unwrap_or("Unnamed").to_string();
             let topic = room_data["topic"]
                 .as_str()
                 .filter(|t| !t.is_empty())
@@ -969,7 +1034,7 @@ pub async fn get_space_info(
             .to_string();
 
             // Avatar: use cache for joined rooms, convert MXC thumbnail URL for others
-            let avatar_url = if membership == "joined" {
+            let mut avatar_url = if membership == "joined" {
                 if let Ok(rid) = matrix_sdk::ruma::RoomId::parse(&child_id) {
                     if let Some(r) = client.get_room(&rid) {
                         get_or_fetch_avatar(
@@ -1000,6 +1065,26 @@ pub async fn get_space_info(
                 }
             };
 
+            let mut is_direct = false;
+            let mut dm_peer_user_id: Option<String> = None;
+            let mut dm_peer_presence: Option<String> = None;
+
+            if membership == "joined" {
+                if let Ok(rid) = matrix_sdk::ruma::RoomId::parse(&child_id) {
+                    if let Some(r) = client.get_room(&rid) {
+                        if let Some((dname, dav, pid, pres)) =
+                            dm_one_to_one_peer_summary(&r, &avatar_cache, &state.presence_map).await
+                        {
+                            name = dname;
+                            avatar_url = dav;
+                            is_direct = true;
+                            dm_peer_user_id = Some(pid);
+                            dm_peer_presence = Some(pres);
+                        }
+                    }
+                }
+            }
+
             children.push(SpaceChildInfo {
                 id: child_id,
                 name,
@@ -1009,6 +1094,9 @@ pub async fn get_space_info(
                 join_rule,
                 room_type,
                 num_joined_members,
+                is_direct,
+                dm_peer_user_id,
+                dm_peer_presence,
             });
         }
     }

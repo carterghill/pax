@@ -1,7 +1,7 @@
 import { useState, useEffect, useRef, useCallback } from "react";
 import { useRoomRedactionPolicy } from "../hooks/useRoomRedactionPolicy";
 import { listen } from "@tauri-apps/api/event";
-import { Hash, Users } from "lucide-react";
+import { ArrowLeft, Hash, MessageCircle, Users } from "lucide-react";
 import MessageList from "../components/MessageList";
 import MessageInput, { type EditingMessageRef } from "../components/MessageInput";
 import UserMenu from "../components/UserMenu";
@@ -9,6 +9,7 @@ import { useMessages } from "../hooks/useMessages";
 import { useTheme } from "../theme/ThemeContext";
 import { Message, Room } from "../types/matrix";
 import { useResizeHandle } from "../hooks/useResizeHandle";
+import { userInitialAvatarBackground } from "../utils/userAvatarColor";
 
 const USER_MENU_DEFAULT_WIDTH = 240;
 const MIN_USER_MENU_WIDTH = 180;
@@ -16,11 +17,14 @@ const MAX_USER_MENU_WIDTH = 400;
 const USER_MENU_RESIZE_HANDLE = 6;
 
 interface ChatViewProps {
-  room: Room;
   userId: string;
   userMenuWidth: number;
   onUserMenuWidthChange: (width: number) => void;
-  onOpenDirectMessage: (roomId: string) => void | Promise<void>;
+  onStartDirectMessage: (peerUserId: string, displayNameHint: string) => void;
+  room?: Room;
+  draftDm?: { peerUserId: string; displayNameHint: string } | null;
+  onDraftDmResolved?: (roomId: string) => void | Promise<void>;
+  onCancelDraftDm?: () => void;
 }
 
 interface TypingPayload {
@@ -34,7 +38,6 @@ function TypingIndicator({
   localTyping,
 }: {
   names: string[];
-  /** True while this client is sending typing=true to the homeserver. */
   localTyping?: boolean;
 }) {
   const { palette, typography, spacing } = useTheme();
@@ -116,11 +119,17 @@ function TypingIndicator({
 
 export default function ChatView({
   room,
+  draftDm,
   userId,
   userMenuWidth,
   onUserMenuWidthChange,
-  onOpenDirectMessage,
+  onStartDirectMessage,
+  onDraftDmResolved,
+  onCancelDraftDm,
 }: ChatViewProps) {
+  const isDraft = draftDm != null;
+  const activeRoom = room ?? null;
+
   const {
     messages,
     loadMore,
@@ -130,9 +139,9 @@ export default function ChatView({
     refreshing,
     refresh,
     removeMessageById,
-  } = useMessages(room.id);
-  const redactionPolicy = useRoomRedactionPolicy(room.id);
-  const { palette, typography, spacing } = useTheme();
+  } = useMessages(isDraft ? null : activeRoom!.id);
+  const redactionPolicy = useRoomRedactionPolicy(isDraft ? null : activeRoom!.id);
+  const { palette, typography, spacing, resolvedColorScheme } = useTheme();
   const [typingNames, setTypingNames] = useState<string[]>([]);
   const [localTyping, setLocalTyping] = useState(false);
   const [showUsers, setShowUsers] = useState(true);
@@ -147,31 +156,162 @@ export default function ChatView({
     direction: -1,
   });
 
-  // Listen for typing events in this room
   useEffect(() => {
+    if (isDraft || !activeRoom) return;
     const unlisten = listen<TypingPayload>("typing", (event) => {
       const { roomId, displayNames, userIds } = event.payload;
-      if (roomId !== room.id) return;
+      if (roomId !== activeRoom.id) return;
       const filtered = displayNames.filter((_, i) => userIds[i] !== userId);
       setTypingNames(filtered);
     });
 
-    // Clear typing when switching rooms
     setTypingNames([]);
     setLocalTyping(false);
 
     return () => {
       unlisten.then((fn) => fn());
     };
-  }, [room.id, userId]);
+  }, [isDraft, activeRoom, userId]);
 
   useEffect(() => {
     setEditingMessage(null);
-  }, [room.id]);
+  }, [activeRoom?.id, isDraft]);
 
   const handleRequestEdit = useCallback((msg: Message) => {
     setEditingMessage({ eventId: msg.eventId, body: msg.body });
   }, []);
+
+  const handleDraftDmFirstMessage = useCallback(
+    async (newRoomId: string) => {
+      await onDraftDmResolved?.(newRoomId);
+    },
+    [onDraftDmResolved],
+  );
+
+  if (isDraft && draftDm) {
+    const hint = draftDm.displayNameHint.trim() || draftDm.peerUserId;
+    const initials = hint
+      .split(/\s+/)
+      .map((w) => w[0])
+      .join("")
+      .slice(0, 2)
+      .toUpperCase() || "?";
+
+    return (
+      <div ref={containerRef} style={{
+        flex: 1,
+        minHeight: 0,
+        display: "flex",
+        flexDirection: "column",
+        height: "100vh",
+        minWidth: 0,
+        overflow: "hidden",
+      }}>
+        <div style={{
+          padding: `0 ${spacing.unit * 4}px`,
+          height: spacing.headerHeight,
+          borderBottom: `1px solid ${palette.border}`,
+          display: "flex",
+          position: "relative",
+          alignItems: "center",
+          gap: spacing.unit * 2,
+          boxSizing: "border-box",
+          minWidth: 0,
+        }}>
+          <button
+            type="button"
+            onClick={() => onCancelDraftDm?.()}
+            title="Close"
+            style={{
+              background: "none",
+              border: "none",
+              cursor: "pointer",
+              padding: spacing.unit,
+              borderRadius: spacing.unit,
+              display: "flex",
+              alignItems: "center",
+              flexShrink: 0,
+              color: palette.textSecondary,
+            }}
+          >
+            <ArrowLeft size={20} />
+          </button>
+          <div style={{
+            width: 32,
+            height: 32,
+            borderRadius: "50%",
+            backgroundColor: userInitialAvatarBackground(draftDm.peerUserId, resolvedColorScheme),
+            display: "flex",
+            alignItems: "center",
+            justifyContent: "center",
+            flexShrink: 0,
+            fontSize: typography.fontSizeSmall,
+            fontWeight: typography.fontWeightBold,
+            color: palette.textPrimary,
+          }}>
+            {initials}
+          </div>
+          <div style={{ flex: 1, minWidth: 0 }}>
+            <div style={{
+              fontWeight: typography.fontWeightBold,
+              color: palette.textHeading,
+              fontSize: typography.fontSizeBase,
+              overflow: "hidden",
+              textOverflow: "ellipsis",
+              whiteSpace: "nowrap",
+            }}>
+              {hint}
+            </div>
+            <div style={{
+              fontSize: typography.fontSizeSmall,
+              color: palette.textSecondary,
+            }}>
+              Direct message · no room until you send
+            </div>
+          </div>
+          <MessageCircle size={20} color={palette.textSecondary} style={{ flexShrink: 0 }} />
+        </div>
+
+        <div style={{
+          flex: 1,
+          display: "flex",
+          flexDirection: "column",
+          minWidth: 0,
+          minHeight: 0,
+          backgroundColor: palette.bgPrimary,
+        }}>
+          <div style={{
+            flex: 1,
+            display: "flex",
+            alignItems: "center",
+            justifyContent: "center",
+            color: palette.textSecondary,
+            fontSize: typography.fontSizeSmall,
+            padding: spacing.unit * 4,
+            textAlign: "center",
+          }}>
+            No messages yet. Your first message will create this conversation.
+          </div>
+
+          <div style={{ position: "relative", flexShrink: 0, zIndex: 1 }}>
+            <MessageInput
+              key={`draft-${draftDm.peerUserId}`}
+              roomId=""
+              roomName={hint}
+              draftDmPeerUserId={draftDm.peerUserId}
+              onDraftDmFirstMessage={handleDraftDmFirstMessage}
+              onMessageSent={() => {}}
+              editingMessage={null}
+              onCancelEdit={undefined}
+              onLocalTypingActive={setLocalTyping}
+            />
+          </div>
+        </div>
+      </div>
+    );
+  }
+
+  if (!activeRoom) return null;
 
   return (
     <div ref={containerRef} style={{
@@ -195,7 +335,36 @@ export default function ChatView({
         boxSizing: "border-box",
         minWidth: 0,
       }}>
-        <Hash size={20} color={palette.textSecondary} style={{ flexShrink: 0 }} />
+        {activeRoom.isDirect ? (
+          <div style={{
+            width: 28,
+            height: 28,
+            borderRadius: "50%",
+            backgroundColor: activeRoom.dmPeerUserId
+              ? userInitialAvatarBackground(activeRoom.dmPeerUserId, resolvedColorScheme)
+              : palette.bgActive,
+            display: "flex",
+            alignItems: "center",
+            justifyContent: "center",
+            flexShrink: 0,
+            fontSize: 11,
+            fontWeight: typography.fontWeightBold,
+            color: palette.textPrimary,
+            overflow: "hidden",
+          }}>
+            {activeRoom.avatarUrl ? (
+              <img
+                src={activeRoom.avatarUrl}
+                alt=""
+                style={{ width: "100%", height: "100%", objectFit: "cover" }}
+              />
+            ) : (
+              (activeRoom.name || "?").slice(0, 2).toUpperCase()
+            )}
+          </div>
+        ) : (
+          <Hash size={20} color={palette.textSecondary} style={{ flexShrink: 0 }} />
+        )}
         <span style={{
           fontWeight: typography.fontWeightBold,
           color: palette.textHeading,
@@ -207,7 +376,7 @@ export default function ChatView({
           whiteSpace: "nowrap",
           paddingRight: spacing.unit * 8,
         }}>
-          {room.name}
+          {activeRoom.name}
         </span>
         <button
           onClick={() => setShowUsers((prev) => !prev)}
@@ -257,7 +426,7 @@ export default function ChatView({
             refreshing={refreshing}
             hasMore={hasMore}
             onLoadMore={loadMore}
-            roomId={room.id}
+            roomId={activeRoom.id}
             userId={userId}
             redactionPolicy={redactionPolicy}
             onRequestEdit={handleRequestEdit}
@@ -271,9 +440,9 @@ export default function ChatView({
               localTyping={localTyping}
             />
             <MessageInput
-              key={room.id}
-              roomId={room.id}
-              roomName={room.name}
+              key={activeRoom.id}
+              roomId={activeRoom.id}
+              roomName={activeRoom.name}
               onMessageSent={refresh}
               editingMessage={editingMessage}
               onCancelEdit={() => setEditingMessage(null)}
@@ -294,9 +463,9 @@ export default function ChatView({
           }}>
             <UserMenu
               width={userMenuWidth}
-              roomId={room.id}
+              roomId={activeRoom.id}
               userId={userId}
-              onOpenDirectMessage={onOpenDirectMessage}
+              onStartDirectMessage={onStartDirectMessage}
             />
             <div
               onMouseDown={userMenuResize.onMouseDown}

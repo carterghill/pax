@@ -68,6 +68,9 @@ interface MessageInputProps {
   onCancelEdit?: () => void;
   /** Fires when this client starts/stops sending typing notices (Matrix sync usually omits self). */
   onLocalTypingActive?: (active: boolean) => void;
+  /** When set, first text send creates the DM room then delivers the message (no room until send). */
+  draftDmPeerUserId?: string | null;
+  onDraftDmFirstMessage?: (roomId: string) => void | Promise<void>;
 }
 
 const COMPOSER_POPOVER_Z = 12_000;
@@ -88,6 +91,8 @@ export default function MessageInput({
   editingMessage = null,
   onCancelEdit,
   onLocalTypingActive,
+  draftDmPeerUserId = null,
+  onDraftDmFirstMessage,
 }: MessageInputProps) {
   const [plainText, setPlainText] = useState("");
   /** True when the editor contains an embedded image (GIF, pasted image). Plain text alone is tracked in `plainText`. */
@@ -166,16 +171,18 @@ export default function MessageInput({
 
   const sendTyping = useCallback(
     (typing: boolean) => {
+      if (draftDmPeerUserId) return;
       if (typing === isTyping.current) return;
       isTyping.current = typing;
       onLocalTypingActive?.(typing);
       invoke("send_typing_notice", { roomId, typing }).catch(() => {});
     },
-    [roomId, onLocalTypingActive],
+    [roomId, onLocalTypingActive, draftDmPeerUserId],
   );
 
   useEffect(() => {
     return () => {
+      if (draftDmPeerUserId) return;
       if (typingTimeout.current) clearTimeout(typingTimeout.current);
       if (isTyping.current) {
         invoke("send_typing_notice", { roomId, typing: false }).catch(() => {});
@@ -183,7 +190,7 @@ export default function MessageInput({
         onLocalTypingActive?.(false);
       }
     };
-  }, [roomId, onLocalTypingActive]);
+  }, [roomId, onLocalTypingActive, draftDmPeerUserId]);
 
   // Clean up pending file preview URL on unmount
   useEffect(() => {
@@ -210,6 +217,7 @@ export default function MessageInput({
     syncHeight();
 
     if (editingMessage) return;
+    if (draftDmPeerUserId) return;
     if (text.trim().length > 0 || media) {
       sendTyping(true);
       if (typingTimeout.current) clearTimeout(typingTimeout.current);
@@ -393,6 +401,43 @@ export default function MessageInput({
 
     setSending(true);
     try {
+      if (draftDmPeerUserId) {
+        if (pendingFile) {
+          console.warn("Attachments are available after the conversation is created.");
+          setSending(false);
+          return;
+        }
+        if (!trimmed || editingMessage) {
+          setSending(false);
+          return;
+        }
+        const rid = await invoke<string>("send_first_direct_message", {
+          peerUserId: draftDmPeerUserId,
+          body: trimmed,
+        });
+        const prevFormats = getActiveFormats(el);
+        el.innerHTML = "";
+        setPlainText("");
+        setHasComposerMedia(false);
+        await onDraftDmFirstMessage?.(rid);
+        onMessageSent();
+        el.focus();
+        if (prevFormats.has("bold") || prevFormats.has("italic") || prevFormats.has("strikethrough")) {
+          document.execCommand("insertText", false, "\u200b");
+          const sel = window.getSelection();
+          if (sel) { sel.selectAllChildren(el); }
+          for (const fmt of prevFormats) {
+            if (fmt === "bold") document.execCommand("bold");
+            else if (fmt === "italic") document.execCommand("italic");
+            else if (fmt === "strikethrough") document.execCommand("strikeThrough");
+          }
+          if (sel) { sel.collapseToEnd(); }
+        }
+        refreshFormats();
+        syncHeight();
+        setSending(false);
+        return;
+      }
       if (pendingFile) {
         // Single message: file with optional caption (typed text)
         await invoke("upload_and_send_file", {
@@ -784,9 +829,21 @@ export default function MessageInput({
         />
         <button
           type="button"
-          title={pendingFile ? "File attached" : "Upload file"}
-          aria-label={pendingFile ? "File attached" : "Upload file"}
-          disabled={!!pendingFile}
+          title={
+            draftDmPeerUserId
+              ? "Send a message first to create the conversation"
+              : pendingFile
+                ? "File attached"
+                : "Upload file"
+          }
+          aria-label={
+            draftDmPeerUserId
+              ? "Upload disabled until conversation exists"
+              : pendingFile
+                ? "File attached"
+                : "Upload file"
+          }
+          disabled={!!pendingFile || !!draftDmPeerUserId}
           onMouseDown={(e) => e.preventDefault()}
           onClick={() => fileInputRef.current?.click()}
           style={{
@@ -803,16 +860,16 @@ export default function MessageInput({
             borderRadius: inputToolBtnRadius,
             backgroundColor: "transparent",
             color: palette.textSecondary,
-            cursor: pendingFile ? "not-allowed" : "pointer",
-            opacity: pendingFile ? 0.35 : 1,
+            cursor: pendingFile || draftDmPeerUserId ? "not-allowed" : "pointer",
+            opacity: pendingFile || draftDmPeerUserId ? 0.35 : 1,
           }}
           onMouseEnter={(e) => {
-            if (pendingFile) return;
+            if (pendingFile || draftDmPeerUserId) return;
             e.currentTarget.style.backgroundColor = palette.bgHover;
             e.currentTarget.style.color = palette.textPrimary;
           }}
           onMouseLeave={(e) => {
-            if (pendingFile) return;
+            if (pendingFile || draftDmPeerUserId) return;
             e.currentTarget.style.backgroundColor = "transparent";
             e.currentTarget.style.color = palette.textSecondary;
           }}

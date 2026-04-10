@@ -3,6 +3,7 @@ import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import {
   Hash,
+  MessageCircle,
   Volume2,
   Users,
   LogIn,
@@ -42,6 +43,9 @@ function roomToSpaceChildInfo(r: Room, fromHierarchy?: SpaceChildInfo): SpaceChi
     joinRule: fromHierarchy?.joinRule ?? null,
     roomType: r.roomType,
     numJoinedMembers: fromHierarchy?.numJoinedMembers ?? 0,
+    isDirect: r.isDirect ?? false,
+    dmPeerUserId: r.dmPeerUserId ?? null,
+    dmPeerPresence: r.dmPeerPresence ?? null,
   };
 }
 
@@ -121,6 +125,11 @@ interface KnockData {
   canKick: boolean;
 }
 
+interface PresencePayload {
+  userId: string;
+  presence: string;
+}
+
 export default function SpaceHomeView({
   space,
   onSelectRoom,
@@ -187,6 +196,33 @@ export default function SpaceHomeView({
         if (activeSpaceIdRef.current !== requestedId) return;
         if (!background) setLoading(false);
       });
+  }, [space.id]);
+
+  // Live-update DM presence dots on the space home list (sync pushes `presence` events).
+  useEffect(() => {
+    const unlisten = listen<PresencePayload>("presence", (event) => {
+      const { userId, presence } = event.payload;
+      setInfo((prev) => {
+        if (!prev) return prev;
+        let changed = false;
+        const children = prev.children.map((c) => {
+          if (c.dmPeerUserId === userId && c.dmPeerPresence !== presence) {
+            changed = true;
+            return { ...c, dmPeerPresence: presence };
+          }
+          return c;
+        });
+        if (!changed) return prev;
+        const next = { ...prev, children };
+        if (activeSpaceIdRef.current === space.id) {
+          setCachedSpaceInfo(space.id, next);
+        }
+        return next;
+      });
+    });
+    return () => {
+      unlisten.then((fn) => fn());
+    };
   }, [space.id]);
 
   useEffect(() => {
@@ -354,6 +390,15 @@ export default function SpaceHomeView({
     return joinedRoomsDirect.filter((c) => !roomIdsListedUnderSubspaces.has(c.id));
   }, [info, roomIdsListedUnderSubspaces]);
 
+  const directMessageRoomsHome = useMemo(
+    () => joinedRoomsDirectFiltered.filter((c) => c.isDirect),
+    [joinedRoomsDirectFiltered],
+  );
+  const nonDirectChannelsHome = useMemo(
+    () => joinedRoomsDirectFiltered.filter((c) => !c.isDirect),
+    [joinedRoomsDirectFiltered],
+  );
+
   const totalChannelCount = useMemo(() => {
     let n = joinedRoomsDirectFiltered.length;
     for (const sub of joinedSubspaces) {
@@ -406,6 +451,7 @@ export default function SpaceHomeView({
           parentSpaceIds: [parentForOptimistic],
           roomType: childMeta?.roomType ?? null,
           membership: "joined",
+          isDirect: false,
         };
         await onRoomsChanged({ optimisticRoom });
         setInfo((prev) => {
@@ -754,10 +800,22 @@ export default function SpaceHomeView({
                 </div>
               );
             })}
-            {joinedRoomsDirectFiltered.length > 0 && (
+            {directMessageRoomsHome.length > 0 && (
+              <RoomSection
+                title="Direct messages"
+                rooms={directMessageRoomsHome}
+                onClickRoom={onSelectRoom}
+                joiningRoomId={joiningRoomId}
+                onJoinRoom={handleJoinRoom}
+                palette={palette}
+                typography={typography}
+                spacing={spacing}
+              />
+            )}
+            {nonDirectChannelsHome.length > 0 && (
               <RoomSection
                 title={joinedSubspaces.length > 0 ? "Other channels" : "Channels in this space"}
-                rooms={joinedRoomsDirectFiltered}
+                rooms={nonDirectChannelsHome}
                 onClickRoom={onSelectRoom}
                 joiningRoomId={joiningRoomId}
                 onJoinRoom={handleJoinRoom}
@@ -934,6 +992,19 @@ function RoomSection({
   );
 }
 
+function dmPresenceDotColor(p: string | undefined): string {
+  switch (p) {
+    case "online":
+      return "#23a55a";
+    case "unavailable":
+      return "#f0b232";
+    case "dnd":
+      return "#f23f43";
+    default:
+      return "#80848e";
+  }
+}
+
 function RoomRow({
   room,
   isJoining,
@@ -951,19 +1022,21 @@ function RoomRow({
   typography: ReturnType<typeof useTheme>["typography"];
   spacing: ReturnType<typeof useTheme>["spacing"];
 }) {
+  const { resolvedColorScheme } = useTheme();
   const [hovered, setHovered] = useState(false);
   const [imageFailed, setImageFailed] = useState(false);
   const isVoice = room.roomType === VOICE_ROOM_TYPE;
   const isJoined = room.membership === "joined";
   const isInvited = room.membership === "invited";
   const canJoin = !isJoined;
-
-  // const initials = room.name
-  //   .split(" ")
-  //   .map((w) => w[0])
-  //   .join("")
-  //   .slice(0, 2)
-  //   .toUpperCase();
+  const isDm = room.isDirect === true && !!room.dmPeerUserId;
+  const dmPresence = room.dmPeerPresence ?? "offline";
+  const initials = room.name
+    .split(/\s+/)
+    .map((w) => w[0])
+    .join("")
+    .slice(0, 2)
+    .toUpperCase();
 
   return (
     <div
@@ -982,37 +1055,64 @@ function RoomRow({
       }}
     >
       {/* Room icon or avatar */}
-      {room.avatarUrl && !imageFailed ? (
-        <img
-          src={room.avatarUrl}
-          alt={room.name}
-          onError={() => setImageFailed(true)}
-          style={{
+      <div style={{ position: "relative", width: 36, height: 36, flexShrink: 0 }}>
+        {room.avatarUrl && !imageFailed ? (
+          <img
+            src={room.avatarUrl}
+            alt={room.name}
+            onError={() => setImageFailed(true)}
+            style={{
+              width: 36,
+              height: 36,
+              borderRadius: "50%",
+              objectFit: "cover",
+            }}
+          />
+        ) : (
+          <div style={{
             width: 36,
             height: 36,
             borderRadius: "50%",
-            objectFit: "cover",
-            flexShrink: 0,
-          }}
-        />
-      ) : (
-        <div style={{
-          width: 36,
-          height: 36,
-          borderRadius: "50%",
-          backgroundColor: palette.bgActive,
-          display: "flex",
-          alignItems: "center",
-          justifyContent: "center",
-          flexShrink: 0,
-        }}>
-          {isVoice ? (
-            <Volume2 size={18} color={palette.textSecondary} />
-          ) : (
-            <Hash size={18} color={palette.textSecondary} />
-          )}
-        </div>
-      )}
+            backgroundColor:
+              isDm && room.dmPeerUserId
+                ? userInitialAvatarBackground(room.dmPeerUserId, resolvedColorScheme)
+                : palette.bgActive,
+            display: "flex",
+            alignItems: "center",
+            justifyContent: "center",
+          }}>
+            {isVoice ? (
+              <Volume2 size={18} color={palette.textSecondary} />
+            ) : isDm ? (
+              <span style={{
+                fontSize: typography.fontSizeSmall,
+                fontWeight: typography.fontWeightBold,
+                color: palette.textPrimary,
+              }}>
+                {initials || "?"}
+              </span>
+            ) : (
+              <Hash size={18} color={palette.textSecondary} />
+            )}
+          </div>
+        )}
+        {isDm && isJoined && (
+          <span
+            title={dmPresence}
+            style={{
+              position: "absolute",
+              bottom: 0,
+              right: 0,
+              width: 10,
+              height: 10,
+              borderRadius: "50%",
+              backgroundColor: dmPresenceDotColor(dmPresence),
+              border: `2px solid ${palette.bgPrimary}`,
+              boxSizing: "border-box",
+            }}
+          />
+        )}
+      </div>
 
       {/* Room info */}
       <div style={{ flex: 1, minWidth: 0 }}>
@@ -1032,7 +1132,7 @@ function RoomRow({
             {room.name}
           </span>
         </div>
-        {room.topic && (
+        {room.topic && !isDm && (
           <div style={{
             fontSize: typography.fontSizeSmall,
             color: palette.textSecondary,
@@ -1043,17 +1143,31 @@ function RoomRow({
             {room.topic}
           </div>
         )}
-        <div style={{
-          fontSize: typography.fontSizeSmall,
-          color: palette.textSecondary,
-          display: "flex",
-          alignItems: "center",
-          gap: spacing.unit,
-          marginTop: 1,
-        }}>
-          <Users size={11} color={palette.textSecondary} />
-          <span>{room.numJoinedMembers} member{room.numJoinedMembers !== 1 ? "s" : ""}</span>
-        </div>
+        {isDm ? (
+          <div style={{
+            fontSize: typography.fontSizeSmall,
+            color: palette.textSecondary,
+            display: "flex",
+            alignItems: "center",
+            gap: spacing.unit,
+            marginTop: 1,
+          }}>
+            <MessageCircle size={11} color={palette.textSecondary} />
+            <span>Direct message</span>
+          </div>
+        ) : (
+          <div style={{
+            fontSize: typography.fontSizeSmall,
+            color: palette.textSecondary,
+            display: "flex",
+            alignItems: "center",
+            gap: spacing.unit,
+            marginTop: 1,
+          }}>
+            <Users size={11} color={palette.textSecondary} />
+            <span>{room.numJoinedMembers} member{room.numJoinedMembers !== 1 ? "s" : ""}</span>
+          </div>
+        )}
       </div>
 
       {/* Status / action */}

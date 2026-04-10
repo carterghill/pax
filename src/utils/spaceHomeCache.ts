@@ -14,6 +14,9 @@ export interface SpaceChildInfo {
   joinRule: string | null;
   roomType: string | null;
   numJoinedMembers: number;
+  isDirect?: boolean;
+  dmPeerUserId?: string | null;
+  dmPeerPresence?: string | null;
 }
 
 export interface SpaceInfo {

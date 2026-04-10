@@ -14,6 +14,12 @@ pub struct RoomInfo {
     pub topic: Option<String>,
     /// "joined" or "invited"
     pub membership: String,
+    /// True when this is a 1:1 DM (name/avatar are the peer).
+    pub is_direct: bool,
+    /// Other participant in a 1:1 DM (for presence / display).
+    pub dm_peer_user_id: Option<String>,
+    /// Last known presence for `dm_peer_user_id` from sync (`online`, `offline`, …).
+    pub dm_peer_presence: Option<String>,
 }
 
 #[derive(Clone, Serialize)]
@@ -159,6 +165,10 @@ pub struct SpaceChildInfo {
     pub join_rule: Option<String>,
     pub room_type: Option<String>,
     pub num_joined_members: u64,
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub is_direct: bool,
+    pub dm_peer_user_id: Option<String>,
+    pub dm_peer_presence: Option<String>,
 }
 
 #[derive(Serialize)]
