@@ -267,6 +267,8 @@ pub fn run() {
             commands::members::get_knock_members,
             commands::members::preview_leave_space,
             commands::members::invite_user,
+            commands::members::search_user_directory,
+            commands::members::get_invite_suggestions,
             commands::members::kick_user,
             commands::voice_matrix::get_voice_participants,
             commands::voice_matrix::get_all_voice_participants,

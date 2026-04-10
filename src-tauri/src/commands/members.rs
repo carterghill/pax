@@ -1,7 +1,9 @@
+use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 use std::time::Duration;
 
 use futures_util::future::join_all;
+use serde::Deserialize;
 use tauri::State;
 
 use crate::types::RoomMemberInfo;
@@ -350,6 +352,252 @@ pub async fn preview_leave_space(
     let is_only_admin = admin_count == 1 && my_level >= ADMIN_POWER_LEVEL;
 
     Ok(PreviewLeaveSpaceResponse { is_only_admin })
+}
+
+/// A user row for the invite dialog (search or suggestions).
+#[derive(Clone, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct InviteUserCandidate {
+    pub user_id: String,
+    pub display_name: Option<String>,
+    pub avatar_url: Option<String>,
+}
+
+/// Homeserver user-directory search (`POST /_matrix/client/v3/user_directory/search`).
+#[tauri::command]
+pub async fn search_user_directory(
+    state: State<'_, Arc<AppState>>,
+    room_id: String,
+    search_term: String,
+    limit: u32,
+) -> Result<Vec<InviteUserCandidate>, String> {
+    let trimmed = search_term.trim();
+    if trimmed.is_empty() {
+        return Ok(vec![]);
+    }
+
+    let client = get_client(&state).await?;
+    let access_token = client.access_token().ok_or("No access token")?;
+    let homeserver = client.homeserver().to_string();
+    let hs = homeserver.trim_end_matches('/');
+
+    let target_room = resolve_room(&client, &room_id)?;
+    let target_members: HashSet<String> = target_room
+        .members(matrix_sdk::RoomMemberships::JOIN)
+        .await
+        .map_err(|e| format!("Failed to get room members: {}", fmt_error_chain(&e)))?
+        .iter()
+        .map(|m| m.user_id().to_string())
+        .collect();
+
+    let self_id = client
+        .user_id()
+        .ok_or("Not logged in")?
+        .to_string();
+
+    let url = format!("{}/_matrix/client/v3/user_directory/search", hs);
+    let cap = limit.clamp(1, 50);
+    let resp = state
+        .http_client
+        .post(&url)
+        .timeout(Duration::from_secs(20))
+        .bearer_auth(access_token)
+        .json(&serde_json::json!({
+            "search_term": trimmed,
+            "limit": cap,
+        }))
+        .send()
+        .await
+        .map_err(|e| format!("User search failed: {}", fmt_error_chain(&e)))?;
+
+    if !resp.status().is_success() {
+        let status = resp.status();
+        let text = resp.text().await.unwrap_or_default();
+        return Err(format!("User search failed ({status}): {text}"));
+    }
+
+    #[derive(Deserialize)]
+    struct UserDirectorySearchResponse {
+        results: Vec<UserDirectoryHit>,
+    }
+    #[derive(Deserialize)]
+    struct UserDirectoryHit {
+        user_id: String,
+        display_name: Option<String>,
+        avatar_url: Option<String>,
+    }
+
+    let body: UserDirectorySearchResponse = resp
+        .json()
+        .await
+        .map_err(|e| format!("Failed to parse user search: {e}"))?;
+
+    let avatar_cache = state.avatar_cache.clone();
+    let mut out = Vec::new();
+
+    for hit in body.results {
+        if hit.user_id == self_id || target_members.contains(&hit.user_id) {
+            continue;
+        }
+        let avatar_url = if let Some(ref mxc) = hit.avatar_url {
+            resolve_mxc_avatar_data_url(
+                &state.http_client,
+                hs,
+                mxc,
+                &avatar_cache,
+            )
+            .await
+        } else {
+            None
+        };
+        out.push(InviteUserCandidate {
+            user_id: hit.user_id,
+            display_name: hit.display_name,
+            avatar_url,
+        });
+    }
+
+    Ok(out)
+}
+
+/// Users you share other joined rooms with (excluding members already in `room_id`), for suggested invites.
+#[tauri::command]
+pub async fn get_invite_suggestions(
+    state: State<'_, Arc<AppState>>,
+    room_id: String,
+    limit: usize,
+) -> Result<Vec<InviteUserCandidate>, String> {
+    let client = get_client(&state).await?;
+    let target_room = resolve_room(&client, &room_id)?;
+    let target_members: HashSet<String> = target_room
+        .members(matrix_sdk::RoomMemberships::JOIN)
+        .await
+        .map_err(|e| format!("Failed to get room members: {}", fmt_error_chain(&e)))?
+        .iter()
+        .map(|m| m.user_id().to_string())
+        .collect();
+
+    let self_id = client
+        .user_id()
+        .ok_or("Not logged in")?
+        .to_string();
+
+    let rooms: Vec<matrix_sdk::Room> = client
+        .joined_rooms()
+        .into_iter()
+        .filter(|r| r.room_id().as_str() != room_id)
+        .take(50)
+        .collect();
+
+    let futures: Vec<_> = rooms
+        .into_iter()
+        .map(|room| async move {
+            room.members(matrix_sdk::RoomMemberships::JOIN)
+                .await
+                .map_err(|e| fmt_error_chain(&e))
+        })
+        .collect();
+
+    let member_lists = join_all(futures).await;
+
+    // user_id -> (shared_room_count, display_name, avatar_mxc)
+    let mut agg: HashMap<String, (usize, Option<String>, Option<String>)> = HashMap::new();
+
+    for members_res in member_lists {
+        let members = members_res.map_err(|e| format!("Failed to list members: {e}"))?;
+        for m in members {
+            let uid = m.user_id().to_string();
+            if uid == self_id || target_members.contains(&uid) {
+                continue;
+            }
+            let dn = m.display_name().map(|s| s.to_string());
+            let mxc = m.avatar_url().map(|u| u.to_string());
+            agg.entry(uid)
+                .and_modify(|e| {
+                    e.0 += 1;
+                    if e.1.is_none() {
+                        e.1 = dn.clone();
+                    }
+                    if e.2.is_none() {
+                        e.2 = mxc.clone();
+                    }
+                })
+                .or_insert((1, dn, mxc));
+        }
+    }
+
+    let mut pairs: Vec<(String, (usize, Option<String>, Option<String>))> = agg.into_iter().collect();
+    pairs.sort_by(|a, b| {
+        b.1.0
+            .cmp(&a.1.0)
+            .then_with(|| a.0.to_lowercase().cmp(&b.0.to_lowercase()))
+    });
+
+    let cap = limit.max(1).min(40);
+    let homeserver = client.homeserver().to_string();
+    let hs = homeserver.trim_end_matches('/');
+    let avatar_cache = state.avatar_cache.clone();
+
+    let mut out = Vec::new();
+    for (user_id, (_, display_name, mxc)) in pairs.into_iter().take(cap) {
+        let avatar_url = if let Some(ref uri) = mxc {
+            resolve_mxc_avatar_data_url(&state.http_client, hs, uri, &avatar_cache).await
+        } else {
+            None
+        };
+        out.push(InviteUserCandidate {
+            user_id,
+            display_name,
+            avatar_url,
+        });
+    }
+
+    Ok(out)
+}
+
+async fn resolve_mxc_avatar_data_url(
+    http: &reqwest::Client,
+    homeserver: &str,
+    mxc_uri: &str,
+    avatar_cache: &Arc<tokio::sync::Mutex<HashMap<String, String>>>,
+) -> Option<String> {
+    {
+        let cache = avatar_cache.lock().await;
+        if let Some(cached) = cache.get(mxc_uri) {
+            return Some(cached.clone());
+        }
+    }
+
+    let thumb = mxc_uri
+        .strip_prefix("mxc://")
+        .and_then(|stripped| stripped.split_once('/'))
+        .map(|(server, media_id)| {
+            format!(
+                "{}/_matrix/media/v3/thumbnail/{}/{}?width=64&height=64&method=crop",
+                homeserver, server, media_id
+            )
+        })?;
+
+    match http
+        .get(&thumb)
+        .timeout(Duration::from_secs(10))
+        .send()
+        .await
+    {
+        Ok(r) if r.status().is_success() => {
+            if let Ok(bytes) = r.bytes().await {
+                let mime = sniff_image_mime(&bytes);
+                let data_url = encode_bytes_data_url(&bytes, mime);
+                avatar_cache
+                    .lock()
+                    .await
+                    .insert(mxc_uri.to_string(), data_url.clone());
+                return Some(data_url);
+            }
+        }
+        _ => {}
+    }
+    None
 }
 
 /// Invite a user to a room. Used to accept knock requests.
