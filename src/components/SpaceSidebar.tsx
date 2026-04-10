@@ -5,6 +5,7 @@ import { useTheme } from "../theme/ThemeContext";
 import type { Room } from "../types/matrix";
 import { spaceInitialAvatarBackground } from "../utils/userAvatarColor";
 import CreateSpaceDialog from "./CreateSpaceDialog";
+import CreateRoomDialog from "./CreateRoomDialog";
 import SpaceContextMenu from "./SpaceContextMenu";
 import SpaceSettingsDialog from "./SpaceSettingsDialog";
 import InviteDialog from "./InviteDialog";
@@ -107,6 +108,8 @@ export default function SpaceSidebar({
     y: number;
     spaceId: string;
     spaceName: string;
+    /** When set, whether the user can send `m.space.child` in this space (same as Space Home "Create Room"). */
+    canManageChildren?: boolean;
   } | null>(null);
   const [spaceSettingsTarget, setSpaceSettingsTarget] = useState<{
     spaceId: string;
@@ -117,6 +120,7 @@ export default function SpaceSidebar({
   const [leaveSpaceOnlyAdmin, setLeaveSpaceOnlyAdmin] = useState<boolean | null>(null);
   const [leaveSpaceError, setLeaveSpaceError] = useState<string | null>(null);
   const [leaveSpaceSubmitting, setLeaveSpaceSubmitting] = useState(false);
+  const [createRoomSpaceId, setCreateRoomSpaceId] = useState<string | null>(null);
   const checkedRef = useRef(false);
 
   // Check room creation permission once on mount
@@ -158,6 +162,28 @@ export default function SpaceSidebar({
       cancelled = true;
     };
   }, [leaveSpace?.id]);
+
+  useEffect(() => {
+    const sid = spaceContextMenu?.spaceId;
+    if (!sid) return;
+    let cancelled = false;
+    invoke<boolean>("can_manage_space_children", { spaceId: sid })
+      .then((v) => {
+        if (cancelled) return;
+        setSpaceContextMenu((prev) =>
+          prev && prev.spaceId === sid ? { ...prev, canManageChildren: v } : prev
+        );
+      })
+      .catch(() => {
+        if (cancelled) return;
+        setSpaceContextMenu((prev) =>
+          prev && prev.spaceId === sid ? { ...prev, canManageChildren: false } : prev
+        );
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [spaceContextMenu?.spaceId]);
 
   const handleConfirmLeaveSpace = useCallback(async () => {
     if (!leaveSpace) return;
@@ -329,9 +355,14 @@ export default function SpaceSidebar({
           x={spaceContextMenu.x}
           y={spaceContextMenu.y}
           spaceName={spaceContextMenu.spaceName}
+          canCreateRoom={spaceContextMenu.canManageChildren === true}
           onInvite={() => {
             const t = spaceContextMenu;
             setInviteSpace({ id: t.spaceId, name: t.spaceName });
+          }}
+          onCreateRoom={() => {
+            const t = spaceContextMenu;
+            setCreateRoomSpaceId(t.spaceId);
           }}
           onLeave={() => {
             const t = spaceContextMenu;
@@ -345,6 +376,14 @@ export default function SpaceSidebar({
             })
           }
           onClose={() => setSpaceContextMenu(null)}
+        />
+      )}
+
+      {createRoomSpaceId && (
+        <CreateRoomDialog
+          spaceId={createRoomSpaceId}
+          onClose={() => setCreateRoomSpaceId(null)}
+          onCreated={handleCreated}
         />
       )}
 

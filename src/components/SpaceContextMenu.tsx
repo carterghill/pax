@@ -1,5 +1,5 @@
 import { useEffect, useRef } from "react";
-import { Settings, UserPlus, LogOut } from "lucide-react";
+import { Settings, UserPlus, LogOut, Hash } from "lucide-react";
 import { useTheme } from "../theme/ThemeContext";
 import { useOverlayObstruction } from "../hooks/useOverlayObstruction";
 
@@ -7,8 +7,10 @@ interface SpaceContextMenuProps {
   x: number;
   y: number;
   spaceName: string;
+  canCreateRoom?: boolean;
   onInvite: () => void;
   onOpenSpaceSettings: () => void;
+  onCreateRoom?: () => void;
   onLeave: () => void;
   onClose: () => void;
 }
@@ -17,8 +19,10 @@ export default function SpaceContextMenu({
   x,
   y,
   spaceName,
+  canCreateRoom = true,
   onInvite,
   onOpenSpaceSettings,
+  onCreateRoom,
   onLeave,
   onClose,
 }: SpaceContextMenuProps) {
@@ -160,6 +164,39 @@ export default function SpaceContextMenu({
         <UserPlus size={14} color={palette.textSecondary} />
         Invite people
       </button>
+
+      {canCreateRoom && onCreateRoom && (
+        <button
+          type="button"
+          onClick={() => {
+            onCreateRoom();
+            onClose();
+          }}
+          style={{
+            display: "flex",
+            alignItems: "center",
+            gap: spacing.unit * 2,
+            width: "100%",
+            padding: `${spacing.unit * 1.5}px ${spacing.unit * 2}px`,
+            border: "none",
+            borderRadius: 4,
+            backgroundColor: "transparent",
+            color: palette.textPrimary,
+            fontSize: typography.fontSizeSmall,
+            cursor: "pointer",
+            textAlign: "left",
+          }}
+          onMouseEnter={(e) => {
+            (e.currentTarget as HTMLButtonElement).style.backgroundColor = palette.bgActive;
+          }}
+          onMouseLeave={(e) => {
+            (e.currentTarget as HTMLButtonElement).style.backgroundColor = "transparent";
+          }}
+        >
+          <Hash size={14} color={palette.textSecondary} />
+          Create room
+        </button>
+      )}
 
       <div
         style={{

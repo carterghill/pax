@@ -1963,12 +1963,11 @@ pub async fn create_space(
 ///
 /// Compares the user's power level against the level required for
 /// `m.space.child` in the space's `m.room.power_levels` state.
-#[tauri::command]
-pub async fn can_manage_space_children(
-    state: State<'_, Arc<AppState>>,
-    space_id: String,
+async fn can_manage_space_children_for_user(
+    state: &AppState,
+    space_id: &str,
 ) -> Result<bool, String> {
-    let client = super::get_client(&state).await?;
+    let client = super::get_client(state).await?;
     let user_id = client.user_id().ok_or("No user ID")?.to_owned();
     let homeserver = client.homeserver().to_string();
     let access_token = client.access_token().ok_or("No access token")?;
@@ -1977,7 +1976,7 @@ pub async fn can_manage_space_children(
     let pl_url = format!(
         "{}/_matrix/client/v3/rooms/{}/state/m.room.power_levels/",
         homeserver.trim_end_matches('/'),
-        urlencoding::encode(&space_id),
+        urlencoding::encode(space_id),
     );
 
     let resp = state
@@ -2032,6 +2031,14 @@ pub async fn can_manage_space_children(
     Ok(user_pl >= required)
 }
 
+#[tauri::command]
+pub async fn can_manage_space_children(
+    state: State<'_, Arc<AppState>>,
+    space_id: String,
+) -> Result<bool, String> {
+    can_manage_space_children_for_user(&state, &space_id).await
+}
+
 /// Create a new room and add it as a child of the specified space.
 ///
 /// Creates the room via `POST /createRoom`, then sends an `m.space.child`
@@ -2054,6 +2061,12 @@ pub async fn create_room_in_space(
     room_alias: Option<String>,
     history_visibility: Option<String>,
 ) -> Result<String, String> {
+    if !can_manage_space_children_for_user(&state, &space_id).await? {
+        return Err(
+            "You don't have permission to add rooms to this space (insufficient power level). Ask a space admin to raise your level or create the channel for you.".to_string(),
+        );
+    }
+
     let client = super::get_client(&state).await?;
     let homeserver = client.homeserver().to_string();
     let access_token = client.access_token().ok_or("No access token")?;
