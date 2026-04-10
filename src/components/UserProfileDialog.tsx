@@ -3,6 +3,7 @@ import { invoke } from "@tauri-apps/api/core";
 import { X, Loader2, Copy, Shield, Crown, User, Calendar, Hash } from "lucide-react";
 import { useTheme } from "../theme/ThemeContext";
 import { useOverlayObstruction } from "../hooks/useOverlayObstruction";
+import { usePresenceContext } from "../hooks/PresenceContext";
 import type { RoomMemberProfile } from "../types/matrix";
 import { userInitialAvatarBackground } from "../utils/userAvatarColor";
 
@@ -67,11 +68,23 @@ function presenceLabel(presence: string): string {
 interface UserProfileDialogProps {
   roomId: string;
   userId: string;
+  /** When set and equal to `userId`, presence is taken from local status (matches the user menu). */
+  currentUserId?: string;
   onClose: () => void;
 }
 
-export default function UserProfileDialog({ roomId, userId, onClose }: UserProfileDialogProps) {
+function sameMatrixUser(a: string, b: string): boolean {
+  return a.trim().toLowerCase() === b.trim().toLowerCase();
+}
+
+export default function UserProfileDialog({
+  roomId,
+  userId,
+  currentUserId,
+  onClose,
+}: UserProfileDialogProps) {
   const { palette, typography, spacing, resolvedColorScheme } = useTheme();
+  const { effectivePresence } = usePresenceContext();
   const modalRef = useRef<HTMLDivElement>(null);
   useOverlayObstruction(modalRef);
 
@@ -138,6 +151,13 @@ export default function UserProfileDialog({ roomId, userId, onClose }: UserProfi
   const roleKey = profile?.role ?? "user";
   const roleMeta = ROLE_META[roleKey] ?? ROLE_META.user;
   const RoleIcon = roleMeta.Icon;
+
+  const isSelf =
+    currentUserId != null &&
+    currentUserId.length > 0 &&
+    sameMatrixUser(currentUserId, userId);
+  const presenceToShow =
+    profile && isSelf ? effectivePresence : profile?.presence ?? "offline";
 
   return (
     <div
@@ -378,7 +398,7 @@ export default function UserProfileDialog({ roomId, userId, onClose }: UserProfi
                       width: 10,
                       height: 10,
                       borderRadius: "50%",
-                      backgroundColor: presenceDotColor(profile.presence),
+                      backgroundColor: presenceDotColor(presenceToShow),
                       flexShrink: 0,
                       boxShadow: `0 0 0 2px ${palette.bgSecondary}`,
                     }}
@@ -390,7 +410,7 @@ export default function UserProfileDialog({ roomId, userId, onClose }: UserProfi
                       fontWeight: typography.fontWeightMedium,
                     }}
                   >
-                    {presenceLabel(profile.presence)}
+                    {presenceLabel(presenceToShow)}
                   </span>
                 </div>
 

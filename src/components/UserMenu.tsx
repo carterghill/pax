@@ -429,6 +429,7 @@ export default function UserMenu({ width, roomId, userId }: UserMenuProps) {
       <UserProfileDialog
         roomId={roomId}
         userId={profileUserId}
+        currentUserId={userId}
         onClose={() => setProfileUserId(null)}
       />
     )}
