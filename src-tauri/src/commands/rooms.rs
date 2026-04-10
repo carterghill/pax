@@ -558,7 +558,11 @@ async fn dm_one_to_one_peer_summary(
     }
     let client = room.client();
     let me = client.user_id()?;
-    let members = room.members(RoomMemberships::JOIN).await.ok()?;
+    // Include invited members so 1:1 DMs still resolve the peer before they accept (we're joined, they're invited).
+    let members = room
+        .members(RoomMemberships::JOIN | RoomMemberships::INVITE)
+        .await
+        .ok()?;
     let others: Vec<_> = members
         .into_iter()
         .filter(|m| m.user_id() != me)

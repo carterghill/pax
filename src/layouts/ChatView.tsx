@@ -2,29 +2,21 @@ import { useState, useEffect, useRef, useCallback, type CSSProperties } from "re
 import { useRoomRedactionPolicy } from "../hooks/useRoomRedactionPolicy";
 import { listen } from "@tauri-apps/api/event";
 import { ArrowLeft, Hash, MessageCircle, Users } from "lucide-react";
+import DmPeerAvatar from "../components/DmPeerAvatar";
 import MessageList from "../components/MessageList";
 import MessageInput, { type EditingMessageRef } from "../components/MessageInput";
 import UserMenu from "../components/UserMenu";
 import { useMessages } from "../hooks/useMessages";
+import { useMatrixUserProfile } from "../hooks/useMatrixUserProfile";
 import { useTheme } from "../theme/ThemeContext";
 import { Message, Room } from "../types/matrix";
 import { useResizeHandle } from "../hooks/useResizeHandle";
-import { userInitialAvatarBackground } from "../utils/userAvatarColor";
+import { effectiveDmTitle, isDmChatUi } from "../utils/dmDisplay";
 
 const USER_MENU_DEFAULT_WIDTH = 240;
 const MIN_USER_MENU_WIDTH = 180;
 const MAX_USER_MENU_WIDTH = 400;
 const USER_MENU_RESIZE_HANDLE = 6;
-
-function displayInitials(name: string): string {
-  const t = name.trim();
-  if (!t) return "?";
-  const parts = t.split(/\s+/).filter(Boolean);
-  if (parts.length >= 2) {
-    return `${parts[0][0] ?? ""}${parts[1][0] ?? ""}`.slice(0, 2).toUpperCase();
-  }
-  return t.slice(0, 2).toUpperCase();
-}
 
 interface ChatViewProps {
   userId: string;
@@ -139,6 +131,7 @@ export default function ChatView({
 }: ChatViewProps) {
   const isDraft = draftDm != null;
   const activeRoom = room ?? null;
+  const draftPeerProfile = useMatrixUserProfile(isDraft && draftDm ? draftDm.peerUserId : null);
 
   const {
     messages,
@@ -151,7 +144,7 @@ export default function ChatView({
     removeMessageById,
   } = useMessages(isDraft ? null : activeRoom!.id);
   const redactionPolicy = useRoomRedactionPolicy(isDraft ? null : activeRoom!.id);
-  const { palette, typography, spacing, resolvedColorScheme } = useTheme();
+  const { palette, typography, spacing } = useTheme();
   const [typingNames, setTypingNames] = useState<string[]>([]);
   const [localTyping, setLocalTyping] = useState(false);
   const [showUsers, setShowUsers] = useState(true);
@@ -211,7 +204,7 @@ export default function ChatView({
 
   if (isDraft && draftDm) {
     const hint = draftDm.displayNameHint.trim() || draftDm.peerUserId;
-    const initials = displayInitials(hint);
+    const title = draftPeerProfile.displayName?.trim() || hint;
 
     return (
       <div ref={containerRef} style={{
@@ -242,21 +235,12 @@ export default function ChatView({
           >
             <ArrowLeft size={20} />
           </button>
-          <div style={{
-            width: 32,
-            height: 32,
-            borderRadius: "50%",
-            backgroundColor: userInitialAvatarBackground(draftDm.peerUserId, resolvedColorScheme),
-            display: "flex",
-            alignItems: "center",
-            justifyContent: "center",
-            flexShrink: 0,
-            fontSize: typography.fontSizeSmall,
-            fontWeight: typography.fontWeightBold,
-            color: palette.textPrimary,
-          }}>
-            {initials}
-          </div>
+          <DmPeerAvatar
+            peerUserId={draftDm.peerUserId}
+            displayName={title}
+            avatarUrl={draftPeerProfile.avatarUrl}
+            size={32}
+          />
           <div style={{ flex: 1, minWidth: 0 }}>
             <div style={{
               fontWeight: typography.fontWeightBold,
@@ -266,7 +250,7 @@ export default function ChatView({
               textOverflow: "ellipsis",
               whiteSpace: "nowrap",
             }}>
-              {hint}
+              {title}
             </div>
             <div style={{
               fontSize: typography.fontSizeSmall,
@@ -303,7 +287,7 @@ export default function ChatView({
             <MessageInput
               key={`draft-${draftDm.peerUserId}`}
               roomId=""
-              roomName={hint}
+              roomName={title}
               draftDmPeerUserId={draftDm.peerUserId}
               onDraftDmFirstMessage={handleDraftDmFirstMessage}
               onMessageSent={() => {}}
@@ -330,34 +314,14 @@ export default function ChatView({
       overflow: "hidden",
     }}>
       {/* Channel header — 1:1 DM matches draft banner (no member list toggle) */}
-      {activeRoom.isDirect ? (
+      {isDmChatUi(activeRoom) ? (
         <div style={dmBannerStyle}>
-          <div style={{
-            width: 32,
-            height: 32,
-            borderRadius: "50%",
-            backgroundColor: activeRoom.dmPeerUserId
-              ? userInitialAvatarBackground(activeRoom.dmPeerUserId, resolvedColorScheme)
-              : palette.bgActive,
-            display: "flex",
-            alignItems: "center",
-            justifyContent: "center",
-            flexShrink: 0,
-            fontSize: typography.fontSizeSmall,
-            fontWeight: typography.fontWeightBold,
-            color: palette.textPrimary,
-            overflow: "hidden",
-          }}>
-            {activeRoom.avatarUrl ? (
-              <img
-                src={activeRoom.avatarUrl}
-                alt=""
-                style={{ width: "100%", height: "100%", objectFit: "cover" }}
-              />
-            ) : (
-              displayInitials(activeRoom.name || "?")
-            )}
-          </div>
+          <DmPeerAvatar
+            peerUserId={activeRoom.dmPeerUserId ?? activeRoom.id}
+            displayName={effectiveDmTitle(activeRoom)}
+            avatarUrl={activeRoom.avatarUrl}
+            size={32}
+          />
           <div style={{ flex: 1, minWidth: 0 }}>
             <div style={{
               fontWeight: typography.fontWeightBold,
@@ -367,7 +331,7 @@ export default function ChatView({
               textOverflow: "ellipsis",
               whiteSpace: "nowrap",
             }}>
-              {activeRoom.name}
+              {effectiveDmTitle(activeRoom)}
             </div>
             <div style={{
               fontSize: typography.fontSizeSmall,
@@ -479,7 +443,7 @@ export default function ChatView({
         </div>
 
         {/* User menu panel with resizable inside border (not for 1:1 DMs) */}
-        {showUsers && !activeRoom.isDirect && (
+        {showUsers && !isDmChatUi(activeRoom) && (
           <div style={{
             position: "relative",
             flexShrink: 0,

@@ -21,6 +21,7 @@ import {
   voiceStateLookupKeysForLiveKitIdentity,
 } from "../utils/matrix";
 import { useLivekitVoiceSnapshots } from "../hooks/useLivekitVoiceSnapshots";
+import { useMatrixUserProfile } from "../hooks/useMatrixUserProfile";
 import { useUserAvatar } from "../hooks/useUserAvatar";
 import { useResizeHandle } from "../hooks/useResizeHandle";
 
@@ -108,6 +109,7 @@ export default function MainLayout({
   const [settingsOpen, setSettingsOpen] = useState(false);
   /** DM composer before the Matrix room exists (first send creates the room). */
   const [pendingDm, setPendingDm] = useState<{ peerUserId: string; displayNameHint: string } | null>(null);
+  const pendingDmPeerProfile = useMatrixUserProfile(pendingDm?.peerUserId ?? null);
 
   const spaceKey = activeSpaceId ?? "";
   const activeRoomId = activeRoomBySpace[spaceKey] ?? null;
@@ -217,8 +219,8 @@ export default function MainLayout({
       if (!base.some((r) => r.id === fakeId)) {
         const fake: Room = {
           id: fakeId,
-          name: pendingDm.displayNameHint,
-          avatarUrl: null,
+          name: pendingDmPeerProfile.displayName?.trim() || pendingDm.displayNameHint,
+          avatarUrl: pendingDmPeerProfile.avatarUrl ?? null,
           isSpace: false,
           parentSpaceIds: [],
           roomType: null,
@@ -232,7 +234,14 @@ export default function MainLayout({
       }
     }
     return base;
-  }, [activeSpaceId, pendingDm, roomsBySpace, subSpaceRoomIdSet]);
+  }, [
+    activeSpaceId,
+    pendingDm,
+    pendingDmPeerProfile.displayName,
+    pendingDmPeerProfile.avatarUrl,
+    roomsBySpace,
+    subSpaceRoomIdSet,
+  ]);
 
   const subSpaceSections = useMemo(
     () =>

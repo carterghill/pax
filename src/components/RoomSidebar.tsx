@@ -1,9 +1,10 @@
-import { useState, useCallback } from "react";
+import { useState, useCallback, useEffect } from "react";
 import { invoke } from "@tauri-apps/api/core";
+import { listen } from "@tauri-apps/api/event";
+import DmPeerAvatar from "./DmPeerAvatar";
 import {
   Hash,
   House,
-  MessageCircle,
   Volume2,
   Monitor,
   MicOff,
@@ -24,12 +25,18 @@ import RoomSettingsModal from "./RoomSettingsModal";
 import InviteDialog from "./InviteDialog";
 import LeaveConfirmDialog from "./LeaveConfirmDialog";
 import { useUserVolume } from "../hooks/useUserVolume";
+import { dmPresenceDotColor, effectiveDmTitle, isDmChatUi } from "../utils/dmDisplay";
 import {
   VOICE_ROOM_TYPE,
   isPendingDmRoomId,
+  normalizeUserId,
+  parsePendingDmPeerUserId,
   voiceStateLookupKeysForParticipant,
 } from "../utils/matrix";
 import { userInitialAvatarBackground } from "../utils/userAvatarColor";
+
+/** DM peer circle in the channel list (slightly larger than default 16px icons). */
+const DM_SIDEBAR_AVATAR_PX = 28;
 
 function resolveVoiceStateForRoom(
   participant: VoiceParticipant,
@@ -207,6 +214,7 @@ function ChannelBlock({
   screenSharingOwners,
   voiceParticipantStatesByRoom,
   onParticipantContextMenu,
+  peerPresenceByUserId,
   palette,
   spacing,
   typography,
@@ -231,6 +239,8 @@ function ChannelBlock({
     identity: string,
     displayName: string
   ) => void;
+  /** Live presence from sync (`presence` events), keyed by normalized user id. */
+  peerPresenceByUserId: Record<string, string>;
   palette: ReturnType<typeof useTheme>["palette"];
   spacing: ReturnType<typeof useTheme>["spacing"];
   typography: ReturnType<typeof useTheme>["typography"];
@@ -238,6 +248,9 @@ function ChannelBlock({
 }) {
   const isVoice = room.roomType === VOICE_ROOM_TYPE;
   const isDraftDmRow = isPendingDmRoomId(room.id);
+  const dmPeerId = room.dmPeerUserId ?? parsePendingDmPeerUserId(room.id) ?? room.id;
+  const dmPeerPresenceLive =
+    peerPresenceByUserId[normalizeUserId(dmPeerId)] ?? room.dmPeerPresence ?? "offline";
   const participants = isVoice ? (voiceParticipants[room.id] ?? []) : [];
   const isConnectedHere = connectedVoiceRoomId === room.id;
   const padLeft = indent ? spacing.unit * 6 : spacing.unit * 3;
@@ -276,11 +289,39 @@ function ChannelBlock({
                     : palette.textSecondary
               }
             />
-          ) : isDraftDmRow ? (
-            <MessageCircle
-              size={16}
-              color={activeRoomId === room.id ? palette.textHeading : palette.textSecondary}
-            />
+          ) : isDmChatUi(room) ? (
+            <div
+              style={{
+                position: "relative",
+                width: DM_SIDEBAR_AVATAR_PX,
+                height: DM_SIDEBAR_AVATAR_PX,
+                flexShrink: 0,
+              }}
+            >
+              <DmPeerAvatar
+                peerUserId={dmPeerId}
+                displayName={effectiveDmTitle(room)}
+                avatarUrl={room.avatarUrl}
+                size={DM_SIDEBAR_AVATAR_PX}
+                fontSize={13}
+              />
+              {room.membership === "joined" && !!room.dmPeerUserId && (
+                <span
+                  title={dmPeerPresenceLive}
+                  style={{
+                    position: "absolute",
+                    bottom: -1,
+                    right: -1,
+                    width: 10,
+                    height: 10,
+                    borderRadius: "50%",
+                    backgroundColor: dmPresenceDotColor(dmPeerPresenceLive),
+                    border: `2px solid ${palette.bgSecondary}`,
+                    boxSizing: "border-box",
+                  }}
+                />
+              )}
+            </div>
           ) : (
             <Hash
               size={16}
@@ -293,7 +334,7 @@ function ChannelBlock({
               color: isConnectedHere ? "#23a55a" : undefined,
             }}
           >
-            {room.name}
+            {isDmChatUi(room) ? effectiveDmTitle(room) : room.name}
           </div>
         </span>
       </div>
@@ -384,6 +425,19 @@ export default function RoomSidebar({
   const [leaveRoomError, setLeaveRoomError] = useState<string | null>(null);
   const [leaveRoomSubmitting, setLeaveRoomSubmitting] = useState(false);
   const settingsRoom = settingsRoomId ? getRoom(settingsRoomId) : null;
+
+  /** Live DM peer presence from sync (same `presence` event as space home / member list). */
+  const [peerPresenceByUserId, setPeerPresenceByUserId] = useState<Record<string, string>>({});
+  useEffect(() => {
+    const unlisten = listen<{ userId: string; presence: string }>("presence", (event) => {
+      const { userId, presence } = event.payload;
+      const key = normalizeUserId(userId);
+      setPeerPresenceByUserId((prev) => ({ ...prev, [key]: presence }));
+    });
+    return () => {
+      unlisten.then((fn) => fn());
+    };
+  }, []);
 
   const isSubSpaceExpanded = (id: string) => subSpaceExpanded[id] !== false;
 
@@ -620,6 +674,7 @@ export default function RoomSidebar({
                     onParticipantContextMenu={(e, identity, displayName) => {
                       setContextMenu({ x: e.clientX, y: e.clientY, identity, displayName });
                     }}
+                    peerPresenceByUserId={peerPresenceByUserId}
                     palette={palette}
                     spacing={spacing}
                     typography={typography}
@@ -649,6 +704,7 @@ export default function RoomSidebar({
             onParticipantContextMenu={(e, identity, displayName) => {
               setContextMenu({ x: e.clientX, y: e.clientY, identity, displayName });
             }}
+            peerPresenceByUserId={peerPresenceByUserId}
             palette={palette}
             spacing={spacing}
             typography={typography}

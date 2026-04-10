@@ -265,6 +265,7 @@ pub fn run() {
             commands::messages::get_matrix_image_path,
             commands::members::get_room_members,
             commands::members::get_room_member_profile,
+            commands::members::get_matrix_user_profile,
             commands::members::get_user_avatar,
             commands::members::get_knock_members,
             commands::members::preview_leave_space,

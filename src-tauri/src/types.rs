@@ -53,6 +53,14 @@ pub struct RoomMemberInfo {
     pub presence: String, // "online", "offline", "unavailable"
 }
 
+/// Global profile (`GET /profile/{userId}`) for DM UI when no room member state exists yet.
+#[derive(Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct MatrixUserProfile {
+    pub display_name: Option<String>,
+    pub avatar_url: Option<String>,
+}
+
 /// Extended member details for the profile dialog (room-scoped).
 #[derive(Clone, Serialize)]
 #[serde(rename_all = "camelCase")]

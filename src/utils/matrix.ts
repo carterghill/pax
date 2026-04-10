@@ -139,3 +139,8 @@ export function pendingDmRoomId(peerUserId: string): string {
 export function isPendingDmRoomId(roomId: string): boolean {
   return roomId.startsWith(PENDING_DM_ROOM_PREFIX);
 }
+
+export function parsePendingDmPeerUserId(roomId: string): string | null {
+  if (!isPendingDmRoomId(roomId)) return null;
+  return roomId.slice(PENDING_DM_ROOM_PREFIX.length);
+}

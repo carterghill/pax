@@ -6,10 +6,14 @@ use futures_util::future::join_all;
 use serde::Deserialize;
 use tauri::{Emitter, State};
 
-use crate::types::{RoomMemberInfo, RoomMemberProfile};
+use crate::types::{MatrixUserProfile, RoomMemberInfo, RoomMemberProfile};
 use crate::AppState;
 
 use super::{fmt_error_chain, get_client, get_or_fetch_avatar, resolve_room, encode_bytes_data_url, sniff_image_mime};
+use matrix_sdk::media::{MediaFormat, MediaRequestParameters};
+use matrix_sdk::ruma::api::client::profile::get_profile::v3::Request as GetProfileRequest;
+use matrix_sdk::ruma::api::client::profile::{AvatarUrl, DisplayName};
+use matrix_sdk::ruma::events::room::MediaSource;
 
 #[tauri::command]
 pub async fn get_room_members(
@@ -172,6 +176,54 @@ pub async fn get_room_member_profile(
         can_invite: member.can_invite(),
         can_kick: member.can_kick(),
         can_ban: member.can_ban(),
+    })
+}
+
+/// Fetch display name + avatar (data URL) for any user via the Matrix profile API.
+#[tauri::command]
+pub async fn get_matrix_user_profile(
+    state: State<'_, Arc<AppState>>,
+    user_id: String,
+) -> Result<MatrixUserProfile, String> {
+    let client = get_client(&state).await?;
+    let uid = matrix_sdk::ruma::UserId::parse(&user_id)
+        .map_err(|e| format!("Invalid user ID: {e}"))?;
+
+    let response = client
+        .send(GetProfileRequest::new(uid))
+        .await
+        .map_err(|e| format!("Failed to load profile: {}", fmt_error_chain(&e)))?;
+
+    let display_name = response
+        .get_static::<DisplayName>()
+        .map_err(|e| format!("Profile displayname: {}", e))?;
+    let owned_mxc = response
+        .get_static::<AvatarUrl>()
+        .map_err(|e| format!("Profile avatar_url: {}", e))?;
+    let mxc_ref = owned_mxc.as_deref();
+
+    let client_clone = client.clone();
+    let owned_mxc_for_fetch = owned_mxc.clone();
+    let fetch_bytes = async move {
+        let Some(u) = owned_mxc_for_fetch else {
+            return Ok(None);
+        };
+        let request = MediaRequestParameters {
+            source: MediaSource::Plain(u),
+            format: MediaFormat::File,
+        };
+        client_clone
+            .media()
+            .get_media_content(&request, true)
+            .await
+            .map(Some)
+    };
+
+    let avatar_url = get_or_fetch_avatar(mxc_ref, fetch_bytes, &state.avatar_cache).await;
+
+    Ok(MatrixUserProfile {
+        display_name,
+        avatar_url,
     })
 }
 

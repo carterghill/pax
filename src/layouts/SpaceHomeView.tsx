@@ -20,6 +20,7 @@ import {
 import { useTheme } from "../theme/ThemeContext";
 import { Room } from "../types/matrix";
 import type { RoomsChangedPayload } from "../types/roomsChanged";
+import { dmPresenceDotColor, effectiveDmTitle } from "../utils/dmDisplay";
 import { VOICE_ROOM_TYPE, SPACE_ROOM_TYPE, compareByDisplayThenKey } from "../utils/matrix";
 import {
   spaceInitialAvatarBackground,
@@ -992,19 +993,6 @@ function RoomSection({
   );
 }
 
-function dmPresenceDotColor(p: string | undefined): string {
-  switch (p) {
-    case "online":
-      return "#23a55a";
-    case "unavailable":
-      return "#f0b232";
-    case "dnd":
-      return "#f23f43";
-    default:
-      return "#80848e";
-  }
-}
-
 function RoomRow({
   room,
   isJoining,
@@ -1029,9 +1017,10 @@ function RoomRow({
   const isJoined = room.membership === "joined";
   const isInvited = room.membership === "invited";
   const canJoin = !isJoined;
-  const isDm = room.isDirect === true && !!room.dmPeerUserId;
+  const isDm = room.isDirect === true;
   const dmPresence = room.dmPeerPresence ?? "offline";
-  const initials = room.name
+  const dmTitle = effectiveDmTitle({ name: room.name, dmPeerUserId: room.dmPeerUserId ?? null });
+  const initials = dmTitle
     .split(/\s+/)
     .map((w) => w[0])
     .join("")
@@ -1059,7 +1048,7 @@ function RoomRow({
         {room.avatarUrl && !imageFailed ? (
           <img
             src={room.avatarUrl}
-            alt={room.name}
+            alt={dmTitle}
             onError={() => setImageFailed(true)}
             style={{
               width: 36,
@@ -1096,7 +1085,7 @@ function RoomRow({
             )}
           </div>
         )}
-        {isDm && isJoined && (
+        {isDm && isJoined && !!room.dmPeerUserId && (
           <span
             title={dmPresence}
             style={{
@@ -1129,7 +1118,7 @@ function RoomRow({
             textOverflow: "ellipsis",
             whiteSpace: "nowrap",
           }}>
-            {room.name}
+            {isDm ? dmTitle : room.name}
           </span>
         </div>
         {room.topic && !isDm && (
