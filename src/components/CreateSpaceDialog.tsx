@@ -105,14 +105,15 @@ function buildDefaultSearchServers(currentHomeserver: string | null): string[] {
 function buildOptimisticSpaceRoom(
   roomId: string,
   name: string,
-  avatarUrl: string | null
+  avatarUrl: string | null,
+  parentSpaceIds: string[] = []
 ): Room {
   return {
     id: roomId,
     name,
     avatarUrl,
     isSpace: true,
-    parentSpaceIds: [],
+    parentSpaceIds,
     roomType: "m.space",
     membership: "joined",
   };
@@ -122,12 +123,15 @@ interface CreateSpaceDialogProps {
   canCreate: boolean;
   onClose: () => void;
   onCreated: (payload?: RoomsChangedPayload) => void | Promise<void>;
+  /** When set, only the create form is shown and the new space is nested under this parent. */
+  parentSpace?: { id: string; name: string } | null;
 }
 
 export default function CreateSpaceDialog({
   canCreate,
   onClose,
   onCreated,
+  parentSpace = null,
 }: CreateSpaceDialogProps) {
   const { palette, typography, resolvedColorScheme } = useTheme();
   const modalRef = useRef<HTMLDivElement>(null);
@@ -135,6 +139,10 @@ export default function CreateSpaceDialog({
 
   // Tab state — if user can't create, only show join (no tabs at all)
   const [activeTab, setActiveTab] = useState<"join" | "create">("join");
+
+  useEffect(() => {
+    if (parentSpace) setActiveTab("create");
+  }, [parentSpace]);
 
   // ── Create form state ──
   const [name, setName] = useState("");
@@ -190,6 +198,7 @@ export default function CreateSpaceDialog({
   // Light, one-time listing of public spaces on your homeserver when the join tab is shown.
   useEffect(() => {
     if (
+      parentSpace ||
       activeTab !== "join" ||
       !currentHomeserver ||
       homeserverPublicListFetchedRef.current
@@ -230,7 +239,7 @@ export default function CreateSpaceDialog({
       cancelled = true;
       setHomeserverBrowseLoading(false);
     };
-  }, [activeTab, currentHomeserver]);
+  }, [activeTab, currentHomeserver, parentSpace]);
 
   const searchServers = useMemo(() => {
     const explicitServers = parseServerInputs(searchServer);
@@ -295,24 +304,39 @@ export default function CreateSpaceDialog({
     setError(null);
 
     try {
-      const roomId = await invoke<string>("create_space", {
-        name: name.trim(),
-        topic: topic.trim() || null,
-        isPublic,
-        roomAlias: roomAlias.trim() || null,
-        federate,
-        avatarData,
-        avatarMime,
-        historyVisibility,
-        guestAccess,
-        joinRule,
-      });
+      const roomId = parentSpace
+        ? await invoke<string>("create_sub_space", {
+            parentSpaceId: parentSpace.id,
+            name: name.trim(),
+            topic: topic.trim() || null,
+            isPublic,
+            roomAlias: roomAlias.trim() || null,
+            federate,
+            avatarData,
+            avatarMime,
+            historyVisibility,
+            guestAccess,
+            joinRule,
+          })
+        : await invoke<string>("create_space", {
+            name: name.trim(),
+            topic: topic.trim() || null,
+            isPublic,
+            roomAlias: roomAlias.trim() || null,
+            federate,
+            avatarData,
+            avatarMime,
+            historyVisibility,
+            guestAccess,
+            joinRule,
+          });
       await onCreated({
         joinedRoomId: roomId,
         optimisticRoom: buildOptimisticSpaceRoom(
           roomId,
           name.trim(),
-          avatarPreview
+          avatarPreview,
+          parentSpace ? [parentSpace.id] : []
         ),
       });
       onClose();
@@ -323,7 +347,7 @@ export default function CreateSpaceDialog({
     }
   }, [
     name, topic, isPublic, roomAlias, federate, avatarData, avatarMime,
-    historyVisibility, guestAccess, joinRule, onCreated, onClose,
+    historyVisibility, guestAccess, joinRule, onCreated, onClose, parentSpace,
   ]);
 
   // ── Search public spaces ──
@@ -570,7 +594,11 @@ export default function CreateSpaceDialog({
               color: palette.textHeading,
             }}
           >
-            {canCreate ? "Add a Space" : "Join a Space"}
+            {parentSpace
+              ? "Create sub-space"
+              : canCreate
+                ? "Add a Space"
+                : "Join a Space"}
           </h2>
           <button
             onClick={onClose}
@@ -589,7 +617,7 @@ export default function CreateSpaceDialog({
         </div>
 
         {/* ── Tabs (only if user can create) ── */}
-        {canCreate && (
+        {canCreate && !parentSpace && (
           <div
             style={{
               display: "flex",
@@ -635,8 +663,23 @@ export default function CreateSpaceDialog({
 
         {/* ── Body ── */}
         <div style={{ flex: 1, overflowY: "auto", padding: 16 }}>
+          {parentSpace && (
+            <div
+              style={{
+                fontSize: typography.fontSizeSmall,
+                color: palette.textSecondary,
+                marginBottom: 12,
+                lineHeight: typography.lineHeight,
+              }}
+            >
+              Under:{" "}
+              <span style={{ color: palette.textPrimary, fontWeight: typography.fontWeightMedium }}>
+                {parentSpace.name}
+              </span>
+            </div>
+          )}
           {/* ═════════════════ JOIN TAB ═════════════════ */}
-          {activeTab === "join" && (
+          {activeTab === "join" && !parentSpace && (
             <>
               {/* Search bar */}
               <div style={{ marginBottom: 12 }}>
@@ -874,7 +917,7 @@ export default function CreateSpaceDialog({
           )}
 
           {/* ═════════════════ CREATE TAB ═════════════════ */}
-          {activeTab === "create" && (
+          {(activeTab === "create" || parentSpace) && (
             <>
               {/* Avatar + Name row */}
               <div style={{ display: "flex", gap: 16, marginBottom: 16 }}>
@@ -1170,7 +1213,7 @@ export default function CreateSpaceDialog({
         </div>
 
         {/* ── Footer (create tab only) ── */}
-        {activeTab === "create" && (
+        {(activeTab === "create" || parentSpace) && (
           <div
             style={{
               display: "flex",
@@ -1232,7 +1275,7 @@ export default function CreateSpaceDialog({
               ) : (
                 <>
                   <Plus size={16} />
-                  Create Space
+                  {parentSpace ? "Create sub-space" : "Create Space"}
                 </>
               )}
             </button>

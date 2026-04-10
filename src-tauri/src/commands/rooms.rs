@@ -1958,6 +1958,263 @@ pub async fn create_space(
     Ok(room_id)
 }
 
+/// Create a nested Matrix space under a parent space.
+///
+/// Same options as [`create_space`], plus linking the new space to `parent_space_id`
+/// via `m.space.parent` / `m.space.child`. Requires permission to send `m.space.child`
+/// in the parent (same as [`create_room_in_space`]).
+#[tauri::command]
+pub async fn create_sub_space(
+    state: State<'_, Arc<AppState>>,
+    parent_space_id: String,
+    name: String,
+    topic: Option<String>,
+    is_public: bool,
+    room_alias: Option<String>,
+    federate: bool,
+    avatar_data: Option<String>,
+    avatar_mime: Option<String>,
+    history_visibility: Option<String>,
+    guest_access: Option<String>,
+    join_rule: Option<String>,
+) -> Result<String, String> {
+    if !can_manage_space_children_for_user(&state, &parent_space_id).await? {
+        return Err(
+            "You don't have permission to add rooms to this space (insufficient power level). Ask a space admin to raise your level or create the sub-space for you.".to_string(),
+        );
+    }
+
+    let client = super::get_client(&state).await?;
+    let homeserver = client.homeserver().to_string();
+    let access_token = client.access_token().ok_or("No access token")?;
+
+    let server_name = parent_space_id
+        .split(':')
+        .nth(1)
+        .unwrap_or("localhost")
+        .to_string();
+
+    // Upload avatar if provided, get MXC URI
+    let avatar_mxc: Option<String> = if let (Some(data), Some(mime)) = (&avatar_data, &avatar_mime)
+    {
+        let bytes = data_encoding::BASE64
+            .decode(data.as_bytes())
+            .map_err(|e| format!("Invalid base64 avatar data: {e}"))?;
+
+        let upload_url = format!(
+            "{}/_matrix/media/v3/upload",
+            homeserver.trim_end_matches('/')
+        );
+
+        let resp = state
+            .http_client
+            .post(&upload_url)
+            .timeout(Duration::from_secs(30))
+            .bearer_auth(access_token.to_string())
+            .header("Content-Type", mime.as_str())
+            .body(bytes)
+            .send()
+            .await
+            .map_err(|e| format!("Failed to upload avatar: {}", super::fmt_error_chain(&e)))?;
+
+        if !resp.status().is_success() {
+            let status = resp.status();
+            let text = resp.text().await.unwrap_or_default();
+            return Err(format!("Avatar upload failed ({}): {}", status, text));
+        }
+
+        let body: serde_json::Value = resp
+            .json()
+            .await
+            .map_err(|e| format!("Failed to parse upload response: {e}"))?;
+
+        body["content_uri"].as_str().map(|s| s.to_string())
+    } else {
+        None
+    };
+
+    // Build initial_state events — parent link first, then same as create_space
+    let mut initial_state: Vec<serde_json::Value> = Vec::new();
+
+    initial_state.push(serde_json::json!({
+        "type": "m.space.parent",
+        "state_key": parent_space_id,
+        "content": {
+            "via": [server_name.clone()],
+            "canonical": true,
+        }
+    }));
+
+    if let Some(mxc) = &avatar_mxc {
+        initial_state.push(serde_json::json!({
+            "type": "m.room.avatar",
+            "state_key": "",
+            "content": {
+                "url": mxc,
+            }
+        }));
+    }
+
+    if let Some(hv) = &history_visibility {
+        let valid = ["joined", "shared", "invited", "world_readable"];
+        if valid.contains(&hv.as_str()) {
+            initial_state.push(serde_json::json!({
+                "type": "m.room.history_visibility",
+                "state_key": "",
+                "content": {
+                    "history_visibility": hv,
+                }
+            }));
+        }
+    }
+
+    if let Some(ga) = &guest_access {
+        let valid = ["can_join", "forbidden"];
+        if valid.contains(&ga.as_str()) {
+            initial_state.push(serde_json::json!({
+                "type": "m.room.guest_access",
+                "state_key": "",
+                "content": {
+                    "guest_access": ga,
+                }
+            }));
+        }
+    }
+
+    if let Some(jr) = &join_rule {
+        let valid = ["public", "invite", "knock"];
+        if valid.contains(&jr.as_str()) {
+            initial_state.push(serde_json::json!({
+                "type": "m.room.join_rules",
+                "state_key": "",
+                "content": {
+                    "join_rule": jr,
+                }
+            }));
+        }
+    }
+
+    let effective_join_rule =
+        join_rule
+            .as_deref()
+            .unwrap_or(if is_public { "public" } else { "invite" });
+    let preset = if effective_join_rule == "public" {
+        "public_chat"
+    } else {
+        "private_chat"
+    };
+    let visibility = if is_public { "public" } else { "private" };
+
+    let mut body = serde_json::json!({
+        "name": name,
+        "preset": preset,
+        "visibility": visibility,
+        "creation_content": {
+            "type": "m.space",
+            "m.federate": federate,
+        },
+        "initial_state": initial_state,
+        "power_level_content_override": {
+            "events_default": 100,
+        },
+    });
+
+    if let Some(t) = &topic {
+        if !t.is_empty() {
+            body["topic"] = serde_json::json!(t);
+        }
+    }
+
+    if let Some(alias) = &room_alias {
+        if !alias.is_empty() {
+            body["room_alias_name"] = serde_json::json!(alias);
+        }
+    }
+
+    let create_url = format!(
+        "{}/_matrix/client/v3/createRoom",
+        homeserver.trim_end_matches('/')
+    );
+
+    let resp = state
+        .http_client
+        .post(&create_url)
+        .timeout(Duration::from_secs(30))
+        .bearer_auth(access_token.to_string())
+        .json(&body)
+        .send()
+        .await
+        .map_err(|e| format!("Failed to create space: {}", super::fmt_error_chain(&e)))?;
+
+    let status = resp.status();
+    let resp_body: serde_json::Value = resp
+        .json()
+        .await
+        .map_err(|e| format!("Failed to parse create response: {e}"))?;
+
+    if !status.is_success() {
+        let errcode = resp_body["errcode"].as_str().unwrap_or("UNKNOWN");
+        let error = resp_body["error"].as_str().unwrap_or("Unknown error");
+        return Err(format!("{}: {}", errcode, error));
+    }
+
+    let room_id = resp_body["room_id"]
+        .as_str()
+        .ok_or("No room_id in create response")?
+        .to_string();
+
+    let child_url = format!(
+        "{}/_matrix/client/v3/rooms/{}/state/m.space.child/{}",
+        homeserver.trim_end_matches('/'),
+        urlencoding::encode(&parent_space_id),
+        urlencoding::encode(&room_id),
+    );
+
+    let child_content = serde_json::json!({
+        "via": [server_name],
+        "suggested": false,
+    });
+
+    let child_resp = state
+        .http_client
+        .put(&child_url)
+        .timeout(Duration::from_secs(15))
+        .bearer_auth(access_token.to_string())
+        .json(&child_content)
+        .send()
+        .await
+        .map_err(|e| {
+            format!(
+                "Space created but failed to link to parent: {}",
+                super::fmt_error_chain(&e)
+            )
+        })?;
+
+    if !child_resp.status().is_success() {
+        let status = child_resp.status();
+        let text = child_resp.text().await.unwrap_or_default();
+        log::warn!(
+            "create_sub_space: m.space.child failed ({}): {} — room {} exists but is unlinked",
+            status,
+            text,
+            room_id
+        );
+        return Err(format!(
+            "Space created ({}) but linking to parent failed ({}): {}",
+            room_id, status, text
+        ));
+    }
+
+    log::info!(
+        "create_sub_space: created '{}' → {} under parent {}",
+        name,
+        room_id,
+        parent_space_id
+    );
+
+    Ok(room_id)
+}
+
 /// Check whether the logged-in user has permission to add/remove children
 /// in a space (i.e. can send `m.space.child` state events).
 ///

@@ -121,6 +121,10 @@ export default function SpaceSidebar({
   const [leaveSpaceError, setLeaveSpaceError] = useState<string | null>(null);
   const [leaveSpaceSubmitting, setLeaveSpaceSubmitting] = useState(false);
   const [createRoomSpaceId, setCreateRoomSpaceId] = useState<string | null>(null);
+  const [createSubSpaceParent, setCreateSubSpaceParent] = useState<{
+    id: string;
+    name: string;
+  } | null>(null);
   const checkedRef = useRef(false);
 
   // Check room creation permission once on mount
@@ -364,6 +368,10 @@ export default function SpaceSidebar({
             const t = spaceContextMenu;
             setCreateRoomSpaceId(t.spaceId);
           }}
+          onCreateSubSpace={() => {
+            const t = spaceContextMenu;
+            setCreateSubSpaceParent({ id: t.spaceId, name: t.spaceName });
+          }}
           onLeave={() => {
             const t = spaceContextMenu;
             setLeaveSpaceError(null);
@@ -383,6 +391,15 @@ export default function SpaceSidebar({
         <CreateRoomDialog
           spaceId={createRoomSpaceId}
           onClose={() => setCreateRoomSpaceId(null)}
+          onCreated={handleCreated}
+        />
+      )}
+
+      {createSubSpaceParent && (
+        <CreateSpaceDialog
+          canCreate
+          parentSpace={createSubSpaceParent}
+          onClose={() => setCreateSubSpaceParent(null)}
           onCreated={handleCreated}
         />
       )}

@@ -256,6 +256,7 @@ pub fn run() {
             commands::rooms::set_history_visibility,
             commands::rooms::can_create_rooms,
             commands::rooms::create_space,
+            commands::rooms::create_sub_space,
             commands::rooms::can_manage_space_children,
             commands::rooms::create_room_in_space,
             commands::rooms::search_public_spaces,
