@@ -6,6 +6,7 @@ import { useTheme } from "../theme/ThemeContext";
 import { useRoomMembers } from "../hooks/useRoomMembers";
 import { usePresenceContext } from "../hooks/PresenceContext";
 import MemberContextMenu from "./MemberContextMenu";
+import UserProfileDialog from "./UserProfileDialog";
 
 interface UserMenuProps {
   width: number;
@@ -47,6 +48,7 @@ export default function UserMenu({ width, roomId, userId }: UserMenuProps) {
     userId: string;
     displayName: string;
   } | null>(null);
+  const [profileUserId, setProfileUserId] = useState<string | null>(null);
   const activeRoomRef = useRef(roomId);
   activeRoomRef.current = roomId;
 
@@ -68,6 +70,7 @@ export default function UserMenu({ width, roomId, userId }: UserMenuProps) {
   useEffect(() => {
     setKnockData(null);
     setMemberContextMenu(null);
+    setProfileUserId(null);
     fetchKnocks();
   }, [roomId, fetchKnocks]);
 
@@ -414,6 +417,18 @@ export default function UserMenu({ width, roomId, userId }: UserMenuProps) {
         displayName={memberContextMenu.displayName}
         userId={memberContextMenu.userId}
         onClose={() => setMemberContextMenu(null)}
+        onProfile={() => {
+          const id = memberContextMenu.userId;
+          setMemberContextMenu(null);
+          setProfileUserId(id);
+        }}
+      />
+    )}
+    {profileUserId && (
+      <UserProfileDialog
+        roomId={roomId}
+        userId={profileUserId}
+        onClose={() => setProfileUserId(null)}
       />
     )}
     </>

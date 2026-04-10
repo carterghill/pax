@@ -41,6 +41,23 @@ export interface RoomMember {
   presence: string; // "online" | "offline" | "unavailable"
 }
 
+/** From `get_room_member_profile` — room-scoped member details. */
+export interface RoomMemberProfile {
+  userId: string;
+  displayName: string | null;
+  avatarUrl: string | null;
+  presence: string;
+  role: "creator" | "administrator" | "moderator" | "user";
+  powerLevel: number | null;
+  joinedAtMs: number | null;
+  nameAmbiguous: boolean;
+  homeserver: string;
+  isIgnored: boolean;
+  canInvite: boolean;
+  canKick: boolean;
+  canBan: boolean;
+}
+
 export interface VoiceParticipant {
   userId: string;
   displayName: string | null;

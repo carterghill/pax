@@ -47,6 +47,27 @@ pub struct RoomMemberInfo {
     pub presence: String, // "online", "offline", "unavailable"
 }
 
+/// Extended member details for the profile dialog (room-scoped).
+#[derive(Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RoomMemberProfile {
+    pub user_id: String,
+    pub display_name: Option<String>,
+    pub avatar_url: Option<String>,
+    pub presence: String,
+    /// `creator` | `administrator` | `moderator` | `user`
+    pub role: String,
+    /// Raw power level when not a room creator (`None` when infinite / creator).
+    pub power_level: Option<i64>,
+    pub joined_at_ms: Option<u64>,
+    pub name_ambiguous: bool,
+    pub homeserver: String,
+    pub is_ignored: bool,
+    pub can_invite: bool,
+    pub can_kick: bool,
+    pub can_ban: bool,
+}
+
 #[derive(Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct PresencePayload {

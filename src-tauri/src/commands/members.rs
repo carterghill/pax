@@ -6,7 +6,7 @@ use futures_util::future::join_all;
 use serde::Deserialize;
 use tauri::State;
 
-use crate::types::RoomMemberInfo;
+use crate::types::{RoomMemberInfo, RoomMemberProfile};
 use crate::AppState;
 
 use super::{fmt_error_chain, get_client, get_or_fetch_avatar, resolve_room, encode_bytes_data_url, sniff_image_mime};
@@ -64,6 +64,83 @@ pub async fn get_room_members(
         .collect();
 
     Ok(result)
+}
+
+/// Room-scoped profile for a single member (power level, join time, permissions, etc.).
+#[tauri::command]
+pub async fn get_room_member_profile(
+    state: State<'_, Arc<AppState>>,
+    room_id: String,
+    member_user_id: String,
+) -> Result<RoomMemberProfile, String> {
+    use matrix_sdk::room::RoomMemberRole;
+    use matrix_sdk::ruma::events::room::power_levels::UserPowerLevel;
+
+    let client = get_client(&state).await?;
+    let room = resolve_room(&client, &room_id)?;
+    let uid = matrix_sdk::ruma::UserId::parse(&member_user_id)
+        .map_err(|e| format!("Invalid user ID: {e}"))?;
+
+    let Some(member) = room
+        .get_member(&uid)
+        .await
+        .map_err(|e| format!("Failed to load member: {}", fmt_error_chain(&e)))?
+    else {
+        return Err("Member not found in this room".into());
+    };
+
+    let avatar_url = get_or_fetch_avatar(
+        member.avatar_url(),
+        member.avatar(matrix_sdk::media::MediaFormat::File),
+        &state.avatar_cache,
+    )
+    .await;
+
+    let presence = state
+        .presence_map
+        .lock()
+        .await
+        .get(&member_user_id)
+        .cloned()
+        .unwrap_or_else(|| "offline".to_string());
+
+    let role = match member.suggested_role_for_power_level() {
+        RoomMemberRole::Creator => "creator",
+        RoomMemberRole::Administrator => "administrator",
+        RoomMemberRole::Moderator => "moderator",
+        RoomMemberRole::User => "user",
+    }
+    .to_string();
+
+    let power_level = match member.power_level() {
+        UserPowerLevel::Infinite => None,
+        UserPowerLevel::Int(n) => i64::try_from(n).ok(),
+        _ => None,
+    };
+
+    let joined_at_ms = member.event().timestamp().map(|u| {
+        let v: u64 = u.into();
+        v
+    });
+
+    let homeserver = member.user_id().server_name().to_string();
+    let display_name = member.display_name().map(|s| s.to_string());
+
+    Ok(RoomMemberProfile {
+        user_id: member_user_id,
+        display_name,
+        avatar_url,
+        presence,
+        role,
+        power_level,
+        joined_at_ms,
+        name_ambiguous: member.name_ambiguous(),
+        homeserver,
+        is_ignored: member.is_ignored(),
+        can_invite: member.can_invite(),
+        can_kick: member.can_kick(),
+        can_ban: member.can_ban(),
+    })
 }
 
 /// Fetch the logged-in user's own avatar as a data URL.

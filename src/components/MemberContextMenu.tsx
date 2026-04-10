@@ -1,5 +1,5 @@
 import { useEffect, useRef } from "react";
-import { Copy } from "lucide-react";
+import { Copy, User } from "lucide-react";
 import { useTheme } from "../theme/ThemeContext";
 import { useOverlayObstruction } from "../hooks/useOverlayObstruction";
 
@@ -9,6 +9,7 @@ interface MemberContextMenuProps {
   displayName: string;
   userId: string;
   onClose: () => void;
+  onProfile: () => void;
 }
 
 export default function MemberContextMenu({
@@ -17,6 +18,7 @@ export default function MemberContextMenu({
   displayName,
   userId,
   onClose,
+  onProfile,
 }: MemberContextMenuProps) {
   const { palette, spacing, typography } = useTheme();
   const menuRef = useRef<HTMLDivElement>(null);
@@ -86,6 +88,42 @@ export default function MemberContextMenu({
       >
         {displayName}
       </div>
+
+      <div
+        style={{
+          height: 1,
+          backgroundColor: palette.border,
+          margin: `${spacing.unit}px 0`,
+        }}
+      />
+
+      <button
+        type="button"
+        onClick={() => onProfile()}
+        style={{
+          display: "flex",
+          alignItems: "center",
+          gap: spacing.unit * 2,
+          width: "100%",
+          padding: `${spacing.unit * 1.5}px ${spacing.unit * 2}px`,
+          border: "none",
+          borderRadius: 4,
+          backgroundColor: "transparent",
+          color: palette.textPrimary,
+          fontSize: typography.fontSizeSmall,
+          cursor: "pointer",
+          textAlign: "left",
+        }}
+        onMouseEnter={(e) => {
+          (e.currentTarget as HTMLButtonElement).style.backgroundColor = palette.bgActive;
+        }}
+        onMouseLeave={(e) => {
+          (e.currentTarget as HTMLButtonElement).style.backgroundColor = "transparent";
+        }}
+      >
+        <User size={14} color={palette.textSecondary} />
+        Profile
+      </button>
 
       <div
         style={{
