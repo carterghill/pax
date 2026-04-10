@@ -3,6 +3,7 @@ import { invoke } from "@tauri-apps/api/core";
 import { Plus, Settings } from "lucide-react";
 import { useTheme } from "../theme/ThemeContext";
 import type { Room } from "../types/matrix";
+import { spaceInitialAvatarBackground } from "../utils/userAvatarColor";
 import CreateSpaceDialog from "./CreateSpaceDialog";
 import SpaceContextMenu from "./SpaceContextMenu";
 import SpaceSettingsDialog from "./SpaceSettingsDialog";
@@ -26,6 +27,7 @@ interface SpaceSidebarProps {
 }
 
 function SpaceAvatar({ space, isActive }: { space: Room; isActive: boolean }) {
+  const { resolvedColorScheme } = useTheme();
   const initials = space.name
     .split(" ")
     .map((w) => w[0])
@@ -67,7 +69,7 @@ function SpaceAvatar({ space, isActive }: { space: Room; isActive: boolean }) {
           style={{
             width: "100%",
             height: "100%",
-            backgroundColor: "#5865f2",
+            backgroundColor: spaceInitialAvatarBackground(space.id, resolvedColorScheme),
             color: "#fff",
             display: "flex",
             alignItems: "center",

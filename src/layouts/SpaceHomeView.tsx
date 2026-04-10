@@ -6,7 +6,10 @@ import { useTheme } from "../theme/ThemeContext";
 import { Room } from "../types/matrix";
 import type { RoomsChangedPayload } from "../types/roomsChanged";
 import { VOICE_ROOM_TYPE } from "../utils/matrix";
-import { userInitialAvatarBackground } from "../utils/userAvatarColor";
+import {
+  spaceInitialAvatarBackground,
+  userInitialAvatarBackground,
+} from "../utils/userAvatarColor";
 import CreateRoomDialog from "../components/CreateRoomDialog";
 import type { SpaceChildInfo, SpaceInfo } from "../utils/spaceHomeCache";
 import { getCachedSpaceInfo, setCachedSpaceInfo } from "../utils/spaceHomeCache";
@@ -336,7 +339,7 @@ export default function SpaceHomeView({ space, onSelectRoom, onRoomsChanged }: S
               width: 72,
               height: 72,
               borderRadius: 20,
-              backgroundColor: palette.accent,
+              backgroundColor: spaceInitialAvatarBackground(space.id, resolvedColorScheme),
               color: "#fff",
               display: "flex",
               alignItems: "center",

@@ -18,6 +18,8 @@ import {
 } from "lucide-react";
 import { useTheme } from "../theme/ThemeContext";
 import { useOverlayObstruction } from "../hooks/useOverlayObstruction";
+import type { ResolvedColorScheme } from "../theme/types";
+import { spaceInitialAvatarBackground } from "../utils/userAvatarColor";
 
 type HistoryVisibility = "shared" | "joined" | "invited" | "world_readable";
 type GuestAccess = "can_join" | "forbidden";
@@ -127,7 +129,7 @@ export default function CreateSpaceDialog({
   onClose,
   onCreated,
 }: CreateSpaceDialogProps) {
-  const { palette, typography } = useTheme();
+  const { palette, typography, resolvedColorScheme } = useTheme();
   const modalRef = useRef<HTMLDivElement>(null);
   useOverlayObstruction(modalRef);
 
@@ -775,6 +777,7 @@ export default function CreateSpaceDialog({
                       onJoin={handleJoinSpace}
                       palette={palette}
                       typography={typography}
+                      resolvedColorScheme={resolvedColorScheme}
                     />
                   ))}
                 </div>
@@ -1251,6 +1254,7 @@ function SpaceSearchRow({
   onJoin,
   palette,
   typography,
+  resolvedColorScheme,
 }: {
   space: PublicSpaceResult;
   joiningId: string | null;
@@ -1258,6 +1262,7 @@ function SpaceSearchRow({
   onJoin: (space: PublicSpaceResult) => void;
   palette: import("../theme/types").ThemePalette;
   typography: import("../theme/types").ThemeTypography;
+  resolvedColorScheme: ResolvedColorScheme;
 }) {
   const [hovered, setHovered] = useState(false);
   const [imageFailed, setImageFailed] = useState(false);
@@ -1300,14 +1305,14 @@ function SpaceSearchRow({
             width: 40,
             height: 40,
             borderRadius: 12,
-            backgroundColor: palette.bgActive,
+            backgroundColor: spaceInitialAvatarBackground(space.room_id, resolvedColorScheme),
             display: "flex",
             alignItems: "center",
             justifyContent: "center",
             flexShrink: 0,
             fontSize: 16,
             fontWeight: 600,
-            color: palette.textSecondary,
+            color: "#fff",
           }}
         >
           {(space.name || "?")

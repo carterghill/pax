@@ -2,6 +2,7 @@ import { useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { useTheme } from "../theme/ThemeContext";
 import { Room } from "../types/matrix";
+import { spaceInitialAvatarBackground } from "../utils/userAvatarColor";
 
 interface InvitationViewProps {
   room: Room;
@@ -9,7 +10,7 @@ interface InvitationViewProps {
 }
 
 export default function InvitationView({ room, onJoined }: InvitationViewProps) {
-  const { palette, typography, spacing } = useTheme();
+  const { palette, typography, spacing, resolvedColorScheme } = useTheme();
   const [joining, setJoining] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
@@ -68,7 +69,9 @@ export default function InvitationView({ room, onJoined }: InvitationViewProps) 
             width: 80,
             height: 80,
             borderRadius: room.isSpace ? 24 : "50%",
-            backgroundColor: palette.accent,
+            backgroundColor: room.isSpace
+              ? spaceInitialAvatarBackground(room.id, resolvedColorScheme)
+              : palette.accent,
             color: "#fff",
             display: "flex",
             alignItems: "center",
