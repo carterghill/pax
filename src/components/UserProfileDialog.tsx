@@ -4,6 +4,7 @@ import { X, Loader2, Copy, Shield, Crown, User, Calendar, Hash } from "lucide-re
 import { useTheme } from "../theme/ThemeContext";
 import { useOverlayObstruction } from "../hooks/useOverlayObstruction";
 import type { RoomMemberProfile } from "../types/matrix";
+import { userInitialAvatarBackground } from "../utils/userAvatarColor";
 
 const ROLE_META: Record<
   RoomMemberProfile["role"],
@@ -261,7 +262,7 @@ export default function UserProfileDialog({ roomId, userId, onClose }: UserProfi
                     width: avatarPx,
                     height: avatarPx,
                     borderRadius: "50%",
-                    background: `linear-gradient(145deg, ${palette.accent}, ${palette.accentHover})`,
+                    backgroundColor: userInitialAvatarBackground(userId, resolvedColorScheme),
                     color: "#fff",
                     display: "flex",
                     alignItems: "center",

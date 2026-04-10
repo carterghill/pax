@@ -17,9 +17,11 @@ import {
 import type { LucideIcon } from "lucide-react";
 import type { VoiceCall } from "../hooks/useVoiceCall";
 import VoiceAudioSettingsSection from "./VoiceAudioSettingsSection";
+import { userInitialAvatarBackground } from "../utils/userAvatarColor";
 
 interface SettingsMenuProps {
   onSignOut: () => void;
+  userId: string;
   userAvatarUrl: string | null;
   onAvatarChanged: (newUrl: string | null) => void;
   voiceCall: VoiceCall;
@@ -38,11 +40,12 @@ interface SettingsNavItem {
 
 export default function SettingsMenu({
   onSignOut,
+  userId,
   userAvatarUrl,
   onAvatarChanged,
   voiceCall,
 }: SettingsMenuProps) {
-  const { palette, typography, spacing } = useTheme();
+  const { palette, typography, spacing, resolvedColorScheme } = useTheme();
   const [activeSection, setActiveSection] = useState<SettingsSection>("user");
 
   const reconnectVoiceAfterDeviceChange = useCallback(async () => {
@@ -332,7 +335,7 @@ export default function SettingsMenu({
                   width: 44,
                   height: 44,
                   borderRadius: "50%",
-                  backgroundColor: palette.accent,
+                  backgroundColor: userInitialAvatarBackground(userId, resolvedColorScheme),
                   color: "#fff",
                   display: "flex",
                   alignItems: "center",
@@ -509,7 +512,7 @@ export default function SettingsMenu({
                           width: 84,
                           height: 84,
                           borderRadius: "50%",
-                          backgroundColor: palette.accent,
+                          backgroundColor: userInitialAvatarBackground(userId, resolvedColorScheme),
                           color: "#fff",
                           display: "flex",
                           alignItems: "center",

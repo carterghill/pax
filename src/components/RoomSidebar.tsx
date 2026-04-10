@@ -14,6 +14,7 @@ import {
   VOICE_ROOM_TYPE,
   voiceStateLookupKeysForParticipant,
 } from "../utils/matrix";
+import { userInitialAvatarBackground } from "../utils/userAvatarColor";
 
 function resolveVoiceStateForRoom(
   participant: VoiceParticipant,
@@ -77,7 +78,7 @@ function VoiceParticipantRow({
   isConnecting: boolean;
   onContextMenu: (e: React.MouseEvent) => void;
 }) {
-  const { palette, spacing, typography } = useTheme();
+  const { palette, spacing, typography, resolvedColorScheme } = useTheme();
   const name = participant.displayName ?? participant.userId;
 
   return (
@@ -118,7 +119,7 @@ function VoiceParticipantRow({
           width: 20,
           height: 20,
           borderRadius: "50%",
-          backgroundColor: palette.accent,
+          backgroundColor: userInitialAvatarBackground(participant.userId, resolvedColorScheme),
           color: "#fff",
           display: "flex",
           alignItems: "center",
@@ -445,7 +446,7 @@ export default function RoomSidebar({
 
       {/* User status at bottom — flexShrink: 0 so it stays full width */}
       <div style={{ flexShrink: 0 }}>
-        <StatusDropdown displayName={displayName} avatarUrl={userAvatarUrl} />
+        <StatusDropdown displayName={displayName} avatarUrl={userAvatarUrl} userId={userId} />
       </div>
 
       {/* Volume context menu */}

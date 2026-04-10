@@ -4,6 +4,8 @@ import { invoke } from "@tauri-apps/api/core";
 import { MoreVertical, Pencil, Trash2 } from "lucide-react";
 import { Message, RoomRedactionPolicy } from "../types/matrix";
 import { useTheme } from "../theme/ThemeContext";
+import type { ResolvedColorScheme } from "../theme/types";
+import { userInitialAvatarBackground } from "../utils/userAvatarColor";
 import MessageMarkdown from "./MessageMarkdown";
 import MessageMatrixImage from "./MessageMatrixImage";
 
@@ -86,7 +88,7 @@ interface MessageRowProps {
   spacingUnit: number;
   palette: ReturnType<typeof useTheme>["palette"];
   typography: ReturnType<typeof useTheme>["typography"];
-  resolvedColorScheme: string;
+  resolvedColorScheme: ResolvedColorScheme;
 }
 
 const MessageRow = memo(function MessageRow({
@@ -153,7 +155,7 @@ const MessageRow = memo(function MessageRow({
               width: 40,
               height: 40,
               borderRadius: "50%",
-              backgroundColor: palette.accent,
+              backgroundColor: userInitialAvatarBackground(msg.sender, resolvedColorScheme),
               color: "#fff",
               display: "flex",
               alignItems: "center",

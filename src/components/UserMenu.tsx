@@ -3,6 +3,7 @@ import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { Check, X, Loader2 } from "lucide-react";
 import { useTheme } from "../theme/ThemeContext";
+import { userInitialAvatarBackground } from "../utils/userAvatarColor";
 import { useRoomMembers } from "../hooks/useRoomMembers";
 import { usePresenceContext } from "../hooks/PresenceContext";
 import MemberContextMenu from "./MemberContextMenu";
@@ -35,7 +36,7 @@ const presenceColor: Record<string, string> = {
 };
 
 export default function UserMenu({ width, roomId, userId }: UserMenuProps) {
-  const { palette, typography, spacing } = useTheme();
+  const { palette, typography, spacing, resolvedColorScheme } = useTheme();
   const { members, loading } = useRoomMembers(roomId);
   const { effectivePresence } = usePresenceContext();
 
@@ -196,7 +197,7 @@ export default function UserMenu({ width, roomId, userId }: UserMenuProps) {
                       width: 32,
                       height: 32,
                       borderRadius: "50%",
-                      backgroundColor: palette.accent,
+                      backgroundColor: userInitialAvatarBackground(knock.userId, resolvedColorScheme),
                       color: "#fff",
                       display: "flex",
                       alignItems: "center",
@@ -371,7 +372,7 @@ export default function UserMenu({ width, roomId, userId }: UserMenuProps) {
                       width: 32,
                       height: 32,
                       borderRadius: "50%",
-                      backgroundColor: palette.accent,
+                      backgroundColor: userInitialAvatarBackground(member.userId, resolvedColorScheme),
                       color: "#fff",
                       display: "flex",
                       alignItems: "center",

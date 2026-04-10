@@ -6,6 +6,7 @@ import { useTheme } from "../theme/ThemeContext";
 import { Room } from "../types/matrix";
 import type { RoomsChangedPayload } from "../types/roomsChanged";
 import { VOICE_ROOM_TYPE } from "../utils/matrix";
+import { userInitialAvatarBackground } from "../utils/userAvatarColor";
 import CreateRoomDialog from "../components/CreateRoomDialog";
 import type { SpaceChildInfo, SpaceInfo } from "../utils/spaceHomeCache";
 import { getCachedSpaceInfo, setCachedSpaceInfo } from "../utils/spaceHomeCache";
@@ -63,7 +64,7 @@ interface KnockData {
 }
 
 export default function SpaceHomeView({ space, onSelectRoom, onRoomsChanged }: SpaceHomeViewProps) {
-  const { palette, typography, spacing } = useTheme();
+  const { palette, typography, spacing, resolvedColorScheme } = useTheme();
   const [info, setInfo] = useState<SpaceInfo | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
@@ -489,6 +490,7 @@ export default function SpaceHomeView({ space, onSelectRoom, onRoomsChanged }: S
                     palette={palette}
                     typography={typography}
                     spacing={spacing}
+                    resolvedColorScheme={resolvedColorScheme}
                   />
                 );
               })}
@@ -789,6 +791,7 @@ function KnockRow({
   palette,
   typography,
   spacing,
+  resolvedColorScheme,
 }: {
   knock: { userId: string; displayName: string | null; avatarUrl: string | null; reason: string | null };
   isActing: boolean;
@@ -799,6 +802,7 @@ function KnockRow({
   palette: ReturnType<typeof useTheme>["palette"];
   typography: ReturnType<typeof useTheme>["typography"];
   spacing: ReturnType<typeof useTheme>["spacing"];
+  resolvedColorScheme: ReturnType<typeof useTheme>["resolvedColorScheme"];
 }) {
   const [hovered, setHovered] = useState(false);
 
@@ -834,7 +838,7 @@ function KnockRow({
           width: 36,
           height: 36,
           borderRadius: "50%",
-          backgroundColor: palette.accent,
+          backgroundColor: userInitialAvatarBackground(knock.userId, resolvedColorScheme),
           color: "#fff",
           display: "flex",
           alignItems: "center",

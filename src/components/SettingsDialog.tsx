@@ -8,6 +8,7 @@ import SettingsMenu from "./SettingsMenu";
 interface SettingsDialogProps {
   onClose: () => void;
   onSignOut: () => void;
+  userId: string;
   userAvatarUrl: string | null;
   onAvatarChanged: (newUrl: string | null) => void;
   voiceCall: VoiceCall;
@@ -16,6 +17,7 @@ interface SettingsDialogProps {
 export default function SettingsDialog({
   onClose,
   onSignOut,
+  userId,
   userAvatarUrl,
   onAvatarChanged,
   voiceCall,
@@ -93,6 +95,7 @@ export default function SettingsDialog({
         </button>
         <SettingsMenu
           onSignOut={onSignOut}
+          userId={userId}
           userAvatarUrl={userAvatarUrl}
           onAvatarChanged={onAvatarChanged}
           voiceCall={voiceCall}

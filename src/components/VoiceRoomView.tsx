@@ -10,6 +10,7 @@ import {
   localpartFromUserId,
   normalizeUserId,
 } from "../utils/matrix";
+import { userInitialAvatarBackground } from "../utils/userAvatarColor";
 import { useUserVolume } from "../hooks/useUserVolume";
 import VolumeContextMenu from "./VolumeContextMenu";
 import VoiceAudioSettingsSection from "./VoiceAudioSettingsSection";
@@ -51,7 +52,7 @@ export default function VoiceRoomView({
     setParticipantVolume: onSetParticipantVolume,
     listAudioDevices: onListAudioDevices,
   } = voiceCall;
-  const { palette, spacing, typography } = useTheme();
+  const { palette, spacing, typography, resolvedColorScheme } = useTheme();
   const { getVolume, setVolume } = useUserVolume();
   const [screenShareMenuOpen, setScreenShareMenuOpen] = useState(false);
   const [generalSettingsOpen, setGeneralSettingsOpen] = useState(false);
@@ -544,13 +545,13 @@ export default function VoiceRoomView({
                 width: 80,
                 height: 80,
                 borderRadius: "50%",
-                backgroundColor: palette.bgActive,
+                backgroundColor: userInitialAvatarBackground(p.identity, resolvedColorScheme),
                 display: "flex",
                 alignItems: "center",
                 justifyContent: "center",
                 fontSize: 28,
                 fontWeight: typography.fontWeightBold,
-                color: palette.textHeading,
+                color: "#fff",
                 boxShadow: p.isSpeaking ? "0 0 0 3px #23a55a" : "none",
                 transition: "box-shadow 0.15s ease",
               }}>
@@ -667,13 +668,13 @@ export default function VoiceRoomView({
                 width: 80,
                 height: 80,
                 borderRadius: "50%",
-                backgroundColor: palette.bgActive,
+                backgroundColor: userInitialAvatarBackground(p.identity, resolvedColorScheme),
                 display: "flex",
                 alignItems: "center",
                 justifyContent: "center",
                 fontSize: 28,
                 fontWeight: typography.fontWeightBold,
-                color: palette.textHeading,
+                color: "#fff",
                 boxShadow: p.isSpeaking ? "0 0 0 3px #23a55a" : "none",
                 transition: "box-shadow 0.15s ease",
               }}>

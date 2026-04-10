@@ -368,6 +368,7 @@ export default function MainLayout({
           <SettingsDialog
             onClose={handleCloseSettings}
             onSignOut={onSignOut}
+            userId={userId}
             userAvatarUrl={userAvatarUrl}
             onAvatarChanged={setAvatarOverride}
             voiceCall={voiceCall}

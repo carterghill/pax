@@ -4,6 +4,7 @@ import { usePresenceContext } from "../hooks/PresenceContext";
 import { ManualStatus } from "../hooks/usePresence";
 import { ChevronDown } from "lucide-react";
 import { useOverlayObstruction } from "../hooks/useOverlayObstruction";
+import { userInitialAvatarBackground } from "../utils/userAvatarColor";
 
 const presenceColor: Record<string, string> = {
   online: "#23a55a",
@@ -37,10 +38,11 @@ function getDisplayLabel(presence: string): string {
 interface StatusDropdownProps {
   displayName: string;
   avatarUrl: string | null;
+  userId: string;
 }
 
-export default function StatusDropdown({ displayName, avatarUrl }: StatusDropdownProps) {
-  const { palette, typography, spacing } = useTheme();
+export default function StatusDropdown({ displayName, avatarUrl, userId }: StatusDropdownProps) {
+  const { palette, typography, spacing, resolvedColorScheme } = useTheme();
   const { manualStatus, setManualStatus, effectivePresence } = usePresenceContext();
   const [open, setOpen] = useState(false);
   const dropdownRef = useRef<HTMLDivElement>(null);
@@ -101,7 +103,7 @@ export default function StatusDropdown({ displayName, avatarUrl }: StatusDropdow
               width: 32,
               height: 32,
               borderRadius: "50%",
-              backgroundColor: palette.accent,
+              backgroundColor: userInitialAvatarBackground(userId, resolvedColorScheme),
               color: "#fff",
               display: "flex",
               alignItems: "center",
