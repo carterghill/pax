@@ -40,9 +40,6 @@ export default function UserMenu({ width, roomId, userId }: UserMenuProps) {
   const {
     members,
     loading,
-    listPartial,
-    cachedPresenceForHeader,
-    totalJoinedCount,
   } = useRoomMembers(roomId);
   /** Lets React yield so applying a huge member list does not block the main thread in one frame. */
   const deferredMembers = useDeferredValue(members);
@@ -128,25 +125,19 @@ export default function UserMenu({ width, roomId, userId }: UserMenuProps) {
     m.userId === userId ? { ...m, presence: effectivePresence } : m
   );
 
-  /** Section header counts: use last full snapshot while list is capped so totals match room size. */
   const presenceForGroupLabels = useMemo(() => {
-    if (listPartial && cachedPresenceForHeader) {
-      return cachedPresenceForHeader;
-    }
     const online = displayMembers.filter((m) => m.presence === "online" || m.presence === "dnd").length;
     const unavailable = displayMembers.filter((m) => m.presence === "unavailable").length;
     const offline = displayMembers.filter((m) => m.presence === "offline").length;
     return { online, unavailable, offline };
-  }, [listPartial, cachedPresenceForHeader, displayMembers]);
+  }, [displayMembers]);
 
   // Group members by presence (rows are always from the loaded slice only)
   const online = displayMembers.filter((m) => m.presence === "online" || m.presence === "dnd");
   const unavailable = displayMembers.filter((m) => m.presence === "unavailable");
   const offline = displayMembers.filter((m) => m.presence === "offline");
 
-  const showAwaySection =
-    unavailable.length > 0 ||
-    (listPartial && presenceForGroupLabels.unavailable > 0);
+  const showAwaySection = unavailable.length > 0;
 
   const groups = [
     { label: `Online — ${presenceForGroupLabels.online}`, members: online },
@@ -338,15 +329,6 @@ export default function UserMenu({ width, roomId, userId }: UserMenuProps) {
         </div>
       ) : (
         <>
-        {listPartial && totalJoinedCount > displayMembers.length && (
-          <div style={{
-            color: palette.textSecondary,
-            fontSize: typography.fontSizeSmall,
-            padding: `${spacing.unit * 2}px ${spacing.unit * 4}px ${spacing.unit * 3}px`,
-          }}>
-            Showing {displayMembers.length} of {totalJoinedCount} members
-          </div>
-        )}
         {groups.map((group) => (
           <div key={group.label}>
             <div style={{
@@ -360,7 +342,7 @@ export default function UserMenu({ width, roomId, userId }: UserMenuProps) {
               {group.label}
             </div>
 
-            {group.members.slice().sort((a, b) => (a.displayName || '').localeCompare(b.displayName || '')).map((member) => (
+            {group.members.map((member) => (
               <div
                 key={member.userId}
                 style={{

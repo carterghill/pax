@@ -4,7 +4,7 @@ use std::time::Duration;
 
 use futures_util::future::join_all;
 use serde::Deserialize;
-use tauri::State;
+use tauri::{Emitter, State};
 
 use crate::types::{RoomMemberInfo, RoomMemberProfile};
 use crate::AppState;
@@ -13,6 +13,7 @@ use super::{fmt_error_chain, get_client, get_or_fetch_avatar, resolve_room, enco
 
 #[tauri::command]
 pub async fn get_room_members(
+    app: tauri::AppHandle,
     state: State<'_, Arc<AppState>>,
     room_id: String,
 ) -> Result<Vec<RoomMemberInfo>, String> {
@@ -27,33 +28,24 @@ pub async fn get_room_members(
     let avatar_cache = state.avatar_cache.clone();
     let presence_map = state.presence_map.lock().await.clone();
 
-    // Fetch all avatars concurrently
-    let avatar_futures: Vec<_> = members
+    // Cache-only avatar lookup — no HTTP, returns instantly.
+    let cache_snapshot = avatar_cache.lock().await;
+    let mut missing_avatars: Vec<(String, matrix_sdk::room::RoomMember)> = Vec::new();
+
+    let result: Vec<RoomMemberInfo> = members
         .iter()
         .map(|member| {
-            let cache = avatar_cache.clone();
-            let member = member.clone();
-            async move {
-                get_or_fetch_avatar(
-                    member.avatar_url(),
-                    member.avatar(matrix_sdk::media::MediaFormat::File),
-                    &cache,
-                )
-                .await
-            }
-        })
-        .collect();
-    let avatars = join_all(avatar_futures).await;
-
-    let result = members
-        .iter()
-        .zip(avatars)
-        .map(|(member, avatar_url)| {
             let user_id_str = member.user_id().to_string();
             let presence = presence_map
                 .get(&user_id_str)
                 .cloned()
                 .unwrap_or_else(|| "offline".to_string());
+            let avatar_url = member
+                .avatar_url()
+                .and_then(|mxc| cache_snapshot.get(&mxc.to_string()).cloned());
+            if avatar_url.is_none() && member.avatar_url().is_some() {
+                missing_avatars.push((user_id_str.clone(), member.clone()));
+            }
             RoomMemberInfo {
                 user_id: user_id_str,
                 display_name: member.display_name().map(|n| n.to_string()),
@@ -62,6 +54,46 @@ pub async fn get_room_members(
             }
         })
         .collect();
+    drop(cache_snapshot);
+
+    // Background task: fetch uncached avatars and push updates to the frontend.
+    if !missing_avatars.is_empty() {
+        let cache = avatar_cache.clone();
+        let rid = room_id.clone();
+        tauri::async_runtime::spawn(async move {
+            // Process in small batches to avoid hammering the homeserver.
+            for chunk in missing_avatars.chunks(10) {
+                let futs: Vec<_> = chunk
+                    .iter()
+                    .map(|(uid, member)| {
+                        let cache = cache.clone();
+                        let uid = uid.clone();
+                        let member = member.clone();
+                        async move {
+                            let url = get_or_fetch_avatar(
+                                member.avatar_url(),
+                                member.avatar(matrix_sdk::media::MediaFormat::File),
+                                &cache,
+                            )
+                            .await;
+                            (uid, url)
+                        }
+                    })
+                    .collect();
+
+                let results = join_all(futs).await;
+                for (uid, url) in results {
+                    if let Some(data_url) = url {
+                        let _ = app.emit("member-avatar-updated", serde_json::json!({
+                            "roomId": rid,
+                            "userId": uid,
+                            "avatarUrl": data_url,
+                        }));
+                    }
+                }
+            }
+        });
+    }
 
     Ok(result)
 }
