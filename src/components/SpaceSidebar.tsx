@@ -6,6 +6,7 @@ import type { Room } from "../types/matrix";
 import CreateSpaceDialog from "./CreateSpaceDialog";
 import SpaceContextMenu from "./SpaceContextMenu";
 import SpaceSettingsDialog from "./SpaceSettingsDialog";
+import InviteDialog from "./InviteDialog";
 
 type RoomsChangedPayload = {
   joinedRoomId?: string;
@@ -18,6 +19,7 @@ interface SpaceSidebarProps {
   onSelectSpace: (spaceId: string) => void;
   onSpacesChanged: (payload?: RoomsChangedPayload) => void | Promise<void>;
   onOpenSettings: () => void;
+  userId: string;
 }
 
 function SpaceAvatar({ space, isActive }: { space: Room; isActive: boolean }) {
@@ -84,6 +86,7 @@ export default function SpaceSidebar({
   onSelectSpace,
   onSpacesChanged,
   onOpenSettings,
+  userId,
 }: SpaceSidebarProps) {
   const { palette } = useTheme();
   const [showDialog, setShowDialog] = useState(false);
@@ -100,6 +103,7 @@ export default function SpaceSidebar({
     spaceId: string;
     spaceName: string;
   } | null>(null);
+  const [inviteSpace, setInviteSpace] = useState<{ id: string; name: string } | null>(null);
   const checkedRef = useRef(false);
 
   // Check room creation permission once on mount
@@ -277,6 +281,10 @@ export default function SpaceSidebar({
           x={spaceContextMenu.x}
           y={spaceContextMenu.y}
           spaceName={spaceContextMenu.spaceName}
+          onInvite={() => {
+            const t = spaceContextMenu;
+            setInviteSpace({ id: t.spaceId, name: t.spaceName });
+          }}
           onOpenSpaceSettings={() =>
             setSpaceSettingsTarget({
               spaceId: spaceContextMenu.spaceId,
@@ -293,6 +301,16 @@ export default function SpaceSidebar({
           titleFallback={spaceSettingsTarget.spaceName}
           onClose={() => setSpaceSettingsTarget(null)}
           onSaved={() => onSpacesChanged()}
+        />
+      )}
+
+      {inviteSpace && (
+        <InviteDialog
+          roomId={inviteSpace.id}
+          targetName={inviteSpace.name}
+          kind="space"
+          currentUserId={userId}
+          onClose={() => setInviteSpace(null)}
         />
       )}
     </>

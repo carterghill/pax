@@ -243,6 +243,7 @@ export default function MainLayout({
           onSelectSpace={handleSelectSpace}
           onSpacesChanged={handleSpacesChanged}
           onOpenSettings={handleOpenSettings}
+          userId={userId}
         />
         <div style={{ position: "relative", flexShrink: 0, zIndex: 1 }}>
           <RoomSidebar

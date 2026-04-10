@@ -4,6 +4,41 @@
 
  export const normalizeUserId = (id: string): string => id.trim().toLowerCase();
 
+ const MXID_RE = /^@[^:\s]+:[^:\s/]+$/;
+
+ /**
+  * Parse pasted or typed invite input into a canonical Matrix user ID, or null if invalid.
+  * Accepts `@localpart:server`, `localpart:server`, and matrix.to user links.
+  */
+ export function parseInviteUserInput(raw: string): string | null {
+   const trimmed = raw.trim();
+   if (!trimmed) return null;
+
+   let candidate = trimmed;
+
+   // matrix.to user link: https://matrix.to/#/@user:server or #/@user:server
+   const matrixTo = trimmed.match(/#\/(@[^/?#]+:[^/?#]+)/);
+   if (matrixTo?.[1]) {
+     candidate = matrixTo[1];
+   } else if (trimmed.includes("matrix.to")) {
+     const hash = trimmed.split("#")[1];
+     if (hash) {
+       const m = hash.match(/(@[^/?#]+:[^/?#]+)/);
+       if (m?.[1]) candidate = m[1];
+     }
+   }
+
+   if (!candidate.startsWith("@")) {
+     const colonIdx = candidate.indexOf(":");
+     if (colonIdx > 0 && !candidate.includes(" ") && !candidate.includes("/")) {
+       candidate = `@${candidate}`;
+     }
+   }
+
+   candidate = normalizeUserId(candidate);
+   return MXID_RE.test(candidate) ? candidate : null;
+ }
+
  /** Case-insensitive display order; tie-break on stable id for deterministic lists. */
  export function compareByDisplayThenKey(
    aDisplay: string,

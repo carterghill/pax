@@ -6,6 +6,7 @@ import StatusDropdown from "./StatusDropdown";
 import VolumeContextMenu from "./VolumeContextMenu";
 import RoomContextMenu from "./RoomContextMenu";
 import RoomSettingsModal from "./RoomSettingsModal";
+import InviteDialog from "./InviteDialog";
 import { useUserVolume } from "../hooks/useUserVolume";
 import {
   VOICE_ROOM_TYPE,
@@ -198,6 +199,7 @@ export default function RoomSidebar({
     roomName: string;
   } | null>(null);
   const [settingsRoomId, setSettingsRoomId] = useState<string | null>(null);
+  const [inviteRoom, setInviteRoom] = useState<{ id: string; name: string } | null>(null);
   const settingsRoom = settingsRoomId
     ? rooms.find((r) => r.id === settingsRoomId)
     : null;
@@ -384,6 +386,10 @@ export default function RoomSidebar({
           x={roomContextMenu.x}
           y={roomContextMenu.y}
           roomName={roomContextMenu.roomName}
+          onInvite={() => {
+            const t = roomContextMenu;
+            setInviteRoom({ id: t.roomId, name: t.roomName });
+          }}
           onOpenSettings={() => setSettingsRoomId(roomContextMenu.roomId)}
           onClose={() => setRoomContextMenu(null)}
         />
@@ -395,6 +401,16 @@ export default function RoomSidebar({
           roomId={settingsRoom.id}
           roomName={settingsRoom.name}
           onClose={() => setSettingsRoomId(null)}
+        />
+      )}
+
+      {inviteRoom && (
+        <InviteDialog
+          roomId={inviteRoom.id}
+          targetName={inviteRoom.name}
+          kind="room"
+          currentUserId={userId}
+          onClose={() => setInviteRoom(null)}
         />
       )}
     </div>
