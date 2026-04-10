@@ -1,5 +1,5 @@
 import { useEffect, useRef } from "react";
-import { Settings, UserPlus } from "lucide-react";
+import { Settings, UserPlus, LogOut } from "lucide-react";
 import { useTheme } from "../theme/ThemeContext";
 import { useOverlayObstruction } from "../hooks/useOverlayObstruction";
 
@@ -9,6 +9,7 @@ interface SpaceContextMenuProps {
   spaceName: string;
   onInvite: () => void;
   onOpenSpaceSettings: () => void;
+  onLeave: () => void;
   onClose: () => void;
 }
 
@@ -18,6 +19,7 @@ export default function SpaceContextMenu({
   spaceName,
   onInvite,
   onOpenSpaceSettings,
+  onLeave,
   onClose,
 }: SpaceContextMenuProps) {
   const { palette, spacing, typography } = useTheme();
@@ -157,6 +159,45 @@ export default function SpaceContextMenu({
       >
         <Settings size={14} color={palette.textSecondary} />
         Space Settings
+      </button>
+
+      <div
+        style={{
+          height: 1,
+          backgroundColor: palette.border,
+          margin: `${spacing.unit}px 0`,
+        }}
+      />
+
+      <button
+        type="button"
+        onClick={() => {
+          onLeave();
+          onClose();
+        }}
+        style={{
+          display: "flex",
+          alignItems: "center",
+          gap: spacing.unit * 2,
+          width: "100%",
+          padding: `${spacing.unit * 1.5}px ${spacing.unit * 2}px`,
+          border: "none",
+          borderRadius: 4,
+          backgroundColor: "transparent",
+          color: "#ed4245",
+          fontSize: typography.fontSizeSmall,
+          cursor: "pointer",
+          textAlign: "left",
+        }}
+        onMouseEnter={(e) => {
+          (e.currentTarget as HTMLButtonElement).style.backgroundColor = "rgba(237, 66, 69, 0.12)";
+        }}
+        onMouseLeave={(e) => {
+          (e.currentTarget as HTMLButtonElement).style.backgroundColor = "transparent";
+        }}
+      >
+        <LogOut size={14} color="#ed4245" />
+        Leave space
       </button>
     </div>
   );

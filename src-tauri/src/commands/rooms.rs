@@ -710,6 +710,36 @@ pub async fn join_room(
 }
 
 #[tauri::command]
+pub async fn leave_room(
+    state: State<'_, Arc<AppState>>,
+    room_id: String,
+) -> Result<(), String> {
+    let client = super::get_client(&state).await?;
+    let access_token = client.access_token().ok_or("No access token")?;
+    let homeserver = client.homeserver().to_string();
+    let hs = homeserver.trim_end_matches('/');
+    let encoded_room = urlencoding::encode(&room_id);
+
+    let url = format!("{}/_matrix/client/v3/rooms/{}/leave", hs, encoded_room);
+    let resp = state
+        .http_client
+        .post(&url)
+        .timeout(Duration::from_secs(30))
+        .bearer_auth(access_token)
+        .json(&serde_json::json!({}))
+        .send()
+        .await
+        .map_err(|e| format!("Leave failed: {}", fmt_error_chain(&e)))?;
+
+    if !resp.status().is_success() {
+        let status = resp.status();
+        let text = resp.text().await.unwrap_or_default();
+        return Err(format!("Leave failed ({status}): {text}"));
+    }
+    Ok(())
+}
+
+#[tauri::command]
 pub async fn knock_room(
     state: State<'_, Arc<AppState>>,
     room_id: String,

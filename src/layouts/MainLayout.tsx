@@ -227,6 +227,29 @@ export default function MainLayout({
     await fetchRooms();
   }, [fetchRooms, upsertOptimisticRoom]);
 
+  const handleLeftRoom = useCallback(
+    (roomId: string) => {
+      if (voiceCall.connectedRoomId === roomId) {
+        voiceCall.disconnect();
+      }
+      void fetchRooms();
+      if (activeRoomId === roomId) {
+        setActiveRoomId(null);
+      }
+    },
+    [fetchRooms, activeRoomId, setActiveRoomId, voiceCall.connectedRoomId, voiceCall.disconnect]
+  );
+
+  const handleLeftSpace = useCallback(
+    (spaceId: string) => {
+      void fetchRooms();
+      if (activeSpaceId === spaceId) {
+        setActiveSpaceId(null);
+      }
+    },
+    [fetchRooms, activeSpaceId]
+  );
+
   return (
     <PresenceContext.Provider value={{ manualStatus, setManualStatus, effectivePresence }}>
       <div style={{
@@ -244,6 +267,7 @@ export default function MainLayout({
           onSpacesChanged={handleSpacesChanged}
           onOpenSettings={handleOpenSettings}
           userId={userId}
+          onLeftSpace={handleLeftSpace}
         />
         <div style={{ position: "relative", flexShrink: 0, zIndex: 1 }}>
           <RoomSidebar
@@ -268,6 +292,7 @@ export default function MainLayout({
             screenSharingOwners={voiceCall.screenSharingOwners}
             voiceParticipantStatesByRoom={voiceParticipantStatesByRoom}
             onSetParticipantVolume={voiceCall.setParticipantVolume}
+            onLeftRoom={handleLeftRoom}
           />
           <div
             onMouseDown={sidebarResize.onMouseDown}

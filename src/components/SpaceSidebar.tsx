@@ -7,6 +7,7 @@ import CreateSpaceDialog from "./CreateSpaceDialog";
 import SpaceContextMenu from "./SpaceContextMenu";
 import SpaceSettingsDialog from "./SpaceSettingsDialog";
 import InviteDialog from "./InviteDialog";
+import LeaveConfirmDialog, { fetchLeaveSpacePreview } from "./LeaveConfirmDialog";
 
 type RoomsChangedPayload = {
   joinedRoomId?: string;
@@ -20,6 +21,8 @@ interface SpaceSidebarProps {
   onSpacesChanged: (payload?: RoomsChangedPayload) => void | Promise<void>;
   onOpenSettings: () => void;
   userId: string;
+  /** Called after successfully leaving a space from the context menu */
+  onLeftSpace?: (spaceId: string) => void;
 }
 
 function SpaceAvatar({ space, isActive }: { space: Room; isActive: boolean }) {
@@ -87,6 +90,7 @@ export default function SpaceSidebar({
   onSpacesChanged,
   onOpenSettings,
   userId,
+  onLeftSpace,
 }: SpaceSidebarProps) {
   const { palette } = useTheme();
   const [showDialog, setShowDialog] = useState(false);
@@ -104,6 +108,10 @@ export default function SpaceSidebar({
     spaceName: string;
   } | null>(null);
   const [inviteSpace, setInviteSpace] = useState<{ id: string; name: string } | null>(null);
+  const [leaveSpace, setLeaveSpace] = useState<{ id: string; name: string } | null>(null);
+  const [leaveSpaceOnlyAdmin, setLeaveSpaceOnlyAdmin] = useState<boolean | null>(null);
+  const [leaveSpaceError, setLeaveSpaceError] = useState<string | null>(null);
+  const [leaveSpaceSubmitting, setLeaveSpaceSubmitting] = useState(false);
   const checkedRef = useRef(false);
 
   // Check room creation permission once on mount
@@ -126,6 +134,41 @@ export default function SpaceSidebar({
   const handleCreated = useCallback((payload?: RoomsChangedPayload) => {
     return onSpacesChanged(payload);
   }, [onSpacesChanged]);
+
+  useEffect(() => {
+    if (!leaveSpace) {
+      setLeaveSpaceOnlyAdmin(null);
+      return;
+    }
+    let cancelled = false;
+    setLeaveSpaceOnlyAdmin(null);
+    fetchLeaveSpacePreview(leaveSpace.id)
+      .then((v) => {
+        if (!cancelled) setLeaveSpaceOnlyAdmin(v);
+      })
+      .catch(() => {
+        if (!cancelled) setLeaveSpaceOnlyAdmin(false);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [leaveSpace?.id]);
+
+  const handleConfirmLeaveSpace = useCallback(async () => {
+    if (!leaveSpace) return;
+    setLeaveSpaceError(null);
+    setLeaveSpaceSubmitting(true);
+    try {
+      await invoke("leave_room", { roomId: leaveSpace.id });
+      onLeftSpace?.(leaveSpace.id);
+      await onSpacesChanged();
+      setLeaveSpace(null);
+    } catch (e) {
+      setLeaveSpaceError(String(e));
+    } finally {
+      setLeaveSpaceSubmitting(false);
+    }
+  }, [leaveSpace, onLeftSpace, onSpacesChanged]);
 
   return (
     <>
@@ -285,6 +328,11 @@ export default function SpaceSidebar({
             const t = spaceContextMenu;
             setInviteSpace({ id: t.spaceId, name: t.spaceName });
           }}
+          onLeave={() => {
+            const t = spaceContextMenu;
+            setLeaveSpaceError(null);
+            setLeaveSpace({ id: t.spaceId, name: t.spaceName });
+          }}
           onOpenSpaceSettings={() =>
             setSpaceSettingsTarget({
               spaceId: spaceContextMenu.spaceId,
@@ -311,6 +359,23 @@ export default function SpaceSidebar({
           kind="space"
           currentUserId={userId}
           onClose={() => setInviteSpace(null)}
+        />
+      )}
+
+      {leaveSpace && (
+        <LeaveConfirmDialog
+          kind="space"
+          targetName={leaveSpace.name}
+          onlyAdminWarning={leaveSpaceOnlyAdmin}
+          leaving={leaveSpaceSubmitting}
+          error={leaveSpaceError}
+          onConfirm={handleConfirmLeaveSpace}
+          onClose={() => {
+            if (!leaveSpaceSubmitting) {
+              setLeaveSpace(null);
+              setLeaveSpaceError(null);
+            }
+          }}
         />
       )}
     </>

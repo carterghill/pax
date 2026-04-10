@@ -264,6 +264,94 @@ pub async fn get_knock_members(
     })
 }
 
+/// Power level at or above which a member is treated as a room/space "admin" for leave warnings.
+const ADMIN_POWER_LEVEL: i64 = 100;
+
+#[derive(Clone, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PreviewLeaveSpaceResponse {
+    /// True when the current user is the only joined member with power ≥ 100.
+    pub is_only_admin: bool,
+}
+
+/// Whether leaving this space would remove the last user with admin-level power (typically 100).
+#[tauri::command]
+pub async fn preview_leave_space(
+    state: State<'_, Arc<AppState>>,
+    room_id: String,
+) -> Result<PreviewLeaveSpaceResponse, String> {
+    let client = get_client(&state).await?;
+    let room = resolve_room(&client, &room_id)?;
+    if !room.is_space() {
+        return Ok(PreviewLeaveSpaceResponse {
+            is_only_admin: false,
+        });
+    }
+
+    let user_id = client
+        .user_id()
+        .ok_or("Not logged in")?
+        .to_string();
+
+    let access_token = client.access_token().ok_or("No access token")?;
+    let homeserver = client.homeserver().to_string();
+    let hs = homeserver.trim_end_matches('/');
+    let encoded_room = urlencoding::encode(&room_id);
+
+    let members = room
+        .members(matrix_sdk::RoomMemberships::JOIN)
+        .await
+        .map_err(|e| format!("Failed to get members: {}", fmt_error_chain(&e)))?;
+
+    let pl_url = format!(
+        "{}/_matrix/client/v3/rooms/{}/state/m.room.power_levels/",
+        hs, encoded_room
+    );
+    let pl_resp = state
+        .http_client
+        .get(&pl_url)
+        .timeout(Duration::from_secs(10))
+        .bearer_auth(access_token.to_string())
+        .send()
+        .await
+        .map_err(|e| format!("Failed to load power levels: {}", fmt_error_chain(&e)))?;
+
+    if !pl_resp.status().is_success() {
+        return Ok(PreviewLeaveSpaceResponse {
+            is_only_admin: false,
+        });
+    }
+
+    let pl: serde_json::Value = pl_resp.json().await.unwrap_or_default();
+    let users_default = pl
+        .get("users_default")
+        .and_then(|v| v.as_i64())
+        .unwrap_or(0);
+
+    let admin_count = members
+        .iter()
+        .filter(|m| {
+            let uid = m.user_id().to_string();
+            let level = pl
+                .get("users")
+                .and_then(|u| u.get(&uid))
+                .and_then(|v| v.as_i64())
+                .unwrap_or(users_default);
+            level >= ADMIN_POWER_LEVEL
+        })
+        .count();
+
+    let my_level = pl
+        .get("users")
+        .and_then(|u| u.get(&user_id))
+        .and_then(|v| v.as_i64())
+        .unwrap_or(users_default);
+
+    let is_only_admin = admin_count == 1 && my_level >= ADMIN_POWER_LEVEL;
+
+    Ok(PreviewLeaveSpaceResponse { is_only_admin })
+}
+
 /// Invite a user to a room. Used to accept knock requests.
 #[tauri::command]
 pub async fn invite_user(

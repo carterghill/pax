@@ -1,4 +1,5 @@
-import { useState } from "react";
+import { useState, useCallback } from "react";
+import { invoke } from "@tauri-apps/api/core";
 import { Hash, House, Volume2, Monitor, MicOff, Headphones, Slash, Loader2 } from "lucide-react";
 import { Room, VoiceParticipant } from "../types/matrix";
 import { useTheme } from "../theme/ThemeContext";
@@ -7,6 +8,7 @@ import VolumeContextMenu from "./VolumeContextMenu";
 import RoomContextMenu from "./RoomContextMenu";
 import RoomSettingsModal from "./RoomSettingsModal";
 import InviteDialog from "./InviteDialog";
+import LeaveConfirmDialog from "./LeaveConfirmDialog";
 import { useUserVolume } from "../hooks/useUserVolume";
 import {
   VOICE_ROOM_TYPE,
@@ -50,6 +52,8 @@ interface RoomSidebarProps {
     Record<string, { isMuted: boolean; isDeafened: boolean; isSpeaking: boolean }>
   >;
   onSetParticipantVolume: (identity: string, volume: number, source: string) => void;
+  /** Called after successfully leaving a room from the context menu */
+  onLeftRoom?: (roomId: string) => void;
 }
 
 function VoiceParticipantRow({
@@ -183,6 +187,7 @@ export default function RoomSidebar({
   screenSharingOwners,
   voiceParticipantStatesByRoom,
   onSetParticipantVolume,
+  onLeftRoom,
 }: RoomSidebarProps) {
   const { palette, spacing, typography } = useTheme();
   const { getVolume, setVolume } = useUserVolume();
@@ -200,6 +205,9 @@ export default function RoomSidebar({
   } | null>(null);
   const [settingsRoomId, setSettingsRoomId] = useState<string | null>(null);
   const [inviteRoom, setInviteRoom] = useState<{ id: string; name: string } | null>(null);
+  const [leaveRoom, setLeaveRoom] = useState<{ id: string; name: string } | null>(null);
+  const [leaveRoomError, setLeaveRoomError] = useState<string | null>(null);
+  const [leaveRoomSubmitting, setLeaveRoomSubmitting] = useState(false);
   const settingsRoom = settingsRoomId
     ? rooms.find((r) => r.id === settingsRoomId)
     : null;
@@ -208,6 +216,21 @@ export default function RoomSidebar({
   const displayName = userId.startsWith("@")
     ? userId.slice(1).split(":")[0]
     : userId;
+
+  const handleConfirmLeaveRoom = useCallback(async () => {
+    if (!leaveRoom) return;
+    setLeaveRoomError(null);
+    setLeaveRoomSubmitting(true);
+    try {
+      await invoke("leave_room", { roomId: leaveRoom.id });
+      onLeftRoom?.(leaveRoom.id);
+      setLeaveRoom(null);
+    } catch (e) {
+      setLeaveRoomError(String(e));
+    } finally {
+      setLeaveRoomSubmitting(false);
+    }
+  }, [leaveRoom, onLeftRoom]);
 
   return (
     <div style={{
@@ -391,6 +414,11 @@ export default function RoomSidebar({
             setInviteRoom({ id: t.roomId, name: t.roomName });
           }}
           onOpenSettings={() => setSettingsRoomId(roomContextMenu.roomId)}
+          onLeave={() => {
+            const t = roomContextMenu;
+            setLeaveRoomError(null);
+            setLeaveRoom({ id: t.roomId, name: t.roomName });
+          }}
           onClose={() => setRoomContextMenu(null)}
         />
       )}
@@ -411,6 +439,23 @@ export default function RoomSidebar({
           kind="room"
           currentUserId={userId}
           onClose={() => setInviteRoom(null)}
+        />
+      )}
+
+      {leaveRoom && (
+        <LeaveConfirmDialog
+          kind="room"
+          targetName={leaveRoom.name}
+          onlyAdminWarning={false}
+          leaving={leaveRoomSubmitting}
+          error={leaveRoomError}
+          onConfirm={handleConfirmLeaveRoom}
+          onClose={() => {
+            if (!leaveRoomSubmitting) {
+              setLeaveRoom(null);
+              setLeaveRoomError(null);
+            }
+          }}
         />
       )}
     </div>
