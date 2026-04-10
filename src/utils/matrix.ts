@@ -2,6 +2,9 @@
  *  Also defined in the Rust backend at `src-tauri/src/commands/voice_matrix.rs` — keep both in sync. */
  export const VOICE_ROOM_TYPE = "org.matrix.msc3417.call";
 
+/** Matrix space rooms (`creation_content.type` / room type `m.space`). */
+export const SPACE_ROOM_TYPE = "m.space";
+
  export const normalizeUserId = (id: string): string => id.trim().toLowerCase();
 
  const MXID_RE = /^@[^:\s]+:[^:\s/]+$/;

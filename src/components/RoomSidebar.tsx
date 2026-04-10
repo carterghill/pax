@@ -1,6 +1,19 @@
 import { useState, useCallback } from "react";
 import { invoke } from "@tauri-apps/api/core";
-import { Hash, House, Volume2, Monitor, MicOff, Headphones, Slash, Loader2, UserPlus } from "lucide-react";
+import {
+  Hash,
+  House,
+  Volume2,
+  Monitor,
+  MicOff,
+  Headphones,
+  Slash,
+  Loader2,
+  UserPlus,
+  ChevronRight,
+  ChevronDown,
+  ExternalLink,
+} from "lucide-react";
 import { Room, VoiceParticipant } from "../types/matrix";
 import { useTheme } from "../theme/ThemeContext";
 import StatusDropdown from "./StatusDropdown";
@@ -30,9 +43,16 @@ function resolveVoiceStateForRoom(
   return undefined;
 }
 
+export type RoomSidebarSubSpaceSection = { subSpace: Room; rooms: Room[] };
+
 interface RoomSidebarProps {
   width: number;
   rooms: Room[];
+  /** Joined sub-spaces of the active space, each with its channels (Discord-style categories). */
+  subSpaceSections: RoomSidebarSubSpaceSection[];
+  getRoom: (roomId: string) => Room | null;
+  /** Optional: open sub-space home (small control only; row click toggles expand/collapse). */
+  onOpenSubSpace?: (spaceId: string) => void;
   activeRoomId: string | null;
   onSelectRoom: (roomId: string) => void;
   /** Clears room selection so the joined space home is shown (same as re-clicking the space). */
@@ -172,9 +192,144 @@ function VoiceParticipantRow({
   );
 }
 
+function ChannelBlock({
+  room,
+  activeRoomId,
+  userId,
+  onSelectRoom,
+  onRoomContextMenu,
+  voiceParticipants,
+  connectedVoiceRoomId,
+  isVoiceConnecting,
+  disconnectingFromRoomId,
+  screenSharingOwners,
+  voiceParticipantStatesByRoom,
+  onParticipantContextMenu,
+  palette,
+  spacing,
+  typography,
+  indent = false,
+}: {
+  room: Room;
+  activeRoomId: string | null;
+  userId: string;
+  onSelectRoom: (roomId: string) => void;
+  onRoomContextMenu: (roomId: string, roomName: string, e: React.MouseEvent) => void;
+  voiceParticipants: Record<string, VoiceParticipant[]>;
+  connectedVoiceRoomId: string | null;
+  isVoiceConnecting: boolean;
+  disconnectingFromRoomId: string | null;
+  screenSharingOwners: string[];
+  voiceParticipantStatesByRoom: Record<
+    string,
+    Record<string, { isMuted: boolean; isDeafened: boolean; isSpeaking: boolean }>
+  >;
+  onParticipantContextMenu: (
+    e: React.MouseEvent,
+    identity: string,
+    displayName: string
+  ) => void;
+  palette: ReturnType<typeof useTheme>["palette"];
+  spacing: ReturnType<typeof useTheme>["spacing"];
+  typography: ReturnType<typeof useTheme>["typography"];
+  indent?: boolean;
+}) {
+  const isVoice = room.roomType === VOICE_ROOM_TYPE;
+  const participants = isVoice ? (voiceParticipants[room.id] ?? []) : [];
+  const isConnectedHere = connectedVoiceRoomId === room.id;
+  const padLeft = indent ? spacing.unit * 6 : spacing.unit * 3;
+
+  return (
+    <div>
+      <div
+        onClick={() => onSelectRoom(room.id)}
+        onContextMenu={(e) => onRoomContextMenu(room.id, room.name, e)}
+        style={{
+          padding: `${spacing.unit * 2}px ${spacing.unit * 3}px`,
+          paddingLeft: padLeft,
+          borderRadius: spacing.unit,
+          cursor: "pointer",
+          color: activeRoomId === room.id ? palette.textHeading : palette.textSecondary,
+          backgroundColor: activeRoomId === room.id ? palette.bgActive : "transparent",
+          fontSize: typography.fontSizeBase,
+          fontWeight:
+            activeRoomId === room.id
+              ? typography.fontWeightMedium
+              : typography.fontWeightNormal,
+        }}
+      >
+        <span style={{ display: "flex", alignItems: "center", gap: spacing.unit }}>
+          {isVoice ? (
+            <Volume2
+              size={16}
+              color={
+                isConnectedHere
+                  ? "#23a55a"
+                  : activeRoomId === room.id
+                    ? palette.textHeading
+                    : palette.textSecondary
+              }
+            />
+          ) : (
+            <Hash
+              size={16}
+              color={activeRoomId === room.id ? palette.textHeading : palette.textSecondary}
+            />
+          )}
+          <div
+            style={{
+              marginLeft: spacing.unit,
+              color: isConnectedHere ? "#23a55a" : undefined,
+            }}
+          >
+            {room.name}
+          </div>
+        </span>
+      </div>
+
+      {isVoice && participants.length > 0 && (
+        <div style={{ paddingBottom: spacing.unit }}>
+          {participants.map((p) => {
+            const state = resolveVoiceStateForRoom(
+              p,
+              voiceParticipantStatesByRoom[room.id] ?? {}
+            );
+            const isLocalConnecting =
+              isConnectedHere && p.userId === userId && isVoiceConnecting;
+            const isLocalDisconnecting =
+              room.id === disconnectingFromRoomId && p.userId === userId;
+            const isRemoteConnecting =
+              isConnectedHere && !isVoiceConnecting && p.userId !== userId && !state;
+            const isParticipantConnecting =
+              isLocalConnecting || isLocalDisconnecting || isRemoteConnecting;
+            return (
+              <VoiceParticipantRow
+                key={p.userId}
+                participant={p}
+                isLocalUser={p.userId === userId}
+                isSharingScreen={screenSharingOwners.includes(p.userId)}
+                isMuted={!!state?.isMuted}
+                isDeafened={!!state?.isDeafened}
+                isSpeaking={!!state?.isSpeaking}
+                isConnecting={isParticipantConnecting}
+                onContextMenu={(e) => {
+                  onParticipantContextMenu(e, p.userId, p.displayName ?? p.userId);
+                }}
+              />
+            );
+          })}
+        </div>
+      )}
+    </div>
+  );
+}
+
 export default function RoomSidebar({
   width,
   rooms,
+  subSpaceSections,
+  getRoom,
+  onOpenSubSpace,
   activeRoomId,
   onSelectRoom,
   onSelectSpaceHome,
@@ -194,6 +349,8 @@ export default function RoomSidebar({
   onLeftRoom,
 }: RoomSidebarProps) {
   const { palette, spacing, typography } = useTheme();
+  /** Sub-space id → expanded; absence means expanded (default open). */
+  const [subSpaceExpanded, setSubSpaceExpanded] = useState<Record<string, boolean>>({});
   const { getVolume, setVolume } = useUserVolume();
   const [contextMenu, setContextMenu] = useState<{
     x: number;
@@ -215,9 +372,19 @@ export default function RoomSidebar({
   const [leaveRoom, setLeaveRoom] = useState<{ id: string; name: string } | null>(null);
   const [leaveRoomError, setLeaveRoomError] = useState<string | null>(null);
   const [leaveRoomSubmitting, setLeaveRoomSubmitting] = useState(false);
-  const settingsRoom = settingsRoomId
-    ? rooms.find((r) => r.id === settingsRoomId)
-    : null;
+  const settingsRoom = settingsRoomId ? getRoom(settingsRoomId) : null;
+
+  const isSubSpaceExpanded = (id: string) => subSpaceExpanded[id] !== false;
+
+  const toggleSubSpace = useCallback((spaceId: string) => {
+    setSubSpaceExpanded((prev) => {
+      const cur = prev[spaceId] !== false;
+      return { ...prev, [spaceId]: !cur };
+    });
+  }, []);
+
+  const hasChannelList =
+    rooms.length > 0 || subSpaceSections.some((s) => s.rooms.length > 0);
 
   // Extract local part of userId for display (e.g. @carter:matrix.org → carter)
   const displayName = userId.startsWith("@")
@@ -315,6 +482,7 @@ export default function RoomSidebar({
         ) : null}
       </div>
       <div style={{ flex: 1, overflowY: "auto", padding: spacing.unit * 2 }}>
+        <style>{`@keyframes spin { from { transform: rotate(0deg); } to { transform: rotate(360deg); } }`}</style>
         {showSpaceHomeNav && (
           <div style={{ marginBottom: spacing.unit }}>
             <div
@@ -343,97 +511,139 @@ export default function RoomSidebar({
             </div>
           </div>
         )}
-        {rooms.map((room) => {
-          const isVoice = room.roomType === VOICE_ROOM_TYPE;
-          const participants = isVoice ? (voiceParticipants[room.id] ?? []) : [];
-          const isConnectedHere = connectedVoiceRoomId === room.id;
-
+        {subSpaceSections.map(({ subSpace, rooms: subRooms }) => {
+          const expanded = isSubSpaceExpanded(subSpace.id);
+          const ChevronIcon = expanded ? ChevronDown : ChevronRight;
           return (
-            <div key={room.id}>
-              {/* Room row */}
+            <div key={subSpace.id} style={{ marginBottom: spacing.unit }}>
               <div
-                onClick={() => onSelectRoom(room.id)}
-                onContextMenu={(e) => {
-                  e.preventDefault();
-                  setRoomContextMenu({
-                    x: e.clientX,
-                    y: e.clientY,
-                    roomId: room.id,
-                    roomName: room.name,
-                  });
+                role="button"
+                tabIndex={0}
+                aria-expanded={expanded}
+                onClick={() => toggleSubSpace(subSpace.id)}
+                onKeyDown={(e) => {
+                  if (e.key === "Enter" || e.key === " ") {
+                    e.preventDefault();
+                    toggleSubSpace(subSpace.id);
+                  }
                 }}
                 style={{
-                  padding: `${spacing.unit * 2}px ${spacing.unit * 3}px`,
+                  display: "flex",
+                  alignItems: "center",
+                  gap: spacing.unit,
+                  padding: `${spacing.unit}px ${spacing.unit * 2}px`,
                   borderRadius: spacing.unit,
+                  userSelect: "none",
                   cursor: "pointer",
-                  color: activeRoomId === room.id ? palette.textHeading : palette.textSecondary,
-                  backgroundColor: activeRoomId === room.id ? palette.bgActive : "transparent",
-                  fontSize: typography.fontSizeBase,
-                  fontWeight: activeRoomId === room.id
-                    ? typography.fontWeightMedium
-                    : typography.fontWeightNormal,
                 }}
               >
-                <span style={{ display: "flex", alignItems: "center", gap: spacing.unit }}>
-                  {isVoice ? (
-                    <Volume2
-                      size={16}
-                      color={isConnectedHere ? "#23a55a" : (activeRoomId === room.id ? palette.textHeading : palette.textSecondary)}
-                    />
-                  ) : (
-                    <Hash size={16} color={activeRoomId === room.id ? palette.textHeading : palette.textSecondary} />
-                  )}
-                  <div style={{
-                    marginLeft: spacing.unit,
-                    color: isConnectedHere ? "#23a55a" : undefined,
-                  }}>
-                    {room.name}
-                  </div>
+                <ChevronIcon
+                  size={16}
+                  strokeWidth={2}
+                  aria-hidden
+                  style={{ flexShrink: 0, color: palette.textSecondary }}
+                />
+                <span
+                  style={{
+                    flex: 1,
+                    minWidth: 0,
+                    fontSize: typography.fontSizeSmall,
+                    fontWeight: typography.fontWeightBold,
+                    color: palette.textSecondary,
+                    textTransform: "uppercase" as const,
+                    letterSpacing: "0.02em",
+                    overflow: "hidden",
+                    textOverflow: "ellipsis",
+                    whiteSpace: "nowrap",
+                  }}
+                >
+                  {subSpace.name}
                 </span>
+                {onOpenSubSpace ? (
+                  <button
+                    type="button"
+                    title="Open sub-space home"
+                    aria-label={`Open ${subSpace.name} home`}
+                    onClick={(e) => {
+                      e.stopPropagation();
+                      onOpenSubSpace(subSpace.id);
+                    }}
+                    onMouseDown={(e) => e.stopPropagation()}
+                    style={{
+                      flexShrink: 0,
+                      display: "flex",
+                      alignItems: "center",
+                      justifyContent: "center",
+                      width: 28,
+                      height: 28,
+                      padding: 0,
+                      border: "none",
+                      borderRadius: spacing.unit * 0.75,
+                      backgroundColor: "transparent",
+                      color: palette.textSecondary,
+                      cursor: "pointer",
+                    }}
+                  >
+                    <ExternalLink size={14} strokeWidth={2} aria-hidden />
+                  </button>
+                ) : null}
               </div>
-
-              {/* Voice participants listed under the voice room */}
-              {isVoice && participants.length > 0 && (
-                <div style={{ paddingBottom: spacing.unit }}>
-                  <style>{`@keyframes spin { from { transform: rotate(0deg); } to { transform: rotate(360deg); } }`}</style>
-                  {participants.map((p) => {
-                    const state = resolveVoiceStateForRoom(
-                      p,
-                      voiceParticipantStatesByRoom[room.id] ?? {}
-                    );
-                    // Local user: connecting (joining) or disconnecting (left LiveKit but still in Matrix list)
-                    const isLocalConnecting = isConnectedHere && p.userId === userId && isVoiceConnecting;
-                    const isLocalDisconnecting = room.id === disconnectingFromRoomId && p.userId === userId;
-                    const isRemoteConnecting = isConnectedHere && !isVoiceConnecting && p.userId !== userId && !state;
-                    const isParticipantConnecting = isLocalConnecting || isLocalDisconnecting || isRemoteConnecting;
-                    return (
-                    <VoiceParticipantRow
-                      key={p.userId}
-                      participant={p}
-                      isLocalUser={p.userId === userId}
-                      isSharingScreen={screenSharingOwners.includes(p.userId)}
-                      isMuted={!!state?.isMuted}
-                      isDeafened={!!state?.isDeafened}
-                      isSpeaking={!!state?.isSpeaking}
-                      isConnecting={isParticipantConnecting}
-                      onContextMenu={(e) => {
-                        // Map userId to the identity format used by LiveKit
-                        setContextMenu({
-                          x: e.clientX,
-                          y: e.clientY,
-                          identity: p.userId,
-                          displayName: p.displayName ?? p.userId,
-                        });
-                      }}
-                    />
-                    );
-                  })}
-                </div>
-              )}
+              {expanded &&
+                subRooms.map((room) => (
+                  <ChannelBlock
+                    key={room.id}
+                    room={room}
+                    activeRoomId={activeRoomId}
+                    userId={userId}
+                    onSelectRoom={onSelectRoom}
+                    onRoomContextMenu={(rid, rname, e) => {
+                      e.preventDefault();
+                      setRoomContextMenu({ x: e.clientX, y: e.clientY, roomId: rid, roomName: rname });
+                    }}
+                    voiceParticipants={voiceParticipants}
+                    connectedVoiceRoomId={connectedVoiceRoomId}
+                    isVoiceConnecting={isVoiceConnecting}
+                    disconnectingFromRoomId={disconnectingFromRoomId}
+                    screenSharingOwners={screenSharingOwners}
+                    voiceParticipantStatesByRoom={voiceParticipantStatesByRoom}
+                    onParticipantContextMenu={(e, identity, displayName) => {
+                      setContextMenu({ x: e.clientX, y: e.clientY, identity, displayName });
+                    }}
+                    palette={palette}
+                    spacing={spacing}
+                    typography={typography}
+                    indent
+                  />
+                ))}
             </div>
           );
         })}
-        {rooms.length === 0 && (
+        {rooms.map((room) => (
+          <ChannelBlock
+            key={room.id}
+            room={room}
+            activeRoomId={activeRoomId}
+            userId={userId}
+            onSelectRoom={onSelectRoom}
+            onRoomContextMenu={(rid, rname, e) => {
+              e.preventDefault();
+              setRoomContextMenu({ x: e.clientX, y: e.clientY, roomId: rid, roomName: rname });
+            }}
+            voiceParticipants={voiceParticipants}
+            connectedVoiceRoomId={connectedVoiceRoomId}
+            isVoiceConnecting={isVoiceConnecting}
+            disconnectingFromRoomId={disconnectingFromRoomId}
+            screenSharingOwners={screenSharingOwners}
+            voiceParticipantStatesByRoom={voiceParticipantStatesByRoom}
+            onParticipantContextMenu={(e, identity, displayName) => {
+              setContextMenu({ x: e.clientX, y: e.clientY, identity, displayName });
+            }}
+            palette={palette}
+            spacing={spacing}
+            typography={typography}
+          />
+        ))}
+        {!hasChannelList && (
           <div style={{
             color: palette.textSecondary,
             padding: `${spacing.unit * 2}px ${spacing.unit * 3}px`,

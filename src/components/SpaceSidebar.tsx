@@ -18,6 +18,8 @@ type RoomsChangedPayload = {
 interface SpaceSidebarProps {
   spaces: Room[];
   activeSpaceId: string | null;
+  /** Top-level space to show as selected when the user is inside a nested sub-space. */
+  spaceHighlightId: string | null;
   onSelectSpace: (spaceId: string) => void;
   onSpacesChanged: (payload?: RoomsChangedPayload) => void | Promise<void>;
   onOpenSettings: () => void;
@@ -88,6 +90,7 @@ function SpaceAvatar({ space, isActive }: { space: Room; isActive: boolean }) {
 export default function SpaceSidebar({
   spaces,
   activeSpaceId,
+  spaceHighlightId,
   onSelectSpace,
   onSpacesChanged,
   onOpenSettings,
@@ -243,7 +246,7 @@ export default function SpaceSidebar({
           >
             <SpaceAvatar
               space={space}
-              isActive={activeSpaceId === space.id}
+              isActive={spaceHighlightId === space.id}
             />
           </div>
         ))}

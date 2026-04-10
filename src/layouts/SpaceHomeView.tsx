@@ -1,11 +1,25 @@
-import { useState, useEffect, useRef, useCallback } from "react";
+import { useState, useEffect, useRef, useCallback, useMemo } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
-import { Hash, Volume2, Users, LogIn, Check, Mail, RefreshCw, Plus, X, Loader2 } from "lucide-react";
+import {
+  Hash,
+  Volume2,
+  Users,
+  LogIn,
+  Check,
+  Mail,
+  RefreshCw,
+  Plus,
+  X,
+  Loader2,
+  ChevronRight,
+  ChevronDown,
+  ExternalLink,
+} from "lucide-react";
 import { useTheme } from "../theme/ThemeContext";
 import { Room } from "../types/matrix";
 import type { RoomsChangedPayload } from "../types/roomsChanged";
-import { VOICE_ROOM_TYPE } from "../utils/matrix";
+import { VOICE_ROOM_TYPE, SPACE_ROOM_TYPE, compareByDisplayThenKey } from "../utils/matrix";
 import {
   spaceInitialAvatarBackground,
   userInitialAvatarBackground,
@@ -14,9 +28,50 @@ import CreateRoomDialog from "../components/CreateRoomDialog";
 import type { SpaceChildInfo, SpaceInfo } from "../utils/spaceHomeCache";
 import { getCachedSpaceInfo, setCachedSpaceInfo } from "../utils/spaceHomeCache";
 
+function isChildMatrixSpace(c: SpaceChildInfo): boolean {
+  return c.roomType === SPACE_ROOM_TYPE;
+}
+
+function roomToSpaceChildInfo(r: Room, fromHierarchy?: SpaceChildInfo): SpaceChildInfo {
+  return {
+    id: r.id,
+    name: r.name,
+    topic: r.topic ?? null,
+    avatarUrl: r.avatarUrl,
+    membership: r.membership,
+    joinRule: fromHierarchy?.joinRule ?? null,
+    roomType: r.roomType,
+    numJoinedMembers: fromHierarchy?.numJoinedMembers ?? 0,
+  };
+}
+
+/** Merge hierarchy children of a sub-space with rooms from sync (invited/joined). */
+function mergeSubSpaceChannels(
+  syncRooms: Room[],
+  hierarchyChildren: SpaceChildInfo[] | undefined
+): SpaceChildInfo[] {
+  const byId = new Map<string, SpaceChildInfo>();
+  for (const c of hierarchyChildren ?? []) {
+    if (isChildMatrixSpace(c)) continue;
+    byId.set(c.id, c);
+  }
+  for (const r of syncRooms) {
+    if (r.isSpace) continue;
+    const fromH = byId.get(r.id);
+    byId.set(r.id, roomToSpaceChildInfo(r, fromH));
+  }
+  return [...byId.values()].sort((a, b) =>
+    compareByDisplayThenKey(a.name, a.id, b.name, b.id)
+  );
+}
+
 interface SpaceHomeViewProps {
   space: Room;
   onSelectRoom: (roomId: string) => void;
+  /** Switch the main layout to a child space (sidebar / home for that space). */
+  onSelectChildSpace?: (spaceId: string) => void;
+  /** Joined channels for a child space id (from sync / get_rooms). */
+  getRoomsInChildSpace: (spaceId: string) => Room[];
   onRoomsChanged: (payload?: RoomsChangedPayload) => void | Promise<void>;
 }
 
@@ -66,7 +121,13 @@ interface KnockData {
   canKick: boolean;
 }
 
-export default function SpaceHomeView({ space, onSelectRoom, onRoomsChanged }: SpaceHomeViewProps) {
+export default function SpaceHomeView({
+  space,
+  onSelectRoom,
+  onSelectChildSpace,
+  getRoomsInChildSpace,
+  onRoomsChanged,
+}: SpaceHomeViewProps) {
   const { palette, typography, spacing, resolvedColorScheme } = useTheme();
   const [info, setInfo] = useState<SpaceInfo | null>(null);
   const [loading, setLoading] = useState(true);
@@ -78,6 +139,19 @@ export default function SpaceHomeView({ space, onSelectRoom, onRoomsChanged }: S
 
   const [canManageChildren, setCanManageChildren] = useState(false);
   const [showCreateRoom, setShowCreateRoom] = useState(false);
+  /** Sub-space id → expanded in space home (absent = expanded). */
+  const [subSpaceExpandedHome, setSubSpaceExpandedHome] = useState<Record<string, boolean>>({});
+  /** Per–sub-space hierarchy from `get_space_info(sub.id)` (joinable rooms not in sync). */
+  const [subSpaceHierarchyChildren, setSubSpaceHierarchyChildren] = useState<
+    Record<string, SpaceChildInfo[]>
+  >({});
+  const isHomeSubExpanded = (id: string) => subSpaceExpandedHome[id] !== false;
+  const toggleHomeSub = useCallback((id: string) => {
+    setSubSpaceExpandedHome((prev) => {
+      const cur = prev[id] !== false;
+      return { ...prev, [id]: !cur };
+    });
+  }, []);
   const permCheckedRef = useRef<string | null>(null);
 
   // ── Knock requests ──
@@ -114,6 +188,43 @@ export default function SpaceHomeView({ space, onSelectRoom, onRoomsChanged }: S
         if (!background) setLoading(false);
       });
   }, [space.id]);
+
+  useEffect(() => {
+    setSubSpaceExpandedHome({});
+    setSubSpaceHierarchyChildren({});
+  }, [space.id]);
+
+  useEffect(() => {
+    if (!info) {
+      setSubSpaceHierarchyChildren({});
+      return;
+    }
+    const subs = info.children
+      .filter((c) => c.membership === "joined" && isChildMatrixSpace(c))
+      .sort((a, b) => compareByDisplayThenKey(a.name, a.id, b.name, b.id));
+    if (subs.length === 0) {
+      setSubSpaceHierarchyChildren({});
+      return;
+    }
+    let cancelled = false;
+    (async () => {
+      const map: Record<string, SpaceChildInfo[]> = {};
+      await Promise.all(
+        subs.map(async (sub) => {
+          try {
+            const si = await invoke<SpaceInfo>("get_space_info", { spaceId: sub.id });
+            if (!cancelled) map[sub.id] = si.children;
+          } catch {
+            if (!cancelled) map[sub.id] = [];
+          }
+        })
+      );
+      if (!cancelled) setSubSpaceHierarchyChildren(map);
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [info, space.id]);
 
   useEffect(() => {
     setJoiningRoomId(null);
@@ -210,33 +321,118 @@ export default function SpaceHomeView({ space, onSelectRoom, onRoomsChanged }: S
     });
   }, [space.id, space.topic]);
 
-  async function handleJoinRoom(roomId: string) {
-    setJoiningRoomId(roomId);
-    const childMeta = info?.children.find((c) => c.id === roomId);
-    try {
-      await invoke("join_room", { roomId });
-      const optimisticRoom: Room = {
-        id: roomId,
-        name: childMeta?.name ?? roomId,
-        avatarUrl: childMeta?.avatarUrl ?? null,
-        isSpace: false,
-        parentSpaceIds: [space.id],
-        roomType: childMeta?.roomType ?? null,
-        membership: "joined",
-      };
-      await onRoomsChanged({ optimisticRoom });
-      setInfo((prev) => {
-        if (!prev) return prev;
-        const next = mergeJoinedChildIntoSpaceInfo(prev, roomId);
-        setCachedSpaceInfo(space.id, next);
-        return next;
-      });
-      fetchInfo({ background: true });
-    } catch (e) {
-      console.error("Failed to join room:", e);
+  const joinedSubspaces = useMemo(() => {
+    if (!info) return [];
+    return info.children
+      .filter((c) => c.membership === "joined" && isChildMatrixSpace(c))
+      .sort((a, b) => compareByDisplayThenKey(a.name, a.id, b.name, b.id));
+  }, [info]);
+
+  const mergedSubChannelsBySubId = useMemo(() => {
+    const result: Record<string, SpaceChildInfo[]> = {};
+    for (const sub of joinedSubspaces) {
+      const sync = getRoomsInChildSpace(sub.id);
+      result[sub.id] = mergeSubSpaceChannels(sync, subSpaceHierarchyChildren[sub.id]);
     }
-    setJoiningRoomId(null);
-  }
+    return result;
+  }, [joinedSubspaces, getRoomsInChildSpace, subSpaceHierarchyChildren]);
+
+  const roomIdsListedUnderSubspaces = useMemo(() => {
+    const s = new Set<string>();
+    for (const sub of joinedSubspaces) {
+      for (const c of mergedSubChannelsBySubId[sub.id] ?? []) {
+        if (!isChildMatrixSpace(c)) s.add(c.id);
+      }
+    }
+    return s;
+  }, [joinedSubspaces, mergedSubChannelsBySubId]);
+
+  const joinedRoomsDirectFiltered = useMemo(() => {
+    if (!info) return [];
+    const joinedChildren = info.children.filter((c) => c.membership === "joined");
+    const joinedRoomsDirect = joinedChildren.filter((c) => !isChildMatrixSpace(c));
+    return joinedRoomsDirect.filter((c) => !roomIdsListedUnderSubspaces.has(c.id));
+  }, [info, roomIdsListedUnderSubspaces]);
+
+  const totalChannelCount = useMemo(() => {
+    let n = joinedRoomsDirectFiltered.length;
+    for (const sub of joinedSubspaces) {
+      for (const c of mergedSubChannelsBySubId[sub.id] ?? []) {
+        if (!isChildMatrixSpace(c)) n += 1;
+      }
+    }
+    return n;
+  }, [joinedSubspaces, mergedSubChannelsBySubId, joinedRoomsDirectFiltered]);
+
+  const invitedRoomsFiltered = useMemo(() => {
+    if (!info) return [];
+    return info.children.filter(
+      (c) => c.membership === "invited" && !roomIdsListedUnderSubspaces.has(c.id)
+    );
+  }, [info, roomIdsListedUnderSubspaces]);
+
+  const availableRoomsFiltered = useMemo(() => {
+    if (!info) return [];
+    return info.children.filter(
+      (c) => c.membership === "none" && !roomIdsListedUnderSubspaces.has(c.id)
+    );
+  }, [info, roomIdsListedUnderSubspaces]);
+
+  const spaceDescription = useMemo(() => {
+    const t = (info?.topic ?? "").trim();
+    return t || null;
+  }, [info?.topic]);
+
+  const handleJoinRoom = useCallback(
+    async (roomId: string, optimisticParentSpaceId?: string) => {
+      setJoiningRoomId(roomId);
+      const parentForOptimistic = optimisticParentSpaceId ?? space.id;
+      const childMeta =
+        info?.children.find((c) => c.id === roomId) ??
+        (() => {
+          for (const sub of joinedSubspaces) {
+            const found = (mergedSubChannelsBySubId[sub.id] ?? []).find((c) => c.id === roomId);
+            if (found) return found;
+          }
+          return undefined;
+        })();
+      try {
+        await invoke("join_room", { roomId });
+        const optimisticRoom: Room = {
+          id: roomId,
+          name: childMeta?.name ?? roomId,
+          avatarUrl: childMeta?.avatarUrl ?? null,
+          isSpace: false,
+          parentSpaceIds: [parentForOptimistic],
+          roomType: childMeta?.roomType ?? null,
+          membership: "joined",
+        };
+        await onRoomsChanged({ optimisticRoom });
+        setInfo((prev) => {
+          if (!prev) return prev;
+          const next = mergeJoinedChildIntoSpaceInfo(prev, roomId);
+          setCachedSpaceInfo(space.id, next);
+          return next;
+        });
+        if (optimisticParentSpaceId && optimisticParentSpaceId !== space.id) {
+          try {
+            const si = await invoke<SpaceInfo>("get_space_info", { spaceId: optimisticParentSpaceId });
+            setSubSpaceHierarchyChildren((prev) => ({
+              ...prev,
+              [optimisticParentSpaceId]: si.children,
+            }));
+          } catch {
+            /* ignore */
+          }
+        }
+        fetchInfo({ background: true });
+      } catch (e) {
+        console.error("Failed to join room:", e);
+      }
+      setJoiningRoomId(null);
+    },
+    [info, space.id, joinedSubspaces, mergedSubChannelsBySubId, onRoomsChanged, fetchInfo]
+  );
 
   const initials = space.name
     .split(" ")
@@ -296,11 +492,6 @@ export default function SpaceHomeView({ space, onSelectRoom, onRoomsChanged }: S
   }
 
   if (!info) return null;
-
-  const joinedRooms = info.children.filter((c) => c.membership === "joined");
-  const invitedRooms = info.children.filter((c) => c.membership === "invited");
-  const availableRooms = info.children.filter((c) => c.membership === "none");
-  const spaceDescription = (info.topic ?? "").trim();
 
   return (
     <div style={{
@@ -420,24 +611,168 @@ export default function SpaceHomeView({ space, onSelectRoom, onRoomsChanged }: S
           </div>
         )}
 
-        {/* Room sections */}
-        {joinedRooms.length > 0 && (
-          <RoomSection
-            title="Your Rooms"
-            rooms={joinedRooms}
-            onClickRoom={onSelectRoom}
-            joiningRoomId={joiningRoomId}
-            onJoinRoom={handleJoinRoom}
-            palette={palette}
-            typography={typography}
-            spacing={spacing}
-          />
+        {/* Channels: sub-space groups + direct (merged with per–sub-space hierarchy for join + counts) */}
+        {(joinedSubspaces.length > 0 || joinedRoomsDirectFiltered.length > 0) && (
+          <div style={{ marginBottom: spacing.unit * 6 }}>
+            {joinedSubspaces.length > 0 && (
+              <div style={{
+                fontSize: typography.fontSizeSmall,
+                fontWeight: typography.fontWeightBold,
+                color: palette.textSecondary,
+                textTransform: "uppercase" as const,
+                letterSpacing: "0.02em",
+                padding: `${spacing.unit * 2}px ${spacing.unit * 2}px`,
+                marginBottom: spacing.unit * 2,
+              }}>
+                Channels in this space — {totalChannelCount}
+              </div>
+            )}
+            {joinedSubspaces.map((sub) => {
+              const channels = mergedSubChannelsBySubId[sub.id] ?? [];
+              const expanded = isHomeSubExpanded(sub.id);
+              const ChevronIcon = expanded ? ChevronDown : ChevronRight;
+              const nonSpaceCount = channels.filter((c) => !isChildMatrixSpace(c)).length;
+              return (
+                <div key={sub.id} style={{ marginBottom: spacing.unit * 4 }}>
+                  <div
+                    role="button"
+                    tabIndex={0}
+                    aria-expanded={expanded}
+                    onClick={() => toggleHomeSub(sub.id)}
+                    onKeyDown={(e) => {
+                      if (e.key === "Enter" || e.key === " ") {
+                        e.preventDefault();
+                        toggleHomeSub(sub.id);
+                      }
+                    }}
+                    style={{
+                      display: "flex",
+                      alignItems: "center",
+                      gap: spacing.unit * 2,
+                      marginBottom: spacing.unit * 2,
+                      padding: `${spacing.unit * 2}px ${spacing.unit * 2}px`,
+                      borderRadius: spacing.unit * 1.5,
+                      cursor: "pointer",
+                      userSelect: "none",
+                    }}
+                  >
+                    <ChevronIcon size={18} strokeWidth={2} style={{ flexShrink: 0, color: palette.textSecondary }} aria-hidden />
+                    {sub.avatarUrl ? (
+                      <img
+                        src={sub.avatarUrl}
+                        alt=""
+                        style={{
+                          width: 28,
+                          height: 28,
+                          borderRadius: 8,
+                          objectFit: "cover",
+                          flexShrink: 0,
+                        }}
+                      />
+                    ) : null}
+                    <span style={{
+                      flex: 1,
+                      minWidth: 0,
+                      fontSize: typography.fontSizeSmall,
+                      fontWeight: typography.fontWeightBold,
+                      color: palette.textHeading,
+                      textTransform: "uppercase" as const,
+                      letterSpacing: "0.02em",
+                      overflow: "hidden",
+                      textOverflow: "ellipsis",
+                      whiteSpace: "nowrap",
+                    }}>
+                      {sub.name}
+                      {nonSpaceCount > 0 ? (
+                        <span style={{ color: palette.textSecondary, fontWeight: typography.fontWeightNormal }}>
+                          {" "}— {nonSpaceCount}
+                        </span>
+                      ) : null}
+                    </span>
+                    {onSelectChildSpace ? (
+                      <button
+                        type="button"
+                        title="Open sub-space home"
+                        aria-label={`Open ${sub.name} home`}
+                        onClick={(e) => {
+                          e.stopPropagation();
+                          onSelectChildSpace(sub.id);
+                        }}
+                        onMouseDown={(e) => e.stopPropagation()}
+                        style={{
+                          flexShrink: 0,
+                          display: "flex",
+                          alignItems: "center",
+                          justifyContent: "center",
+                          width: 32,
+                          height: 32,
+                          padding: 0,
+                          border: "none",
+                          borderRadius: spacing.unit * 1.5,
+                          backgroundColor: "transparent",
+                          color: palette.textSecondary,
+                          cursor: "pointer",
+                        }}
+                      >
+                        <ExternalLink size={16} strokeWidth={2} aria-hidden />
+                      </button>
+                    ) : null}
+                  </div>
+                  {expanded && (channels.filter((c) => !isChildMatrixSpace(c)).length > 0 ? (
+                    <div style={{
+                      display: "flex",
+                      flexDirection: "column",
+                      gap: spacing.unit,
+                      paddingLeft: spacing.unit * 2,
+                    }}>
+                      {channels.filter((c) => !isChildMatrixSpace(c)).map((room) => (
+                        <RoomRow
+                          key={room.id}
+                          room={room}
+                          isJoining={joiningRoomId === room.id}
+                          onClick={() => {
+                            if (room.membership === "joined") {
+                              onSelectRoom(room.id);
+                            }
+                          }}
+                          onJoin={() => handleJoinRoom(room.id, sub.id)}
+                          palette={palette}
+                          typography={typography}
+                          spacing={spacing}
+                        />
+                      ))}
+                    </div>
+                  ) : (
+                    <div style={{
+                      color: palette.textSecondary,
+                      fontSize: typography.fontSizeSmall,
+                      paddingLeft: spacing.unit * 2,
+                    }}>
+                      No channels in this sub-space yet
+                    </div>
+                  ))}
+                </div>
+              );
+            })}
+            {joinedRoomsDirectFiltered.length > 0 && (
+              <RoomSection
+                title={joinedSubspaces.length > 0 ? "Other channels" : "Channels in this space"}
+                rooms={joinedRoomsDirectFiltered}
+                onClickRoom={onSelectRoom}
+                joiningRoomId={joiningRoomId}
+                onJoinRoom={handleJoinRoom}
+                palette={palette}
+                typography={typography}
+                spacing={spacing}
+              />
+            )}
+          </div>
         )}
 
-        {invitedRooms.length > 0 && (
+        {invitedRoomsFiltered.length > 0 && (
           <RoomSection
             title="Pending Invitations"
-            rooms={invitedRooms}
+            rooms={invitedRoomsFiltered}
             onClickRoom={onSelectRoom}
             joiningRoomId={joiningRoomId}
             onJoinRoom={handleJoinRoom}
@@ -447,10 +782,10 @@ export default function SpaceHomeView({ space, onSelectRoom, onRoomsChanged }: S
           />
         )}
 
-        {availableRooms.length > 0 && (
+        {availableRoomsFiltered.length > 0 && (
           <RoomSection
             title="Available Rooms"
-            rooms={availableRooms}
+            rooms={availableRoomsFiltered}
             onClickRoom={onSelectRoom}
             joiningRoomId={joiningRoomId}
             onJoinRoom={handleJoinRoom}

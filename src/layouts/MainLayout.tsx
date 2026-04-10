@@ -15,6 +15,7 @@ import { useTheme } from "../theme/ThemeContext";
 import SettingsDialog from "../components/SettingsDialog";
 import {
   VOICE_ROOM_TYPE,
+  compareByDisplayThenKey,
   voiceStateLookupKeysForLiveKitIdentity,
 } from "../utils/matrix";
 import { useLivekitVoiceSnapshots } from "../hooks/useLivekitVoiceSnapshots";
@@ -84,6 +85,20 @@ export default function MainLayout({
   onSignOut,
   rooms: { spaces, roomsBySpace, getRoom, fetchRooms, upsertOptimisticRoom },
 }: MainLayoutProps) {
+  const joinedSpaceIdSet = useMemo(() => {
+    const ids = new Set<string>();
+    for (const s of spaces) {
+      if (s.membership === "joined") ids.add(s.id);
+    }
+    return ids;
+  }, [spaces]);
+
+  const topLevelSpaces = useMemo(
+    () =>
+      spaces.filter((s) => !s.parentSpaceIds.some((pid) => joinedSpaceIdSet.has(pid))),
+    [spaces, joinedSpaceIdSet]
+  );
+
   const { manualStatus, setManualStatus, effectivePresence } = usePresence();
   const voiceCall = useVoiceCall();
   const [activeSpaceId, setActiveSpaceId] = useState<string | null>(null);
@@ -109,6 +124,24 @@ export default function MainLayout({
 
   const { palette, spacing } = useTheme();
   const activeSpace = activeSpaceId ? getRoom(activeSpaceId) : null;
+
+  /** Which space icon receives the active outline in the left rail (root when viewing a nested sub-space). */
+  const spaceSidebarHighlightId = useMemo(() => {
+    if (!activeSpaceId) return null;
+    let id = activeSpaceId;
+    const seen = new Set<string>();
+    for (let i = 0; i < 32; i++) {
+      if (seen.has(id)) return id;
+      seen.add(id);
+      const r = getRoom(id);
+      if (!r?.isSpace) return null;
+      const joinedParent = r.parentSpaceIds.find((pid) => joinedSpaceIdSet.has(pid));
+      if (!joinedParent) return id;
+      id = joinedParent;
+    }
+    return id;
+  }, [activeSpaceId, getRoom, joinedSpaceIdSet]);
+
   const fetchedAvatarUrl = useUserAvatar();
   const [avatarOverride, setAvatarOverride] = useState<string | null | undefined>(undefined);
   const userAvatarUrl = avatarOverride !== undefined ? avatarOverride : fetchedAvatarUrl;
@@ -142,14 +175,58 @@ export default function MainLayout({
     storeUserMenuWidth(userMenuWidth);
   }, [userMenuWidth]);
 
-  const visibleRooms = roomsBySpace(activeSpaceId);
+  const childJoinedSubspaces = useMemo(() => {
+    if (!activeSpaceId) return [];
+    return spaces
+      .filter(
+        (s) =>
+          s.isSpace &&
+          s.membership === "joined" &&
+          s.parentSpaceIds.includes(activeSpaceId)
+      )
+      .sort((a, b) => compareByDisplayThenKey(a.name, a.id, b.name, b.id));
+  }, [spaces, activeSpaceId]);
+
+  const subSpaceRoomIdSet = useMemo(() => {
+    const set = new Set<string>();
+    for (const ss of childJoinedSubspaces) {
+      for (const r of roomsBySpace(ss.id)) {
+        set.add(r.id);
+      }
+    }
+    return set;
+  }, [childJoinedSubspaces, roomsBySpace]);
+
+  const visibleRooms = useMemo(() => {
+    if (!activeSpaceId) return roomsBySpace(activeSpaceId);
+    return roomsBySpace(activeSpaceId).filter((r) => !subSpaceRoomIdSet.has(r.id));
+  }, [activeSpaceId, roomsBySpace, subSpaceRoomIdSet]);
+
+  const subSpaceSections = useMemo(
+    () =>
+      childJoinedSubspaces.map((subSpace) => ({
+        subSpace,
+        rooms: roomsBySpace(subSpace.id).sort((a, b) =>
+          compareByDisplayThenKey(a.name, a.id, b.name, b.id)
+        ),
+      })),
+    [childJoinedSubspaces, roomsBySpace]
+  );
+
   const activeRoom = activeRoomId ? getRoom(activeRoomId) : null;
 
   // Collect voice room IDs in the current space for participant tracking
-  const voiceRoomIds = useMemo(
-    () => visibleRooms.filter((r) => r.roomType === VOICE_ROOM_TYPE).map((r) => r.id),
-    [visibleRooms]
-  );
+  const voiceRoomIds = useMemo(() => {
+    const ids: string[] = [];
+    const pushVoice = (list: typeof visibleRooms) => {
+      for (const r of list) {
+        if (r.roomType === VOICE_ROOM_TYPE) ids.push(r.id);
+      }
+    };
+    pushVoice(visibleRooms);
+    for (const { rooms } of subSpaceSections) pushVoice(rooms);
+    return ids;
+  }, [visibleRooms, subSpaceSections]);
   const voiceParticipants = useVoiceParticipants(voiceRoomIds);
   const livekitByRoom = useLivekitVoiceSnapshots(voiceRoomIds);
   const voiceParticipantStatesByRoom = useMemo(() => {
@@ -261,8 +338,9 @@ export default function MainLayout({
         overflow: "hidden",
       }}>
         <SpaceSidebar
-          spaces={spaces}
+          spaces={topLevelSpaces}
           activeSpaceId={activeSpaceId}
+          spaceHighlightId={spaceSidebarHighlightId}
           onSelectSpace={handleSelectSpace}
           onSpacesChanged={handleSpacesChanged}
           onOpenSettings={handleOpenSettings}
@@ -273,6 +351,9 @@ export default function MainLayout({
           <RoomSidebar
             width={roomSidebarWidth}
             rooms={visibleRooms}
+            subSpaceSections={subSpaceSections}
+            getRoom={getRoom}
+            onOpenSubSpace={handleSelectSpace}
             activeRoomId={activeRoomId}
             onSelectRoom={handleSelectRoom}
             onSelectSpaceHome={() => setActiveRoomId(null)}
@@ -350,6 +431,8 @@ export default function MainLayout({
             <SpaceHomeView
               space={activeSpace}
               onSelectRoom={handleSelectRoom}
+              onSelectChildSpace={handleSelectSpace}
+              getRoomsInChildSpace={roomsBySpace}
               onRoomsChanged={handleSpacesChanged}
             />
           ) : (
