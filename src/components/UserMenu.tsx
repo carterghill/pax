@@ -1,10 +1,11 @@
-import { useState, useEffect, useCallback, useRef, useMemo, useDeferredValue } from "react";
+import { useState, useEffect, useCallback, useRef, useMemo, memo } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { Check, X, Loader2 } from "lucide-react";
 import { useTheme } from "../theme/ThemeContext";
 import { userInitialAvatarBackground } from "../utils/userAvatarColor";
 import { useRoomMembers } from "../hooks/useRoomMembers";
+import { RoomMember } from "../types/matrix";
 import { usePresenceContext } from "../hooks/PresenceContext";
 import MemberContextMenu from "./MemberContextMenu";
 import UserProfileDialog from "./UserProfileDialog";
@@ -35,14 +36,106 @@ const presenceColor: Record<string, string> = {
   offline: "#80848e",
 };
 
+// ── Row heights (spacing.unit = 4) ──
+const MEMBER_HEIGHT = 44; // 6px pad top + 32px avatar + 6px pad bottom
+const HEADER_HEIGHT = 38; // 16px pad top + 14px text + 8px pad bottom
+const OVERSCAN = 8;
+
+// ── Virtual row types ──
+type VRow =
+  | { type: "header"; key: string; label: string }
+  | { type: "member"; key: string; member: RoomMember };
+
+interface MemberRowProps {
+  member: RoomMember;
+  onContextMenu: (e: React.MouseEvent, userId: string, displayName: string) => void;
+}
+
+const MemberRow = memo(function MemberRow({ member, onContextMenu }: MemberRowProps) {
+  const { palette, typography, spacing, resolvedColorScheme } = useTheme();
+  return (
+    <div
+      style={{
+        display: "flex",
+        alignItems: "center",
+        gap: spacing.unit * 3,
+        padding: `${spacing.unit * 1.5}px ${spacing.unit * 4}px`,
+        cursor: "pointer",
+        borderRadius: spacing.unit,
+        margin: `0 ${spacing.unit * 2}px`,
+        opacity: member.presence === "offline" ? 0.5 : 1,
+        height: MEMBER_HEIGHT,
+        boxSizing: "border-box",
+      }}
+      onContextMenu={(e) => {
+        e.preventDefault();
+        onContextMenu(e, member.userId, member.displayName ?? member.userId);
+      }}
+      onMouseEnter={(e) => {
+        (e.currentTarget as HTMLDivElement).style.backgroundColor = palette.bgHover;
+      }}
+      onMouseLeave={(e) => {
+        (e.currentTarget as HTMLDivElement).style.backgroundColor = "transparent";
+      }}
+    >
+      <div style={{ position: "relative", flexShrink: 0 }}>
+        {member.avatarUrl ? (
+          <img
+            src={member.avatarUrl}
+            alt={member.displayName ?? member.userId}
+            style={{
+              display: "block",
+              width: 32,
+              height: 32,
+              borderRadius: "50%",
+              objectFit: "cover",
+            }}
+          />
+        ) : (
+          <div style={{
+            width: 32,
+            height: 32,
+            borderRadius: "50%",
+            backgroundColor: userInitialAvatarBackground(member.userId, resolvedColorScheme),
+            color: "#fff",
+            display: "flex",
+            alignItems: "center",
+            justifyContent: "center",
+            fontSize: typography.fontSizeSmall,
+            fontWeight: typography.fontWeightBold,
+          }}>
+            {(member.displayName ?? member.userId).charAt(0).toUpperCase()}
+          </div>
+        )}
+        <div style={{
+          position: "absolute",
+          bottom: -1,
+          right: -1,
+          width: 10,
+          height: 10,
+          borderRadius: "50%",
+          backgroundColor: presenceColor[member.presence] ?? presenceColor.offline,
+          border: `2px solid ${palette.bgSecondary}`,
+        }} />
+      </div>
+
+      <span style={{
+        fontSize: typography.fontSizeBase,
+        fontWeight: typography.fontWeightMedium,
+        color: member.presence === "offline" ? palette.textSecondary : palette.textPrimary,
+        overflow: "hidden",
+        textOverflow: "ellipsis",
+        whiteSpace: "nowrap",
+      }}>
+        {member.displayName ?? member.userId}
+      </span>
+    </div>
+  );
+});
+
 export default function UserMenu({ width, roomId, userId }: UserMenuProps) {
   const { palette, typography, spacing, resolvedColorScheme } = useTheme();
-  const {
-    members,
-    loading,
-  } = useRoomMembers(roomId);
-  /** Lets React yield so applying a huge member list does not block the main thread in one frame. */
-  const deferredMembers = useDeferredValue(members);
+  const { members, loading } = useRoomMembers(roomId);
   const { effectivePresence } = usePresenceContext();
 
   // ── Knock requests state ──
@@ -58,6 +151,30 @@ export default function UserMenu({ width, roomId, userId }: UserMenuProps) {
   const activeRoomRef = useRef(roomId);
   activeRoomRef.current = roomId;
 
+  // ── Virtualization scroll state ──
+  const scrollRef = useRef<HTMLDivElement>(null);
+  const [scrollTop, setScrollTop] = useState(0);
+  const [viewHeight, setViewHeight] = useState(600);
+
+  const handleScroll = useCallback(() => {
+    const el = scrollRef.current;
+    if (el) setScrollTop(el.scrollTop);
+  }, []);
+
+  // Measure container height
+  useEffect(() => {
+    const el = scrollRef.current;
+    if (!el) return;
+    const ro = new ResizeObserver((entries) => {
+      for (const entry of entries) {
+        setViewHeight(entry.contentRect.height);
+      }
+    });
+    ro.observe(el);
+    setViewHeight(el.clientHeight);
+    return () => ro.disconnect();
+  }, []);
+
   const fetchKnocks = useCallback(() => {
     const target = roomId;
     invoke<KnockMembersResponse>("get_knock_members", { roomId: target })
@@ -72,7 +189,6 @@ export default function UserMenu({ width, roomId, userId }: UserMenuProps) {
       });
   }, [roomId]);
 
-  // Reset + fetch on room change
   useEffect(() => {
     setKnockData(null);
     setMemberContextMenu(null);
@@ -80,11 +196,8 @@ export default function UserMenu({ width, roomId, userId }: UserMenuProps) {
     fetchKnocks();
   }, [roomId, fetchKnocks]);
 
-  // Refetch on rooms-changed
   useEffect(() => {
-    const unlisten = listen("rooms-changed", () => {
-      fetchKnocks();
-    });
+    const unlisten = listen("rooms-changed", () => { fetchKnocks(); });
     return () => { unlisten.then((fn) => fn()); };
   }, [fetchKnocks]);
 
@@ -93,9 +206,7 @@ export default function UserMenu({ width, roomId, userId }: UserMenuProps) {
     try {
       await invoke("invite_user", { roomId, userId: knockUserId });
       setKnockData((prev) =>
-        prev
-          ? { ...prev, members: prev.members.filter((m) => m.userId !== knockUserId) }
-          : prev
+        prev ? { ...prev, members: prev.members.filter((m) => m.userId !== knockUserId) } : prev
       );
     } catch (e) {
       console.error("Failed to accept knock:", e);
@@ -109,9 +220,7 @@ export default function UserMenu({ width, roomId, userId }: UserMenuProps) {
     try {
       await invoke("kick_user", { roomId, userId: knockUserId, reason: "Join request denied" });
       setKnockData((prev) =>
-        prev
-          ? { ...prev, members: prev.members.filter((m) => m.userId !== knockUserId) }
-          : prev
+        prev ? { ...prev, members: prev.members.filter((m) => m.userId !== knockUserId) } : prev
       );
     } catch (e) {
       console.error("Failed to deny knock:", e);
@@ -120,32 +229,73 @@ export default function UserMenu({ width, roomId, userId }: UserMenuProps) {
     }
   }, [roomId]);
 
-  // Override the current user's presence with local intent (instant, no server round-trip)
-  const displayMembers = deferredMembers.map((m) =>
-    m.userId === userId ? { ...m, presence: effectivePresence } : m
+  const handleMemberContextMenu = useCallback(
+    (e: React.MouseEvent, uid: string, displayName: string) => {
+      setMemberContextMenu({ x: e.clientX, y: e.clientY, userId: uid, displayName });
+    },
+    []
   );
 
-  const presenceForGroupLabels = useMemo(() => {
-    const online = displayMembers.filter((m) => m.presence === "online" || m.presence === "dnd").length;
-    const unavailable = displayMembers.filter((m) => m.presence === "unavailable").length;
-    const offline = displayMembers.filter((m) => m.presence === "offline").length;
-    return { online, unavailable, offline };
+  // Override current user's presence locally
+  const displayMembers = useMemo(
+    () => members.map((m) => (m.userId === userId ? { ...m, presence: effectivePresence } : m)),
+    [members, userId, effectivePresence]
+  );
+
+  // ── Build flat virtual row list with offsets ──
+  const { rows, offsets, totalHeight } = useMemo(() => {
+    const online = displayMembers.filter((m) => m.presence === "online" || m.presence === "dnd");
+    const unavailable = displayMembers.filter((m) => m.presence === "unavailable");
+    const offline = displayMembers.filter((m) => m.presence === "offline");
+
+    const groups = [
+      { label: `Online — ${online.length}`, members: online },
+      ...(unavailable.length > 0
+        ? [{ label: `Away — ${unavailable.length}`, members: unavailable }]
+        : []),
+      { label: `Offline — ${offline.length}`, members: offline },
+    ];
+
+    const r: VRow[] = [];
+    for (const g of groups) {
+      r.push({ type: "header", key: `h:${g.label}`, label: g.label });
+      for (const m of g.members) {
+        r.push({ type: "member", key: m.userId, member: m });
+      }
+    }
+
+    const o = new Float64Array(r.length);
+    let h = 0;
+    for (let i = 0; i < r.length; i++) {
+      o[i] = h;
+      h += r[i].type === "header" ? HEADER_HEIGHT : MEMBER_HEIGHT;
+    }
+
+    return { rows: r, offsets: o, totalHeight: h };
   }, [displayMembers]);
 
-  // Group members by presence (rows are always from the loaded slice only)
-  const online = displayMembers.filter((m) => m.presence === "online" || m.presence === "dnd");
-  const unavailable = displayMembers.filter((m) => m.presence === "unavailable");
-  const offline = displayMembers.filter((m) => m.presence === "offline");
+  // ── Compute visible window ──
+  const { startIdx, endIdx } = useMemo(() => {
+    if (rows.length === 0) return { startIdx: 0, endIdx: -1 };
 
-  const showAwaySection = unavailable.length > 0;
+    // Binary search for first visible row
+    let lo = 0, hi = rows.length - 1;
+    while (lo < hi) {
+      const mid = (lo + hi) >>> 1;
+      const rowBottom = offsets[mid] + (rows[mid].type === "header" ? HEADER_HEIGHT : MEMBER_HEIGHT);
+      if (rowBottom <= scrollTop) lo = mid + 1;
+      else hi = mid;
+    }
+    const start = Math.max(0, lo - OVERSCAN);
 
-  const groups = [
-    { label: `Online — ${presenceForGroupLabels.online}`, members: online },
-    ...(showAwaySection
-      ? [{ label: `Away — ${presenceForGroupLabels.unavailable}`, members: unavailable }]
-      : []),
-    { label: `Offline — ${presenceForGroupLabels.offline}`, members: offline },
-  ];
+    // Find last visible
+    const bottomEdge = scrollTop + viewHeight;
+    let end = lo;
+    while (end < rows.length && offsets[end] < bottomEdge) end++;
+    end = Math.min(rows.length - 1, end + OVERSCAN);
+
+    return { startIdx: start, endIdx: end };
+  }, [rows, offsets, scrollTop, viewHeight]);
 
   const knockMembers = knockData?.members ?? [];
   const canInvite = knockData?.canInvite ?? false;
@@ -154,303 +304,194 @@ export default function UserMenu({ width, roomId, userId }: UserMenuProps) {
 
   return (
     <>
-    <div style={{
-      width,
-      minWidth: width,
-      minHeight: 0,
-      height: "100%",
-      flexShrink: 0,
-      backgroundColor: palette.bgSecondary,
-      borderLeft: `1px solid ${palette.border}`,
-      overflowY: "auto",
-      padding: `${spacing.unit * 4}px 0`,
-      boxSizing: "border-box",
-    }}>
-      {/* ── Knock Requests ── */}
-      {showKnocks && (
-        <div style={{ marginBottom: spacing.unit * 2 }}>
-          <div style={{
-            padding: `0 ${spacing.unit * 4}px ${spacing.unit * 2}px`,
-            fontSize: typography.fontSizeSmall,
-            fontWeight: typography.fontWeightBold,
-            color: palette.textSecondary,
-            textTransform: "uppercase",
-            letterSpacing: 0.5,
-          }}>
-            Requests — {knockMembers.length}
-          </div>
-
-          {knockMembers.map((knock) => {
-            const isActing = actionInProgress === knock.userId;
-            return (
-              <div
-                key={knock.userId}
-                style={{
-                  display: "flex",
-                  alignItems: "center",
-                  gap: spacing.unit * 2,
-                  padding: `${spacing.unit * 2}px ${spacing.unit * 4}px`,
-                  margin: `0 ${spacing.unit * 2}px`,
-                  borderRadius: spacing.unit,
-                }}
-              >
-                {/* Avatar */}
-                <div style={{ flexShrink: 0 }}>
-                  {knock.avatarUrl ? (
-                    <img
-                      src={knock.avatarUrl}
-                      alt={knock.displayName ?? knock.userId}
-                      style={{
-                        display: "block",
-                        width: 32,
-                        height: 32,
-                        borderRadius: "50%",
-                        objectFit: "cover",
-                      }}
-                    />
-                  ) : (
-                    <div style={{
-                      width: 32,
-                      height: 32,
-                      borderRadius: "50%",
-                      backgroundColor: userInitialAvatarBackground(knock.userId, resolvedColorScheme),
-                      color: "#fff",
-                      display: "flex",
-                      alignItems: "center",
-                      justifyContent: "center",
-                      fontSize: typography.fontSizeSmall,
-                      fontWeight: typography.fontWeightBold,
-                    }}>
-                      {(knock.displayName ?? knock.userId).charAt(0).toUpperCase()}
-                    </div>
-                  )}
-                </div>
-
-                {/* Name + reason */}
-                <div style={{ flex: 1, minWidth: 0 }}>
-                  <div style={{
-                    fontSize: typography.fontSizeBase,
-                    fontWeight: typography.fontWeightMedium,
-                    color: palette.textPrimary,
-                    overflow: "hidden",
-                    textOverflow: "ellipsis",
-                    whiteSpace: "nowrap",
-                  }}>
-                    {knock.displayName ?? knock.userId}
-                  </div>
-                  {knock.reason && (
-                    <div style={{
-                      fontSize: typography.fontSizeSmall - 1,
-                      color: palette.textSecondary,
-                      overflow: "hidden",
-                      textOverflow: "ellipsis",
-                      whiteSpace: "nowrap",
-                      marginTop: 1,
-                    }}>
-                      {knock.reason}
-                    </div>
-                  )}
-                </div>
-
-                {/* Accept / Deny buttons */}
-                <div style={{ display: "flex", gap: spacing.unit, flexShrink: 0 }}>
-                  {canInvite && (
-                    <button
-                      onClick={() => handleAccept(knock.userId)}
-                      disabled={isActing}
-                      title="Accept"
-                      style={{
-                        display: "flex",
-                        alignItems: "center",
-                        justifyContent: "center",
-                        width: 28,
-                        height: 28,
-                        borderRadius: "50%",
-                        border: "none",
-                        backgroundColor: "#23a55a",
-                        color: "#fff",
-                        cursor: isActing ? "not-allowed" : "pointer",
-                        opacity: isActing ? 0.5 : 1,
-                        padding: 0,
-                      }}
-                    >
-                      {isActing ? (
-                        <Loader2 size={14} style={{ animation: "spin 1s linear infinite" }} />
-                      ) : (
-                        <Check size={14} />
-                      )}
-                    </button>
-                  )}
-                  {canKick && (
-                    <button
-                      onClick={() => handleDeny(knock.userId)}
-                      disabled={isActing}
-                      title="Deny"
-                      style={{
-                        display: "flex",
-                        alignItems: "center",
-                        justifyContent: "center",
-                        width: 28,
-                        height: 28,
-                        borderRadius: "50%",
-                        border: "none",
-                        backgroundColor: "#ed4245",
-                        color: "#fff",
-                        cursor: isActing ? "not-allowed" : "pointer",
-                        opacity: isActing ? 0.5 : 1,
-                        padding: 0,
-                      }}
-                    >
-                      <X size={14} />
-                    </button>
-                  )}
-                </div>
-              </div>
-            );
-          })}
-
-          {/* Divider */}
-          <div style={{
-            height: 1,
-            backgroundColor: palette.border,
-            margin: `${spacing.unit * 3}px ${spacing.unit * 4}px`,
-          }} />
-        </div>
-      )}
-
-      {/* ── Member list ── */}
-      {loading ? (
-        <div style={{
-          color: palette.textSecondary,
-          fontSize: typography.fontSizeSmall,
-          padding: `${spacing.unit * 2}px ${spacing.unit * 4}px`,
-        }}>
-          Loading members...
-        </div>
-      ) : (
-        <>
-        {groups.map((group) => (
-          <div key={group.label}>
+      <div
+        ref={scrollRef}
+        onScroll={handleScroll}
+        style={{
+          width,
+          minWidth: width,
+          minHeight: 0,
+          height: "100%",
+          flexShrink: 0,
+          backgroundColor: palette.bgSecondary,
+          borderLeft: `1px solid ${palette.border}`,
+          overflowY: "auto",
+          boxSizing: "border-box",
+        }}
+      >
+        {/* ── Knock Requests (not virtualized — always small) ── */}
+        {showKnocks && (
+          <div style={{ marginBottom: spacing.unit * 2, paddingTop: spacing.unit * 4 }}>
             <div style={{
-              padding: `${spacing.unit * 4}px ${spacing.unit * 4}px ${spacing.unit * 2}px`,
+              padding: `0 ${spacing.unit * 4}px ${spacing.unit * 2}px`,
               fontSize: typography.fontSizeSmall,
               fontWeight: typography.fontWeightBold,
               color: palette.textSecondary,
               textTransform: "uppercase",
               letterSpacing: 0.5,
             }}>
-              {group.label}
+              Requests — {knockMembers.length}
             </div>
 
-            {group.members.map((member) => (
-              <div
-                key={member.userId}
-                style={{
-                  display: "flex",
-                  alignItems: "center",
-                  gap: spacing.unit * 3,
-                  padding: `${spacing.unit * 1.5}px ${spacing.unit * 4}px`,
-                  cursor: "pointer",
-                  borderRadius: spacing.unit,
-                  margin: `0 ${spacing.unit * 2}px`,
-                  opacity: member.presence === "offline" ? 0.5 : 1,
-                }}
-                onContextMenu={(e) => {
-                  e.preventDefault();
-                  setMemberContextMenu({
-                    x: e.clientX,
-                    y: e.clientY,
-                    userId: member.userId,
-                    displayName: member.displayName ?? member.userId,
-                  });
-                }}
-                onMouseEnter={(e) => {
-                  (e.currentTarget as HTMLDivElement).style.backgroundColor = palette.bgHover;
-                }}
-                onMouseLeave={(e) => {
-                  (e.currentTarget as HTMLDivElement).style.backgroundColor = "transparent";
-                }}
-              >
-                <div style={{ position: "relative", flexShrink: 0 }}>
-                  {member.avatarUrl ? (
-                    <img
-                      src={member.avatarUrl}
-                      alt={member.displayName ?? member.userId}
-                      style={{
-                        display: "block",
-                        width: 32,
-                        height: 32,
-                        borderRadius: "50%",
-                        objectFit: "cover",
-                      }}
-                    />
-                  ) : (
+            {knockMembers.map((knock) => {
+              const isActing = actionInProgress === knock.userId;
+              return (
+                <div
+                  key={knock.userId}
+                  style={{
+                    display: "flex",
+                    alignItems: "center",
+                    gap: spacing.unit * 2,
+                    padding: `${spacing.unit * 2}px ${spacing.unit * 4}px`,
+                    margin: `0 ${spacing.unit * 2}px`,
+                    borderRadius: spacing.unit,
+                  }}
+                >
+                  <div style={{ flexShrink: 0 }}>
+                    {knock.avatarUrl ? (
+                      <img
+                        src={knock.avatarUrl}
+                        alt={knock.displayName ?? knock.userId}
+                        style={{ display: "block", width: 32, height: 32, borderRadius: "50%", objectFit: "cover" }}
+                      />
+                    ) : (
+                      <div style={{
+                        width: 32, height: 32, borderRadius: "50%",
+                        backgroundColor: userInitialAvatarBackground(knock.userId, resolvedColorScheme),
+                        color: "#fff", display: "flex", alignItems: "center", justifyContent: "center",
+                        fontSize: typography.fontSizeSmall, fontWeight: typography.fontWeightBold,
+                      }}>
+                        {(knock.displayName ?? knock.userId).charAt(0).toUpperCase()}
+                      </div>
+                    )}
+                  </div>
+                  <div style={{ flex: 1, minWidth: 0 }}>
                     <div style={{
-                      width: 32,
-                      height: 32,
-                      borderRadius: "50%",
-                      backgroundColor: userInitialAvatarBackground(member.userId, resolvedColorScheme),
-                      color: "#fff",
-                      display: "flex",
-                      alignItems: "center",
-                      justifyContent: "center",
+                      fontSize: typography.fontSizeBase, fontWeight: typography.fontWeightMedium,
+                      color: palette.textPrimary, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap",
+                    }}>
+                      {knock.displayName ?? knock.userId}
+                    </div>
+                    {knock.reason && (
+                      <div style={{
+                        fontSize: typography.fontSizeSmall - 1, color: palette.textSecondary,
+                        overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", marginTop: 1,
+                      }}>
+                        {knock.reason}
+                      </div>
+                    )}
+                  </div>
+                  <div style={{ display: "flex", gap: spacing.unit, flexShrink: 0 }}>
+                    {canInvite && (
+                      <button onClick={() => handleAccept(knock.userId)} disabled={isActing} title="Accept"
+                        style={{
+                          display: "flex", alignItems: "center", justifyContent: "center",
+                          width: 28, height: 28, borderRadius: "50%", border: "none",
+                          backgroundColor: "#23a55a", color: "#fff",
+                          cursor: isActing ? "not-allowed" : "pointer", opacity: isActing ? 0.5 : 1, padding: 0,
+                        }}>
+                        {isActing ? <Loader2 size={14} style={{ animation: "spin 1s linear infinite" }} /> : <Check size={14} />}
+                      </button>
+                    )}
+                    {canKick && (
+                      <button onClick={() => handleDeny(knock.userId)} disabled={isActing} title="Deny"
+                        style={{
+                          display: "flex", alignItems: "center", justifyContent: "center",
+                          width: 28, height: 28, borderRadius: "50%", border: "none",
+                          backgroundColor: "#ed4245", color: "#fff",
+                          cursor: isActing ? "not-allowed" : "pointer", opacity: isActing ? 0.5 : 1, padding: 0,
+                        }}>
+                        <X size={14} />
+                      </button>
+                    )}
+                  </div>
+                </div>
+              );
+            })}
+            <div style={{ height: 1, backgroundColor: palette.border, margin: `${spacing.unit * 3}px ${spacing.unit * 4}px` }} />
+          </div>
+        )}
+
+        {/* ── Member list (virtualized) ── */}
+        {loading ? (
+          <div style={{
+            color: palette.textSecondary,
+            fontSize: typography.fontSizeSmall,
+            padding: `${spacing.unit * 6}px ${spacing.unit * 4}px`,
+          }}>
+            Loading members...
+          </div>
+        ) : (
+          <div style={{ height: totalHeight, position: "relative" }}>
+            {rows.slice(startIdx, endIdx + 1).map((row, i) => {
+              const idx = startIdx + i;
+              const top = offsets[idx];
+
+              if (row.type === "header") {
+                return (
+                  <div
+                    key={row.key}
+                    style={{
+                      position: "absolute",
+                      top,
+                      left: 0,
+                      right: 0,
+                      height: HEADER_HEIGHT,
+                      padding: `${spacing.unit * 4}px ${spacing.unit * 4}px ${spacing.unit * 2}px`,
                       fontSize: typography.fontSizeSmall,
                       fontWeight: typography.fontWeightBold,
-                    }}>
-                      {(member.displayName ?? member.userId).charAt(0).toUpperCase()}
-                    </div>
-                  )}
-                  <div style={{
-                    position: "absolute",
-                    bottom: -1,
-                    right: -1,
-                    width: 10,
-                    height: 10,
-                    borderRadius: "50%",
-                    backgroundColor: presenceColor[member.presence] ?? presenceColor.offline,
-                    border: `2px solid ${palette.bgSecondary}`,
-                  }} />
-                </div>
+                      color: palette.textSecondary,
+                      textTransform: "uppercase",
+                      letterSpacing: 0.5,
+                      boxSizing: "border-box",
+                    }}
+                  >
+                    {row.label}
+                  </div>
+                );
+              }
 
-                <span style={{
-                  fontSize: typography.fontSizeBase,
-                  fontWeight: typography.fontWeightMedium,
-                  color: member.presence === "offline" ? palette.textSecondary : palette.textPrimary,
-                  overflow: "hidden",
-                  textOverflow: "ellipsis",
-                  whiteSpace: "nowrap",
-                }}>
-                  {member.displayName ?? member.userId}
-                </span>
-              </div>
-            ))}
+              return (
+                <div
+                  key={row.key}
+                  style={{
+                    position: "absolute",
+                    top,
+                    left: 0,
+                    right: 0,
+                    height: MEMBER_HEIGHT,
+                  }}
+                >
+                  <MemberRow member={row.member} onContextMenu={handleMemberContextMenu} />
+                </div>
+              );
+            })}
           </div>
-        ))}
-        </>
+        )}
+      </div>
+
+      {memberContextMenu && (
+        <MemberContextMenu
+          x={memberContextMenu.x}
+          y={memberContextMenu.y}
+          displayName={memberContextMenu.displayName}
+          userId={memberContextMenu.userId}
+          onClose={() => setMemberContextMenu(null)}
+          onProfile={() => {
+            const id = memberContextMenu.userId;
+            setMemberContextMenu(null);
+            setProfileUserId(id);
+          }}
+        />
       )}
-    </div>
-    {memberContextMenu && (
-      <MemberContextMenu
-        x={memberContextMenu.x}
-        y={memberContextMenu.y}
-        displayName={memberContextMenu.displayName}
-        userId={memberContextMenu.userId}
-        onClose={() => setMemberContextMenu(null)}
-        onProfile={() => {
-          const id = memberContextMenu.userId;
-          setMemberContextMenu(null);
-          setProfileUserId(id);
-        }}
-      />
-    )}
-    {profileUserId && (
-      <UserProfileDialog
-        roomId={roomId}
-        userId={profileUserId}
-        currentUserId={userId}
-        onClose={() => setProfileUserId(null)}
-      />
-    )}
+      {profileUserId && (
+        <UserProfileDialog
+          roomId={roomId}
+          userId={profileUserId}
+          currentUserId={userId}
+          onClose={() => setProfileUserId(null)}
+        />
+      )}
     </>
   );
 }

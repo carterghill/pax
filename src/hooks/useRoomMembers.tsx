@@ -21,6 +21,12 @@ interface AvatarPayload {
   avatarUrl: string;
 }
 
+function dedupeMembers(members: RoomMember[]): RoomMember[] {
+  const byId = new Map<string, RoomMember>();
+  for (const m of members) byId.set(m.userId, m);
+  return [...byId.values()];
+}
+
 function sortMembersForDisplay(members: RoomMember[]): RoomMember[] {
   const order: Record<string, number> = { online: 0, dnd: 0, unavailable: 1, offline: 2 };
   return [...members].sort((a, b) => {
@@ -33,6 +39,9 @@ function sortMembersForDisplay(members: RoomMember[]): RoomMember[] {
   });
 }
 
+/** Simple cache — last fetched member list per room. Written only on fetch, not on every event. */
+const memberCache = new Map<string, RoomMember[]>();
+
 export function useRoomMembers(roomId: string) {
   const [members, setMembers] = useState<RoomMember[]>([]);
   const [loading, setLoading] = useState(true);
@@ -42,6 +51,9 @@ export function useRoomMembers(roomId: string) {
   const activeRoomIdRef = useRef(roomId);
   activeRoomIdRef.current = roomId;
 
+  /** Set of userIds in the current member list — for fast "is this user relevant?" checks. */
+  const memberIdsRef = useRef<Set<string>>(new Set());
+
   const fetchMembers = useCallback(
     (showLoading: boolean) => {
       const requestedRoomId = roomId;
@@ -50,33 +62,43 @@ export function useRoomMembers(roomId: string) {
       invoke<RoomMember[]>("get_room_members", { roomId: requestedRoomId })
         .then((result) => {
           if (activeRoomIdRef.current !== requestedRoomId) return;
-          // Dedupe by userId (last wins)
-          const byId = new Map<string, RoomMember>();
-          for (const m of result) byId.set(m.userId, m);
-          setMembers([...byId.values()]);
+          const deduped = dedupeMembers(result);
+          memberCache.set(requestedRoomId, deduped);
+          memberIdsRef.current = new Set(deduped.map((m) => m.userId));
+          setMembers(deduped);
           setLoading(false);
           hasFetched.current = true;
         })
         .catch((e) => {
           if (activeRoomIdRef.current !== requestedRoomId) return;
           console.error("Failed to fetch room members:", e);
-          setMembers([]);
           setLoading(false);
         });
     },
     [roomId]
   );
 
-  // Clear stale data before paint on room switch
+  // On room switch: always clear synchronously to prevent wrong-room flash.
+  // Cache is restored in the useEffect below (after paint, non-blocking).
   useLayoutEffect(() => {
     setMembers([]);
     setLoading(true);
     hasFetched.current = false;
+    memberIdsRef.current = new Set();
   }, [roomId]);
 
-  // Initial fetch
+  // Restore from cache (after paint) or fetch
   useEffect(() => {
-    fetchMembers(true);
+    const cached = memberCache.get(roomId);
+    if (cached) {
+      memberIdsRef.current = new Set(cached.map((m) => m.userId));
+      setMembers(cached);
+      setLoading(false);
+      // Still refresh in the background
+      fetchMembers(false);
+    } else {
+      fetchMembers(true);
+    }
   }, [roomId, fetchMembers]);
 
   // Background re-fetch on rooms-changed, debounced
@@ -92,30 +114,78 @@ export function useRoomMembers(roomId: string) {
     };
   }, [fetchMembers]);
 
-  // Live presence updates
+  // ── Batched event patches (once per frame, skip non-members) ──
+  const pendingPresence = useRef<Map<string, string>>(new Map());
+  const pendingAvatars = useRef<Map<string, string>>(new Map());
+  const flushRaf = useRef<number | null>(null);
+
+  const scheduleFlush = useCallback(() => {
+    if (flushRaf.current != null) return;
+    flushRaf.current = requestAnimationFrame(() => {
+      flushRaf.current = null;
+      const pres = pendingPresence.current;
+      const av = pendingAvatars.current;
+      if (pres.size === 0 && av.size === 0) return;
+      const presSnap = new Map(pres);
+      const avSnap = new Map(av);
+      pres.clear();
+      av.clear();
+
+      setMembers((prev) => {
+        let changed = false;
+        const next = prev.map((m) => {
+          const newPres = presSnap.get(m.userId);
+          const newAv = avSnap.get(m.userId);
+          if (!newPres && !newAv) return m;
+          if (newPres && m.presence === newPres && !newAv) return m;
+          changed = true;
+          return {
+            ...m,
+            ...(newPres ? { presence: newPres } : undefined),
+            ...(newAv ? { avatarUrl: newAv } : undefined),
+          };
+        });
+        return changed ? next : prev;
+      });
+    });
+  }, []);
+
   useEffect(() => {
     const unlisten = listen<PresencePayload>("presence", (event) => {
       const { userId, presence } = event.payload;
-      setMembers((prev) =>
-        prev.map((m) => (m.userId === userId ? { ...m, presence } : m))
-      );
+      // Skip if this user isn't in the current room's member list
+      if (!memberIdsRef.current.has(userId)) return;
+      pendingPresence.current.set(userId, presence);
+      scheduleFlush();
     });
-    return () => {
-      unlisten.then((fn) => fn());
-    };
-  }, []);
+    return () => { unlisten.then((fn) => fn()); };
+  }, [scheduleFlush]);
 
-  // Background avatar backfill from Rust
   useEffect(() => {
     const unlisten = listen<AvatarPayload>("member-avatar-updated", (event) => {
       const { roomId: rid, userId, avatarUrl } = event.payload;
       if (rid !== activeRoomIdRef.current) return;
-      setMembers((prev) =>
-        prev.map((m) => (m.userId === userId ? { ...m, avatarUrl } : m))
-      );
+      pendingAvatars.current.set(userId, avatarUrl);
+      scheduleFlush();
     });
+    return () => { unlisten.then((fn) => fn()); };
+  }, [scheduleFlush]);
+
+  // Cleanup on room switch and unmount
+  useEffect(() => {
     return () => {
-      unlisten.then((fn) => fn());
+      pendingPresence.current.clear();
+      pendingAvatars.current.clear();
+      if (flushRaf.current != null) {
+        cancelAnimationFrame(flushRaf.current);
+        flushRaf.current = null;
+      }
+    };
+  }, [roomId]);
+
+  useEffect(() => {
+    return () => {
+      if (flushRaf.current != null) cancelAnimationFrame(flushRaf.current);
     };
   }, []);
 
