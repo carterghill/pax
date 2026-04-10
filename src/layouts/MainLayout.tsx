@@ -283,6 +283,9 @@ export default function MainLayout({
             }
             showSpaceHomeNav={!!activeSpace && activeSpace.membership === "joined"}
             spaceName={activeSpace?.name ?? "Home"}
+            spaceInviteId={
+              activeSpace && activeSpace.membership === "joined" ? activeSpaceId : null
+            }
             userId={userId}
             userAvatarUrl={userAvatarUrl}
             voiceParticipants={voiceParticipants}

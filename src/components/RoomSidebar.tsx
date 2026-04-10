@@ -1,6 +1,6 @@
 import { useState, useCallback } from "react";
 import { invoke } from "@tauri-apps/api/core";
-import { Hash, House, Volume2, Monitor, MicOff, Headphones, Slash, Loader2 } from "lucide-react";
+import { Hash, House, Volume2, Monitor, MicOff, Headphones, Slash, Loader2, UserPlus } from "lucide-react";
 import { Room, VoiceParticipant } from "../types/matrix";
 import { useTheme } from "../theme/ThemeContext";
 import StatusDropdown from "./StatusDropdown";
@@ -39,6 +39,8 @@ interface RoomSidebarProps {
   isSpaceHomeActive: boolean;
   showSpaceHomeNav: boolean;
   spaceName: string;
+  /** When set, show an invite button in the header for this space (Matrix room id). */
+  spaceInviteId?: string | null;
   userId: string;
   userAvatarUrl: string | null;
   voiceParticipants: Record<string, VoiceParticipant[]>;
@@ -178,6 +180,7 @@ export default function RoomSidebar({
   isSpaceHomeActive,
   showSpaceHomeNav,
   spaceName,
+  spaceInviteId,
   userId,
   userAvatarUrl,
   voiceParticipants,
@@ -205,6 +208,9 @@ export default function RoomSidebar({
   } | null>(null);
   const [settingsRoomId, setSettingsRoomId] = useState<string | null>(null);
   const [inviteRoom, setInviteRoom] = useState<{ id: string; name: string } | null>(null);
+  const [inviteSpaceFromHeader, setInviteSpaceFromHeader] = useState<{ id: string; name: string } | null>(
+    null
+  );
   const [leaveRoom, setLeaveRoom] = useState<{ id: string; name: string } | null>(null);
   const [leaveRoomError, setLeaveRoomError] = useState<string | null>(null);
   const [leaveRoomSubmitting, setLeaveRoomSubmitting] = useState(false);
@@ -242,17 +248,71 @@ export default function RoomSidebar({
       flexDirection: "column",
       height: "100vh",
     }}>
-      <h2 style={{
-        padding: `${spacing.unit * 4}px ${spacing.unit * 4}px`,
-        fontSize: typography.fontSizeLarge,
-        fontWeight: typography.fontWeightBold,
-        height: spacing.headerHeight,
-        color: palette.textHeading,
-        borderBottom: `1px solid ${palette.border}`,
-        margin: 0,
-      }}>
-        {spaceName}
-      </h2>
+      <div
+        style={{
+          display: "flex",
+          alignItems: "center",
+          gap: spacing.unit * 2,
+          paddingTop: spacing.unit * 4,
+          paddingBottom: spacing.unit * 4,
+          paddingLeft: spacing.unit * 4,
+          paddingRight: spacing.unit * 2,
+          height: spacing.headerHeight,
+          borderBottom: `1px solid ${palette.border}`,
+          boxSizing: "border-box",
+          minHeight: spacing.headerHeight,
+        }}
+      >
+        <h2
+          style={{
+            flex: 1,
+            minWidth: 0,
+            fontSize: typography.fontSizeLarge,
+            fontWeight: typography.fontWeightBold,
+            color: palette.textHeading,
+            margin: 0,
+            overflow: "hidden",
+            textOverflow: "ellipsis",
+            whiteSpace: "nowrap",
+          }}
+        >
+          {spaceName}
+        </h2>
+        {spaceInviteId ? (
+          <button
+            type="button"
+            title="Invite people to this space"
+            aria-label="Invite people to this space"
+            onClick={() =>
+              setInviteSpaceFromHeader({ id: spaceInviteId, name: spaceName })
+            }
+            style={{
+              flexShrink: 0,
+              display: "flex",
+              alignItems: "center",
+              justifyContent: "center",
+              margin: 0,
+              padding: spacing.unit * 1.5,
+              border: "none",
+              borderRadius: 6,
+              backgroundColor: "transparent",
+              color: palette.textSecondary,
+              cursor: "pointer",
+              lineHeight: 0,
+            }}
+            onMouseEnter={(e) => {
+              (e.currentTarget as HTMLButtonElement).style.backgroundColor = palette.bgActive;
+              (e.currentTarget as HTMLButtonElement).style.color = palette.textPrimary;
+            }}
+            onMouseLeave={(e) => {
+              (e.currentTarget as HTMLButtonElement).style.backgroundColor = "transparent";
+              (e.currentTarget as HTMLButtonElement).style.color = palette.textSecondary;
+            }}
+          >
+            <UserPlus size={20} strokeWidth={2} aria-hidden />
+          </button>
+        ) : null}
+      </div>
       <div style={{ flex: 1, overflowY: "auto", padding: spacing.unit * 2 }}>
         {showSpaceHomeNav && (
           <div style={{ marginBottom: spacing.unit }}>
@@ -439,6 +499,16 @@ export default function RoomSidebar({
           kind="room"
           currentUserId={userId}
           onClose={() => setInviteRoom(null)}
+        />
+      )}
+
+      {inviteSpaceFromHeader && (
+        <InviteDialog
+          roomId={inviteSpaceFromHeader.id}
+          targetName={inviteSpaceFromHeader.name}
+          kind="space"
+          currentUserId={userId}
+          onClose={() => setInviteSpaceFromHeader(null)}
         />
       )}
 

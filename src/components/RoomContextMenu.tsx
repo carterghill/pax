@@ -104,37 +104,6 @@ export default function RoomContextMenu({
 
       <button
         onClick={() => {
-          onInvite();
-          onClose();
-        }}
-        style={{
-          display: "flex",
-          alignItems: "center",
-          gap: spacing.unit * 2,
-          width: "100%",
-          padding: `${spacing.unit * 1.5}px ${spacing.unit * 2}px`,
-          border: "none",
-          borderRadius: 4,
-          backgroundColor: "transparent",
-          color: palette.textPrimary,
-          fontSize: typography.fontSizeSmall,
-          cursor: "pointer",
-          textAlign: "left",
-        }}
-        onMouseEnter={(e) => {
-          (e.currentTarget as HTMLButtonElement).style.backgroundColor = palette.bgActive;
-        }}
-        onMouseLeave={(e) => {
-          (e.currentTarget as HTMLButtonElement).style.backgroundColor = "transparent";
-        }}
-      >
-        <UserPlus size={14} color={palette.textSecondary} />
-        Invite people
-      </button>
-
-      {/* Room Settings button */}
-      <button
-        onClick={() => {
           onClose();
           onOpenSettings();
         }}
@@ -161,6 +130,36 @@ export default function RoomContextMenu({
       >
         <Settings size={14} color={palette.textSecondary} />
         Room Settings
+      </button>
+
+      <button
+        onClick={() => {
+          onInvite();
+          onClose();
+        }}
+        style={{
+          display: "flex",
+          alignItems: "center",
+          gap: spacing.unit * 2,
+          width: "100%",
+          padding: `${spacing.unit * 1.5}px ${spacing.unit * 2}px`,
+          border: "none",
+          borderRadius: 4,
+          backgroundColor: "transparent",
+          color: palette.textPrimary,
+          fontSize: typography.fontSizeSmall,
+          cursor: "pointer",
+          textAlign: "left",
+        }}
+        onMouseEnter={(e) => {
+          (e.currentTarget as HTMLButtonElement).style.backgroundColor = palette.bgActive;
+        }}
+        onMouseLeave={(e) => {
+          (e.currentTarget as HTMLButtonElement).style.backgroundColor = "transparent";
+        }}
+      >
+        <UserPlus size={14} color={palette.textSecondary} />
+        Invite people
       </button>
 
       <div

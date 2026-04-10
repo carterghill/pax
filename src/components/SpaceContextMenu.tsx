@@ -102,37 +102,6 @@ export default function SpaceContextMenu({
       <button
         type="button"
         onClick={() => {
-          onInvite();
-          onClose();
-        }}
-        style={{
-          display: "flex",
-          alignItems: "center",
-          gap: spacing.unit * 2,
-          width: "100%",
-          padding: `${spacing.unit * 1.5}px ${spacing.unit * 2}px`,
-          border: "none",
-          borderRadius: 4,
-          backgroundColor: "transparent",
-          color: palette.textPrimary,
-          fontSize: typography.fontSizeSmall,
-          cursor: "pointer",
-          textAlign: "left",
-        }}
-        onMouseEnter={(e) => {
-          (e.currentTarget as HTMLButtonElement).style.backgroundColor = palette.bgActive;
-        }}
-        onMouseLeave={(e) => {
-          (e.currentTarget as HTMLButtonElement).style.backgroundColor = "transparent";
-        }}
-      >
-        <UserPlus size={14} color={palette.textSecondary} />
-        Invite people
-      </button>
-
-      <button
-        type="button"
-        onClick={() => {
           onOpenSpaceSettings();
           onClose();
         }}
@@ -159,6 +128,37 @@ export default function SpaceContextMenu({
       >
         <Settings size={14} color={palette.textSecondary} />
         Space Settings
+      </button>
+
+      <button
+        type="button"
+        onClick={() => {
+          onInvite();
+          onClose();
+        }}
+        style={{
+          display: "flex",
+          alignItems: "center",
+          gap: spacing.unit * 2,
+          width: "100%",
+          padding: `${spacing.unit * 1.5}px ${spacing.unit * 2}px`,
+          border: "none",
+          borderRadius: 4,
+          backgroundColor: "transparent",
+          color: palette.textPrimary,
+          fontSize: typography.fontSizeSmall,
+          cursor: "pointer",
+          textAlign: "left",
+        }}
+        onMouseEnter={(e) => {
+          (e.currentTarget as HTMLButtonElement).style.backgroundColor = palette.bgActive;
+        }}
+        onMouseLeave={(e) => {
+          (e.currentTarget as HTMLButtonElement).style.backgroundColor = "transparent";
+        }}
+      >
+        <UserPlus size={14} color={palette.textSecondary} />
+        Invite people
       </button>
 
       <div
