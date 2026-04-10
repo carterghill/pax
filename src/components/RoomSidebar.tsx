@@ -254,6 +254,9 @@ function ChannelBlock({
   const participants = isVoice ? (voiceParticipants[room.id] ?? []) : [];
   const isConnectedHere = connectedVoiceRoomId === room.id;
   const padLeft = indent ? spacing.unit * 6 : spacing.unit * 3;
+  const roomTitle = isDmChatUi(room) ? effectiveDmTitle(room) : room.name;
+  const titleFadePx = 20;
+  const titleFadeMask = `linear-gradient(to right, #000 calc(100% - ${titleFadePx}px), transparent)`;
 
   return (
     <div>
@@ -277,7 +280,15 @@ function ChannelBlock({
               : typography.fontWeightNormal,
         }}
       >
-        <span style={{ display: "flex", alignItems: "center", gap: spacing.unit }}>
+        <span
+          style={{
+            display: "flex",
+            alignItems: "center",
+            gap: spacing.unit,
+            minWidth: 0,
+            width: "100%",
+          }}
+        >
           {isVoice ? (
             <Volume2
               size={16}
@@ -329,12 +340,19 @@ function ChannelBlock({
             />
           )}
           <div
+            title={roomTitle}
             style={{
               marginLeft: spacing.unit,
               color: isConnectedHere ? "#23a55a" : undefined,
+              flex: 1,
+              minWidth: 0,
+              overflow: "hidden",
+              whiteSpace: "nowrap",
+              maskImage: titleFadeMask,
+              WebkitMaskImage: titleFadeMask,
             }}
           >
-            {isDmChatUi(room) ? effectiveDmTitle(room) : room.name}
+            {roomTitle}
           </div>
         </span>
       </div>
