@@ -34,6 +34,7 @@ function statusToDisplay(status: ManualStatus, systemIdle: boolean): string {
 export function usePresence() {
   const [manualStatus, setManualStatus] = useState<ManualStatus>("auto");
   const [systemIdle, setSystemIdle] = useState(false);
+  const [syncReady, setSyncReady] = useState(false);
   const currentPresence = useRef<string>("");
   const idleMonitorStartedRef = useRef(false);
 
@@ -65,15 +66,30 @@ export function usePresence() {
     };
   }, []);
 
-  // Send presence whenever manual status or system idle state changes
+  // Wait for the first sync response before sending any presence.
+  // This avoids the initial set_presence("online") racing the sync loop's
+  // first /sync request (which carries set_presence=offline), which can cause
+  // the server to reset our presence back to offline.
   useEffect(() => {
+    const unlisten = listen("sync-ready", () => {
+      setSyncReady(true);
+    });
+    return () => {
+      unlisten.then((fn) => fn());
+    };
+  }, []);
+
+  // Send presence whenever manual status, system idle, or sync readiness changes.
+  // Gated on syncReady so the very first PUT goes out only after the sync loop
+  // has processed its first response.
+  useEffect(() => {
+    if (!syncReady) return;
     const presence = statusToPresence(manualStatus, systemIdle);
     sendPresence(presence);
-  }, [manualStatus, systemIdle, sendPresence]);
+  }, [manualStatus, systemIdle, syncReady, sendPresence]);
 
-  // Set online on mount
+  // Set offline on unmount
   useEffect(() => {
-    sendPresence("online");
     return () => {
       invoke("set_presence", { presence: "offline" }).catch(() => {});
     };

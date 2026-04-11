@@ -453,6 +453,7 @@ pub async fn start_sync(
     // set_presence(Offline) tells the server: "do NOT auto-update my presence on sync"
     // We manage presence explicitly via the set_presence command instead.
     let join = tokio::spawn(async move {
+        let first_sync_done = Arc::new(std::sync::atomic::AtomicBool::new(false));
         let result = client
             .sync_with_callback(
                 matrix_sdk::config::SyncSettings::default()
@@ -462,7 +463,15 @@ pub async fn start_sync(
                     let presence_map = presence_map.clone();
                     let avatar_cache = avatar_cache.clone();
                     let voice_client = voice_client.clone();
+                    let first_sync_done = first_sync_done.clone();
                     async move {
+                        // Signal the frontend that the first sync response has been
+                        // processed so it can safely send the initial presence PUT
+                        // without the sync's set_presence(Offline) racing it.
+                        if !first_sync_done.swap(true, std::sync::atomic::Ordering::Relaxed) {
+                            let _ = app.emit("sync-ready", ());
+                        }
+
                         // Extract presence updates from the sync response
                         for raw_event in &response.presence {
                             if let Ok(ev) = raw_event.deserialize() {
