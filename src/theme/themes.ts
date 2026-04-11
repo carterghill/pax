@@ -224,7 +224,8 @@ const byzantineDarkPalette: ThemePalette = {
   textHeading: "#f4f1f7",
   accent: BYZANTINE_ACCENT,
   accentHover: BYZANTINE_ACCENT_HOVER,
-  border: "#2e2933",
+  border: "#5c5753",
+  borderSecondary: "#d4cec8",
 };
 
 const byzantineLightPalette: ThemePalette = {
@@ -238,7 +239,8 @@ const byzantineLightPalette: ThemePalette = {
   textHeading: "#1a151c",
   accent: BYZANTINE_ACCENT,
   accentHover: BYZANTINE_ACCENT_HOVER,
-  border: "#d8cfe0",
+  border: "#aea59a",
+  borderSecondary: "#949089",
 };
 
 export const byzantineThemeDefinition: ThemeDefinition = {
@@ -266,7 +268,7 @@ const romanDarkPalette: ThemePalette = {
   textHeading: "#f5f0ed",
   accent: ROMAN_ACCENT,
   accentHover: ROMAN_ACCENT_HOVER,
-  border: "#3a3532",
+  border: "#5c5753",
   borderSecondary: "#d4cec8",
 };
 
@@ -281,7 +283,7 @@ const romanLightPalette: ThemePalette = {
   textHeading: "#1a1412",
   accent: ROMAN_ACCENT,
   accentHover: ROMAN_ACCENT_HOVER,
-  border: "#d0c5bf",
+  border: "#aea59a",
   borderSecondary: "#949089",
 };
 
