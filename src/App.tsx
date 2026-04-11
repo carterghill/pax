@@ -178,7 +178,7 @@ function App() {
   if (userId && !initialLoadComplete) {
     return (
       <div style={styles.container}>
-        <img src="/logoBlurple.png" alt="Pax" style={styles.logo} />
+        <img src="/logoIris.png" alt="Pax" style={styles.logo} />
         <p style={styles.signingIn}>Loading rooms...</p>
       </div>
     );
@@ -199,7 +199,7 @@ function App() {
   if (autoLoggingIn) {
     return (
       <div style={styles.container}>
-        <img src="/logoBlurple.png" alt="Pax" style={styles.logo} />
+        <img src="/logoIris.png" alt="Pax" style={styles.logo} />
         <p style={styles.signingIn}>Signing in...</p>
       </div>
     );
@@ -207,7 +207,7 @@ function App() {
 
   return (
     <div style={styles.container}>
-      <img src="/logoBlurple.png" alt="Pax" style={styles.logo} />
+      <img src="/logoIris.png" alt="Pax" style={styles.logo} />
 
       {/* Tab switcher */}
       <div style={styles.tabRow}>
