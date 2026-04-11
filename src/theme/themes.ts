@@ -207,6 +207,90 @@ export const solarizedThemeDefinition: ThemeDefinition = {
   spacing,
 };
 
+/* ─── Byzantine (muted Tyrian / imperial purple accent) ───────────────────── */
+
+/** Restrained accent: historical Byzantine purple range, desaturated so it stays UI-appropriate. */
+const BYZANTINE_ACCENT = "#6e4a6e";
+const BYZANTINE_ACCENT_HOVER = "#5c3d5c";
+
+const byzantineDarkPalette: ThemePalette = {
+  bgPrimary: "#2a262e",
+  bgSecondary: "#221f26",
+  bgTertiary: "#1a171d",
+  bgHover: "#322e38",
+  bgActive: "#3d3845",
+  textPrimary: "#e8e4ec",
+  textSecondary: "#9d96a6",
+  textHeading: "#f4f1f7",
+  accent: BYZANTINE_ACCENT,
+  accentHover: BYZANTINE_ACCENT_HOVER,
+  border: "#2e2933",
+};
+
+const byzantineLightPalette: ThemePalette = {
+  bgPrimary: "#faf9fb",
+  bgSecondary: "#f2eef5",
+  bgTertiary: "#eae4f0",
+  bgHover: "#f0ecf6",
+  bgActive: "#ddd2e6",
+  textPrimary: "#2a242c",
+  textSecondary: "#5f5668",
+  textHeading: "#1a151c",
+  accent: BYZANTINE_ACCENT,
+  accentHover: BYZANTINE_ACCENT_HOVER,
+  border: "#d8cfe0",
+};
+
+export const byzantineThemeDefinition: ThemeDefinition = {
+  id: "byzantine",
+  dark: { ...byzantineDarkPalette },
+  light: { ...byzantineLightPalette },
+  typography,
+  spacing,
+};
+
+/* ─── Roman (muted imperial / terracotta red accent) ──────────────────────── */
+
+/** Restrained accent: old Roman imperial red range (cinnabar / vermillion), desaturated for UI. */
+const ROMAN_ACCENT = "#c03d3d";
+const ROMAN_ACCENT_HOVER = "#9e3030";
+
+const romanDarkPalette: ThemePalette = {
+  bgPrimary: "#2a2422",
+  bgSecondary: "#221e1c",
+  bgTertiary: "#1a1715",
+  bgHover: "#322c29",
+  bgActive: "#3d3632",
+  textPrimary: "#ebe6e3",
+  textSecondary: "#a89892",
+  textHeading: "#f5f0ed",
+  accent: ROMAN_ACCENT,
+  accentHover: ROMAN_ACCENT_HOVER,
+  border: "#332e2b",
+};
+
+const romanLightPalette: ThemePalette = {
+  bgPrimary: "#faf8f7",
+  bgSecondary: "#f3eeeb",
+  bgTertiary: "#eae3df",
+  bgHover: "#f0e9e5",
+  bgActive: "#e2d2cc",
+  textPrimary: "#2c2420",
+  textSecondary: "#665550",
+  textHeading: "#1a1412",
+  accent: ROMAN_ACCENT,
+  accentHover: ROMAN_ACCENT_HOVER,
+  border: "#ddd2cc",
+};
+
+export const romanThemeDefinition: ThemeDefinition = {
+  id: "roman",
+  dark: { ...romanDarkPalette },
+  light: { ...romanLightPalette },
+  typography,
+  spacing,
+};
+
 /* ─── Registry ───────────────────────────────────────────────────────────── */
 
 export const BUILTIN_THEME_DEFINITIONS: Record<string, ThemeDefinition> = {
@@ -215,4 +299,6 @@ export const BUILTIN_THEME_DEFINITIONS: Record<string, ThemeDefinition> = {
   element: elementThemeDefinition,
   notepad: notepadThemeDefinition,
   solarized: solarizedThemeDefinition,
+  byzantine: byzantineThemeDefinition,
+  roman: romanThemeDefinition,
 };
