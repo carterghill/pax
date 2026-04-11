@@ -2,6 +2,7 @@ import { useState, useRef, useEffect, useCallback } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { X, UserPlus, Loader2, Check, User } from "lucide-react";
 import { useTheme } from "../theme/ThemeContext";
+import { paletteDialogOuterBorderStyle } from "../theme/paletteBorder";
 import { useOverlayObstruction } from "../hooks/useOverlayObstruction";
 import ModalLayer from "./ModalLayer";
 import { parseInviteUserInput } from "../utils/matrix";
@@ -211,7 +212,7 @@ export default function InviteDialog({
           width: "min(480px, calc(100vw - 32px))",
           maxWidth: 480,
           boxShadow: "0 12px 40px rgba(0,0,0,0.55)",
-          border: `1px solid ${palette.border}`,
+          border: paletteDialogOuterBorderStyle(palette),
         }}
       >
         <div

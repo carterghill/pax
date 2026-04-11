@@ -17,6 +17,7 @@ import {
   Check,
 } from "lucide-react";
 import { useTheme } from "../theme/ThemeContext";
+import { paletteDialogShellBorderStyle } from "../theme/paletteBorder";
 import { useOverlayObstruction } from "../hooks/useOverlayObstruction";
 import ModalLayer from "./ModalLayer";
 import type { ResolvedColorScheme } from "../theme/types";
@@ -572,6 +573,7 @@ export default function CreateSpaceDialog({
           display: "flex",
           flexDirection: "column",
           boxShadow: "0 8px 32px rgba(0,0,0,0.5)",
+          ...paletteDialogShellBorderStyle(palette),
         }}
       >
         {/* ── Header ── */}

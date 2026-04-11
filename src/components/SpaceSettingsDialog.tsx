@@ -10,6 +10,7 @@ import {
   DoorOpen,
 } from "lucide-react";
 import { useTheme } from "../theme/ThemeContext";
+import { paletteDialogShellBorderStyle } from "../theme/paletteBorder";
 import { useOverlayObstruction } from "../hooks/useOverlayObstruction";
 import ModalLayer from "./ModalLayer";
 
@@ -340,6 +341,7 @@ export default function SpaceSettingsDialog({
           display: "flex",
           flexDirection: "column",
           boxShadow: "0 8px 32px rgba(0,0,0,0.5)",
+          ...paletteDialogShellBorderStyle(palette),
         }}
       >
         <div

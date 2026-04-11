@@ -39,6 +39,7 @@ import {
 import { Picker } from "emoji-mart";
 import data from "@emoji-mart/data";
 import { useTheme } from "../theme/ThemeContext";
+import { paletteComposerOuterBorderStyle } from "../theme/paletteBorder";
 import type { ResolvedColorScheme } from "../theme/types";
 import { EMOJI_ONLY_DISPLAY_SCALE, isOnlyEmojisAndWhitespace } from "../utils/emojifyTwemoji";
 import { hrefLooksLikeDirectImageUrl } from "../utils/directImageUrl";
@@ -672,6 +673,8 @@ export default function MessageInput({
 
   // ─── Render ───────────────────────────────────────────────────────────────
 
+  const composerOuterBorder = paletteComposerOuterBorderStyle(palette);
+
   return (
     <>
       <style>{`
@@ -721,6 +724,7 @@ export default function MessageInput({
           display: "flex",
           flexDirection: "column",
           minWidth: 0,
+          ...(composerOuterBorder ? { border: composerOuterBorder } : {}),
         }}
       >
         {/* Attachment preview */}
@@ -1074,8 +1078,8 @@ export default function MessageInput({
                 height: 1,
                 marginLeft: spacing.unit * 2,
                 marginRight: spacing.unit * 2,
-                backgroundColor: palette.border,
-                opacity: 0.25,
+                backgroundColor: palette.borderSecondary ?? palette.border,
+                opacity: palette.borderSecondary ? 1 : 0.25,
               }}
             />
             <div

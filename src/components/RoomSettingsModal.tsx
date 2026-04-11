@@ -2,6 +2,7 @@ import { useEffect, useRef, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { X, Check, Loader2 } from "lucide-react";
 import { useTheme } from "../theme/ThemeContext";
+import { paletteDialogOuterBorderStyle } from "../theme/paletteBorder";
 import { useOverlayObstruction } from "../hooks/useOverlayObstruction";
 import ModalLayer from "./ModalLayer";
 
@@ -133,7 +134,7 @@ export default function RoomSettingsModal({
         style={{
           backgroundColor: palette.bgSecondary,
           borderRadius: 12,
-          border: `1px solid ${palette.border}`,
+          border: paletteDialogOuterBorderStyle(palette),
           width: 480,
           maxWidth: "90vw",
           maxHeight: "80vh",

@@ -266,7 +266,8 @@ const romanDarkPalette: ThemePalette = {
   textHeading: "#f5f0ed",
   accent: ROMAN_ACCENT,
   accentHover: ROMAN_ACCENT_HOVER,
-  border: "#332e2b",
+  border: "#3a3532",
+  borderSecondary: "#d4cec8",
 };
 
 const romanLightPalette: ThemePalette = {
@@ -280,7 +281,8 @@ const romanLightPalette: ThemePalette = {
   textHeading: "#1a1412",
   accent: ROMAN_ACCENT,
   accentHover: ROMAN_ACCENT_HOVER,
-  border: "#ddd2cc",
+  border: "#d0c5bf",
+  borderSecondary: "#949089",
 };
 
 export const romanThemeDefinition: ThemeDefinition = {

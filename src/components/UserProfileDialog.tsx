@@ -2,6 +2,7 @@ import { useEffect, useRef, useState, useCallback, useMemo } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { X, Loader2, Copy, Shield, Crown, User, Calendar, Hash } from "lucide-react";
 import { useTheme } from "../theme/ThemeContext";
+import { paletteDialogOuterBorderStyle } from "../theme/paletteBorder";
 import { useOverlayObstruction } from "../hooks/useOverlayObstruction";
 import ModalLayer from "./ModalLayer";
 import { usePresenceContext } from "../hooks/PresenceContext";
@@ -186,7 +187,7 @@ export default function UserProfileDialog({
           display: "flex",
           flexDirection: "column",
           boxShadow: "0 24px 48px rgba(0,0,0,0.65), 0 0 0 1px rgba(255,255,255,0.06) inset",
-          border: `1px solid ${palette.border}`,
+          border: paletteDialogOuterBorderStyle(palette),
         }}
       >
         {/* Banner, close, and avatar (absolute so scroll overflow does not clip the circle) */}

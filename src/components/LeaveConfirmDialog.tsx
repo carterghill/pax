@@ -2,6 +2,7 @@ import { useEffect, useRef, useCallback } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { X, Loader2, AlertTriangle } from "lucide-react";
 import { useTheme } from "../theme/ThemeContext";
+import { paletteDialogOuterBorderStyle } from "../theme/paletteBorder";
 import { useOverlayObstruction } from "../hooks/useOverlayObstruction";
 import ModalLayer from "./ModalLayer";
 
@@ -70,7 +71,7 @@ export default function LeaveConfirmDialog({
           borderRadius: 12,
           width: "min(400px, calc(100vw - 32px))",
           boxShadow: "0 12px 40px rgba(0,0,0,0.55)",
-          border: `1px solid ${palette.border}`,
+          border: paletteDialogOuterBorderStyle(palette),
         }}
       >
         <div

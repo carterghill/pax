@@ -11,6 +11,7 @@ import {
   Lock,
 } from "lucide-react";
 import { useTheme } from "../theme/ThemeContext";
+import { paletteDialogShellBorderStyle } from "../theme/paletteBorder";
 import { useOverlayObstruction } from "../hooks/useOverlayObstruction";
 import ModalLayer from "./ModalLayer";
 import { VOICE_ROOM_TYPE } from "../utils/matrix";
@@ -146,6 +147,7 @@ export default function CreateRoomDialog({
           display: "flex",
           flexDirection: "column",
           boxShadow: "0 8px 32px rgba(0,0,0,0.5)",
+          ...paletteDialogShellBorderStyle(palette),
         }}
       >
         {/* Header */}

@@ -17,6 +17,8 @@ export interface ThemePalette {
 
   // Borders
   border: string;
+  /** Optional outer frame for the message composer and modal shells (e.g. subtle trim). */
+  borderSecondary?: string;
 }
 
 export interface ThemeTypography {

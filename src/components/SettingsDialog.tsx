@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useRef } from "react";
 import { X } from "lucide-react";
 import { useTheme } from "../theme/ThemeContext";
+import { paletteDialogOuterBorderStyle } from "../theme/paletteBorder";
 import { useOverlayObstruction } from "../hooks/useOverlayObstruction";
 import ModalLayer from "./ModalLayer";
 import type { VoiceCall } from "../hooks/useVoiceCall";
@@ -64,7 +65,7 @@ export default function SettingsDialog({
           justifyContent: "center",
           overflow: "hidden",
           backgroundColor: palette.bgSecondary,
-          border: `1px solid ${palette.border}`,
+          border: paletteDialogOuterBorderStyle(palette),
           borderRadius: 16,
           boxShadow: "0 18px 48px rgba(0,0,0,0.45)",
         }}
