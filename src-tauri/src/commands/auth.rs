@@ -91,6 +91,19 @@ fn credentials_path(app: &tauri::AppHandle) -> Result<std::path::PathBuf, String
 
 #[tauri::command]
 pub async fn logout(state: State<'_, Arc<AppState>>, app: tauri::AppHandle) -> Result<(), String> {
+    // Tell the server we're offline BEFORE tearing anything down, while the
+    // client and access token still exist.
+    if let Some(client) = state.client.lock().await.as_ref() {
+        if let Some(user_id) = client.user_id() {
+            let request =
+                matrix_sdk::ruma::api::client::presence::set_presence::v3::Request::new(
+                    user_id.to_owned(),
+                    matrix_sdk::ruma::presence::PresenceState::Offline,
+                );
+            let _ = client.send(request).await;
+        }
+    }
+
     state.stop_sync_task().await;
     state.stop_heartbeat_loop();
     if let Ok(mut g) = state.voice_livekit_jwt_service_url.lock() {

@@ -300,6 +300,7 @@ pub fn run() {
             commands::messages::send_typing_notice,
             commands::messages::upload_and_send_file,
             commands::presence::set_presence,
+            commands::presence::sync_presence,
             commands::presence::start_idle_monitor,
             commands::overlay::overlay_is_supported,
             commands::overlay::overlay_set_rect,

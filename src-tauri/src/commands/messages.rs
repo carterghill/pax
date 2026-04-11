@@ -448,6 +448,10 @@ pub async fn start_sync(
     let avatar_cache = state.avatar_cache.clone();
     let voice_client = client.clone();
     let sync_running = state.sync_running.clone();
+    let self_user_id = client
+        .user_id()
+        .map(|u| u.to_string())
+        .unwrap_or_default();
 
     // Spawn the continuous sync loop in the background
     // set_presence(Offline) tells the server: "do NOT auto-update my presence on sync"
@@ -464,6 +468,7 @@ pub async fn start_sync(
                     let avatar_cache = avatar_cache.clone();
                     let voice_client = voice_client.clone();
                     let first_sync_done = first_sync_done.clone();
+                    let self_user_id = self_user_id.clone();
                     async move {
                         // Signal the frontend that the first sync response has been
                         // processed so it can safely send the initial presence PUT
@@ -472,9 +477,17 @@ pub async fn start_sync(
                             let _ = app.emit("sync-ready", ());
                         }
 
-                        // Extract presence updates from the sync response
+                        // Extract presence updates from the sync response.
+                        // Skip our own user — we manage self-presence explicitly
+                        // via set_presence PUTs + heartbeat, and sync echoes for
+                        // self are racey/stale, causing the local display to flicker.
                         for raw_event in &response.presence {
                             if let Ok(ev) = raw_event.deserialize() {
+                                let user_id = ev.sender.to_string();
+                                if user_id == self_user_id {
+                                    continue;
+                                }
+
                                 let presence_str = match ev.content.presence {
                                     matrix_sdk::ruma::presence::PresenceState::Online => "online",
                                     matrix_sdk::ruma::presence::PresenceState::Unavailable => {
@@ -482,8 +495,6 @@ pub async fn start_sync(
                                     }
                                     _ => "offline",
                                 };
-
-                                let user_id = ev.sender.to_string();
 
                                 presence_map
                                     .lock()

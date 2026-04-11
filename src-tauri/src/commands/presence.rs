@@ -1,3 +1,4 @@
+use std::collections::HashSet;
 use std::sync::Arc;
 
 use tauri::{Emitter, State};
@@ -50,6 +51,89 @@ pub async fn set_presence(
             presence,
         },
     );
+
+    Ok(())
+}
+
+/// Actively fetch current presence for all members of all joined rooms and
+/// populate the presence_map.  This covers the gap where `restore_session`
+/// resumes from a stored `since` token and the incremental sync response
+/// doesn't include presence for users whose status hasn't changed since then.
+#[tauri::command]
+pub async fn sync_presence(
+    state: State<'_, Arc<AppState>>,
+    app: tauri::AppHandle,
+) -> Result<(), String> {
+    let client = get_client(&state).await?;
+    let self_id = client
+        .user_id()
+        .ok_or("No user ID")?
+        .to_string();
+
+    // Collect unique user IDs across all joined rooms.
+    let mut user_ids = HashSet::new();
+    for room in client.joined_rooms() {
+        if let Ok(members) = room.members(matrix_sdk::RoomMemberships::JOIN).await {
+            for m in members {
+                let uid = m.user_id().to_string();
+                if uid != self_id {
+                    user_ids.insert(uid);
+                }
+            }
+        }
+    }
+
+    let access_token = client.access_token().ok_or("No access token")?;
+    let homeserver = client.homeserver().to_string();
+    let hs = homeserver.trim_end_matches('/');
+
+    // Fetch presence for each user via the Matrix CS API.
+    // Fire-and-forget individual failures — a single user 403 shouldn't block the rest.
+    for uid in &user_ids {
+        let encoded = urlencoding::encode(uid);
+        let url = format!("{}/_matrix/client/v3/presence/{}/status", hs, encoded);
+        let resp = match state
+            .http_client
+            .get(&url)
+            .bearer_auth(&access_token)
+            .timeout(std::time::Duration::from_secs(5))
+            .send()
+            .await
+        {
+            Ok(r) if r.status().is_success() => r,
+            _ => continue,
+        };
+
+        #[derive(serde::Deserialize)]
+        struct PresenceResponse {
+            presence: String,
+        }
+
+        let body: PresenceResponse = match resp.json().await {
+            Ok(b) => b,
+            Err(_) => continue,
+        };
+
+        let presence_str = match body.presence.as_str() {
+            "online" => "online",
+            "unavailable" => "unavailable",
+            _ => "offline",
+        };
+
+        state
+            .presence_map
+            .lock()
+            .await
+            .insert(uid.clone(), presence_str.to_string());
+
+        let _ = app.emit(
+            "presence",
+            PresencePayload {
+                user_id: uid.clone(),
+                presence: presence_str.to_string(),
+            },
+        );
+    }
 
     Ok(())
 }
