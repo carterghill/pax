@@ -74,13 +74,23 @@ const DEFAULT_DARK_BG_DELTA = 14;
 /** Darken border vs Discord so 1px rules stay visible on darkened backgrounds (e.g. room sidebar). */
 const DEFAULT_DARK_BORDER_DELTA = 14;
 
+/** Default accent: between Discord blurple (#5865f2) and Byzantine (#6e4a6e), same for light/dark. */
+const DEFAULT_ACCENT = "#7158d8";
+const DEFAULT_ACCENT_HOVER = "#5648ae";
+
 export const defaultThemeDefinition: ThemeDefinition = {
   id: "default",
   dark: {
     ...withDarkerBackgrounds(discordDarkPalette, DEFAULT_DARK_BG_DELTA),
     border: darkenHex(discordDarkPalette.border, DEFAULT_DARK_BORDER_DELTA),
+    accent: DEFAULT_ACCENT,
+    accentHover: DEFAULT_ACCENT_HOVER,
   },
-  light: withDarkerBackgrounds(discordLightPalette, 5),
+  light: {
+    ...withDarkerBackgrounds(discordLightPalette, 5),
+    accent: DEFAULT_ACCENT,
+    accentHover: DEFAULT_ACCENT_HOVER,
+  },
   typography,
   spacing,
 };
