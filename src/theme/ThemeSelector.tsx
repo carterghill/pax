@@ -27,6 +27,7 @@ export function ThemeSelector() {
         const selected = themeId === def.id;
         const label = themeDisplayLabel(def);
         const splitPreview = `linear-gradient(90deg, ${def.dark.bgPrimary} 50%, ${def.light.bgPrimary} 50%)`;
+        const previewAccent = def.dark.accent;
 
         return (
           <button
@@ -62,7 +63,7 @@ export function ThemeSelector() {
                 height: PREVIEW_CIRCLE_PX,
                 borderRadius: "50%",
                 background: splitPreview,
-                border: `1px solid ${palette.border}`,
+                border: `2px solid ${previewAccent}`,
                 boxSizing: "border-box",
                 flexShrink: 0,
               }}
