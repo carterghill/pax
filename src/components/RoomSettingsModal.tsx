@@ -3,6 +3,7 @@ import { invoke } from "@tauri-apps/api/core";
 import { X, Check, Loader2 } from "lucide-react";
 import { useTheme } from "../theme/ThemeContext";
 import { useOverlayObstruction } from "../hooks/useOverlayObstruction";
+import ModalLayer from "./ModalLayer";
 
 type HistoryVisibility = "joined" | "shared" | "invited" | "world_readable";
 
@@ -116,17 +117,14 @@ export default function RoomSettingsModal({
     selectedVisibility !== null && selectedVisibility !== currentVisibility;
 
   return (
-    <div
-      style={{
-        position: "fixed",
-        inset: 0,
-        zIndex: 10000,
+    <ModalLayer
+      backdropStyle={{
         display: "flex",
         alignItems: "center",
         justifyContent: "center",
         backgroundColor: "rgba(0, 0, 0, 0.6)",
       }}
-      onClick={(e) => {
+      onBackdropClick={(e) => {
         if (e.target === e.currentTarget) onClose();
       }}
     >
@@ -474,6 +472,6 @@ export default function RoomSettingsModal({
 
         <style>{`@keyframes spin { from { transform: rotate(0deg); } to { transform: rotate(360deg); } }`}</style>
       </div>
-    </div>
+    </ModalLayer>
   );
 }

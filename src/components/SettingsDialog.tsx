@@ -2,6 +2,7 @@ import { useCallback, useEffect, useRef } from "react";
 import { X } from "lucide-react";
 import { useTheme } from "../theme/ThemeContext";
 import { useOverlayObstruction } from "../hooks/useOverlayObstruction";
+import ModalLayer from "./ModalLayer";
 import type { VoiceCall } from "../hooks/useVoiceCall";
 import SettingsMenu from "./SettingsMenu";
 
@@ -43,16 +44,13 @@ export default function SettingsDialog({
   );
 
   return (
-    <div
-      onClick={handleBackdropClick}
-      style={{
-        position: "fixed",
-        inset: 0,
+    <ModalLayer
+      onBackdropClick={handleBackdropClick}
+      backdropStyle={{
         backgroundColor: "rgba(0,0,0,0.7)",
         display: "flex",
         alignItems: "center",
         justifyContent: "center",
-        zIndex: 9999,
         padding: 16,
       }}
     >
@@ -101,6 +99,6 @@ export default function SettingsDialog({
           voiceCall={voiceCall}
         />
       </div>
-    </div>
+    </ModalLayer>
   );
 }

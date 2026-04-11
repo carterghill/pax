@@ -12,6 +12,7 @@ import {
 } from "lucide-react";
 import { useTheme } from "../theme/ThemeContext";
 import { useOverlayObstruction } from "../hooks/useOverlayObstruction";
+import ModalLayer from "./ModalLayer";
 import { VOICE_ROOM_TYPE } from "../utils/matrix";
 import type { Room } from "../types/matrix";
 import type { RoomsChangedPayload } from "../types/roomsChanged";
@@ -126,16 +127,13 @@ export default function CreateRoomDialog({
   };
 
   return (
-    <div
-      onClick={handleBackdropClick}
-      style={{
-        position: "fixed",
-        inset: 0,
+    <ModalLayer
+      onBackdropClick={handleBackdropClick}
+      backdropStyle={{
         backgroundColor: "rgba(0,0,0,0.7)",
         display: "flex",
         alignItems: "center",
         justifyContent: "center",
-        zIndex: 9999,
       }}
     >
       <div
@@ -403,7 +401,7 @@ export default function CreateRoomDialog({
       </div>
 
       <style>{`@keyframes spin { to { transform: rotate(360deg); } }`}</style>
-    </div>
+    </ModalLayer>
   );
 }
 

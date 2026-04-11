@@ -54,6 +54,7 @@ import {
   toggleCodeBlock,
   toggleLink,
 } from "../utils/composerEditorDom";
+import { MODAL_LAYER_Z } from "./ModalLayer";
 
 export interface EditingMessageRef {
   eventId: string;
@@ -73,7 +74,8 @@ interface MessageInputProps {
   onDraftDmFirstMessage?: (roomId: string) => void | Promise<void>;
 }
 
-const COMPOSER_POPOVER_Z = 12_000;
+/** Below `MODAL_LAYER_Z` so emoji/GIF popovers stay under full-screen modals. */
+const COMPOSER_POPOVER_Z = MODAL_LAYER_Z - 1000;
 
 function fixedPopoverStyle(bottom: number, right: number): CSSProperties {
   return {

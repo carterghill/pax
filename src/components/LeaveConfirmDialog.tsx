@@ -3,6 +3,7 @@ import { invoke } from "@tauri-apps/api/core";
 import { X, Loader2, AlertTriangle } from "lucide-react";
 import { useTheme } from "../theme/ThemeContext";
 import { useOverlayObstruction } from "../hooks/useOverlayObstruction";
+import ModalLayer from "./ModalLayer";
 
 export type LeaveTargetKind = "room" | "space";
 
@@ -50,16 +51,13 @@ export default function LeaveConfirmDialog({
   const loadingSpaceCheck = kind === "space" && onlyAdminWarning === null;
 
   return (
-    <div
-      onClick={handleBackdropClick}
-      style={{
-        position: "fixed",
-        inset: 0,
+    <ModalLayer
+      onBackdropClick={handleBackdropClick}
+      backdropStyle={{
         backgroundColor: "rgba(0,0,0,0.7)",
         display: "flex",
         alignItems: "center",
         justifyContent: "center",
-        zIndex: 10000,
         padding: 16,
       }}
     >
@@ -238,7 +236,7 @@ export default function LeaveConfirmDialog({
           <style>{`@keyframes spin { from { transform: rotate(0deg); } to { transform: rotate(360deg); } }`}</style>
         </div>
       </div>
-    </div>
+    </ModalLayer>
   );
 }
 

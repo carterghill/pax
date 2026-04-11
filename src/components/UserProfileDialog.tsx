@@ -3,6 +3,7 @@ import { invoke } from "@tauri-apps/api/core";
 import { X, Loader2, Copy, Shield, Crown, User, Calendar, Hash } from "lucide-react";
 import { useTheme } from "../theme/ThemeContext";
 import { useOverlayObstruction } from "../hooks/useOverlayObstruction";
+import ModalLayer from "./ModalLayer";
 import { usePresenceContext } from "../hooks/PresenceContext";
 import type { RoomMemberProfile } from "../types/matrix";
 import { userInitialAvatarBackground } from "../utils/userAvatarColor";
@@ -160,16 +161,13 @@ export default function UserProfileDialog({
     profile && isSelf ? effectivePresence : profile?.presence ?? "offline";
 
   return (
-    <div
-      onClick={handleBackdropClick}
-      style={{
-        position: "fixed",
-        inset: 0,
+    <ModalLayer
+      onBackdropClick={handleBackdropClick}
+      backdropStyle={{
         backgroundColor: "rgba(0,0,0,0.85)",
         display: "flex",
         alignItems: "center",
         justifyContent: "center",
-        zIndex: 10000,
         padding: 16,
         fontFamily: typography.fontFamily,
       }}
@@ -640,6 +638,6 @@ export default function UserProfileDialog({
       <style>{`
         @keyframes paxSpin { from { transform: rotate(0deg); } to { transform: rotate(360deg); } }
       `}</style>
-    </div>
+    </ModalLayer>
   );
 }

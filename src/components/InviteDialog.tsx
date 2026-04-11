@@ -3,6 +3,7 @@ import { invoke } from "@tauri-apps/api/core";
 import { X, UserPlus, Loader2, Check, User } from "lucide-react";
 import { useTheme } from "../theme/ThemeContext";
 import { useOverlayObstruction } from "../hooks/useOverlayObstruction";
+import ModalLayer from "./ModalLayer";
 import { parseInviteUserInput } from "../utils/matrix";
 
 export type InviteTargetKind = "room" | "space";
@@ -190,16 +191,13 @@ export default function InviteDialog({
   const listLoading = showSearch ? searchLoading : suggestionsLoading;
 
   return (
-    <div
-      onClick={handleBackdropClick}
-      style={{
-        position: "fixed",
-        inset: 0,
+    <ModalLayer
+      onBackdropClick={handleBackdropClick}
+      backdropStyle={{
         backgroundColor: "rgba(0,0,0,0.7)",
         display: "flex",
         alignItems: "center",
         justifyContent: "center",
-        zIndex: 10000,
         padding: 16,
       }}
     >
@@ -623,6 +621,6 @@ export default function InviteDialog({
           )}
         </div>
       </div>
-    </div>
+    </ModalLayer>
   );
 }
