@@ -110,6 +110,13 @@ export default function MainLayout({
   /** DM composer before the Matrix room exists (first send creates the room). */
   const [pendingDm, setPendingDm] = useState<{ peerUserId: string; displayNameHint: string } | null>(null);
   const pendingDmPeerProfile = useMatrixUserProfile(pendingDm?.peerUserId ?? null);
+  /** Carries DM metadata across the gap between room creation and sync populating isDirect. */
+  const [dmTransitionHint, setDmTransitionHint] = useState<{
+    roomId: string;
+    peerUserId: string;
+    displayName: string;
+    avatarUrl: string | null;
+  } | null>(null);
 
   const spaceKey = activeSpaceId ?? "";
   const activeRoomId = activeRoomBySpace[spaceKey] ?? null;
@@ -233,6 +240,20 @@ export default function MainLayout({
         return merged;
       }
     }
+    // Patch any room that was just created as a DM but hasn't been marked isDirect by sync yet
+    if (dmTransitionHint) {
+      base = base.map((r) =>
+        r.id === dmTransitionHint.roomId && !r.isDirect
+          ? {
+              ...r,
+              isDirect: true,
+              dmPeerUserId: dmTransitionHint.peerUserId,
+              name: r.name === "Unnamed" ? dmTransitionHint.displayName : r.name,
+              avatarUrl: r.avatarUrl ?? dmTransitionHint.avatarUrl,
+            }
+          : r
+      );
+    }
     return base;
   }, [
     activeSpaceId,
@@ -241,6 +262,7 @@ export default function MainLayout({
     pendingDmPeerProfile.avatarUrl,
     roomsBySpace,
     subSpaceRoomIdSet,
+    dmTransitionHint,
   ]);
 
   const subSpaceSections = useMemo(
@@ -254,7 +276,28 @@ export default function MainLayout({
     [childJoinedSubspaces, roomsBySpace]
   );
 
-  const activeRoom = activeRoomId ? getRoom(activeRoomId) : null;
+  const activeRoom = useMemo(() => {
+    const raw = activeRoomId ? getRoom(activeRoomId) : null;
+    if (raw && !raw.isDirect && dmTransitionHint?.roomId === raw.id) {
+      return {
+        ...raw,
+        isDirect: true,
+        dmPeerUserId: dmTransitionHint.peerUserId,
+        name: raw.name === "Unnamed" ? dmTransitionHint.displayName : raw.name,
+        avatarUrl: raw.avatarUrl ?? dmTransitionHint.avatarUrl,
+      };
+    }
+    return raw;
+  }, [activeRoomId, getRoom, dmTransitionHint]);
+
+  // Clear transition hint once sync has caught up and the real room has isDirect
+  useEffect(() => {
+    if (!dmTransitionHint) return;
+    const room = getRoom(dmTransitionHint.roomId);
+    if (room?.isDirect) {
+      setDmTransitionHint(null);
+    }
+  }, [dmTransitionHint, getRoom, visibleRooms]);
 
   const draftRoomId = pendingDm ? pendingDmRoomId(pendingDm.peerUserId) : null;
   const showingDraftDm =
@@ -342,11 +385,26 @@ export default function MainLayout({
 
   const handleDraftDmResolved = useCallback(
     async (dmRoomId: string) => {
-      setPendingDm(null);
+      // Capture DM metadata before clearing pendingDm so we can patch the room
+      // during the gap before the sync loop sets isDirect on the real room.
+      const hint = pendingDm
+        ? {
+            roomId: dmRoomId,
+            peerUserId: pendingDm.peerUserId,
+            displayName:
+              pendingDmPeerProfile.displayName?.trim() ||
+              pendingDm.displayNameHint,
+            avatarUrl: pendingDmPeerProfile.avatarUrl ?? null,
+          }
+        : null;
+      setDmTransitionHint(hint);
       await fetchRooms();
-      setActiveRoomId(dmRoomId);
+      startTransition(() => {
+        setPendingDm(null);
+        setActiveRoomId(dmRoomId);
+      });
     },
-    [fetchRooms, setActiveRoomId],
+    [fetchRooms, setActiveRoomId, pendingDm, pendingDmPeerProfile],
   );
 
   const handleCancelDraftDm = useCallback(() => {
