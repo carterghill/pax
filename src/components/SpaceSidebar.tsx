@@ -30,7 +30,7 @@ interface SpaceSidebarProps {
 }
 
 function SpaceAvatar({ space, isActive }: { space: Room; isActive: boolean }) {
-  const { resolvedColorScheme } = useTheme();
+  const { resolvedColorScheme, palette } = useTheme();
   const initials = space.name
     .split(" ")
     .map((w) => w[0])
@@ -51,7 +51,7 @@ function SpaceAvatar({ space, isActive }: { space: Room; isActive: boolean }) {
         overflow: "hidden",
         padding: 0,
         transition: "border-radius 0.2s ease",
-        outline: isActive ? "2px solid #5865f2" : "2px solid transparent",
+        outline: isActive ? `2px solid ${palette.accent}` : "2px solid transparent",
         outlineOffset: 3,
         flexShrink: 0,
       }}
@@ -232,14 +232,14 @@ export default function SpaceSidebar({
             borderRadius:
               activeSpaceId === "" || activeSpaceId === null ? 16 : 24,
             border: "none",
-            backgroundColor: "#5865f2",
+            backgroundColor: palette.accent,
             color: "#fff",
             fontSize: 20,
             cursor: "pointer",
             transition: "border-radius 0.2s ease",
             outline:
               activeSpaceId === "" || activeSpaceId === null
-                ? "2px solid #5865f2"
+                ? `2px solid ${palette.accent}`
                 : "2px solid transparent",
             outlineOffset: 3,
             flexShrink: 0,

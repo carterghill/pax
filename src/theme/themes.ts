@@ -96,8 +96,8 @@ export const discordThemeDefinition: ThemeDefinition = {
 /* ─── Element (Matrix green) ─────────────────────────────────────────────── */
 
 const elementDarkPalette: ThemePalette = {
-  bgPrimary: "#15191e",
-  bgSecondary: "#1a1f27",
+  bgPrimary: "#1a1f27",
+  bgSecondary: "#15191e",
   bgTertiary: "#111519",
   bgHover: "#1e2530",
   bgActive: "#253040",
@@ -172,8 +172,8 @@ export const notepadThemeDefinition: ThemeDefinition = {
 /* ─── Solarized (Ethan Schoonover's palette) ─────────────────────────────── */
 
 const solarizedDarkPalette: ThemePalette = {
-  bgPrimary: "#002b36",   // base03
-  bgSecondary: "#073642", // base02
+  bgPrimary: "#073642",   // base02 — main area
+  bgSecondary: "#002b36", // base03 — room sidebar / user menu (darker than primary)
   bgTertiary: "#002028",  // slightly darker than base03
   bgHover: "#0a3f4e",
   bgActive: "#0e4d5e",
