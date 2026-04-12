@@ -20,6 +20,7 @@ import {
   pendingDmRoomId,
   voiceStateLookupKeysForLiveKitIdentity,
 } from "../utils/matrix";
+import { collectRoomIdsInSpaceTree } from "../utils/spaceModeration";
 import { useLivekitVoiceSnapshots } from "../hooks/useLivekitVoiceSnapshots";
 import { useMatrixUserProfile } from "../hooks/useMatrixUserProfile";
 import { useUserAvatar } from "../hooks/useUserAvatar";
@@ -289,6 +290,19 @@ export default function MainLayout({
     }
     return raw;
   }, [activeRoomId, getRoom, dmTransitionHint]);
+
+  const moderationSpaceTreeRoomIds = useMemo(() => {
+    if (!activeSpaceId || !activeRoom || activeRoom.isDirect) return null;
+    const inTree =
+      activeRoom.id === activeSpaceId || activeRoom.parentSpaceIds.includes(activeSpaceId);
+    if (!inTree) return null;
+    return collectRoomIdsInSpaceTree(activeSpaceId, roomsBySpace);
+  }, [activeRoom, activeSpaceId, roomsBySpace]);
+
+  const moderationSpaceName = useMemo(() => {
+    if (!activeSpaceId) return null;
+    return getRoom(activeSpaceId)?.name ?? null;
+  }, [activeSpaceId, getRoom]);
 
   // Clear transition hint once sync has caught up and the real room has isDirect
   useEffect(() => {
@@ -588,6 +602,8 @@ export default function MainLayout({
                 setUserMenuWidth(clamped);
               }}
               onStartDirectMessage={handleStartDirectMessage}
+              moderationSpaceTreeRoomIds={moderationSpaceTreeRoomIds}
+              moderationSpaceName={moderationSpaceName}
             />
           ) : activeSpace && activeSpace.membership === "invited" ? (
             <InvitationView room={activeSpace} onJoined={fetchRooms} />

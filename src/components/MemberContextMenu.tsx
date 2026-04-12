@@ -15,8 +15,6 @@ interface MemberContextMenuProps {
   moderation?: { canKick: boolean; canBan: boolean };
   onKick?: () => void;
   onBan?: () => void;
-  /** Wording for kick/ban labels ("room" vs "space"). */
-  kickBanPlace?: "room" | "space";
 }
 
 export default function MemberContextMenu({
@@ -30,7 +28,6 @@ export default function MemberContextMenu({
   moderation,
   onKick,
   onBan,
-  kickBanPlace = "room",
 }: MemberContextMenuProps) {
   const { palette, spacing, typography } = useTheme();
   const menuRef = useRef<HTMLDivElement>(null);
@@ -202,7 +199,7 @@ export default function MemberContextMenu({
               }}
             >
               <UserMinus size={14} color="#ed4245" />
-              {`Kick from ${kickBanPlace}`}
+              Kick user
             </button>
           )}
           {moderation.canBan && onBan && (
@@ -231,7 +228,7 @@ export default function MemberContextMenu({
               }}
             >
               <Ban size={14} color="#ed4245" />
-              {`Ban from ${kickBanPlace}`}
+              Ban user
             </button>
           )}
         </>

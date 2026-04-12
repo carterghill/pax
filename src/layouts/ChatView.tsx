@@ -23,6 +23,9 @@ interface ChatViewProps {
   userMenuWidth: number;
   onUserMenuWidthChange: (width: number) => void;
   onStartDirectMessage: (peerUserId: string, displayNameHint: string) => void;
+  /** Space tree room ids when the active room is under a space (for kick/ban scope). */
+  moderationSpaceTreeRoomIds?: string[] | null;
+  moderationSpaceName?: string | null;
   room?: Room;
   draftDm?: { peerUserId: string; displayNameHint: string } | null;
   onDraftDmResolved?: (roomId: string) => void | Promise<void>;
@@ -126,6 +129,8 @@ export default function ChatView({
   userMenuWidth,
   onUserMenuWidthChange,
   onStartDirectMessage,
+  moderationSpaceTreeRoomIds = null,
+  moderationSpaceName = null,
   onDraftDmResolved,
   onCancelDraftDm,
 }: ChatViewProps) {
@@ -455,8 +460,10 @@ export default function ChatView({
             <UserMenu
               width={userMenuWidth}
               roomId={activeRoom.id}
+              roomName={activeRoom.name}
               userId={userId}
-              isSpaceRoom={activeRoom.isSpace}
+              moderationSpaceTreeRoomIds={moderationSpaceTreeRoomIds}
+              moderationSpaceName={moderationSpaceName}
               onStartDirectMessage={onStartDirectMessage}
             />
             <div

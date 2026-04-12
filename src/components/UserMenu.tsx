@@ -10,13 +10,17 @@ import { usePresenceContext } from "../hooks/PresenceContext";
 import { resolvePresenceWithDnd, parseStatusMsg, composeStatusMsg } from "../utils/statusMessage";
 import MemberContextMenu from "./MemberContextMenu";
 import UserProfileDialog from "./UserProfileDialog";
+import ModerationScopeDialog from "./ModerationScopeDialog";
 
 interface UserMenuProps {
   width: number;
   roomId: string;
+  /** Display name of the room whose member list this is (for moderation dialog). */
+  roomName: string;
   userId: string;
-  /** When true, moderation actions say "space" instead of "room". */
-  isSpaceRoom?: boolean;
+  /** When set, dialog can kick/ban across the whole space tree (space + rooms). */
+  moderationSpaceTreeRoomIds?: string[] | null;
+  moderationSpaceName?: string | null;
   /** Open DM composer (room is created on first send, Element-style). */
   onStartDirectMessage: (peerUserId: string, displayNameHint: string) => void;
 }
@@ -161,8 +165,10 @@ function computeWindow(
 export default function UserMenu({
   width,
   roomId,
+  roomName,
   userId,
-  isSpaceRoom = false,
+  moderationSpaceTreeRoomIds = null,
+  moderationSpaceName = null,
   onStartDirectMessage,
 }: UserMenuProps) {
   const { palette, typography, spacing, resolvedColorScheme } = useTheme();
@@ -176,6 +182,12 @@ export default function UserMenu({
     x: number; y: number; userId: string; displayName: string;
   } | null>(null);
   const [memberModeration, setMemberModeration] = useState<MemberModerationPermissions | null>(null);
+  const [moderationDialog, setModerationDialog] = useState<{
+    kind: "kick" | "ban";
+    targetUserId: string;
+    displayName: string;
+  } | null>(null);
+  const [moderationBusy, setModerationBusy] = useState(false);
   const [profileUserId, setProfileUserId] = useState<string | null>(null);
   const activeRoomRef = useRef(roomId);
   activeRoomRef.current = roomId;
@@ -318,45 +330,54 @@ export default function UserMenu({
     onStartDirectMessage(peerId, hint);
   }, [memberContextMenu, onStartDirectMessage]);
 
-  const kickBanPlace: "room" | "space" = isSpaceRoom ? "space" : "room";
-
-  const handleKickFromMenu = useCallback(async () => {
+  const handleKickFromMenu = useCallback(() => {
     if (!memberContextMenu) return;
-    const targetId = memberContextMenu.userId;
-    const label = memberContextMenu.displayName;
-    if (
-      !window.confirm(
-        `Remove ${label} from this ${kickBanPlace}? They can rejoin if the ${kickBanPlace} is public or they receive an invite.`,
-      )
-    ) {
-      return;
-    }
+    setModerationDialog({
+      kind: "kick",
+      targetUserId: memberContextMenu.userId,
+      displayName: memberContextMenu.displayName,
+    });
     setMemberContextMenu(null);
-    try {
-      await invoke("kick_user", { roomId, userId: targetId, reason: null });
-    } catch (e) {
-      console.error("Kick failed:", e);
-    }
-  }, [memberContextMenu, roomId, kickBanPlace]);
+  }, [memberContextMenu]);
 
-  const handleBanFromMenu = useCallback(async () => {
+  const handleBanFromMenu = useCallback(() => {
     if (!memberContextMenu) return;
-    const targetId = memberContextMenu.userId;
-    const label = memberContextMenu.displayName;
-    if (
-      !window.confirm(
-        `Ban ${label} from this ${kickBanPlace}? They will not be able to rejoin until unbanned.`,
-      )
-    ) {
-      return;
-    }
+    setModerationDialog({
+      kind: "ban",
+      targetUserId: memberContextMenu.userId,
+      displayName: memberContextMenu.displayName,
+    });
     setMemberContextMenu(null);
-    try {
-      await invoke("ban_user", { roomId, userId: targetId, reason: null });
-    } catch (e) {
-      console.error("Ban failed:", e);
-    }
-  }, [memberContextMenu, roomId, kickBanPlace]);
+  }, [memberContextMenu]);
+
+  const runModeration = useCallback(
+    async (scope: "space" | "room") => {
+      if (!moderationDialog) return;
+      const { kind, targetUserId } = moderationDialog;
+      const roomIds =
+        scope === "space" && moderationSpaceTreeRoomIds && moderationSpaceTreeRoomIds.length > 0
+          ? moderationSpaceTreeRoomIds
+          : [roomId];
+      setModerationBusy(true);
+      try {
+        for (const rid of roomIds) {
+          try {
+            if (kind === "kick") {
+              await invoke("kick_user", { roomId: rid, userId: targetUserId, reason: null });
+            } else {
+              await invoke("ban_user", { roomId: rid, userId: targetUserId, reason: null });
+            }
+          } catch (e) {
+            console.error(`Moderation failed for room ${rid}:`, e);
+          }
+        }
+      } finally {
+        setModerationBusy(false);
+        setModerationDialog(null);
+      }
+    },
+    [moderationDialog, moderationSpaceTreeRoomIds, roomId],
+  );
 
   // Override current user's presence and statusMsg locally
   const displayMembers = useMemo(
@@ -564,7 +585,22 @@ export default function UserMenu({
           moderation={memberModeration ?? undefined}
           onKick={memberModeration?.canKick ? handleKickFromMenu : undefined}
           onBan={memberModeration?.canBan ? handleBanFromMenu : undefined}
-          kickBanPlace={kickBanPlace}
+        />
+      )}
+      {moderationDialog && (
+        <ModerationScopeDialog
+          kind={moderationDialog.kind}
+          targetDisplayName={moderationDialog.displayName}
+          currentRoomName={roomName}
+          showSpaceScope={!!moderationSpaceTreeRoomIds?.length}
+          spaceName={moderationSpaceName}
+          busy={moderationBusy}
+          onSpaceScope={() => void runModeration("space")}
+          onRoomOnly={() => void runModeration("room")}
+          onCancel={() => {
+            if (moderationBusy) return;
+            setModerationDialog(null);
+          }}
         />
       )}
       {profileUserId && (
