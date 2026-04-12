@@ -22,6 +22,9 @@ export function useExternalLinkInterceptor(): void {
       const href = anchor.getAttribute("href");
       if (!href) return;
 
+      // Inline image / GIF links open in the in-app media viewer (see MessageMarkdown).
+      if (anchor.closest("[data-pax-open-image-viewer]")) return;
+
       // Only intercept external (http/https) links.
       if (!/^https?:\/\//i.test(href)) return;
 

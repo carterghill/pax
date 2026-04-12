@@ -12,6 +12,7 @@ import MessageMatrixVideo from "./MessageMatrixVideo";
 import MessageFileAttachment from "./MessageFileAttachment";
 import MediaViewerModal, { type MediaViewerOpenPayload } from "./MediaViewerModal";
 import { inferMediaViewerKind } from "../utils/mediaViewer";
+import { fileNameFromImageUrl } from "../utils/directImageUrl";
 
 interface MessageListProps {
   messages: Message[];
@@ -90,6 +91,7 @@ interface MessageRowProps {
   isMenuOpen: boolean;
   onOpenMenu: (eventId: string) => void;
   onOpenMediaViewer: (payload: MediaViewerOpenPayload) => void;
+  onOpenDirectImage: (url: string, title: string) => void;
   menuAnchorRef: React.RefObject<HTMLButtonElement | null>;
   rowHighlight: string;
   spacingUnit: number;
@@ -105,6 +107,7 @@ const MessageRow = memo(function MessageRow({
   isMenuOpen,
   onOpenMenu,
   onOpenMediaViewer,
+  onOpenDirectImage,
   menuAnchorRef,
   rowHighlight,
   spacingUnit,
@@ -209,14 +212,18 @@ const MessageRow = memo(function MessageRow({
               }
             />
             {msg.body.trim().length > 0 ? (
-              <MessageMarkdown edited={Boolean(msg.edited)}>{msg.body}</MessageMarkdown>
+              <MessageMarkdown edited={Boolean(msg.edited)} onOpenDirectImage={onOpenDirectImage}>
+                {msg.body}
+              </MessageMarkdown>
             ) : null}
           </>
         ) : msg.videoMediaRequest != null ? (
           <>
             <MessageMatrixVideo request={msg.videoMediaRequest} />
             {msg.body.trim().length > 0 ? (
-              <MessageMarkdown edited={Boolean(msg.edited)}>{msg.body}</MessageMarkdown>
+              <MessageMarkdown edited={Boolean(msg.edited)} onOpenDirectImage={onOpenDirectImage}>
+                {msg.body}
+              </MessageMarkdown>
             ) : null}
           </>
         ) : msg.fileMediaRequest != null ? (
@@ -234,11 +241,15 @@ const MessageRow = memo(function MessageRow({
               }
             />
             {msg.body.trim().length > 0 ? (
-              <MessageMarkdown edited={Boolean(msg.edited)}>{msg.body}</MessageMarkdown>
+              <MessageMarkdown edited={Boolean(msg.edited)} onOpenDirectImage={onOpenDirectImage}>
+                {msg.body}
+              </MessageMarkdown>
             ) : null}
           </>
         ) : (
-          <MessageMarkdown edited={Boolean(msg.edited)}>{msg.body}</MessageMarkdown>
+          <MessageMarkdown edited={Boolean(msg.edited)} onOpenDirectImage={onOpenDirectImage}>
+            {msg.body}
+          </MessageMarkdown>
         )}
       </div>
 
@@ -324,6 +335,15 @@ export default function MessageList({
   const [menuFixedPos, setMenuFixedPos] = useState<{ top: number; right: number } | null>(null);
   const menuAnchorRef = useRef<HTMLButtonElement>(null);
   const [mediaViewer, setMediaViewer] = useState<MediaViewerOpenPayload | null>(null);
+
+  const openDirectImage = useCallback((url: string, title: string) => {
+    setMediaViewer({
+      kind: "image",
+      directUrl: url,
+      fileName: title || fileNameFromImageUrl(url),
+      mimeType: /\.gif([?#]|$)/i.test(url) ? "image/gif" : null,
+    });
+  }, []);
 
   const scrollRafRef = useRef<number | null>(null);
 
@@ -606,6 +626,7 @@ export default function MessageList({
             isMenuOpen={openMenuEventId === msg.eventId}
             onOpenMenu={handleOpenMenu}
             onOpenMediaViewer={setMediaViewer}
+            onOpenDirectImage={openDirectImage}
             menuAnchorRef={menuAnchorRef}
             rowHighlight={rowHighlight}
             spacingUnit={spacing.unit}

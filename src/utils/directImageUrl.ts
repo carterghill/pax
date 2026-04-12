@@ -24,6 +24,20 @@ function canonicalImageKey(href: string): string | null {
   return src ? src.replace(/\/$/, "") : null;
 }
 
+/** Best-effort filename for save / viewer title from an image URL. */
+export function fileNameFromImageUrl(href: string): string {
+  const abs = normalizeImageSrcHref(href);
+  if (!abs) return "Image";
+  try {
+    const u = new URL(abs);
+    const seg = u.pathname.split("/").filter(Boolean).pop();
+    if (seg) return decodeURIComponent(seg.replace(/\+/g, " "));
+  } catch {
+    /* ignore */
+  }
+  return "Image";
+}
+
 /** `href` suitable for `<a href>` (opens in browser). */
 export function normalizeLinkHref(href: string): string {
   const t = href.trim();

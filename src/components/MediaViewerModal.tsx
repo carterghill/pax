@@ -30,7 +30,10 @@ function formatInvokeError(err: unknown): string {
 
 export interface MediaViewerOpenPayload {
   kind: MediaViewerKind;
-  request: unknown;
+  /** Matrix `MediaRequestParameters` JSON — omit when `directUrl` is set. */
+  request?: unknown;
+  /** Raw https URL for message links / GIFs (skips Matrix download). */
+  directUrl?: string;
   fileName: string;
   mimeType: string | null;
 }
@@ -84,6 +87,16 @@ export default function MediaViewerModal({
 
     let cancelled = false;
     resetState();
+
+    if (payload.directUrl) {
+      setFileUrl(payload.directUrl);
+      setLoadingPath(false);
+      setLoadError(null);
+      return () => {
+        cancelled = true;
+      };
+    }
+
     setLoadingPath(true);
 
     let parsed: unknown;

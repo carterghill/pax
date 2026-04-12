@@ -1,4 +1,4 @@
-import { useMemo, isValidElement, memo, type ReactNode } from "react";
+import { useMemo, isValidElement, memo, type MouseEvent, type ReactNode } from "react";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
 import type { Components } from "react-markdown";
@@ -23,7 +23,11 @@ import {
   Table2,
 } from "lucide-react";
 import { useTheme } from "../theme/ThemeContext";
-import { hrefLooksLikeDirectImageUrl, normalizeImageSrcHref } from "../utils/directImageUrl";
+import {
+  fileNameFromImageUrl,
+  hrefLooksLikeDirectImageUrl,
+  normalizeImageSrcHref,
+} from "../utils/directImageUrl";
 
 /** Word joiner–wrapped `(edited)` inside markdown emphasis so we can style it without matching user italics. */
 const EDITED_EMPHASIS = ` *\u2060(edited)\u2060*`;
@@ -32,6 +36,8 @@ interface MessageMarkdownProps {
   children: string;
   /** When true, append an inline “(edited)” label at the end of the rendered text (same line as the last line). */
   edited?: boolean;
+  /** When set, https image/GIF links (inline previews) open in the app media viewer instead of the browser. */
+  onOpenDirectImage?: (url: string, title: string) => void;
 }
 
 function flattenTextNode(value: ReactNode): string {
@@ -65,7 +71,11 @@ function E({ children }: { children: ReactNode }) {
   return <>{emojifyMarkdownChildren(children)}</>;
 }
 
-export default memo(function MessageMarkdown({ children, edited = false }: MessageMarkdownProps) {
+export default memo(function MessageMarkdown({
+  children,
+  edited = false,
+  onOpenDirectImage,
+}: MessageMarkdownProps) {
   const { palette, typography, spacing, resolvedColorScheme } = useTheme();
 
   const markdownSource = useMemo(() => {
@@ -139,12 +149,23 @@ export default memo(function MessageMarkdown({ children, edited = false }: Messa
               href={href}
               target="_blank"
               rel="noopener noreferrer"
+              {...(onOpenDirectImage
+                ? {
+                    "data-pax-open-image-viewer": "",
+                    onClick: (e: MouseEvent<HTMLAnchorElement>) => {
+                      e.preventDefault();
+                      e.stopPropagation();
+                      onOpenDirectImage(src, alt);
+                    },
+                  }
+                : {})}
               style={{
                 display: "inline-block",
                 maxWidth: "100%",
                 lineHeight: 0,
                 textDecoration: "none",
                 verticalAlign: "bottom",
+                ...(onOpenDirectImage ? { cursor: "pointer" } : {}),
               }}
             >
               <img src={src} alt={alt} loading="lazy" decoding="async" style={imgStyle} />
@@ -534,22 +555,68 @@ export default memo(function MessageMarkdown({ children, edited = false }: Messa
           <E>{c}</E>
         </td>
       ),
-      img: ({ src, alt }) => (
-        <img
-          src={src}
-          alt={alt ?? ""}
-          style={{
-            maxWidth: "100%",
-            height: "auto",
-            borderRadius: spacing.unit,
-            display: "block",
-            marginTop: spacing.unit,
-            marginBottom: spacing.unit,
-          }}
-        />
-      ),
+      img: ({ src, alt }) => {
+        const s = src?.trim() ?? "";
+        const abs = s ? normalizeImageSrcHref(s) : null;
+        const canViewer =
+          Boolean(onOpenDirectImage && abs && /^https?:\/\//i.test(s));
+        const imgStyle = {
+          maxWidth: "100%",
+          height: "auto" as const,
+          borderRadius: spacing.unit,
+          display: "block" as const,
+          marginTop: spacing.unit,
+          marginBottom: spacing.unit,
+        };
+        if (canViewer && abs) {
+          const title = (alt ?? "").trim() || fileNameFromImageUrl(abs);
+          return (
+            <span
+              role="button"
+              tabIndex={0}
+              data-pax-open-image-viewer=""
+              onClick={(e) => {
+                e.preventDefault();
+                e.stopPropagation();
+                onOpenDirectImage!(abs, title);
+              }}
+              onKeyDown={(e) => {
+                if (e.key === "Enter" || e.key === " ") {
+                  e.preventDefault();
+                  onOpenDirectImage!(abs, title);
+                }
+              }}
+              style={{
+                display: "inline-block",
+                maxWidth: "100%",
+                cursor: "pointer",
+                marginTop: spacing.unit,
+                marginBottom: spacing.unit,
+                borderRadius: spacing.unit,
+                outline: "none",
+              }}
+            >
+              <img
+                src={src}
+                alt={alt ?? ""}
+                loading="lazy"
+                decoding="async"
+                draggable={false}
+                style={{ ...imgStyle, marginTop: 0, marginBottom: 0 }}
+              />
+            </span>
+          );
+        }
+        return (
+          <img
+            src={src}
+            alt={alt ?? ""}
+            style={imgStyle}
+          />
+        );
+      },
     }),
-    [palette, typography, spacing, resolvedColorScheme, edited],
+    [palette, typography, spacing, resolvedColorScheme, edited, onOpenDirectImage],
   );
 
   // Extract embeddable URLs from the raw text and render them below the markdown.
