@@ -9,10 +9,12 @@ import {
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { RoomMember } from "../types/matrix";
+import { resolvePresenceWithDnd } from "../utils/statusMessage";
 
 interface PresencePayload {
   userId: string;
   presence: string;
+  statusMsg: string | null;
 }
 
 interface AvatarPayload {
@@ -30,8 +32,8 @@ function dedupeMembers(members: RoomMember[]): RoomMember[] {
 function sortMembersForDisplay(members: RoomMember[]): RoomMember[] {
   const order: Record<string, number> = { online: 0, dnd: 0, unavailable: 1, offline: 2 };
   return [...members].sort((a, b) => {
-    const ao = order[a.presence] ?? 2;
-    const bo = order[b.presence] ?? 2;
+    const ao = order[resolvePresenceWithDnd(a.presence, a.statusMsg)] ?? 2;
+    const bo = order[resolvePresenceWithDnd(b.presence, b.statusMsg)] ?? 2;
     if (ao !== bo) return ao - bo;
     const an = (a.displayName ?? a.userId).toLowerCase();
     const bn = (b.displayName ?? b.userId).toLowerCase();
@@ -119,14 +121,14 @@ export function useRoomMembers(roomId: string) {
 
   // ── Presence updates (affect sort order → update members state) ──
   // Batched per frame, skip non-members.
-  const pendingPresence = useRef<Map<string, string>>(new Map());
+  const pendingPresence = useRef<Map<string, { presence: string; statusMsg: string | null }>>(new Map());
   const presenceRaf = useRef<number | null>(null);
 
   useEffect(() => {
     const unlisten = listen<PresencePayload>("presence", (event) => {
-      const { userId, presence } = event.payload;
+      const { userId, presence, statusMsg } = event.payload;
       if (!memberIdsRef.current.has(userId)) return;
-      pendingPresence.current.set(userId, presence);
+      pendingPresence.current.set(userId, { presence, statusMsg });
 
       if (presenceRaf.current == null) {
         presenceRaf.current = requestAnimationFrame(() => {
@@ -138,10 +140,11 @@ export function useRoomMembers(roomId: string) {
           setMembers((prev) => {
             let changed = false;
             const next = prev.map((m) => {
-              const p = patches.get(m.userId);
-              if (!p || m.presence === p) return m;
+              const patch = patches.get(m.userId);
+              if (!patch) return m;
+              if (m.presence === patch.presence && m.statusMsg === patch.statusMsg) return m;
               changed = true;
-              return { ...m, presence: p };
+              return { ...m, presence: patch.presence, statusMsg: patch.statusMsg };
             });
             if (!changed) return prev;
             memberCache.set(activeRoomIdRef.current, next);

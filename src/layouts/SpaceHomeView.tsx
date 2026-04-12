@@ -21,6 +21,7 @@ import { useTheme } from "../theme/ThemeContext";
 import { Room } from "../types/matrix";
 import type { RoomsChangedPayload } from "../types/roomsChanged";
 import { dmPresenceDotColor, effectiveDmTitle } from "../utils/dmDisplay";
+import { resolvePresenceWithDnd } from "../utils/statusMessage";
 import { VOICE_ROOM_TYPE, SPACE_ROOM_TYPE, compareByDisplayThenKey } from "../utils/matrix";
 import {
   spaceInitialAvatarBackground,
@@ -49,6 +50,7 @@ function roomToSpaceChildInfo(r: Room, fromHierarchy?: SpaceChildInfo): SpaceChi
     isDirect: r.isDirect ?? false,
     dmPeerUserId: r.dmPeerUserId ?? null,
     dmPeerPresence: r.dmPeerPresence ?? null,
+    dmPeerStatusMsg: r.dmPeerStatusMsg ?? null,
   };
 }
 
@@ -135,6 +137,7 @@ interface KnockData {
 interface PresencePayload {
   userId: string;
   presence: string;
+  statusMsg: string | null;
 }
 
 export default function SpaceHomeView({
@@ -218,14 +221,14 @@ export default function SpaceHomeView({
   // Live-update DM presence dots on the space home list (sync pushes `presence` events).
   useEffect(() => {
     const unlisten = listen<PresencePayload>("presence", (event) => {
-      const { userId, presence } = event.payload;
+      const { userId, presence, statusMsg } = event.payload;
       setInfo((prev) => {
         if (!prev) return prev;
         let changed = false;
         const children = prev.children.map((c) => {
-          if (c.dmPeerUserId === userId && c.dmPeerPresence !== presence) {
+          if (c.dmPeerUserId === userId && (c.dmPeerPresence !== presence || c.dmPeerStatusMsg !== statusMsg)) {
             changed = true;
-            return { ...c, dmPeerPresence: presence };
+            return { ...c, dmPeerPresence: presence, dmPeerStatusMsg: statusMsg };
           }
           return c;
         });
@@ -1303,7 +1306,7 @@ function RoomRow({
   const isInvited = room.membership === "invited";
   const canJoin = !isJoined;
   const isDm = room.isDirect === true;
-  const dmPresence = room.dmPeerPresence ?? "offline";
+  const dmPresence = resolvePresenceWithDnd(room.dmPeerPresence ?? "offline", room.dmPeerStatusMsg);
   const dmTitle = effectiveDmTitle({ name: room.name, dmPeerUserId: room.dmPeerUserId ?? null });
   const initials = dmTitle
     .split(/\s+/)

@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState, useCallback } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
+import { composeStatusMsg } from "../utils/statusMessage";
 
 export type ManualStatus = "auto" | "online" | "unavailable" | "dnd" | "offline";
 
@@ -9,7 +10,7 @@ function statusToPresence(status: ManualStatus, systemIdle: boolean): string {
   switch (status) {
     case "online":      return "online";
     case "unavailable": return "unavailable";
-    case "dnd":         return "online"; // Matrix has no DND; stay "online"
+    case "dnd":         return "unavailable"; // Matrix has no DND; use "unavailable" so non-Pax clients see away
     case "offline":     return "offline";
     case "auto":
     default:
@@ -35,26 +36,38 @@ export function usePresence() {
   const [manualStatus, setManualStatus] = useState<ManualStatus>("auto");
   const [systemIdle, setSystemIdle]     = useState(false);
   const [syncReady, setSyncReady]       = useState(false);
+  const [statusMessage, setStatusMessage] = useState("");
 
   // What was last sent to the server (for dedup on state changes).
-  const lastSent = useRef("");
+  const lastSent = useRef({ presence: "", statusMsg: "" });
   const idleStarted = useRef(false);
   const presenceFetched = useRef(false);
 
   // ── Helpers ──
 
-  const sendPresence = useCallback((presence: string) => {
-    if (presence === lastSent.current) return;
-    lastSent.current = presence;
-    invoke("set_presence", { presence }).catch((e) =>
+  const sendPresence = useCallback((presence: string, statusMsg: string) => {
+    if (
+      presence === lastSent.current.presence &&
+      statusMsg === lastSent.current.statusMsg
+    ) return;
+    lastSent.current = { presence, statusMsg };
+    invoke("set_presence", {
+      presence,
+      statusMsg: statusMsg || null,
+    }).catch((e) =>
       console.error("Failed to set presence:", e)
     );
   }, []);
 
   // Bypass dedup — used by the heartbeat to re-PUT the same value.
   const heartbeat = useCallback(() => {
-    const p = lastSent.current;
-    if (p) invoke("set_presence", { presence: p }).catch(() => {});
+    const { presence, statusMsg } = lastSent.current;
+    if (presence) {
+      invoke("set_presence", {
+        presence,
+        statusMsg: statusMsg || null,
+      }).catch(() => {});
+    }
   }, []);
 
   // ── One-time setup ──
@@ -82,11 +95,12 @@ export function usePresence() {
 
   // ── Core presence logic ──
 
-  // Whenever the desired presence changes AND sync is ready, PUT it.
+  // Whenever the desired presence OR status message changes AND sync is ready, PUT it.
   useEffect(() => {
     if (!syncReady) return;
-    sendPresence(statusToPresence(manualStatus, systemIdle));
-  }, [manualStatus, systemIdle, syncReady, sendPresence]);
+    const composed = composeStatusMsg(manualStatus === "dnd", statusMessage);
+    sendPresence(statusToPresence(manualStatus, systemIdle), composed);
+  }, [manualStatus, systemIdle, syncReady, statusMessage, sendPresence]);
 
   // Heartbeat: re-PUT periodically.  For "online" this is a redundant safety
   // net (the sync loop handles it); for manual statuses it's the primary
@@ -113,7 +127,7 @@ export function usePresence() {
   // the client, so this is just a safety net for abnormal teardown.
   useEffect(() => {
     return () => {
-      invoke("set_presence", { presence: "offline" }).catch(() => {});
+      invoke("set_presence", { presence: "offline", statusMsg: null }).catch(() => {});
     };
   }, []);
 
@@ -121,5 +135,5 @@ export function usePresence() {
 
   const effectivePresence = statusToDisplay(manualStatus, systemIdle);
 
-  return { manualStatus, setManualStatus, effectivePresence };
+  return { manualStatus, setManualStatus, effectivePresence, statusMessage, setStatusMessage };
 }

@@ -17,6 +17,7 @@ export interface SpaceChildInfo {
   isDirect?: boolean;
   dmPeerUserId?: string | null;
   dmPeerPresence?: string | null;
+  dmPeerStatusMsg?: string | null;
 }
 
 export interface SpaceInfo {

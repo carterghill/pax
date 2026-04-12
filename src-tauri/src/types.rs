@@ -20,6 +20,8 @@ pub struct RoomInfo {
     pub dm_peer_user_id: Option<String>,
     /// Last known presence for `dm_peer_user_id` from sync (`online`, `offline`, …).
     pub dm_peer_presence: Option<String>,
+    /// Matrix `status_msg` for the DM peer (may contain `[dnd]` prefix).
+    pub dm_peer_status_msg: Option<String>,
 }
 
 #[derive(Clone, Serialize)]
@@ -63,6 +65,7 @@ pub struct RoomMemberInfo {
     pub display_name: Option<String>,
     pub avatar_url: Option<String>,
     pub presence: String, // "online", "offline", "unavailable"
+    pub status_msg: Option<String>,
 }
 
 /// Global profile (`GET /profile/{userId}`) for DM UI when no room member state exists yet.
@@ -81,6 +84,7 @@ pub struct RoomMemberProfile {
     pub display_name: Option<String>,
     pub avatar_url: Option<String>,
     pub presence: String,
+    pub status_msg: Option<String>,
     /// `creator` | `administrator` | `moderator` | `user`
     pub role: String,
     /// Raw power level when not a room creator (`None` when infinite / creator).
@@ -99,6 +103,7 @@ pub struct RoomMemberProfile {
 pub struct PresencePayload {
     pub user_id: String,
     pub presence: String,
+    pub status_msg: Option<String>,
 }
 
 #[derive(Clone, Serialize)]
@@ -195,6 +200,7 @@ pub struct SpaceChildInfo {
     pub is_direct: bool,
     pub dm_peer_user_id: Option<String>,
     pub dm_peer_presence: Option<String>,
+    pub dm_peer_status_msg: Option<String>,
 }
 
 #[derive(Serialize)]

@@ -13,6 +13,7 @@ export interface Room {
   isDirect?: boolean;
   dmPeerUserId?: string | null;
   dmPeerPresence?: string | null;
+  dmPeerStatusMsg?: string | null;
 }
 
 export interface Message {
@@ -50,6 +51,7 @@ export interface RoomMember {
   displayName: string | null;
   avatarUrl: string | null;
   presence: string; // "online" | "offline" | "unavailable"
+  statusMsg: string | null;
 }
 
 /** From `get_room_member_profile` — room-scoped member details. */
@@ -58,6 +60,7 @@ export interface RoomMemberProfile {
   displayName: string | null;
   avatarUrl: string | null;
   presence: string;
+  statusMsg: string | null;
   role: "creator" | "administrator" | "moderator" | "user";
   powerLevel: number | null;
   joinedAtMs: number | null;

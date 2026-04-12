@@ -48,6 +48,7 @@ pub struct AppState {
     pub client: Mutex<Option<Client>>,
     pub http_client: reqwest::Client,
     pub presence_map: Arc<Mutex<HashMap<String, String>>>,
+    pub status_msg_map: Arc<Mutex<HashMap<String, String>>>,
     pub avatar_cache: Arc<Mutex<HashMap<String, String>>>,
     pub sync_running: Arc<Mutex<bool>>,
     /// Background `sync_with_callback` task — must be aborted before deleting the SQLite store
@@ -197,6 +198,7 @@ pub fn run() {
         client: Mutex::new(None),
         http_client: reqwest::Client::new(),
         presence_map: Arc::new(Mutex::new(HashMap::new())),
+        status_msg_map: Arc::new(Mutex::new(HashMap::new())),
         avatar_cache: Arc::new(Mutex::new(HashMap::new())),
         sync_running: Arc::new(Mutex::new(false)),
         sync_join: Mutex::new(None),

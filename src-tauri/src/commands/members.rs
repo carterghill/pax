@@ -31,6 +31,7 @@ pub async fn get_room_members(
 
     let avatar_cache = state.avatar_cache.clone();
     let presence_map = state.presence_map.lock().await.clone();
+    let status_msg_snapshot = state.status_msg_map.lock().await.clone();
 
     // Cache-only avatar lookup — no HTTP, returns instantly.
     let cache_snapshot = avatar_cache.lock().await;
@@ -44,6 +45,7 @@ pub async fn get_room_members(
                 .get(&user_id_str)
                 .cloned()
                 .unwrap_or_else(|| "offline".to_string());
+            let status_msg = status_msg_snapshot.get(&user_id_str).cloned();
             let avatar_url = member
                 .avatar_url()
                 .and_then(|mxc| cache_snapshot.get(&mxc.to_string()).cloned());
@@ -55,6 +57,7 @@ pub async fn get_room_members(
                 display_name: member.display_name().map(|n| n.to_string()),
                 avatar_url,
                 presence,
+                status_msg,
             }
         })
         .collect();
@@ -140,6 +143,13 @@ pub async fn get_room_member_profile(
         .cloned()
         .unwrap_or_else(|| "offline".to_string());
 
+    let status_msg = state
+        .status_msg_map
+        .lock()
+        .await
+        .get(&member_user_id)
+        .cloned();
+
     let role = match member.suggested_role_for_power_level() {
         RoomMemberRole::Creator => "creator",
         RoomMemberRole::Administrator => "administrator",
@@ -167,6 +177,7 @@ pub async fn get_room_member_profile(
         display_name,
         avatar_url,
         presence,
+        status_msg,
         role,
         power_level,
         joined_at_ms,

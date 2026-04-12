@@ -26,6 +26,7 @@ import InviteDialog from "./InviteDialog";
 import LeaveConfirmDialog from "./LeaveConfirmDialog";
 import { useUserVolume } from "../hooks/useUserVolume";
 import { dmPresenceDotColor, effectiveDmTitle, isDmChatUi } from "../utils/dmDisplay";
+import { resolvePresenceWithDnd, parseStatusMsg } from "../utils/statusMessage";
 import {
   VOICE_ROOM_TYPE,
   isPendingDmRoomId,
@@ -215,6 +216,7 @@ function ChannelBlock({
   voiceParticipantStatesByRoom,
   onParticipantContextMenu,
   peerPresenceByUserId,
+  peerStatusMsgByUserId,
   palette,
   spacing,
   typography,
@@ -241,6 +243,8 @@ function ChannelBlock({
   ) => void;
   /** Live presence from sync (`presence` events), keyed by normalized user id. */
   peerPresenceByUserId: Record<string, string>;
+  /** Live status_msg from sync, keyed by normalized user id. */
+  peerStatusMsgByUserId: Record<string, string | null>;
   palette: ReturnType<typeof useTheme>["palette"];
   spacing: ReturnType<typeof useTheme>["spacing"];
   typography: ReturnType<typeof useTheme>["typography"];
@@ -249,8 +253,12 @@ function ChannelBlock({
   const isVoice = room.roomType === VOICE_ROOM_TYPE;
   const isDraftDmRow = isPendingDmRoomId(room.id);
   const dmPeerId = room.dmPeerUserId ?? parsePendingDmPeerUserId(room.id) ?? room.id;
-  const dmPeerPresenceLive =
+  const rawPeerPresence =
     peerPresenceByUserId[normalizeUserId(dmPeerId)] ?? room.dmPeerPresence ?? "offline";
+  const peerStatusMsg =
+    peerStatusMsgByUserId[normalizeUserId(dmPeerId)] ?? room.dmPeerStatusMsg ?? null;
+  const dmPeerPresenceLive = resolvePresenceWithDnd(rawPeerPresence, peerStatusMsg);
+  const peerStatusText = parseStatusMsg(peerStatusMsg).text;
   const participants = isVoice ? (voiceParticipants[room.id] ?? []) : [];
   const isConnectedHere = connectedVoiceRoomId === room.id;
   const padLeft = indent ? spacing.unit * 6 : spacing.unit * 3;
@@ -353,6 +361,18 @@ function ChannelBlock({
             }}
           >
             {roomTitle}
+            {isDmChatUi(room) && peerStatusText && (
+              <div style={{
+                fontSize: typography.fontSizeSmall - 1,
+                color: palette.textSecondary,
+                overflow: "hidden",
+                textOverflow: "ellipsis",
+                whiteSpace: "nowrap",
+                lineHeight: 1.2,
+              }}>
+                {peerStatusText}
+              </div>
+            )}
           </div>
         </span>
       </div>
@@ -446,11 +466,13 @@ export default function RoomSidebar({
 
   /** Live DM peer presence from sync (same `presence` event as space home / member list). */
   const [peerPresenceByUserId, setPeerPresenceByUserId] = useState<Record<string, string>>({});
+  const [peerStatusMsgByUserId, setPeerStatusMsgByUserId] = useState<Record<string, string | null>>({});
   useEffect(() => {
-    const unlisten = listen<{ userId: string; presence: string }>("presence", (event) => {
-      const { userId, presence } = event.payload;
+    const unlisten = listen<{ userId: string; presence: string; statusMsg: string | null }>("presence", (event) => {
+      const { userId, presence, statusMsg } = event.payload;
       const key = normalizeUserId(userId);
       setPeerPresenceByUserId((prev) => ({ ...prev, [key]: presence }));
+      setPeerStatusMsgByUserId((prev) => ({ ...prev, [key]: statusMsg ?? null }));
     });
     return () => {
       unlisten.then((fn) => fn());
@@ -693,6 +715,7 @@ export default function RoomSidebar({
                       setContextMenu({ x: e.clientX, y: e.clientY, identity, displayName });
                     }}
                     peerPresenceByUserId={peerPresenceByUserId}
+                    peerStatusMsgByUserId={peerStatusMsgByUserId}
                     palette={palette}
                     spacing={spacing}
                     typography={typography}
@@ -723,6 +746,7 @@ export default function RoomSidebar({
               setContextMenu({ x: e.clientX, y: e.clientY, identity, displayName });
             }}
             peerPresenceByUserId={peerPresenceByUserId}
+            peerStatusMsgByUserId={peerStatusMsgByUserId}
             palette={palette}
             spacing={spacing}
             typography={typography}

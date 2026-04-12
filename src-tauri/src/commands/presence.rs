@@ -13,6 +13,7 @@ pub async fn set_presence(
     state: State<'_, Arc<AppState>>,
     app: tauri::AppHandle,
     presence: String,
+    status_msg: Option<String>,
 ) -> Result<(), String> {
     let presence_state = match presence.as_str() {
         "online" => matrix_sdk::ruma::presence::PresenceState::Online,
@@ -25,10 +26,13 @@ pub async fn set_presence(
     let user_id = client.user_id().ok_or("No user ID")?.to_owned();
     let user_id_str = user_id.to_string();
 
-    let request = matrix_sdk::ruma::api::client::presence::set_presence::v3::Request::new(
+    let mut request = matrix_sdk::ruma::api::client::presence::set_presence::v3::Request::new(
         user_id,
         presence_state,
     );
+    // Normalise: treat empty string the same as None.
+    let status_msg_normalised = status_msg.filter(|s| !s.is_empty());
+    request.status_msg = status_msg_normalised.clone();
 
     client
         .send(request)
@@ -44,6 +48,16 @@ pub async fn set_presence(
         .await
         .insert(user_id_str.clone(), presence.clone());
 
+    // Keep status_msg_map in sync for local user as well.
+    {
+        let mut sm = state.status_msg_map.lock().await;
+        if let Some(ref msg) = status_msg_normalised {
+            sm.insert(user_id_str.clone(), msg.clone());
+        } else {
+            sm.remove(&user_id_str);
+        }
+    }
+
     // Store the desired presence so the sync loop can set `set_presence` on each
     // `/sync` request accordingly: "online" → sync auto-manages (like Cinny/Element),
     // anything else → sync uses Offline and we rely on explicit PUTs.
@@ -56,6 +70,7 @@ pub async fn set_presence(
         PresencePayload {
             user_id: user_id_str,
             presence,
+            status_msg: status_msg_normalised,
         },
     );
 
@@ -114,6 +129,8 @@ pub async fn sync_presence(
         #[derive(serde::Deserialize)]
         struct PresenceResponse {
             presence: String,
+            #[serde(default)]
+            status_msg: Option<String>,
         }
 
         let body: PresenceResponse = match resp.json().await {
@@ -133,11 +150,22 @@ pub async fn sync_presence(
             .await
             .insert(uid.clone(), presence_str.to_string());
 
+        let status_msg_normalised = body.status_msg.filter(|s| !s.is_empty());
+        {
+            let mut sm = state.status_msg_map.lock().await;
+            if let Some(ref msg) = status_msg_normalised {
+                sm.insert(uid.clone(), msg.clone());
+            } else {
+                sm.remove(uid);
+            }
+        }
+
         let _ = app.emit(
             "presence",
             PresencePayload {
                 user_id: uid.clone(),
                 presence: presence_str.to_string(),
+                status_msg: status_msg_normalised,
             },
         );
     }

@@ -8,6 +8,7 @@ import ModalLayer from "./ModalLayer";
 import { usePresenceContext } from "../hooks/PresenceContext";
 import type { RoomMemberProfile } from "../types/matrix";
 import { userInitialAvatarBackground } from "../utils/userAvatarColor";
+import { resolvePresenceWithDnd, parseStatusMsg } from "../utils/statusMessage";
 
 const ROLE_META: Record<
   RoomMemberProfile["role"],
@@ -86,7 +87,7 @@ export default function UserProfileDialog({
   onClose,
 }: UserProfileDialogProps) {
   const { palette, typography, spacing, resolvedColorScheme } = useTheme();
-  const { effectivePresence } = usePresenceContext();
+  const { effectivePresence, statusMessage } = usePresenceContext();
   const modalRef = useRef<HTMLDivElement>(null);
   useOverlayObstruction(modalRef);
 
@@ -159,7 +160,7 @@ export default function UserProfileDialog({
     currentUserId.length > 0 &&
     sameMatrixUser(currentUserId, userId);
   const presenceToShow =
-    profile && isSelf ? effectivePresence : profile?.presence ?? "offline";
+    profile && isSelf ? effectivePresence : resolvePresenceWithDnd(profile?.presence ?? "offline", profile?.statusMsg);
 
   return (
     <ModalLayer
@@ -412,6 +413,27 @@ export default function UserProfileDialog({
                     {presenceLabel(presenceToShow)}
                   </span>
                 </div>
+
+                {/* Status message */}
+                {(() => {
+                  const rawMsg = profile && isSelf
+                    ? (statusMessage || null)
+                    : profile?.statusMsg ?? null;
+                  const { text: statusText } = parseStatusMsg(rawMsg);
+                  return statusText ? (
+                    <div style={{
+                      marginTop: spacing.unit,
+                      fontSize: typography.fontSizeSmall,
+                      color: palette.textSecondary,
+                      fontStyle: "italic",
+                      overflow: "hidden",
+                      textOverflow: "ellipsis",
+                      whiteSpace: "nowrap",
+                    }}>
+                      {statusText}
+                    </div>
+                  ) : null;
+                })()}
 
                 {/* Role badge */}
                 <div style={{ marginTop: spacing.unit * 3, display: "flex", flexWrap: "wrap", gap: 6 }}>

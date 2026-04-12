@@ -2,7 +2,7 @@ import { useState, useRef, useEffect } from "react";
 import { useTheme } from "../theme/ThemeContext";
 import { usePresenceContext } from "../hooks/PresenceContext";
 import { ManualStatus } from "../hooks/usePresence";
-import { ChevronDown } from "lucide-react";
+import { ChevronDown, X } from "lucide-react";
 import { useOverlayObstruction } from "../hooks/useOverlayObstruction";
 import { userInitialAvatarBackground } from "../utils/userAvatarColor";
 
@@ -43,11 +43,29 @@ interface StatusDropdownProps {
 
 export default function StatusDropdown({ displayName, avatarUrl, userId }: StatusDropdownProps) {
   const { palette, typography, spacing, resolvedColorScheme } = useTheme();
-  const { manualStatus, setManualStatus, effectivePresence } = usePresenceContext();
+  const { manualStatus, setManualStatus, effectivePresence, statusMessage, setStatusMessage } = usePresenceContext();
   const [open, setOpen] = useState(false);
+  const [editingStatus, setEditingStatus] = useState(false);
+  const [statusDraft, setStatusDraft] = useState(statusMessage);
   const dropdownRef = useRef<HTMLDivElement>(null);
   const popupRef = useRef<HTMLDivElement>(null);
+  const statusInputRef = useRef<HTMLInputElement>(null);
   useOverlayObstruction(popupRef, open);
+
+  // Sync draft when dropdown opens
+  useEffect(() => {
+    if (open) {
+      setStatusDraft(statusMessage);
+      setEditingStatus(false);
+    }
+  }, [open, statusMessage]);
+
+  // Focus input when entering edit mode
+  useEffect(() => {
+    if (editingStatus && statusInputRef.current) {
+      statusInputRef.current.focus();
+    }
+  }, [editingStatus]);
 
   // Close on outside click
   useEffect(() => {
@@ -60,6 +78,17 @@ export default function StatusDropdown({ displayName, avatarUrl, userId }: Statu
     document.addEventListener("mousedown", handleClick);
     return () => document.removeEventListener("mousedown", handleClick);
   }, [open]);
+
+  const commitStatus = () => {
+    setStatusMessage(statusDraft.trim());
+    setEditingStatus(false);
+  };
+
+  const clearStatus = () => {
+    setStatusDraft("");
+    setStatusMessage("");
+    setEditingStatus(false);
+  };
 
   return (
     <div ref={dropdownRef} style={{
@@ -141,8 +170,11 @@ export default function StatusDropdown({ displayName, avatarUrl, userId }: Statu
           <div style={{
             fontSize: typography.fontSizeSmall,
             color: palette.textSecondary,
+            overflow: "hidden",
+            textOverflow: "ellipsis",
+            whiteSpace: "nowrap",
           }}>
-            {getDisplayLabel(effectivePresence)}
+            {statusMessage || getDisplayLabel(effectivePresence)}
           </div>
         </div>
 
@@ -163,6 +195,87 @@ export default function StatusDropdown({ displayName, avatarUrl, userId }: Statu
           boxShadow: "0 -4px 12px rgba(0,0,0,0.3)",
           marginBottom: spacing.unit,
         }}>
+          {/* ── Set Status section ── */}
+          <div style={{ padding: `${spacing.unit * 2}px ${spacing.unit * 3}px` }}>
+            {editingStatus ? (
+              <div style={{ display: "flex", alignItems: "center", gap: spacing.unit }}>
+                <input
+                  ref={statusInputRef}
+                  type="text"
+                  value={statusDraft}
+                  onChange={(e) => setStatusDraft(e.target.value)}
+                  onKeyDown={(e) => {
+                    if (e.key === "Enter") commitStatus();
+                    if (e.key === "Escape") setEditingStatus(false);
+                  }}
+                  onBlur={commitStatus}
+                  placeholder="What's on your mind?"
+                  maxLength={100}
+                  style={{
+                    flex: 1,
+                    background: palette.bgPrimary,
+                    border: `1px solid ${palette.border}`,
+                    borderRadius: spacing.unit,
+                    padding: `${spacing.unit * 1.5}px ${spacing.unit * 2}px`,
+                    color: palette.textPrimary,
+                    fontSize: typography.fontSizeSmall,
+                    outline: "none",
+                    minWidth: 0,
+                  }}
+                />
+              </div>
+            ) : (
+              <div
+                onClick={() => setEditingStatus(true)}
+                style={{
+                  display: "flex",
+                  alignItems: "center",
+                  gap: spacing.unit * 2,
+                  padding: `${spacing.unit * 1.5}px ${spacing.unit * 2}px`,
+                  borderRadius: spacing.unit,
+                  cursor: "pointer",
+                  border: `1px dashed ${palette.border}`,
+                }}
+                onMouseEnter={(e) => {
+                  (e.currentTarget as HTMLDivElement).style.backgroundColor = palette.bgHover;
+                }}
+                onMouseLeave={(e) => {
+                  (e.currentTarget as HTMLDivElement).style.backgroundColor = "transparent";
+                }}
+              >
+                <span style={{
+                  flex: 1,
+                  fontSize: typography.fontSizeSmall,
+                  color: statusMessage ? palette.textPrimary : palette.textSecondary,
+                  overflow: "hidden",
+                  textOverflow: "ellipsis",
+                  whiteSpace: "nowrap",
+                }}>
+                  {statusMessage || "Set a status..."}
+                </span>
+                {statusMessage && (
+                  <X
+                    size={14}
+                    color={palette.textSecondary}
+                    style={{ flexShrink: 0, cursor: "pointer" }}
+                    onClick={(e) => {
+                      e.stopPropagation();
+                      clearStatus();
+                    }}
+                  />
+                )}
+              </div>
+            )}
+          </div>
+
+          {/* ── Separator ── */}
+          <div style={{
+            height: 1,
+            backgroundColor: palette.border,
+            margin: `${spacing.unit}px ${spacing.unit * 3}px`,
+          }} />
+
+          {/* ── Presence options ── */}
           {statusOptions.map((opt) => (
             <div
               key={opt.value}

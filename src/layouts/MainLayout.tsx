@@ -102,7 +102,7 @@ export default function MainLayout({
     [spaces, joinedSpaceIdSet]
   );
 
-  const { manualStatus, setManualStatus, effectivePresence } = usePresence();
+  const { manualStatus, setManualStatus, effectivePresence, statusMessage, setStatusMessage } = usePresence();
   const voiceCall = useVoiceCall();
   const [activeSpaceId, setActiveSpaceId] = useState<string | null>(null);
   const [activeRoomBySpace, setActiveRoomBySpace] = useState<Record<string, string | null>>({});
@@ -478,7 +478,7 @@ export default function MainLayout({
   );
 
   return (
-    <PresenceContext.Provider value={{ manualStatus, setManualStatus, effectivePresence }}>
+    <PresenceContext.Provider value={{ manualStatus, setManualStatus, effectivePresence, statusMessage, setStatusMessage }}>
       <div style={{
         display: "flex",
         height: "100vh",

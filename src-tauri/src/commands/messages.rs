@@ -533,6 +533,7 @@ pub async fn start_sync(
 
     // Clone shared state needed inside the sync loop.
     let presence_map = state.presence_map.clone();
+    let status_msg_map = state.status_msg_map.clone();
     let avatar_cache = state.avatar_cache.clone();
     let voice_client = client.clone();
     let desired_presence = state.desired_presence.clone();
@@ -605,11 +606,22 @@ pub async fn start_sync(
                         .await
                         .insert(user_id.clone(), presence_str.to_string());
 
+                    let status_msg_val = ev.content.status_msg.filter(|s| !s.is_empty());
+                    {
+                        let mut sm = status_msg_map.lock().await;
+                        if let Some(ref msg) = status_msg_val {
+                            sm.insert(user_id.clone(), msg.clone());
+                        } else {
+                            sm.remove(&user_id);
+                        }
+                    }
+
                     let _ = app.emit(
                         "presence",
                         PresencePayload {
                             user_id,
                             presence: presence_str.to_string(),
+                            status_msg: status_msg_val,
                         },
                     );
                 }

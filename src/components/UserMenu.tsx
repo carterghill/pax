@@ -7,6 +7,7 @@ import { userInitialAvatarBackground } from "../utils/userAvatarColor";
 import { useRoomMembers } from "../hooks/useRoomMembers";
 import { RoomMember } from "../types/matrix";
 import { usePresenceContext } from "../hooks/PresenceContext";
+import { resolvePresenceWithDnd, parseStatusMsg, composeStatusMsg } from "../utils/statusMessage";
 import MemberContextMenu from "./MemberContextMenu";
 import UserProfileDialog from "./UserProfileDialog";
 
@@ -55,6 +56,8 @@ interface MemberRowProps {
 
 const MemberRow = memo(function MemberRow({ member, avatarUrl, onContextMenu }: MemberRowProps) {
   const { palette, typography, spacing, resolvedColorScheme } = useTheme();
+  const resolved = resolvePresenceWithDnd(member.presence, member.statusMsg);
+  const { text: statusText } = parseStatusMsg(member.statusMsg);
   return (
     <div
       style={{
@@ -65,7 +68,7 @@ const MemberRow = memo(function MemberRow({ member, avatarUrl, onContextMenu }: 
         cursor: "pointer",
         borderRadius: spacing.unit,
         margin: `0 ${spacing.unit * 2}px`,
-        opacity: member.presence === "offline" ? 0.5 : 1,
+        opacity: resolved === "offline" ? 0.5 : 1,
         height: MEMBER_HEIGHT,
         boxSizing: "border-box",
       }}
@@ -100,18 +103,32 @@ const MemberRow = memo(function MemberRow({ member, avatarUrl, onContextMenu }: 
         <div style={{
           position: "absolute", bottom: -1, right: -1, width: 10, height: 10,
           borderRadius: "50%",
-          backgroundColor: presenceColor[member.presence] ?? presenceColor.offline,
+          backgroundColor: presenceColor[resolved] ?? presenceColor.offline,
           border: `2px solid ${palette.bgSecondary}`,
         }} />
       </div>
 
-      <span style={{
-        fontSize: typography.fontSizeBase, fontWeight: typography.fontWeightMedium,
-        color: member.presence === "offline" ? palette.textSecondary : palette.textPrimary,
-        overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap",
-      }}>
-        {member.displayName ?? member.userId}
-      </span>
+      <div style={{ flex: 1, minWidth: 0 }}>
+        <div style={{
+          fontSize: typography.fontSizeBase, fontWeight: typography.fontWeightMedium,
+          color: resolved === "offline" ? palette.textSecondary : palette.textPrimary,
+          overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap",
+        }}>
+          {member.displayName ?? member.userId}
+        </div>
+        {statusText && (
+          <div style={{
+            fontSize: typography.fontSizeSmall - 1,
+            color: palette.textSecondary,
+            overflow: "hidden",
+            textOverflow: "ellipsis",
+            whiteSpace: "nowrap",
+            lineHeight: 1.2,
+          }}>
+            {statusText}
+          </div>
+        )}
+      </div>
     </div>
   );
 });
@@ -142,7 +159,7 @@ function computeWindow(
 export default function UserMenu({ width, roomId, userId, onStartDirectMessage }: UserMenuProps) {
   const { palette, typography, spacing, resolvedColorScheme } = useTheme();
   const { members, loading, avatarOverrides } = useRoomMembers(roomId);
-  const { effectivePresence } = usePresenceContext();
+  const { effectivePresence, statusMessage: localStatusMessage, manualStatus } = usePresenceContext();
 
   // ── Knock requests state ──
   const [knockData, setKnockData] = useState<KnockMembersResponse | null>(null);
@@ -264,17 +281,22 @@ export default function UserMenu({ width, roomId, userId, onStartDirectMessage }
     onStartDirectMessage(peerId, hint);
   }, [memberContextMenu, onStartDirectMessage]);
 
-  // Override current user's presence locally
+  // Override current user's presence and statusMsg locally
   const displayMembers = useMemo(
-    () => members.map((m) => (m.userId === userId ? { ...m, presence: effectivePresence } : m)),
-    [members, userId, effectivePresence]
+    () => members.map((m) => (m.userId === userId ? {
+      ...m,
+      presence: effectivePresence,
+      statusMsg: composeStatusMsg(manualStatus === "dnd", localStatusMessage) || null,
+    } : m)),
+    [members, userId, effectivePresence, manualStatus, localStatusMessage]
   );
 
   // ── Build flat virtual row list with offsets ──
   const { rows, offsets, totalHeight } = useMemo(() => {
-    const online = displayMembers.filter((m) => m.presence === "online" || m.presence === "dnd");
-    const unavailable = displayMembers.filter((m) => m.presence === "unavailable");
-    const offline = displayMembers.filter((m) => m.presence === "offline");
+    const resolveP = (m: RoomMember) => resolvePresenceWithDnd(m.presence, m.statusMsg);
+    const online = displayMembers.filter((m) => { const p = resolveP(m); return p === "online" || p === "dnd"; });
+    const unavailable = displayMembers.filter((m) => resolveP(m) === "unavailable");
+    const offline = displayMembers.filter((m) => resolveP(m) === "offline");
 
     const groups = [
       { label: `Online — ${online.length}`, members: online },
