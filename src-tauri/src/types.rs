@@ -68,6 +68,24 @@ pub struct RoomMemberInfo {
     pub status_msg: Option<String>,
 }
 
+#[derive(Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RoomManagementMemberInfo {
+    pub user_id: String,
+    pub display_name: Option<String>,
+    pub avatar_url: Option<String>,
+    pub presence: String,
+    pub status_msg: Option<String>,
+    pub role: String,
+}
+
+#[derive(Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RoomManagementMembersResponse {
+    pub joined: Vec<RoomManagementMemberInfo>,
+    pub banned: Vec<RoomManagementMemberInfo>,
+}
+
 /// Global profile (`GET /profile/{userId}`) for DM UI when no room member state exists yet.
 #[derive(Clone, Serialize)]
 #[serde(rename_all = "camelCase")]

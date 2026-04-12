@@ -6,7 +6,10 @@ use futures_util::future::join_all;
 use serde::Deserialize;
 use tauri::{Emitter, State};
 
-use crate::types::{MatrixUserProfile, RoomMemberInfo, RoomMemberProfile};
+use crate::types::{
+    MatrixUserProfile, RoomManagementMemberInfo, RoomManagementMembersResponse, RoomMemberInfo,
+    RoomMemberProfile,
+};
 use crate::AppState;
 
 use super::{fmt_error_chain, get_client, get_or_fetch_avatar, resolve_room, encode_bytes_data_url, sniff_image_mime};
@@ -16,6 +19,18 @@ use matrix_sdk::ruma::api::client::profile::{AvatarUrl, DisplayName};
 use matrix_sdk::ruma::events::room::MediaSource;
 use matrix_sdk::ruma::events::room::member::MembershipState;
 use matrix_sdk::ruma::events::room::power_levels::UserPowerLevel;
+
+fn room_member_role_label(member: &matrix_sdk::room::RoomMember) -> String {
+    use matrix_sdk::room::RoomMemberRole;
+
+    match member.suggested_role_for_power_level() {
+        RoomMemberRole::Creator => "creator",
+        RoomMemberRole::Administrator => "administrator",
+        RoomMemberRole::Moderator => "moderator",
+        RoomMemberRole::User => "user",
+    }
+    .to_string()
+}
 
 #[tauri::command]
 pub async fn get_room_members(
@@ -107,6 +122,99 @@ pub async fn get_room_members(
     Ok(result)
 }
 
+#[tauri::command]
+pub async fn get_room_management_members(
+    state: State<'_, Arc<AppState>>,
+    room_id: String,
+) -> Result<RoomManagementMembersResponse, String> {
+    let client = get_client(&state).await?;
+    let room = resolve_room(&client, &room_id)?;
+
+    let joined_members = room
+        .members(matrix_sdk::RoomMemberships::JOIN)
+        .await
+        .map_err(|e| format!("Failed to get members: {}", fmt_error_chain(&e)))?;
+
+    let presence_map = state.presence_map.lock().await.clone();
+    let status_msg_snapshot = state.status_msg_map.lock().await.clone();
+    let avatar_snapshot = state.avatar_cache.lock().await.clone();
+
+    let joined = joined_members
+        .iter()
+        .map(|member| {
+            let user_id = member.user_id().to_string();
+            let avatar_url = member
+                .avatar_url()
+                .and_then(|mxc| avatar_snapshot.get(&mxc.to_string()).cloned());
+
+            RoomManagementMemberInfo {
+                user_id: user_id.clone(),
+                display_name: member.display_name().map(|n| n.to_string()),
+                avatar_url,
+                presence: presence_map
+                    .get(&user_id)
+                    .cloned()
+                    .unwrap_or_else(|| "offline".to_string()),
+                status_msg: status_msg_snapshot.get(&user_id).cloned(),
+                role: room_member_role_label(member),
+            }
+        })
+        .collect();
+
+    let access_token = client.access_token().ok_or("No access token")?;
+    let homeserver = client.homeserver().to_string();
+    let hs = homeserver.trim_end_matches('/');
+    let encoded_room = urlencoding::encode(&room_id);
+    let members_url = format!(
+        "{}/_matrix/client/v3/rooms/{}/members?membership=ban",
+        hs, encoded_room
+    );
+
+    let resp = state
+        .http_client
+        .get(&members_url)
+        .timeout(Duration::from_secs(15))
+        .bearer_auth(access_token)
+        .send()
+        .await
+        .map_err(|e| format!("Failed to fetch banned members: {}", fmt_error_chain(&e)))?;
+
+    if !resp.status().is_success() {
+        let status = resp.status();
+        let text = resp.text().await.unwrap_or_default();
+        return Err(format!("Banned members request failed ({status}): {text}"));
+    }
+
+    let body: serde_json::Value = resp
+        .json()
+        .await
+        .map_err(|e| format!("Failed to parse banned members: {e}"))?;
+
+    let banned = body["chunk"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter_map(|event| {
+            let user_id = event["state_key"].as_str()?.to_string();
+            let content = &event["content"];
+            let avatar_url = content["avatar_url"]
+                .as_str()
+                .and_then(|mxc| avatar_snapshot.get(mxc).cloned());
+
+            Some(RoomManagementMemberInfo {
+                user_id,
+                display_name: content["displayname"].as_str().map(|s| s.to_string()),
+                avatar_url,
+                presence: "offline".to_string(),
+                status_msg: None,
+                role: "banned".to_string(),
+            })
+        })
+        .collect();
+
+    Ok(RoomManagementMembersResponse { joined, banned })
+}
+
 /// Room-scoped profile for a single member (power level, join time, permissions, etc.).
 #[tauri::command]
 pub async fn get_room_member_profile(
@@ -114,7 +222,6 @@ pub async fn get_room_member_profile(
     room_id: String,
     member_user_id: String,
 ) -> Result<RoomMemberProfile, String> {
-    use matrix_sdk::room::RoomMemberRole;
     use matrix_sdk::ruma::events::room::power_levels::UserPowerLevel;
 
     let client = get_client(&state).await?;
@@ -152,13 +259,7 @@ pub async fn get_room_member_profile(
         .get(&member_user_id)
         .cloned();
 
-    let role = match member.suggested_role_for_power_level() {
-        RoomMemberRole::Creator => "creator",
-        RoomMemberRole::Administrator => "administrator",
-        RoomMemberRole::Moderator => "moderator",
-        RoomMemberRole::User => "user",
-    }
-    .to_string();
+    let role = room_member_role_label(&member);
 
     let power_level = match member.power_level() {
         UserPowerLevel::Infinite => None,
@@ -957,4 +1058,133 @@ pub async fn ban_user(
         return Err(format!("Ban failed ({status}): {text}"));
     }
     Ok(())
+}
+
+#[tauri::command]
+pub async fn unban_user(
+    state: State<'_, Arc<AppState>>,
+    room_id: String,
+    user_id: String,
+) -> Result<(), String> {
+    let client = get_client(&state).await?;
+    let access_token = client.access_token().ok_or("No access token")?;
+    let homeserver = client.homeserver().to_string();
+    let hs = homeserver.trim_end_matches('/');
+    let encoded_room = urlencoding::encode(&room_id);
+
+    let url = format!("{}/_matrix/client/v3/rooms/{}/unban", hs, encoded_room);
+    let body = serde_json::json!({ "user_id": user_id });
+
+    let resp = state
+        .http_client
+        .post(&url)
+        .timeout(Duration::from_secs(15))
+        .bearer_auth(access_token)
+        .json(&body)
+        .send()
+        .await
+        .map_err(|e| format!("Unban failed: {}", fmt_error_chain(&e)))?;
+
+    if !resp.status().is_success() {
+        let status = resp.status();
+        let text = resp.text().await.unwrap_or_default();
+        return Err(format!("Unban failed ({status}): {text}"));
+    }
+    Ok(())
+}
+
+async fn get_space_tree_room_ids(
+    state: &Arc<AppState>,
+    client: &matrix_sdk::Client,
+    space_id: &str,
+) -> Result<Vec<String>, String> {
+    let access_token = client.access_token().ok_or("No access token")?;
+    let homeserver = client.homeserver().to_string();
+    let hs = homeserver.trim_end_matches('/');
+    let encoded_room = urlencoding::encode(space_id);
+    let url = format!(
+        "{}/_matrix/client/v1/rooms/{}/hierarchy?limit=200",
+        hs, encoded_room
+    );
+
+    let resp = state
+        .http_client
+        .get(&url)
+        .timeout(Duration::from_secs(15))
+        .bearer_auth(access_token)
+        .send()
+        .await
+        .map_err(|e| format!("Hierarchy request failed: {}", fmt_error_chain(&e)))?;
+
+    if !resp.status().is_success() {
+        let status = resp.status();
+        let text = resp.text().await.unwrap_or_default();
+        return Err(format!("Hierarchy request failed ({status}): {text}"));
+    }
+
+    let body: serde_json::Value = resp
+        .json()
+        .await
+        .map_err(|e| format!("Failed to parse hierarchy response: {e}"))?;
+
+    let mut room_ids = vec![space_id.to_string()];
+    if let Some(rooms) = body["rooms"].as_array() {
+        for room_data in rooms {
+            if let Some(room_id) = room_data["room_id"].as_str() {
+                if room_id != space_id {
+                    room_ids.push(room_id.to_string());
+                }
+            }
+        }
+    }
+
+    Ok(room_ids)
+}
+
+#[tauri::command]
+pub async fn unban_user_from_space_tree(
+    state: State<'_, Arc<AppState>>,
+    space_id: String,
+    user_id: String,
+) -> Result<(), String> {
+    let client = get_client(&state).await?;
+    let room_ids = get_space_tree_room_ids(&state, &client, &space_id).await?;
+    let access_token = client.access_token().ok_or("No access token")?;
+    let homeserver = client.homeserver().to_string();
+    let hs = homeserver.trim_end_matches('/');
+
+    let mut failures = Vec::new();
+    for room_id in room_ids {
+        let encoded_room = urlencoding::encode(&room_id);
+        let url = format!("{}/_matrix/client/v3/rooms/{}/unban", hs, encoded_room);
+        let body = serde_json::json!({ "user_id": user_id });
+
+        match state
+            .http_client
+            .post(&url)
+            .timeout(Duration::from_secs(15))
+            .bearer_auth(access_token.clone())
+            .json(&body)
+            .send()
+            .await
+        {
+            Ok(resp) if resp.status().is_success() => {}
+            Ok(resp) => {
+                let status = resp.status();
+                let text = resp.text().await.unwrap_or_default();
+                failures.push(format!("{room_id} ({status}): {text}"));
+            }
+            Err(e) => failures.push(format!("{room_id}: {}", fmt_error_chain(&e))),
+        }
+    }
+
+    if failures.is_empty() {
+        Ok(())
+    } else {
+        Err(format!(
+            "Unbanned in some rooms, but failed in {} room(s): {}",
+            failures.len(),
+            failures.join(" | ")
+        ))
+    }
 }

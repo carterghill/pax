@@ -54,6 +54,15 @@ export interface RoomMember {
   statusMsg: string | null;
 }
 
+export interface RoomManagementMember extends RoomMember {
+  role: "creator" | "administrator" | "moderator" | "user" | "banned";
+}
+
+export interface RoomManagementMembersResponse {
+  joined: RoomManagementMember[];
+  banned: RoomManagementMember[];
+}
+
 /** From `get_member_moderation_permissions` — whether the current user may kick/ban this member. */
 export interface MemberModerationPermissions {
   canKick: boolean;

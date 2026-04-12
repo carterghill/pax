@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import {
   X,
@@ -8,11 +8,20 @@ import {
   Lock,
   Trash2,
   DoorOpen,
+  Users,
+  Shield,
+  Settings as SettingsIcon,
 } from "lucide-react";
 import { useTheme } from "../theme/ThemeContext";
 import { paletteDialogShellBorderStyle } from "../theme/paletteBorder";
 import { useOverlayObstruction } from "../hooks/useOverlayObstruction";
 import ModalLayer from "./ModalLayer";
+import type {
+  RoomManagementMember,
+  RoomManagementMembersResponse,
+} from "../types/matrix";
+import { userInitialAvatarBackground } from "../utils/userAvatarColor";
+import type { ThemePalette, ThemeTypography, ThemeSpacing } from "../theme/types";
 
 type HistoryVisibility = "shared" | "joined" | "invited" | "world_readable";
 type GuestAccess = "can_join" | "forbidden";
@@ -52,6 +61,8 @@ function normalizeJoinRule(rule: string): JoinRule {
   return "invite";
 }
 
+type SettingsTab = "general" | "members" | "permissions";
+
 interface SpaceSettingsDialogProps {
   spaceId: string;
   /** Shown in header while loading or if name missing */
@@ -66,15 +77,17 @@ export default function SpaceSettingsDialog({
   onClose,
   onSaved,
 }: SpaceSettingsDialogProps) {
-  const { palette, typography } = useTheme();
+  const { palette, typography, spacing, resolvedColorScheme } = useTheme();
   const modalRef = useRef<HTMLDivElement>(null);
   useOverlayObstruction(modalRef);
 
+  const [activeTab, setActiveTab] = useState<SettingsTab>("general");
   const [loading, setLoading] = useState(true);
   const [loadError, setLoadError] = useState<string | null>(null);
   const [snap, setSnap] = useState<SpaceSettingsSnapshot | null>(null);
   const [perm, setPerm] = useState<SpaceSettingsPermissions | null>(null);
 
+  // General tab state
   const [name, setName] = useState("");
   const [topic, setTopic] = useState("");
   const [isPublic, setIsPublic] = useState(false);
@@ -95,6 +108,16 @@ export default function SpaceSettingsDialog({
 
   const fileInputRef = useRef<HTMLInputElement>(null);
   const rawJoinRuleRef = useRef<string>("invite");
+
+  // Members tab state
+  const [memberSearch, setMemberSearch] = useState("");
+  const [membersLoading, setMembersLoading] = useState(false);
+  const [membersError, setMembersError] = useState<string | null>(null);
+  const [memberData, setMemberData] = useState<RoomManagementMembersResponse>({
+    joined: [],
+    banned: [],
+  });
+  const [unbanBusyId, setUnbanBusyId] = useState<string | null>(null);
 
   useEffect(() => {
     let cancelled = false;
@@ -131,6 +154,27 @@ export default function SpaceSettingsDialog({
       cancelled = true;
     };
   }, [spaceId]);
+
+  const loadManagementMembers = useCallback(async () => {
+    setMembersLoading(true);
+    setMembersError(null);
+    try {
+      const data = await invoke<RoomManagementMembersResponse>(
+        "get_room_management_members",
+        { roomId: spaceId },
+      );
+      setMemberData(data);
+    } catch (e) {
+      setMembersError(String(e));
+    } finally {
+      setMembersLoading(false);
+    }
+  }, [spaceId]);
+
+  useEffect(() => {
+    if (activeTab !== "members") return;
+    void loadManagementMembers();
+  }, [activeTab, loadManagementMembers]);
 
   useEffect(() => {
     if (!isPublic && (joinRule === "public" || joinRule === "knock")) {
@@ -189,6 +233,54 @@ export default function SpaceSettingsDialog({
   }, [perm?.avatar]);
 
   const canEditJoinRules = perm?.joinRules === true;
+  const adminMembers = useMemo(
+    () =>
+      memberData.joined.filter(
+        (member) =>
+          member.role === "creator" || member.role === "administrator",
+      ),
+    [memberData.joined],
+  );
+  const moderatorMembers = useMemo(
+    () => memberData.joined.filter((member) => member.role === "moderator"),
+    [memberData.joined],
+  );
+  const regularMembers = useMemo(
+    () => memberData.joined.filter((member) => member.role === "user"),
+    [memberData.joined],
+  );
+
+  const handleUnbanFromSpace = useCallback(
+    async (userId: string) => {
+      setUnbanBusyId(userId);
+      setMembersError(null);
+      try {
+        await invoke("unban_user", { roomId: spaceId, userId });
+        await loadManagementMembers();
+      } catch (e) {
+        setMembersError(String(e));
+      } finally {
+        setUnbanBusyId(null);
+      }
+    },
+    [loadManagementMembers, spaceId],
+  );
+
+  const handleUnbanFromSpaceTree = useCallback(
+    async (userId: string) => {
+      setUnbanBusyId(userId);
+      setMembersError(null);
+      try {
+        await invoke("unban_user_from_space_tree", { spaceId, userId });
+        await loadManagementMembers();
+      } catch (e) {
+        setMembersError(String(e));
+      } finally {
+        setUnbanBusyId(null);
+      }
+    },
+    [loadManagementMembers, spaceId],
+  );
 
   const buildPatch = useCallback(() => {
     if (!snap || !perm) return null;
@@ -336,8 +428,8 @@ export default function SpaceSettingsDialog({
         style={{
           backgroundColor: palette.bgSecondary,
           borderRadius: 8,
-          width: 500,
-          maxHeight: "85vh",
+          width: "min(1120px, calc(100vw - 40px))",
+          maxHeight: "min(90vh, 920px)",
           display: "flex",
           flexDirection: "column",
           boxShadow: "0 8px 32px rgba(0,0,0,0.5)",
@@ -347,22 +439,34 @@ export default function SpaceSettingsDialog({
         <div
           style={{
             display: "flex",
-            alignItems: "center",
+            alignItems: "flex-start",
             justifyContent: "space-between",
-            padding: "16px 16px 0 16px",
+            padding: "16px 20px 14px 20px",
             flexShrink: 0,
+            borderBottom: `1px solid ${palette.border}`,
           }}
         >
-          <h2
-            style={{
-              margin: 0,
-              fontSize: typography.fontSizeLarge,
-              fontWeight: typography.fontWeightBold,
-              color: palette.textHeading,
-            }}
-          >
-            Space Settings
-          </h2>
+          <div>
+            <h2
+              style={{
+                margin: 0,
+                fontSize: typography.fontSizeLarge,
+                fontWeight: typography.fontWeightBold,
+                color: palette.textHeading,
+              }}
+            >
+              Space Settings
+            </h2>
+            <div
+              style={{
+                fontSize: typography.fontSizeSmall,
+                color: palette.textSecondary,
+                marginTop: 4,
+              }}
+            >
+              {headerTitle}
+            </div>
+          </div>
           <button
             type="button"
             onClick={onClose}
@@ -380,49 +484,105 @@ export default function SpaceSettingsDialog({
           </button>
         </div>
 
-        <div
-          style={{
-            fontSize: typography.fontSizeSmall,
-            color: palette.textSecondary,
-            padding: "4px 16px 12px 16px",
-          }}
-        >
-          {headerTitle}
-        </div>
-
-        <div style={{ flex: 1, overflowY: "auto", padding: 16 }}>
-          {loading && (
+        <div style={{ display: "flex", flex: 1, minHeight: 0, overflow: "hidden" }}>
+          {/* Left sidebar - Categories */}
+          <div
+            style={{
+              width: 220,
+              flexShrink: 0,
+              backgroundColor: palette.bgSecondary,
+              borderRight: `1px solid ${palette.border}`,
+              padding: `${spacing.unit * 4}px`,
+              display: "flex",
+              flexDirection: "column",
+              gap: spacing.unit * 1,
+              overflowY: "auto",
+            }}
+          >
             <div
               style={{
-                display: "flex",
-                alignItems: "center",
-                gap: 10,
-                color: palette.textSecondary,
-                padding: 24,
-              }}
-            >
-              <Loader2 size={20} style={{ animation: "spin 1s linear infinite" }} />
-              Loading space settings…
-            </div>
-          )}
-
-          {loadError && (
-            <div
-              style={{
-                padding: "12px 16px",
-                backgroundColor: "rgba(237,66,69,0.15)",
-                border: "1px solid rgba(237,66,69,0.3)",
-                borderRadius: 4,
-                color: "#ed4245",
                 fontSize: typography.fontSizeSmall,
+                fontWeight: typography.fontWeightMedium,
+                color: palette.textSecondary,
+                textTransform: "uppercase",
+                letterSpacing: 0.6,
+                marginBottom: spacing.unit * 2,
+                paddingLeft: spacing.unit * 1,
               }}
             >
-              {loadError}
+              Space Settings
             </div>
-          )}
 
-          {!loading && !loadError && snap && perm && (
-            <>
+            {[
+              { id: "general" as SettingsTab, label: "General", icon: SettingsIcon },
+              { id: "members" as SettingsTab, label: "Members", icon: Users },
+              { id: "permissions" as SettingsTab, label: "Permissions", icon: Shield },
+            ].map((cat) => {
+              const Icon = cat.icon;
+              const isActive = activeTab === cat.id;
+              return (
+                <button
+                  key={cat.id}
+                  onClick={() => setActiveTab(cat.id)}
+                  style={{
+                    display: "flex",
+                    alignItems: "center",
+                    gap: spacing.unit * 2.5,
+                    padding: `${spacing.unit * 2.5}px ${spacing.unit * 3}px`,
+                    borderRadius: 8,
+                    border: `1px solid ${isActive ? palette.accent : "transparent"}`,
+                    backgroundColor: isActive ? palette.bgActive : "transparent",
+                    color: isActive ? palette.textHeading : palette.textSecondary,
+                    cursor: "pointer",
+                    textAlign: "left",
+                    fontSize: typography.fontSizeBase,
+                    fontWeight: isActive
+                      ? typography.fontWeightMedium
+                      : typography.fontWeightNormal,
+                  }}
+                >
+                  <Icon size={18} />
+                  {cat.label}
+                </button>
+              );
+            })}
+          </div>
+
+          {/* Main content area */}
+          <div style={{ flex: 1, display: "flex", flexDirection: "column", minHeight: 0 }}>
+            <div style={{ flex: 1, overflowY: "auto", padding: "16px 20px 20px 20px" }}>
+              {loading && activeTab === "general" && (
+                <div
+                  style={{
+                    display: "flex",
+                    alignItems: "center",
+                    gap: 10,
+                    color: palette.textSecondary,
+                    padding: 24,
+                  }}
+                >
+                  <Loader2 size={20} style={{ animation: "spin 1s linear infinite" }} />
+                  Loading space settings…
+                </div>
+              )}
+
+              {loadError && (
+                <div
+                  style={{
+                    padding: "12px 16px",
+                    backgroundColor: "rgba(237,66,69,0.15)",
+                    border: "1px solid rgba(237,66,69,0.3)",
+                    borderRadius: 4,
+                    color: "#ed4245",
+                    fontSize: typography.fontSizeSmall,
+                  }}
+                >
+                  {loadError}
+                </div>
+              )}
+
+              {!loading && !loadError && snap && perm && activeTab === "general" && (
+                <>
               <div style={{ display: "flex", gap: 16, marginBottom: 16 }}>
                 <div
                   style={{
@@ -820,17 +980,150 @@ export default function SpaceSettingsDialog({
                   {saveError}
                 </div>
               )}
-            </>
-          )}
-        </div>
+                </>
+              )}
 
-        {!loading && !loadError && snap && perm && (
+              {activeTab === "members" && (
+                <div>
+                  <div style={{ marginBottom: spacing.unit * 4 }}>
+                    <div
+                      style={{
+                        position: "relative",
+                        marginBottom: spacing.unit * 3,
+                      }}
+                    >
+                      <input
+                        type="text"
+                        value={memberSearch}
+                        onChange={(e) => setMemberSearch(e.target.value)}
+                        placeholder="Search members..."
+                        style={{
+                          width: "100%",
+                          padding: `${spacing.unit * 2.5}px ${spacing.unit * 4}px`,
+                          fontSize: typography.fontSizeBase,
+                          backgroundColor: palette.bgTertiary,
+                          border: `1px solid ${palette.border}`,
+                          borderRadius: 12,
+                          color: palette.textPrimary,
+                          outline: "none",
+                        }}
+                      />
+                    </div>
+
+                    {/* Admin */}
+                    <MemberCategory
+                      title="Admins"
+                      members={adminMembers}
+                      searchTerm={memberSearch}
+                      palette={palette}
+                      typography={typography}
+                      spacing={spacing}
+                      emptyMessage="No admins found."
+                      alwaysShow
+                      resolvedColorScheme={resolvedColorScheme}
+                    />
+
+                    {/* Moderator */}
+                    <MemberCategory
+                      title="Moderators"
+                      members={moderatorMembers}
+                      searchTerm={memberSearch}
+                      palette={palette}
+                      typography={typography}
+                      spacing={spacing}
+                      emptyMessage="No moderators found."
+                      alwaysShow
+                      resolvedColorScheme={resolvedColorScheme}
+                    />
+
+                    {/* Member */}
+                    <MemberCategory
+                      title="Members"
+                      members={regularMembers}
+                      searchTerm={memberSearch}
+                      palette={palette}
+                      typography={typography}
+                      spacing={spacing}
+                      emptyMessage="No regular members found."
+                      alwaysShow
+                      resolvedColorScheme={resolvedColorScheme}
+                    />
+
+                    {/* Banned */}
+                    <MemberCategory
+                      title="Banned"
+                      members={memberData.banned}
+                      searchTerm={memberSearch}
+                      palette={palette}
+                      typography={typography}
+                      spacing={spacing}
+                      emptyMessage="No banned users in this space."
+                      alwaysShow
+                      onPrimaryAction={handleUnbanFromSpace}
+                      primaryActionLabel="Unban"
+                      onSecondaryAction={handleUnbanFromSpaceTree}
+                      secondaryActionLabel="Unban All Rooms"
+                      actionBusyUserId={unbanBusyId}
+                      resolvedColorScheme={resolvedColorScheme}
+                    />
+                  </div>
+
+                  {membersLoading && (
+                    <div
+                      style={{
+                        color: palette.textSecondary,
+                        textAlign: "center",
+                        padding: 20,
+                      }}
+                    >
+                      Loading members...
+                    </div>
+                  )}
+                  {membersError && (
+                    <div
+                      style={{
+                        marginTop: spacing.unit * 3,
+                        padding: `${spacing.unit * 2}px ${spacing.unit * 3}px`,
+                        borderRadius: 8,
+                        border: "1px solid rgba(237,66,69,0.35)",
+                        backgroundColor: "rgba(237,66,69,0.12)",
+                        color: "#ed4245",
+                        fontSize: typography.fontSizeSmall,
+                      }}
+                    >
+                      {membersError}
+                    </div>
+                  )}
+                </div>
+              )}
+
+              {activeTab === "permissions" && (
+                <div
+                  style={{
+                    padding: spacing.unit * 6,
+                    textAlign: "center",
+                    color: palette.textSecondary,
+                  }}
+                >
+                  <Shield size={48} style={{ marginBottom: spacing.unit * 4, opacity: 0.5 }} />
+                  <div style={{ fontSize: typography.fontSizeLarge, marginBottom: spacing.unit * 2 }}>
+                    Permissions
+                  </div>
+                  <div style={{ maxWidth: 400, margin: "0 auto" }}>
+                    Role-based permissions and power level controls will be implemented here.
+                  </div>
+                </div>
+              )}
+            </div>
+
+        {/* Footer - only for general tab for now */}
+        {activeTab === "general" && !loading && !loadError && snap && perm && (
           <div
             style={{
               display: "flex",
               justifyContent: "flex-end",
               gap: 8,
-              padding: "12px 16px",
+              padding: "12px 20px 12px 20px",
               borderTop: `1px solid ${palette.border}`,
               flexShrink: 0,
             }}
@@ -875,6 +1168,7 @@ export default function SpaceSettingsDialog({
                 display: "flex",
                 alignItems: "center",
                 gap: 8,
+                marginRight: spacing.unit,
               }}
             >
               {saving ? (
@@ -888,10 +1182,210 @@ export default function SpaceSettingsDialog({
             </button>
           </div>
         )}
-
+          </div>
+        </div>
         <style>{`@keyframes spin { to { transform: rotate(360deg); } }`}</style>
       </div>
     </ModalLayer>
+  );
+}
+
+function MemberCategory({
+  title,
+  members,
+  searchTerm,
+  palette,
+  typography,
+  spacing,
+  emptyMessage,
+  alwaysShow = false,
+  onPrimaryAction,
+  primaryActionLabel,
+  onSecondaryAction,
+  secondaryActionLabel,
+  actionBusyUserId,
+  resolvedColorScheme,
+}: {
+  title: string;
+  members: RoomManagementMember[];
+  searchTerm: string;
+  palette: ThemePalette;
+  typography: ThemeTypography;
+  spacing: ThemeSpacing;
+  emptyMessage?: string;
+  alwaysShow?: boolean;
+  onPrimaryAction?: (userId: string) => void;
+  primaryActionLabel?: string;
+  onSecondaryAction?: (userId: string) => void;
+  secondaryActionLabel?: string;
+  actionBusyUserId?: string | null;
+  resolvedColorScheme: "light" | "dark";
+}) {
+  const q = searchTerm.trim().toLowerCase();
+  const filtered = members.filter((m) => {
+    if (!q) return true;
+    const label = (m.displayName ?? m.userId).toLowerCase();
+    return label.includes(q);
+  });
+
+  if (!alwaysShow && filtered.length === 0) return null;
+
+  return (
+    <div style={{ marginBottom: spacing.unit * 4 }}>
+      <div
+        style={{
+          fontSize: typography.fontSizeSmall,
+          fontWeight: typography.fontWeightBold,
+          color: palette.textSecondary,
+          textTransform: "uppercase",
+          letterSpacing: 0.5,
+          marginBottom: spacing.unit * 2,
+        }}
+      >
+        {title} — {filtered.length}
+      </div>
+      {filtered.length === 0 ? (
+        <div
+          style={{
+            padding: `${spacing.unit * 3}px ${spacing.unit * 3}px`,
+            borderRadius: 8,
+            border: `1px solid ${palette.border}`,
+            backgroundColor: palette.bgTertiary,
+            color: palette.textSecondary,
+            fontSize: typography.fontSizeSmall,
+          }}
+        >
+          {emptyMessage ?? `No ${title.toLowerCase()} found.`}
+        </div>
+      ) : (
+      <div style={{ display: "flex", flexDirection: "column", gap: spacing.unit * 1.5 }}>
+        {filtered.map((member) => {
+          const displayName = member.displayName ?? member.userId;
+          const isBusy = actionBusyUserId === member.userId;
+          return (
+            <div
+              key={member.userId}
+              style={{
+                display: "flex",
+                alignItems: "center",
+                gap: spacing.unit * 3,
+                padding: `${spacing.unit * 2}px ${spacing.unit * 3}px`,
+                backgroundColor: palette.bgTertiary,
+                borderRadius: 8,
+                border: `1px solid ${palette.border}`,
+              }}
+            >
+              <div style={{ flexShrink: 0 }}>
+                {member.avatarUrl ? (
+                  <img
+                    src={member.avatarUrl}
+                    alt=""
+                    style={{
+                      width: 36,
+                      height: 36,
+                      borderRadius: "50%",
+                      objectFit: "cover",
+                    }}
+                  />
+                ) : (
+                  <div
+                    style={{
+                      width: 36,
+                      height: 36,
+                      borderRadius: "50%",
+                      backgroundColor: userInitialAvatarBackground(
+                        member.userId,
+                        resolvedColorScheme,
+                      ),
+                      display: "flex",
+                      alignItems: "center",
+                      justifyContent: "center",
+                      color: "#fff",
+                      fontSize: typography.fontSizeSmall,
+                      fontWeight: typography.fontWeightBold,
+                    }}
+                  >
+                    {(displayName || "?").charAt(0).toUpperCase()}
+                  </div>
+                )}
+              </div>
+              <div style={{ flex: 1, minWidth: 0 }}>
+                <div
+                  style={{
+                    fontWeight: typography.fontWeightMedium,
+                    color: palette.textPrimary,
+                    overflow: "hidden",
+                    textOverflow: "ellipsis",
+                    whiteSpace: "nowrap",
+                  }}
+                >
+                  {displayName}
+                </div>
+                <div
+                  style={{
+                    fontSize: typography.fontSizeSmall - 1,
+                    color: palette.textSecondary,
+                  }}
+                >
+                  {member.userId}
+                </div>
+              </div>
+              {(onPrimaryAction || onSecondaryAction) && (
+                <div
+                  style={{
+                    display: "flex",
+                    gap: spacing.unit * 1.5,
+                    flexShrink: 0,
+                  }}
+                >
+                  {onSecondaryAction && secondaryActionLabel && (
+                    <button
+                      type="button"
+                      onClick={() => onSecondaryAction(member.userId)}
+                      disabled={isBusy}
+                      style={{
+                        padding: `${spacing.unit}px ${spacing.unit * 2.5}px`,
+                        backgroundColor: palette.bgActive,
+                        color: palette.textPrimary,
+                        border: `1px solid ${palette.border}`,
+                        borderRadius: 6,
+                        cursor: isBusy ? "not-allowed" : "pointer",
+                        opacity: isBusy ? 0.6 : 1,
+                        fontSize: typography.fontSizeSmall,
+                        fontWeight: typography.fontWeightMedium,
+                      }}
+                    >
+                      {secondaryActionLabel}
+                    </button>
+                  )}
+                  {onPrimaryAction && primaryActionLabel && (
+                    <button
+                      type="button"
+                      onClick={() => onPrimaryAction(member.userId)}
+                      disabled={isBusy}
+                      style={{
+                        padding: `${spacing.unit}px ${spacing.unit * 3}px`,
+                        backgroundColor: "#23a55a",
+                        color: "#fff",
+                        border: "none",
+                        borderRadius: 6,
+                        cursor: isBusy ? "not-allowed" : "pointer",
+                        opacity: isBusy ? 0.6 : 1,
+                        fontSize: typography.fontSizeSmall,
+                        fontWeight: typography.fontWeightMedium,
+                      }}
+                    >
+                      {isBusy ? "Working..." : primaryActionLabel}
+                    </button>
+                  )}
+                </div>
+              )}
+            </div>
+          );
+        })}
+      </div>
+      )}
+    </div>
   );
 }
 
