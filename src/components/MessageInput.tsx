@@ -906,8 +906,11 @@ export default function MessageInput({
                   : typography.fontSizeBase,
                 fontFamily: `${typography.fontFamily}, var(--pax-twemoji-font-stack)`,
                 lineHeight: typography.lineHeight,
-                whiteSpace: "pre-wrap",
-                wordBreak: "break-word",
+                whiteSpace: "nowrap",
+                overflow: "hidden",
+                boxSizing: "border-box",
+                WebkitMaskImage: `linear-gradient(to right, #fff 0%, #fff calc(100% - ${spacing.unit * 5}px), transparent 100%)`,
+                maskImage: `linear-gradient(to right, #fff 0%, #fff calc(100% - ${spacing.unit * 5}px), transparent 100%)`,
               }}
             >
               {editingMessage ? "Edit message" : `Message #${roomName}`}
