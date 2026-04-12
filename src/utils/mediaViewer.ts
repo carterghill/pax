@@ -1,4 +1,5 @@
 import type { ComponentType, CSSProperties } from "react";
+import { isTextPreviewableFile } from "./textPreview";
 import {
   FileArchive,
   FileAudio,
@@ -17,7 +18,7 @@ type FileIconComp = ComponentType<{
   "aria-hidden"?: boolean;
 }>;
 
-export type MediaViewerKind = "image" | "pdf" | "generic";
+export type MediaViewerKind = "image" | "pdf" | "text" | "generic";
 
 export function inferMediaViewerKind(
   mimeType: string | null | undefined,
@@ -31,6 +32,7 @@ export function inferMediaViewerKind(
   ) {
     return "image";
   }
+  if (isTextPreviewableFile(mimeType, fileName)) return "text";
   return "generic";
 }
 

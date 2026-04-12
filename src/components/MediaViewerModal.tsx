@@ -15,6 +15,12 @@ import {
   inferMediaViewerKind,
   type MediaViewerKind,
 } from "../utils/mediaViewer";
+import {
+  bufferLooksBinary,
+  inferPrismLanguage,
+  TEXT_PREVIEW_MAX_BYTES,
+} from "../utils/textPreview";
+import MediaViewerTextBody from "./MediaViewerTextBody";
 import type { PDFDocumentProxy } from "pdfjs-dist";
 import pdfWorkerUrl from "pdfjs-dist/build/pdf.worker.min.mjs?url";
 
@@ -54,6 +60,11 @@ export default function MediaViewerModal({
   const [loadError, setLoadError] = useState<string | null>(null);
   const [loadingPath, setLoadingPath] = useState(false);
 
+  const [textContent, setTextContent] = useState<string | null>(null);
+  const [textTruncated, setTextTruncated] = useState(false);
+  const [textError, setTextError] = useState<string | null>(null);
+  const [textLoading, setTextLoading] = useState(false);
+
   const [zoom, setZoom] = useState(1);
   const [pdfPage, setPdfPage] = useState(1);
   const [pdfNumPages, setPdfNumPages] = useState(0);
@@ -72,6 +83,10 @@ export default function MediaViewerModal({
     setFileUrl(null);
     setLoadError(null);
     setLoadingPath(false);
+    setTextContent(null);
+    setTextTruncated(false);
+    setTextError(null);
+    setTextLoading(false);
     setZoom(1);
     setPdfPage(1);
     setPdfNumPages(0);
@@ -131,6 +146,50 @@ export default function MediaViewerModal({
       cancelled = true;
     };
   }, [open, payload, resetState]);
+
+  useEffect(() => {
+    if (!open || !fileUrl || effectiveKind !== "text") {
+      setTextContent(null);
+      setTextTruncated(false);
+      setTextError(null);
+      setTextLoading(false);
+      return;
+    }
+
+    let cancelled = false;
+    setTextLoading(true);
+    setTextError(null);
+    setTextContent(null);
+    setTextTruncated(false);
+
+    (async () => {
+      try {
+        const res = await fetch(fileUrl);
+        if (!res.ok) throw new Error(`HTTP ${res.status}`);
+        const buf = await res.arrayBuffer();
+        if (cancelled) return;
+
+        const truncated = buf.byteLength > TEXT_PREVIEW_MAX_BYTES;
+        const slice = truncated ? buf.slice(0, TEXT_PREVIEW_MAX_BYTES) : buf;
+        const u8 = new Uint8Array(slice);
+        if (bufferLooksBinary(u8)) {
+          setTextError("This file looks binary. Use download to open it with another app.");
+          return;
+        }
+        const text = new TextDecoder("utf-8", { fatal: false }).decode(u8);
+        setTextContent(text);
+        setTextTruncated(truncated);
+      } catch (e) {
+        if (!cancelled) setTextError(formatInvokeError(e));
+      } finally {
+        if (!cancelled) setTextLoading(false);
+      }
+    })();
+
+    return () => {
+      cancelled = true;
+    };
+  }, [open, fileUrl, effectiveKind]);
 
   useEffect(() => {
     if (!open) return;
@@ -293,7 +352,7 @@ export default function MediaViewerModal({
           </div>
         ) : null}
 
-        {(effectiveKind === "pdf" || effectiveKind === "image") && (
+        {(effectiveKind === "pdf" || effectiveKind === "image" || effectiveKind === "text") && (
           <div style={{ display: "flex", alignItems: "center", gap: spacing.unit * 0.5 }}>
             <button
               type="button"
@@ -353,10 +412,24 @@ export default function MediaViewerModal({
         </div>
       );
     }
-    if (loadError) {
+    if (effectiveKind === "text" && textLoading) {
+      return (
+        <div style={{ padding: spacing.unit * 6, color: palette.textSecondary }}>
+          Loading file…
+        </div>
+      );
+    }
+    if (loadError && !fileUrl) {
       return (
         <div style={{ padding: spacing.unit * 4, color: palette.textSecondary, maxWidth: 480 }}>
           {loadError}
+        </div>
+      );
+    }
+    if (effectiveKind === "text" && textError) {
+      return (
+        <div style={{ padding: spacing.unit * 4, color: palette.textSecondary, maxWidth: 480 }}>
+          {textError}
         </div>
       );
     }
@@ -425,6 +498,20 @@ export default function MediaViewerModal({
             }}
           />
         </div>
+      );
+    }
+
+    if (effectiveKind === "text" && textContent != null) {
+      const lang = inferPrismLanguage(payload.fileName, payload.mimeType);
+      return (
+        <MediaViewerTextBody
+          text={textContent}
+          language={lang}
+          resolvedColorScheme={resolvedColorScheme}
+          zoom={zoom}
+          fontSizePx={Math.round(typography.fontSizeSmall * 1.05)}
+          truncated={textTruncated}
+        />
       );
     }
 
