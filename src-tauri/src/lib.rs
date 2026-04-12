@@ -282,6 +282,8 @@ pub fn run() {
             commands::members::search_user_directory,
             commands::members::get_invite_suggestions,
             commands::members::kick_user,
+            commands::members::ban_user,
+            commands::members::get_member_moderation_permissions,
             commands::voice_matrix::get_voice_participants,
             commands::voice_matrix::get_all_voice_participants,
             commands::voice_matrix::get_livekit_voice_room_snapshot,

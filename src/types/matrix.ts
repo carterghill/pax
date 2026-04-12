@@ -54,6 +54,12 @@ export interface RoomMember {
   statusMsg: string | null;
 }
 
+/** From `get_member_moderation_permissions` — whether the current user may kick/ban this member. */
+export interface MemberModerationPermissions {
+  canKick: boolean;
+  canBan: boolean;
+}
+
 /** From `get_room_member_profile` — room-scoped member details. */
 export interface RoomMemberProfile {
   userId: string;

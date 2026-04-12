@@ -14,6 +14,8 @@ use matrix_sdk::media::{MediaFormat, MediaRequestParameters};
 use matrix_sdk::ruma::api::client::profile::get_profile::v3::Request as GetProfileRequest;
 use matrix_sdk::ruma::api::client::profile::{AvatarUrl, DisplayName};
 use matrix_sdk::ruma::events::room::MediaSource;
+use matrix_sdk::ruma::events::room::member::MembershipState;
+use matrix_sdk::ruma::events::room::power_levels::UserPowerLevel;
 
 #[tauri::command]
 pub async fn get_room_members(
@@ -838,6 +840,121 @@ pub async fn kick_user(
         let status = resp.status();
         let text = resp.text().await.unwrap_or_default();
         return Err(format!("Kick failed ({status}): {text}"));
+    }
+    Ok(())
+}
+
+/// True when `own` has strictly higher power than `target` (Matrix kick/ban rules).
+fn user_power_outranks(own: UserPowerLevel, target: UserPowerLevel) -> bool {
+    match (own, target) {
+        (UserPowerLevel::Infinite, UserPowerLevel::Infinite) => false,
+        (UserPowerLevel::Infinite, _) => true,
+        (_, UserPowerLevel::Infinite) => false,
+        (UserPowerLevel::Int(a), UserPowerLevel::Int(b)) => a > b,
+        _ => false,
+    }
+}
+
+/// Whether the current user may kick or ban `member_user_id` in this room (power levels + membership).
+#[derive(Clone, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct MemberModerationPermissions {
+    pub can_kick: bool,
+    pub can_ban: bool,
+}
+
+#[tauri::command]
+pub async fn get_member_moderation_permissions(
+    state: State<'_, Arc<AppState>>,
+    room_id: String,
+    member_user_id: String,
+) -> Result<MemberModerationPermissions, String> {
+    let client = get_client(&state).await?;
+    let room = resolve_room(&client, &room_id)?;
+    let my_id = client.user_id().ok_or("Not logged in")?;
+    let target_uid = matrix_sdk::ruma::UserId::parse(&member_user_id)
+        .map_err(|e| format!("Invalid user ID: {e}"))?;
+
+    if target_uid == *my_id {
+        return Ok(MemberModerationPermissions {
+            can_kick: false,
+            can_ban: false,
+        });
+    }
+
+    let Some(self_member) = room
+        .get_member(my_id)
+        .await
+        .map_err(|e| format!("Failed to load own membership: {}", fmt_error_chain(&e)))?
+    else {
+        return Ok(MemberModerationPermissions {
+            can_kick: false,
+            can_ban: false,
+        });
+    };
+
+    let Some(target_member) = room
+        .get_member(&target_uid)
+        .await
+        .map_err(|e| format!("Failed to load member: {}", fmt_error_chain(&e)))?
+    else {
+        return Ok(MemberModerationPermissions {
+            can_kick: false,
+            can_ban: false,
+        });
+    };
+
+    if *target_member.membership() != MembershipState::Join {
+        return Ok(MemberModerationPermissions {
+            can_kick: false,
+            can_ban: false,
+        });
+    }
+
+    let own_pl = self_member.power_level();
+    let target_pl = target_member.power_level();
+
+    let can_kick =
+        self_member.can_kick() && user_power_outranks(own_pl, target_pl);
+    let can_ban = self_member.can_ban() && user_power_outranks(own_pl, target_pl);
+
+    Ok(MemberModerationPermissions { can_kick, can_ban })
+}
+
+/// Ban a user from a room or space.
+#[tauri::command]
+pub async fn ban_user(
+    state: State<'_, Arc<AppState>>,
+    room_id: String,
+    user_id: String,
+    reason: Option<String>,
+) -> Result<(), String> {
+    let client = get_client(&state).await?;
+    let access_token = client.access_token().ok_or("No access token")?;
+    let homeserver = client.homeserver().to_string();
+    let hs = homeserver.trim_end_matches('/');
+    let encoded_room = urlencoding::encode(&room_id);
+
+    let url = format!("{}/_matrix/client/v3/rooms/{}/ban", hs, encoded_room);
+    let mut body = serde_json::json!({ "user_id": user_id });
+    if let Some(r) = reason {
+        body["reason"] = serde_json::json!(r);
+    }
+
+    let resp = state
+        .http_client
+        .post(&url)
+        .timeout(Duration::from_secs(15))
+        .bearer_auth(access_token)
+        .json(&body)
+        .send()
+        .await
+        .map_err(|e| format!("Ban failed: {}", fmt_error_chain(&e)))?;
+
+    if !resp.status().is_success() {
+        let status = resp.status();
+        let text = resp.text().await.unwrap_or_default();
+        return Err(format!("Ban failed ({status}): {text}"));
     }
     Ok(())
 }

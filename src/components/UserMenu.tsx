@@ -5,7 +5,7 @@ import { Check, X, Loader2 } from "lucide-react";
 import { useTheme } from "../theme/ThemeContext";
 import { userInitialAvatarBackground } from "../utils/userAvatarColor";
 import { useRoomMembers } from "../hooks/useRoomMembers";
-import { RoomMember } from "../types/matrix";
+import type { MemberModerationPermissions, RoomMember } from "../types/matrix";
 import { usePresenceContext } from "../hooks/PresenceContext";
 import { resolvePresenceWithDnd, parseStatusMsg, composeStatusMsg } from "../utils/statusMessage";
 import MemberContextMenu from "./MemberContextMenu";
@@ -15,6 +15,8 @@ interface UserMenuProps {
   width: number;
   roomId: string;
   userId: string;
+  /** When true, moderation actions say "space" instead of "room". */
+  isSpaceRoom?: boolean;
   /** Open DM composer (room is created on first send, Element-style). */
   onStartDirectMessage: (peerUserId: string, displayNameHint: string) => void;
 }
@@ -156,7 +158,13 @@ function computeWindow(
   return [start, end];
 }
 
-export default function UserMenu({ width, roomId, userId, onStartDirectMessage }: UserMenuProps) {
+export default function UserMenu({
+  width,
+  roomId,
+  userId,
+  isSpaceRoom = false,
+  onStartDirectMessage,
+}: UserMenuProps) {
   const { palette, typography, spacing, resolvedColorScheme } = useTheme();
   const { members, loading, avatarOverrides } = useRoomMembers(roomId);
   const { effectivePresence, statusMessage: localStatusMessage, manualStatus } = usePresenceContext();
@@ -167,6 +175,7 @@ export default function UserMenu({ width, roomId, userId, onStartDirectMessage }
   const [memberContextMenu, setMemberContextMenu] = useState<{
     x: number; y: number; userId: string; displayName: string;
   } | null>(null);
+  const [memberModeration, setMemberModeration] = useState<MemberModerationPermissions | null>(null);
   const [profileUserId, setProfileUserId] = useState<string | null>(null);
   const activeRoomRef = useRef(roomId);
   activeRoomRef.current = roomId;
@@ -236,9 +245,37 @@ export default function UserMenu({ width, roomId, userId, onStartDirectMessage }
   useEffect(() => {
     setKnockData(null);
     setMemberContextMenu(null);
+    setMemberModeration(null);
     setProfileUserId(null);
     fetchKnocks();
   }, [roomId, fetchKnocks]);
+
+  useEffect(() => {
+    if (!memberContextMenu) {
+      setMemberModeration(null);
+      return;
+    }
+    const uid = memberContextMenu.userId;
+    if (uid.trim().toLowerCase() === userId.trim().toLowerCase()) {
+      setMemberModeration({ canKick: false, canBan: false });
+      return;
+    }
+    let cancelled = false;
+    setMemberModeration(null);
+    void invoke<MemberModerationPermissions>("get_member_moderation_permissions", {
+      roomId,
+      memberUserId: uid,
+    })
+      .then((p) => {
+        if (!cancelled) setMemberModeration(p);
+      })
+      .catch(() => {
+        if (!cancelled) setMemberModeration({ canKick: false, canBan: false });
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [memberContextMenu, roomId, userId]);
 
   useEffect(() => {
     const unlisten = listen("rooms-changed", () => { fetchKnocks(); });
@@ -280,6 +317,46 @@ export default function UserMenu({ width, roomId, userId, onStartDirectMessage }
     setMemberContextMenu(null);
     onStartDirectMessage(peerId, hint);
   }, [memberContextMenu, onStartDirectMessage]);
+
+  const kickBanPlace: "room" | "space" = isSpaceRoom ? "space" : "room";
+
+  const handleKickFromMenu = useCallback(async () => {
+    if (!memberContextMenu) return;
+    const targetId = memberContextMenu.userId;
+    const label = memberContextMenu.displayName;
+    if (
+      !window.confirm(
+        `Remove ${label} from this ${kickBanPlace}? They can rejoin if the ${kickBanPlace} is public or they receive an invite.`,
+      )
+    ) {
+      return;
+    }
+    setMemberContextMenu(null);
+    try {
+      await invoke("kick_user", { roomId, userId: targetId, reason: null });
+    } catch (e) {
+      console.error("Kick failed:", e);
+    }
+  }, [memberContextMenu, roomId, kickBanPlace]);
+
+  const handleBanFromMenu = useCallback(async () => {
+    if (!memberContextMenu) return;
+    const targetId = memberContextMenu.userId;
+    const label = memberContextMenu.displayName;
+    if (
+      !window.confirm(
+        `Ban ${label} from this ${kickBanPlace}? They will not be able to rejoin until unbanned.`,
+      )
+    ) {
+      return;
+    }
+    setMemberContextMenu(null);
+    try {
+      await invoke("ban_user", { roomId, userId: targetId, reason: null });
+    } catch (e) {
+      console.error("Ban failed:", e);
+    }
+  }, [memberContextMenu, roomId, kickBanPlace]);
 
   // Override current user's presence and statusMsg locally
   const displayMembers = useMemo(
@@ -484,6 +561,10 @@ export default function UserMenu({ width, roomId, userId, onStartDirectMessage }
               ? handleStartDirectMessageFromMenu
               : undefined
           }
+          moderation={memberModeration ?? undefined}
+          onKick={memberModeration?.canKick ? handleKickFromMenu : undefined}
+          onBan={memberModeration?.canBan ? handleBanFromMenu : undefined}
+          kickBanPlace={kickBanPlace}
         />
       )}
       {profileUserId && (

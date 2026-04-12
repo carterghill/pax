@@ -1,5 +1,5 @@
 import { useEffect, useRef } from "react";
-import { Copy, MessageSquare, User } from "lucide-react";
+import { Ban, Copy, MessageSquare, User, UserMinus } from "lucide-react";
 import { useTheme } from "../theme/ThemeContext";
 import { useOverlayObstruction } from "../hooks/useOverlayObstruction";
 
@@ -11,6 +11,12 @@ interface MemberContextMenuProps {
   onClose: () => void;
   onProfile: () => void;
   onSendMessage?: () => void;
+  /** When set, show kick/ban once loaded (omit while fetching). */
+  moderation?: { canKick: boolean; canBan: boolean };
+  onKick?: () => void;
+  onBan?: () => void;
+  /** Wording for kick/ban labels ("room" vs "space"). */
+  kickBanPlace?: "room" | "space";
 }
 
 export default function MemberContextMenu({
@@ -21,6 +27,10 @@ export default function MemberContextMenu({
   onClose,
   onProfile,
   onSendMessage,
+  moderation,
+  onKick,
+  onBan,
+  kickBanPlace = "room",
 }: MemberContextMenuProps) {
   const { palette, spacing, typography } = useTheme();
   const menuRef = useRef<HTMLDivElement>(null);
@@ -155,6 +165,76 @@ export default function MemberContextMenu({
           <MessageSquare size={14} color={palette.textSecondary} />
           Send message
         </button>
+      )}
+
+      {moderation && (moderation.canKick || moderation.canBan) && (
+        <>
+          <div
+            style={{
+              height: 1,
+              backgroundColor: palette.border,
+              margin: `${spacing.unit}px 0`,
+            }}
+          />
+          {moderation.canKick && onKick && (
+            <button
+              type="button"
+              onClick={() => onKick()}
+              style={{
+                display: "flex",
+                alignItems: "center",
+                gap: spacing.unit * 2,
+                width: "100%",
+                padding: `${spacing.unit * 1.5}px ${spacing.unit * 2}px`,
+                border: "none",
+                borderRadius: 4,
+                backgroundColor: "transparent",
+                color: "#ed4245",
+                fontSize: typography.fontSizeSmall,
+                cursor: "pointer",
+                textAlign: "left",
+              }}
+              onMouseEnter={(e) => {
+                (e.currentTarget as HTMLButtonElement).style.backgroundColor = palette.bgActive;
+              }}
+              onMouseLeave={(e) => {
+                (e.currentTarget as HTMLButtonElement).style.backgroundColor = "transparent";
+              }}
+            >
+              <UserMinus size={14} color="#ed4245" />
+              {`Kick from ${kickBanPlace}`}
+            </button>
+          )}
+          {moderation.canBan && onBan && (
+            <button
+              type="button"
+              onClick={() => onBan()}
+              style={{
+                display: "flex",
+                alignItems: "center",
+                gap: spacing.unit * 2,
+                width: "100%",
+                padding: `${spacing.unit * 1.5}px ${spacing.unit * 2}px`,
+                border: "none",
+                borderRadius: 4,
+                backgroundColor: "transparent",
+                color: "#ed4245",
+                fontSize: typography.fontSizeSmall,
+                cursor: "pointer",
+                textAlign: "left",
+              }}
+              onMouseEnter={(e) => {
+                (e.currentTarget as HTMLButtonElement).style.backgroundColor = palette.bgActive;
+              }}
+              onMouseLeave={(e) => {
+                (e.currentTarget as HTMLButtonElement).style.backgroundColor = "transparent";
+              }}
+            >
+              <Ban size={14} color="#ed4245" />
+              {`Ban from ${kickBanPlace}`}
+            </button>
+          )}
+        </>
       )}
 
       <div

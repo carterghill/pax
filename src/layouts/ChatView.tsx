@@ -456,6 +456,7 @@ export default function ChatView({
               width={userMenuWidth}
               roomId={activeRoom.id}
               userId={userId}
+              isSpaceRoom={activeRoom.isSpace}
               onStartDirectMessage={onStartDirectMessage}
             />
             <div
