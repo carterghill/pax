@@ -424,6 +424,26 @@ export default function MainLayout({
     setSettingsOpen(false);
   }, []);
 
+  /** Joined rooms not under any space (for space home "Add existing room"). */
+  const orphanRoomsForSpaceHome = useMemo(
+    () =>
+      roomsBySpace(null).filter(
+        (r) => r.membership === "joined" && !r.isDirect
+      ),
+    [roomsBySpace]
+  );
+
+  /** Joined top-level spaces other than the active one (for "Add existing space"). */
+  const orphanSpacesForSpaceHome = useMemo(() => {
+    if (!activeSpaceId) return [];
+    return spaces.filter(
+      (s) =>
+        s.membership === "joined" &&
+        s.id !== activeSpaceId &&
+        s.parentSpaceIds.length === 0
+    );
+  }, [spaces, activeSpaceId]);
+
   const handleSpacesChanged = useCallback(async (payload?: RoomsChangedPayload) => {
     if (payload?.optimisticRoom) {
       upsertOptimisticRoom(payload.optimisticRoom);
@@ -578,6 +598,8 @@ export default function MainLayout({
               onSelectChildSpace={handleSelectSpace}
               getRoomsInChildSpace={roomsBySpace}
               onRoomsChanged={handleSpacesChanged}
+              orphanRooms={orphanRoomsForSpaceHome}
+              orphanSpaces={orphanSpacesForSpaceHome}
             />
           ) : (
             <div style={{

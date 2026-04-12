@@ -27,6 +27,8 @@ import {
   userInitialAvatarBackground,
 } from "../utils/userAvatarColor";
 import CreateRoomDialog from "../components/CreateRoomDialog";
+import CreateSpaceDialog from "../components/CreateSpaceDialog";
+import LinkExistingToSpaceDialog from "../components/LinkExistingToSpaceDialog";
 import type { SpaceChildInfo, SpaceInfo } from "../utils/spaceHomeCache";
 import { getCachedSpaceInfo, setCachedSpaceInfo } from "../utils/spaceHomeCache";
 
@@ -78,6 +80,10 @@ interface SpaceHomeViewProps {
   /** Joined channels for a child space id (from sync / get_rooms). */
   getRoomsInChildSpace: (spaceId: string) => Room[];
   onRoomsChanged: (payload?: RoomsChangedPayload) => void | Promise<void>;
+  /** Joined rooms with no parent space — can be linked into this space. */
+  orphanRooms: Room[];
+  /** Joined top-level spaces (excluding this one) — can be linked as sub-spaces. */
+  orphanSpaces: Room[];
 }
 
 function mergeCreatedChildIntoSpaceInfo(
@@ -137,6 +143,8 @@ export default function SpaceHomeView({
   onSelectChildSpace,
   getRoomsInChildSpace,
   onRoomsChanged,
+  orphanRooms,
+  orphanSpaces,
 }: SpaceHomeViewProps) {
   const { palette, typography, spacing, resolvedColorScheme } = useTheme();
   const [info, setInfo] = useState<SpaceInfo | null>(null);
@@ -149,6 +157,14 @@ export default function SpaceHomeView({
 
   const [canManageChildren, setCanManageChildren] = useState(false);
   const [showCreateRoom, setShowCreateRoom] = useState(false);
+  const [showCreateSubSpace, setShowCreateSubSpace] = useState(false);
+  const [showLinkExistingRoom, setShowLinkExistingRoom] = useState(false);
+  const [showLinkExistingSpace, setShowLinkExistingSpace] = useState(false);
+  const [addRoomMenuOpen, setAddRoomMenuOpen] = useState(false);
+  const [addSpaceMenuOpen, setAddSpaceMenuOpen] = useState(false);
+  const [roomsListCollapsed, setRoomsListCollapsed] = useState(false);
+  const addRoomMenuRef = useRef<HTMLDivElement>(null);
+  const addSpaceMenuRef = useRef<HTMLDivElement>(null);
   /** Sub-space id → expanded in space home (absent = expanded). */
   const [subSpaceExpandedHome, setSubSpaceExpandedHome] = useState<Record<string, boolean>>({});
   /** Per–sub-space hierarchy from `get_space_info(sub.id)` (joinable rooms not in sync). */
@@ -266,6 +282,12 @@ export default function SpaceHomeView({
   useEffect(() => {
     setJoiningRoomId(null);
     setShowCreateRoom(false);
+    setShowCreateSubSpace(false);
+    setShowLinkExistingRoom(false);
+    setShowLinkExistingSpace(false);
+    setAddRoomMenuOpen(false);
+    setAddSpaceMenuOpen(false);
+    setRoomsListCollapsed(false);
 
     const cached = getCachedSpaceInfo(space.id);
     if (cached) {
@@ -314,6 +336,19 @@ export default function SpaceHomeView({
     const unlisten = listen("rooms-changed", () => { fetchKnocks(); });
     return () => { unlisten.then((fn) => fn()); };
   }, [fetchKnocks]);
+
+  useEffect(() => {
+    if (!addRoomMenuOpen && !addSpaceMenuOpen) return;
+    const close = (e: MouseEvent) => {
+      const t = e.target as Node;
+      if (addRoomMenuRef.current?.contains(t)) return;
+      if (addSpaceMenuRef.current?.contains(t)) return;
+      setAddRoomMenuOpen(false);
+      setAddSpaceMenuOpen(false);
+    };
+    document.addEventListener("mousedown", close);
+    return () => document.removeEventListener("mousedown", close);
+  }, [addRoomMenuOpen, addSpaceMenuOpen]);
 
   const handleAcceptKnock = useCallback(async (knockUserId: string) => {
     setKnockActionId(knockUserId);
@@ -611,69 +646,266 @@ export default function SpaceHomeView({
           ) : null}
         </div>
 
-        {/* Create room button */}
+        {/* Channels header + Add Room / Add Space (aligned with listing, Cinny-style) */}
         {canManageChildren && (
-          <div style={{ marginBottom: spacing.unit * 4 }}>
+          <div
+            style={{
+              display: "flex",
+              alignItems: "center",
+              justifyContent: "space-between",
+              gap: spacing.unit * 2,
+              flexWrap: "wrap",
+              marginBottom: spacing.unit * 3,
+            }}
+          >
             <button
-              onClick={() => setShowCreateRoom(true)}
+              type="button"
+              onClick={() => setRoomsListCollapsed((c) => !c)}
               style={{
-                display: "flex",
+                display: "inline-flex",
                 alignItems: "center",
-                gap: spacing.unit * 2,
-                padding: `${spacing.unit * 2.5}px ${spacing.unit * 3}px`,
+                gap: spacing.unit * 1.5,
+                padding: `${spacing.unit}px ${spacing.unit * 2}px`,
+                margin: 0,
+                border: "none",
                 borderRadius: spacing.unit * 1.5,
-                border: `1px solid ${palette.border}`,
                 backgroundColor: "transparent",
-                color: palette.textPrimary,
+                color: palette.textHeading,
                 fontSize: typography.fontSizeBase,
-                fontWeight: typography.fontWeightMedium,
+                fontWeight: typography.fontWeightBold,
                 fontFamily: typography.fontFamily,
                 cursor: "pointer",
-                width: "100%",
-                transition: "background-color 0.15s",
               }}
-              onMouseEnter={(e) =>
-                (e.currentTarget.style.backgroundColor = palette.bgHover)
-              }
-              onMouseLeave={(e) =>
-                (e.currentTarget.style.backgroundColor = "transparent")
-              }
             >
-              <div
-                style={{
-                  width: 36,
-                  height: 36,
-                  borderRadius: "50%",
-                  backgroundColor: palette.bgActive,
-                  display: "flex",
-                  alignItems: "center",
-                  justifyContent: "center",
-                  flexShrink: 0,
-                }}
-              >
-                <Plus size={18} color={palette.accent} />
-              </div>
-              Create Room
+              <span>Channels</span>
+              <span style={{ color: palette.textSecondary, fontWeight: typography.fontWeightMedium }}>
+                · {totalChannelCount}
+              </span>
+              {roomsListCollapsed ? (
+                <ChevronRight size={18} strokeWidth={2} aria-hidden />
+              ) : (
+                <ChevronDown size={18} strokeWidth={2} aria-hidden />
+              )}
             </button>
+            <div style={{ display: "flex", alignItems: "center", gap: 8, marginLeft: "auto" }}>
+              <div ref={addRoomMenuRef} style={{ position: "relative" }}>
+                <button
+                  type="button"
+                  onClick={() => {
+                    setAddSpaceMenuOpen(false);
+                    setAddRoomMenuOpen((o) => !o);
+                  }}
+                  style={{
+                    display: "inline-flex",
+                    alignItems: "center",
+                    gap: 5,
+                    padding: "5px 12px",
+                    borderRadius: 9999,
+                    border: "none",
+                    backgroundColor: palette.accent,
+                    color: "#fff",
+                    fontSize: typography.fontSizeSmall,
+                    fontWeight: typography.fontWeightMedium,
+                    fontFamily: typography.fontFamily,
+                    cursor: "pointer",
+                  }}
+                >
+                  <Plus size={14} strokeWidth={2.5} aria-hidden />
+                  Add Room
+                </button>
+                {addRoomMenuOpen && (
+                  <div
+                    style={{
+                      position: "absolute",
+                      top: "100%",
+                      right: 0,
+                      marginTop: 6,
+                      minWidth: 220,
+                      padding: spacing.unit,
+                      borderRadius: 8,
+                      backgroundColor: palette.bgTertiary,
+                      border: `1px solid ${palette.border}`,
+                      boxShadow: "0 8px 24px rgba(0,0,0,0.35)",
+                      zIndex: 50,
+                    }}
+                  >
+                    <button
+                      type="button"
+                      onClick={() => {
+                        setAddRoomMenuOpen(false);
+                        setShowCreateRoom(true);
+                      }}
+                      style={{
+                        display: "block",
+                        width: "100%",
+                        textAlign: "left",
+                        padding: `${spacing.unit * 1.5}px ${spacing.unit * 2}px`,
+                        border: "none",
+                        borderRadius: 6,
+                        backgroundColor: "transparent",
+                        color: palette.textPrimary,
+                        fontSize: typography.fontSizeSmall,
+                        fontFamily: typography.fontFamily,
+                        cursor: "pointer",
+                      }}
+                      onMouseEnter={(e) => {
+                        e.currentTarget.style.backgroundColor = palette.bgHover;
+                      }}
+                      onMouseLeave={(e) => {
+                        e.currentTarget.style.backgroundColor = "transparent";
+                      }}
+                    >
+                      Create new room
+                    </button>
+                    <button
+                      type="button"
+                      title={orphanRooms.length === 0 ? "No rooms without a parent space" : undefined}
+                      disabled={orphanRooms.length === 0}
+                      onClick={() => {
+                        if (orphanRooms.length === 0) return;
+                        setAddRoomMenuOpen(false);
+                        setShowLinkExistingRoom(true);
+                      }}
+                      style={{
+                        display: "block",
+                        width: "100%",
+                        textAlign: "left",
+                        padding: `${spacing.unit * 1.5}px ${spacing.unit * 2}px`,
+                        border: "none",
+                        borderRadius: 6,
+                        backgroundColor: "transparent",
+                        color: orphanRooms.length === 0 ? palette.textSecondary : palette.textPrimary,
+                        fontSize: typography.fontSizeSmall,
+                        fontFamily: typography.fontFamily,
+                        cursor: orphanRooms.length === 0 ? "default" : "pointer",
+                        opacity: orphanRooms.length === 0 ? 0.55 : 1,
+                      }}
+                      onMouseEnter={(e) => {
+                        if (orphanRooms.length === 0) return;
+                        e.currentTarget.style.backgroundColor = palette.bgHover;
+                      }}
+                      onMouseLeave={(e) => {
+                        e.currentTarget.style.backgroundColor = "transparent";
+                      }}
+                    >
+                      Add existing room
+                    </button>
+                  </div>
+                )}
+              </div>
+              <div ref={addSpaceMenuRef} style={{ position: "relative" }}>
+                <button
+                  type="button"
+                  onClick={() => {
+                    setAddRoomMenuOpen(false);
+                    setAddSpaceMenuOpen((o) => !o);
+                  }}
+                  style={{
+                    display: "inline-flex",
+                    alignItems: "center",
+                    gap: 5,
+                    padding: "5px 12px",
+                    borderRadius: 9999,
+                    border: `1px solid ${palette.border}`,
+                    backgroundColor: palette.bgTertiary,
+                    color: palette.textPrimary,
+                    fontSize: typography.fontSizeSmall,
+                    fontWeight: typography.fontWeightMedium,
+                    fontFamily: typography.fontFamily,
+                    cursor: "pointer",
+                  }}
+                >
+                  <Plus size={14} strokeWidth={2.5} aria-hidden />
+                  Add Space
+                </button>
+                {addSpaceMenuOpen && (
+                  <div
+                    style={{
+                      position: "absolute",
+                      top: "100%",
+                      right: 0,
+                      marginTop: 6,
+                      minWidth: 220,
+                      padding: spacing.unit,
+                      borderRadius: 8,
+                      backgroundColor: palette.bgTertiary,
+                      border: `1px solid ${palette.border}`,
+                      boxShadow: "0 8px 24px rgba(0,0,0,0.35)",
+                      zIndex: 50,
+                    }}
+                  >
+                    <button
+                      type="button"
+                      onClick={() => {
+                        setAddSpaceMenuOpen(false);
+                        setShowCreateSubSpace(true);
+                      }}
+                      style={{
+                        display: "block",
+                        width: "100%",
+                        textAlign: "left",
+                        padding: `${spacing.unit * 1.5}px ${spacing.unit * 2}px`,
+                        border: "none",
+                        borderRadius: 6,
+                        backgroundColor: "transparent",
+                        color: palette.textPrimary,
+                        fontSize: typography.fontSizeSmall,
+                        fontFamily: typography.fontFamily,
+                        cursor: "pointer",
+                      }}
+                      onMouseEnter={(e) => {
+                        e.currentTarget.style.backgroundColor = palette.bgHover;
+                      }}
+                      onMouseLeave={(e) => {
+                        e.currentTarget.style.backgroundColor = "transparent";
+                      }}
+                    >
+                      Create new space
+                    </button>
+                    <button
+                      type="button"
+                      title={orphanSpaces.length === 0 ? "No other top-level spaces to add" : undefined}
+                      disabled={orphanSpaces.length === 0}
+                      onClick={() => {
+                        if (orphanSpaces.length === 0) return;
+                        setAddSpaceMenuOpen(false);
+                        setShowLinkExistingSpace(true);
+                      }}
+                      style={{
+                        display: "block",
+                        width: "100%",
+                        textAlign: "left",
+                        padding: `${spacing.unit * 1.5}px ${spacing.unit * 2}px`,
+                        border: "none",
+                        borderRadius: 6,
+                        backgroundColor: "transparent",
+                        color: orphanSpaces.length === 0 ? palette.textSecondary : palette.textPrimary,
+                        fontSize: typography.fontSizeSmall,
+                        fontFamily: typography.fontFamily,
+                        cursor: orphanSpaces.length === 0 ? "default" : "pointer",
+                        opacity: orphanSpaces.length === 0 ? 0.55 : 1,
+                      }}
+                      onMouseEnter={(e) => {
+                        if (orphanSpaces.length === 0) return;
+                        e.currentTarget.style.backgroundColor = palette.bgHover;
+                      }}
+                      onMouseLeave={(e) => {
+                        e.currentTarget.style.backgroundColor = "transparent";
+                      }}
+                    >
+                      Add existing space
+                    </button>
+                  </div>
+                )}
+              </div>
+            </div>
           </div>
         )}
 
         {/* Channels: sub-space groups + direct (merged with per–sub-space hierarchy for join + counts) */}
-        {(joinedSubspaces.length > 0 || joinedRoomsDirectFiltered.length > 0) && (
+        {(joinedSubspaces.length > 0 || joinedRoomsDirectFiltered.length > 0) &&
+          (!canManageChildren || !roomsListCollapsed) && (
           <div style={{ marginBottom: spacing.unit * 6 }}>
-            {joinedSubspaces.length > 0 && (
-              <div style={{
-                fontSize: typography.fontSizeSmall,
-                fontWeight: typography.fontWeightBold,
-                color: palette.textSecondary,
-                textTransform: "uppercase" as const,
-                letterSpacing: "0.02em",
-                padding: `${spacing.unit * 2}px ${spacing.unit * 2}px`,
-                marginBottom: spacing.unit * 2,
-              }}>
-                Channels in this space — {totalChannelCount}
-              </div>
-            )}
             {joinedSubspaces.map((sub) => {
               const channels = mergedSubChannelsBySubId[sub.id] ?? [];
               const expanded = isHomeSubExpanded(sub.id);
@@ -815,7 +1047,8 @@ export default function SpaceHomeView({
             )}
             {nonDirectChannelsHome.length > 0 && (
               <RoomSection
-                title={joinedSubspaces.length > 0 ? "Other channels" : "Channels in this space"}
+                title={joinedSubspaces.length > 0 ? "Other channels" : "Channels"}
+                showHeader={!(joinedSubspaces.length === 0 && canManageChildren)}
                 rooms={nonDirectChannelsHome}
                 onClickRoom={onSelectRoom}
                 joiningRoomId={joiningRoomId}
@@ -902,7 +1135,7 @@ export default function SpaceHomeView({
             padding: spacing.unit * 6,
           }}>
             {canManageChildren
-              ? "No rooms in this space yet. Create one to get started!"
+              ? "No rooms in this space yet. Use Add Room or Add Space above to create or link one."
               : "No rooms in this space yet"}
           </div>
         )}
@@ -931,12 +1164,60 @@ export default function SpaceHomeView({
           }}
         />
       )}
+      {showCreateSubSpace && (
+        <CreateSpaceDialog
+          canCreate
+          parentSpace={{ id: space.id, name: info.name }}
+          onClose={() => setShowCreateSubSpace(false)}
+          onCreated={async (payload) => {
+            await onRoomsChanged(payload);
+            if (payload?.optimisticRoom) {
+              setInfo((prev) => {
+                if (!prev) return prev;
+                const next = mergeCreatedChildIntoSpaceInfo(
+                  prev,
+                  payload.optimisticRoom!,
+                  payload.newSpaceChildTopic ?? null
+                );
+                setCachedSpaceInfo(space.id, next);
+                return next;
+              });
+            }
+            fetchInfo({ background: true });
+          }}
+        />
+      )}
+      {showLinkExistingRoom && (
+        <LinkExistingToSpaceDialog
+          kind="room"
+          parentSpaceId={space.id}
+          candidates={orphanRooms}
+          onClose={() => setShowLinkExistingRoom(false)}
+          onLinked={async () => {
+            await onRoomsChanged();
+            fetchInfo({ background: true });
+          }}
+        />
+      )}
+      {showLinkExistingSpace && (
+        <LinkExistingToSpaceDialog
+          kind="space"
+          parentSpaceId={space.id}
+          candidates={orphanSpaces}
+          onClose={() => setShowLinkExistingSpace(false)}
+          onLinked={async () => {
+            await onRoomsChanged();
+            fetchInfo({ background: true });
+          }}
+        />
+      )}
     </div>
   );
 }
 
 function RoomSection({
   title,
+  showHeader = true,
   rooms,
   onClickRoom,
   joiningRoomId,
@@ -946,6 +1227,8 @@ function RoomSection({
   spacing,
 }: {
   title: string;
+  /** When false, only the room rows are shown (e.g. top bar already shows channel count). */
+  showHeader?: boolean;
   rooms: SpaceChildInfo[];
   onClickRoom: (id: string) => void;
   joiningRoomId: string | null;
@@ -956,6 +1239,7 @@ function RoomSection({
 }) {
   return (
     <div style={{ marginBottom: spacing.unit * 6 }}>
+      {showHeader && (
       <div style={{
         fontSize: typography.fontSizeSmall,
         fontWeight: typography.fontWeightBold,
@@ -967,6 +1251,7 @@ function RoomSection({
       }}>
         {title} — {rooms.length}
       </div>
+      )}
       <div style={{
         display: "flex",
         flexDirection: "column",

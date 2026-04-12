@@ -2629,6 +2629,120 @@ pub async fn create_room_in_space(
     Ok(new_room_id)
 }
 
+/// Link an existing room or sub-space to a parent space via `m.space.parent` / `m.space.child`.
+///
+/// The user must be able to send `m.space.child` in the parent and `m.space.parent` in the
+/// child (typically admin in both rooms).
+#[tauri::command]
+pub async fn link_room_to_space(
+    state: State<'_, Arc<AppState>>,
+    parent_space_id: String,
+    child_room_id: String,
+) -> Result<(), String> {
+    if parent_space_id == child_room_id {
+        return Err("Cannot link a room to itself.".to_string());
+    }
+
+    if !can_manage_space_children_for_user(&state, &parent_space_id).await? {
+        return Err(
+            "You don't have permission to add rooms to this space (insufficient power level)."
+                .to_string(),
+        );
+    }
+
+    let client = super::get_client(&state).await?;
+    let homeserver = client.homeserver().to_string();
+    let access_token = client.access_token().ok_or("No access token")?;
+
+    let server_name = parent_space_id
+        .split(':')
+        .nth(1)
+        .unwrap_or("localhost")
+        .to_string();
+
+    // 1) Child points to parent (same shape as create_room_in_space / create_sub_space)
+    let parent_state_url = format!(
+        "{}/_matrix/client/v3/rooms/{}/state/m.space.parent/{}",
+        homeserver.trim_end_matches('/'),
+        urlencoding::encode(&child_room_id),
+        urlencoding::encode(&parent_space_id),
+    );
+
+    let parent_content = serde_json::json!({
+        "via": [server_name.clone()],
+        "canonical": true,
+    });
+
+    let parent_resp = state
+        .http_client
+        .put(&parent_state_url)
+        .timeout(Duration::from_secs(15))
+        .bearer_auth(access_token.to_string())
+        .json(&parent_content)
+        .send()
+        .await
+        .map_err(|e| {
+            format!(
+                "Failed to link room to parent space: {}",
+                super::fmt_error_chain(&e)
+            )
+        })?;
+
+    if !parent_resp.status().is_success() {
+        let status = parent_resp.status();
+        let text = parent_resp.text().await.unwrap_or_default();
+        return Err(format!(
+            "Could not add parent link in the room ({}): {}",
+            status, text
+        ));
+    }
+
+    // 2) Parent lists child
+    let child_url = format!(
+        "{}/_matrix/client/v3/rooms/{}/state/m.space.child/{}",
+        homeserver.trim_end_matches('/'),
+        urlencoding::encode(&parent_space_id),
+        urlencoding::encode(&child_room_id),
+    );
+
+    let child_content = serde_json::json!({
+        "via": [server_name],
+        "suggested": false,
+    });
+
+    let child_resp = state
+        .http_client
+        .put(&child_url)
+        .timeout(Duration::from_secs(15))
+        .bearer_auth(access_token.to_string())
+        .json(&child_content)
+        .send()
+        .await
+        .map_err(|e| {
+            format!(
+                "Parent link was set but failed to update the space: {}",
+                super::fmt_error_chain(&e)
+            )
+        })?;
+
+    if !child_resp.status().is_success() {
+        let status = child_resp.status();
+        let text = child_resp.text().await.unwrap_or_default();
+        return Err(format!(
+            "Room was linked in the child room but updating the space failed ({}): {}",
+            status, text
+        ));
+    }
+
+    log::info!(
+        "link_room_to_space: linked {} as child of {}",
+        child_room_id,
+        parent_space_id
+    );
+
+    Ok(())
+}
+
 /// Search the public room directory for spaces.
 ///
 /// Uses `POST /publicRooms` with `filter.room_types: ["m.space"]` to find
