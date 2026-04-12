@@ -77,6 +77,23 @@ pub(crate) fn sniff_image_mime(bytes: &[u8]) -> &'static str {
     "application/octet-stream"
 }
 
+/// Guess image or common video container MIME from magic bytes.
+pub(crate) fn sniff_media_mime(bytes: &[u8]) -> &'static str {
+    let img = sniff_image_mime(bytes);
+    if img != "application/octet-stream" {
+        return img;
+    }
+    // ISO BMFF (MP4 / MOV / similar): size (4) + "ftyp" at offset 4
+    if bytes.len() >= 12 && &bytes[4..8] == b"ftyp" {
+        return "video/mp4";
+    }
+    // EBML (WebM / Matroska)
+    if bytes.len() >= 4 && bytes[0] == 0x1A && bytes[1] == 0x45 && bytes[2] == 0xDF && bytes[3] == 0xA3 {
+        return "video/webm";
+    }
+    "application/octet-stream"
+}
+
 /// Fetch an avatar by MXC URI, with cache.
 ///
 /// `fetch_bytes` is a future that downloads the image — callers pass in

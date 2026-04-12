@@ -8,6 +8,7 @@ import type { ResolvedColorScheme } from "../theme/types";
 import { userInitialAvatarBackground } from "../utils/userAvatarColor";
 import MessageMarkdown from "./MessageMarkdown";
 import MessageMatrixImage from "./MessageMatrixImage";
+import MessageMatrixVideo from "./MessageMatrixVideo";
 
 interface MessageListProps {
   messages: Message[];
@@ -56,6 +57,7 @@ function shouldShowHeader(msg: Message, prevMsg: Message | null): boolean {
 function messageAllowsEdit(msg: Message, userId: string): boolean {
   if (msg.sender !== userId) return false;
   if (msg.imageMediaRequest != null) return false;
+  if (msg.videoMediaRequest != null) return false;
   return !NON_EDITABLE_BODIES.has(msg.body.trim());
 }
 
@@ -190,6 +192,13 @@ const MessageRow = memo(function MessageRow({
         {msg.imageMediaRequest != null ? (
           <>
             <MessageMatrixImage request={msg.imageMediaRequest} />
+            {msg.body.trim().length > 0 ? (
+              <MessageMarkdown edited={Boolean(msg.edited)}>{msg.body}</MessageMarkdown>
+            ) : null}
+          </>
+        ) : msg.videoMediaRequest != null ? (
+          <>
+            <MessageMatrixVideo request={msg.videoMediaRequest} />
             {msg.body.trim().length > 0 ? (
               <MessageMarkdown edited={Boolean(msg.edited)}>{msg.body}</MessageMarkdown>
             ) : null}

@@ -24,13 +24,14 @@ use crate::types::{
 use crate::AppState;
 
 use super::voice_matrix::collect_voice_participants_for_joined_voice_rooms;
-use super::{fmt_error_chain, get_client, get_or_fetch_avatar, resolve_room, sniff_image_mime};
+use super::{fmt_error_chain, get_client, get_or_fetch_avatar, resolve_room, sniff_media_mime};
 
 /// matrix-sdk sets **no HTTP timeout** for media downloads (`Duration::MAX` in
 /// `Media::get_media_content`), so slow or stuck federation can block the UI for a very long time.
 /// We wrap each fetch so the app fails fast with a clear message instead.
 const MATRIX_IMAGE_THUMB_FETCH_TIMEOUT: Duration = Duration::from_secs(45);
-const MATRIX_IMAGE_FULL_FETCH_TIMEOUT: Duration = Duration::from_secs(75);
+/// Full-file downloads (GIF originals, video) can be large; federation may be slow.
+const MATRIX_IMAGE_FULL_FETCH_TIMEOUT: Duration = Duration::from_secs(300);
 
 async fn get_matrix_media_bytes_with_timeout(
     client: &matrix_sdk::Client,
@@ -78,13 +79,16 @@ pub async fn get_messages(
         body: String,
         timestamp: u64,
         image_media_request: Option<serde_json::Value>,
+        video_media_request: Option<serde_json::Value>,
     }
     let mut raw_msgs = Vec::new();
     let mut unique_senders = Vec::new();
     let mut seen_senders = std::collections::HashSet::new();
-    // target event id -> (replacement body, image request, origin_server_ts); keep latest edit per target
-    let mut latest_replacement: HashMap<String, (String, Option<serde_json::Value>, u64)> =
-        HashMap::new();
+    // target event id -> (replacement body, image, video, origin_server_ts); keep latest edit per target
+    let mut latest_replacement: HashMap<
+        String,
+        (String, Option<serde_json::Value>, Option<serde_json::Value>, u64),
+    > = HashMap::new();
 
     for event in response.chunk {
         let raw = match event.raw().deserialize() {
@@ -103,16 +107,16 @@ pub async fn get_messages(
 
             if let Some(Relation::Replacement(repl)) = &original.content.relates_to {
                 let target = repl.event_id.to_string();
-                let (new_body, new_image) = extract_message_display(&RoomMessageEventContent::from(
-                    repl.new_content.clone(),
-                ));
+                let (new_body, new_image, new_video) = extract_message_display(
+                    &RoomMessageEventContent::from(repl.new_content.clone()),
+                );
                 let ts: u64 = original.origin_server_ts.0.into();
                 let replace = match latest_replacement.get(&target) {
                     None => true,
-                    Some((_, _, prev_ts)) => ts >= *prev_ts,
+                    Some((_, _, _, prev_ts)) => ts >= *prev_ts,
                 };
                 if replace {
-                    latest_replacement.insert(target, (new_body, new_image, ts));
+                    latest_replacement.insert(target, (new_body, new_image, new_video, ts));
                 }
                 continue;
             }
@@ -122,13 +126,15 @@ pub async fn get_messages(
                 unique_senders.push(original.sender.clone());
             }
 
-            let (body, image_media_request) = extract_message_display(&original.content);
+            let (body, image_media_request, video_media_request) =
+                extract_message_display(&original.content);
             raw_msgs.push(RawMsg {
                 event_id: original.event_id.to_string(),
                 sender: sender_str,
                 body,
                 timestamp: original.origin_server_ts.0.into(),
                 image_media_request,
+                video_media_request,
             });
         }
     }
@@ -159,10 +165,16 @@ pub async fn get_messages(
             let (sender_name, avatar_url) =
                 sender_meta.get(&m.sender).cloned().unwrap_or((None, None));
             let edited = latest_replacement.contains_key(&m.event_id);
-            let (body, image_media_request) = latest_replacement
+            let (body, image_media_request, video_media_request) = latest_replacement
                 .get(&m.event_id)
-                .map(|(b, img, _)| (b.clone(), img.clone()))
-                .unwrap_or_else(|| (m.body.clone(), m.image_media_request.clone()));
+                .map(|(b, img, vid, _)| (b.clone(), img.clone(), vid.clone()))
+                .unwrap_or_else(|| {
+                    (
+                        m.body.clone(),
+                        m.image_media_request.clone(),
+                        m.video_media_request.clone(),
+                    )
+                });
             MessageInfo {
                 event_id: m.event_id,
                 sender: m.sender,
@@ -172,6 +184,7 @@ pub async fn get_messages(
                 avatar_url,
                 edited,
                 image_media_request,
+                video_media_request,
             }
         })
         .collect();
@@ -337,21 +350,23 @@ pub async fn start_sync(
             let room_id = room.room_id().to_string();
 
             if let Some(Relation::Replacement(repl)) = &ev.content.relates_to {
-                let (new_body, new_image) = extract_message_display(&RoomMessageEventContent::from(
-                    repl.new_content.clone(),
-                ));
+                let (new_body, new_image, new_video) = extract_message_display(
+                    &RoomMessageEventContent::from(repl.new_content.clone()),
+                );
                 let image_media_request = new_image.unwrap_or(serde_json::Value::Null);
+                let video_media_request = new_video.unwrap_or(serde_json::Value::Null);
                 let payload = MessageEditPayload {
                     room_id,
                     target_event_id: repl.event_id.to_string(),
                     body: new_body,
                     image_media_request,
+                    video_media_request,
                 };
                 let _ = app.emit("room-message-edit", payload);
                 return;
             }
 
-            let (body, image_media_request) = extract_message_display(&ev.content);
+            let (body, image_media_request, video_media_request) = extract_message_display(&ev.content);
             let sender = ev.sender.to_string();
 
             let (sender_name, avatar_url) = match room.get_member_no_sync(&ev.sender).await {
@@ -381,6 +396,7 @@ pub async fn start_sync(
                     avatar_url,
                     edited: false,
                     image_media_request,
+                    video_media_request,
                 },
             };
             let _ = app.emit("room-message", payload);
@@ -569,10 +585,14 @@ pub async fn send_typing_notice(
     Ok(())
 }
 
-/// Body text for the timeline plus optional image download descriptor (`m.room.message` `m.image`).
+/// Body text for the timeline plus optional image / video download descriptors (`m.room.message`).
 fn extract_message_display(
     content: &matrix_sdk::ruma::events::room::message::RoomMessageEventContent,
-) -> (String, Option<serde_json::Value>) {
+) -> (
+    String,
+    Option<serde_json::Value>,
+    Option<serde_json::Value>,
+) {
     use matrix_sdk::ruma::events::room::message::MessageType;
     match &content.msgtype {
         MessageType::Image(img) => {
@@ -597,15 +617,26 @@ fn extract_message_display(
                 format,
             };
             let json = serde_json::to_value(&req).ok();
-            (body, json)
+            (body, json, None)
         }
-        MessageType::Text(text) => (text.body.clone(), None),
-        MessageType::Notice(notice) => (notice.body.clone(), None),
-        MessageType::Emote(emote) => (format!("* {}", emote.body), None),
-        MessageType::File(_) => ("[File]".to_string(), None),
-        MessageType::Video(_) => ("[Video]".to_string(), None),
-        MessageType::Audio(_) => ("[Audio]".to_string(), None),
-        _ => ("[Unsupported message]".to_string(), None),
+        MessageType::Video(vid) => {
+            let body = vid
+                .caption()
+                .map(|s| s.to_string())
+                .unwrap_or_default();
+            let req = MediaRequestParameters {
+                source: vid.source.clone(),
+                format: MediaFormat::File,
+            };
+            let json = serde_json::to_value(&req).ok();
+            (body, None, json)
+        }
+        MessageType::Text(text) => (text.body.clone(), None, None),
+        MessageType::Notice(notice) => (notice.body.clone(), None, None),
+        MessageType::Emote(emote) => (format!("* {}", emote.body), None, None),
+        MessageType::File(_) => ("[File]".to_string(), None, None),
+        MessageType::Audio(_) => ("[Audio]".to_string(), None, None),
+        _ => ("[Unsupported message]".to_string(), None, None),
     }
 }
 
@@ -629,6 +660,9 @@ fn mime_to_file_ext(mime: &str) -> &'static str {
         "image/png" => "png",
         "image/gif" => "gif",
         "image/webp" => "webp",
+        "video/mp4" => "mp4",
+        "video/webm" => "webm",
+        "video/quicktime" => "mov",
         _ => "bin",
     }
 }
@@ -709,7 +743,7 @@ pub async fn get_matrix_image_path(
         }
     };
 
-    let mime = sniff_image_mime(&bytes);
+    let mime = sniff_media_mime(&bytes);
     let ext = mime_to_file_ext(mime);
 
     let temp_dir = app
@@ -719,7 +753,7 @@ pub async fn get_matrix_image_path(
     std::fs::create_dir_all(&temp_dir).map_err(|e| format!("Failed to create temp dir: {e}"))?;
 
     let path = temp_dir.join(format!(
-        "pax_matrix_img_{}.{}",
+        "pax_matrix_media_{}.{}",
         uuid::Uuid::new_v4(),
         ext
     ));

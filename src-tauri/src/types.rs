@@ -32,9 +32,12 @@ pub struct MessageInfo {
     pub timestamp: u64,
     pub avatar_url: Option<String>,
     pub edited: bool,
-    /// When set, the message is an image; the frontend fetches a data URL via `get_matrix_media_data_url`.
+    /// When set, the message is an image; the frontend fetches a temp path via `get_matrix_image_path`.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub image_media_request: Option<serde_json::Value>,
+    /// When set, the message is a video; same download path as images (`get_matrix_image_path`).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub video_media_request: Option<serde_json::Value>,
 }
 
 #[derive(Serialize)]
@@ -105,6 +108,8 @@ pub struct MessageEditPayload {
     pub body: String,
     /// `null` when the edited event is no longer an image; otherwise the same shape as `MessageInfo.image_media_request`.
     pub image_media_request: serde_json::Value,
+    /// `null` when the edited event is no longer a video; otherwise the same shape as `MessageInfo.video_media_request`.
+    pub video_media_request: serde_json::Value,
 }
 
 /// Remove a timeline row when an event is redacted (e.g. message deleted).

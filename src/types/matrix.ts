@@ -26,6 +26,8 @@ export interface Message {
   edited?: boolean;
   /** Matrix `m.image` payload: serialized `MediaRequestParameters` for authenticated download. */
   imageMediaRequest?: unknown;
+  /** Matrix `m.video` payload: serialized `MediaRequestParameters` for authenticated download. */
+  videoMediaRequest?: unknown;
 }
 
 export interface MessageBatch {
