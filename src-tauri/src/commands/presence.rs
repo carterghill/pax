@@ -44,6 +44,13 @@ pub async fn set_presence(
         .await
         .insert(user_id_str.clone(), presence.clone());
 
+    // Store the desired presence so the sync loop can set `set_presence` on each
+    // `/sync` request accordingly: "online" → sync auto-manages (like Cinny/Element),
+    // anything else → sync uses Offline and we rely on explicit PUTs.
+    if let Ok(mut dp) = state.desired_presence.lock() {
+        *dp = presence.clone();
+    }
+
     let _ = app.emit(
         "presence",
         PresencePayload {

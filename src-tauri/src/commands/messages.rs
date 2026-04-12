@@ -535,99 +535,104 @@ pub async fn start_sync(
     let presence_map = state.presence_map.clone();
     let avatar_cache = state.avatar_cache.clone();
     let voice_client = client.clone();
-    let sync_running = state.sync_running.clone();
+    let desired_presence = state.desired_presence.clone();
     let self_user_id = client
         .user_id()
         .map(|u| u.to_string())
         .unwrap_or_default();
 
-    // Spawn the continuous sync loop in the background
-    // set_presence(Offline) tells the server: "do NOT auto-update my presence on sync"
-    // We manage presence explicitly via the set_presence command instead.
+    // Spawn the continuous sync loop in the background.
+    // Uses sync_once in a manual loop so we can read `desired_presence` on each
+    // iteration and set the sync's `set_presence` accordingly:
+    //   - "online" → set_presence=Online  (Synapse auto-manages, like Cinny/Element)
+    //   - anything else → set_presence=Offline (explicit PUTs from the frontend handle it)
     let join = tokio::spawn(async move {
-        let first_sync_done = Arc::new(std::sync::atomic::AtomicBool::new(false));
-        let result = client
-            .sync_with_callback(
-                matrix_sdk::config::SyncSettings::default()
-                    .set_presence(matrix_sdk::ruma::presence::PresenceState::Offline),
-                |response| {
-                    let app = app.clone();
-                    let presence_map = presence_map.clone();
-                    let avatar_cache = avatar_cache.clone();
-                    let voice_client = voice_client.clone();
-                    let first_sync_done = first_sync_done.clone();
-                    let self_user_id = self_user_id.clone();
-                    async move {
-                        // Signal the frontend that the first sync response has been
-                        // processed so it can safely send the initial presence PUT
-                        // without the sync's set_presence(Offline) racing it.
-                        if !first_sync_done.swap(true, std::sync::atomic::Ordering::Relaxed) {
-                            let _ = app.emit("sync-ready", ());
-                        }
+        let mut first_sync_done = false;
 
-                        // Extract presence updates from the sync response.
-                        // Skip our own user — we manage self-presence explicitly
-                        // via set_presence PUTs + heartbeat, and sync echoes for
-                        // self are racey/stale, causing the local display to flicker.
-                        for raw_event in &response.presence {
-                            if let Ok(ev) = raw_event.deserialize() {
-                                let user_id = ev.sender.to_string();
-                                if user_id == self_user_id {
-                                    continue;
-                                }
+        loop {
+            // Read the user's desired presence for this sync iteration.
+            let desired = desired_presence
+                .lock()
+                .ok()
+                .map(|g| g.clone())
+                .unwrap_or_else(|| "online".to_string());
 
-                                let presence_str = match ev.content.presence {
-                                    matrix_sdk::ruma::presence::PresenceState::Online => "online",
-                                    matrix_sdk::ruma::presence::PresenceState::Unavailable => {
-                                        "unavailable"
-                                    }
-                                    _ => "offline",
-                                };
+            let set_presence_value = if desired == "online" {
+                matrix_sdk::ruma::presence::PresenceState::Online
+            } else {
+                matrix_sdk::ruma::presence::PresenceState::Offline
+            };
 
-                                presence_map
-                                    .lock()
-                                    .await
-                                    .insert(user_id.clone(), presence_str.to_string());
+            // The SDK tracks the `since` token internally between sync_once calls.
+            let settings = matrix_sdk::config::SyncSettings::default()
+                .set_presence(set_presence_value);
 
-                                let _ = app.emit(
-                                    "presence",
-                                    PresencePayload {
-                                        user_id,
-                                        presence: presence_str.to_string(),
-                                    },
-                                );
-                            }
-                        }
+            let response = match client.sync_once(settings).await {
+                Ok(r) => r,
+                Err(e) => {
+                    log::warn!("Sync error: {e}");
+                    tokio::time::sleep(std::time::Duration::from_secs(5)).await;
+                    continue;
+                }
+            };
 
-                        let _ = app.emit("rooms-changed", ());
+            if !first_sync_done {
+                first_sync_done = true;
+                let _ = app.emit("sync-ready", ());
+            }
 
-                        // Push voice participants from a spawned task so we
-                        // don't block the sync loop with avatar fetches.
-                        let vc = voice_client.clone();
-                        let ac = avatar_cache.clone();
-                        let ap = app.clone();
-                        tokio::spawn(async move {
-                            let participants_by_room =
-                                collect_voice_participants_for_joined_voice_rooms(&vc, &ac).await;
-                            let _ = ap.emit(
-                                "voice-participants-changed",
-                                VoiceParticipantsChangedPayload {
-                                    participants_by_room,
-                                },
-                            );
-                        });
-
-                        matrix_sdk::LoopCtrl::Continue
+            // Extract presence updates from the sync response.
+            // Skip our own user — we manage self-presence explicitly
+            // via set_presence PUTs + heartbeat, and sync echoes for
+            // self are racey/stale, causing the local display to flicker.
+            for raw_event in &response.presence {
+                if let Ok(ev) = raw_event.deserialize() {
+                    let user_id = ev.sender.to_string();
+                    if user_id == self_user_id {
+                        continue;
                     }
-                },
-            )
-            .await;
 
-        if let Err(e) = result {
-            log::warn!("Sync loop error: {e}");
+                    let presence_str = match ev.content.presence {
+                        matrix_sdk::ruma::presence::PresenceState::Online => "online",
+                        matrix_sdk::ruma::presence::PresenceState::Unavailable => {
+                            "unavailable"
+                        }
+                        _ => "offline",
+                    };
+
+                    presence_map
+                        .lock()
+                        .await
+                        .insert(user_id.clone(), presence_str.to_string());
+
+                    let _ = app.emit(
+                        "presence",
+                        PresencePayload {
+                            user_id,
+                            presence: presence_str.to_string(),
+                        },
+                    );
+                }
+            }
+
+            let _ = app.emit("rooms-changed", ());
+
+            // Push voice participants from a spawned task so we
+            // don't block the sync loop with avatar fetches.
+            let vc = voice_client.clone();
+            let ac = avatar_cache.clone();
+            let ap = app.clone();
+            tokio::spawn(async move {
+                let participants_by_room =
+                    collect_voice_participants_for_joined_voice_rooms(&vc, &ac).await;
+                let _ = ap.emit(
+                    "voice-participants-changed",
+                    VoiceParticipantsChangedPayload {
+                        participants_by_room,
+                    },
+                );
+            });
         }
-
-        *sync_running.lock().await = false;
     });
 
     {

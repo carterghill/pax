@@ -71,6 +71,11 @@ pub struct AppState {
     /// Validated LiveKit JWT (`/sfu/get`) base URL for the active voice session.
     /// Used for `m.call.member` refresh so we do not re-read a stale URL from room state.
     pub voice_livekit_jwt_service_url: StdMutex<Option<String>>,
+    /// The presence state the user wants (e.g. "online", "unavailable", "offline").
+    /// Read by the sync loop so it can set `set_presence` on each `/sync` request:
+    /// when "online", the sync itself tells Synapse the user is active (matching
+    /// Cinny/Element behaviour); otherwise explicit PUTs handle it.
+    pub desired_presence: Arc<StdMutex<String>>,
 }
 
 impl AppState {
@@ -205,6 +210,7 @@ pub fn run() {
         delayed_leave_id: StdMutex::new(None),
         msc4140_supported: AtomicBool::new(true),
         voice_livekit_jwt_service_url: StdMutex::new(None),
+        desired_presence: Arc::new(StdMutex::new("online".to_string())),
     });
 
     tauri::Builder::default()

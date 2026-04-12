@@ -23,10 +23,13 @@ function statusToDisplay(status: ManualStatus, systemIdle: boolean): string {
   return statusToPresence(status, systemIdle);
 }
 
-// Re-PUT interval (ms).  Synapse times out presence after ~5 min if it
-// receives no signal.  Because sync uses set_presence=offline (meaning
-// "don't auto-manage"), explicit PUTs are the only keep-alive.
-const HEARTBEAT_MS = 60_000;
+// Re-PUT interval (ms).  When the user's desired presence is "online", the
+// sync loop now sets set_presence=Online on each /sync request (matching
+// Cinny/Element), so Synapse auto-manages presence.  For manual statuses
+// (unavailable, offline, idle) the sync uses set_presence=Offline and this
+// heartbeat is the only keep-alive.  20 s keeps us well within Synapse's
+// ~30 s SYNC_ONLINE_TIMEOUT.
+const HEARTBEAT_MS = 20_000;
 
 export function usePresence() {
   const [manualStatus, setManualStatus] = useState<ManualStatus>("auto");
@@ -85,7 +88,9 @@ export function usePresence() {
     sendPresence(statusToPresence(manualStatus, systemIdle));
   }, [manualStatus, systemIdle, syncReady, sendPresence]);
 
-  // Heartbeat: re-PUT every 60 s to prevent Synapse timeout.
+  // Heartbeat: re-PUT periodically.  For "online" this is a redundant safety
+  // net (the sync loop handles it); for manual statuses it's the primary
+  // keep-alive since the sync uses set_presence=Offline for those.
   useEffect(() => {
     if (!syncReady) return;
     const id = setInterval(heartbeat, HEARTBEAT_MS);

@@ -81,26 +81,27 @@ export function useRoomMembers(roomId: string) {
     [roomId]
   );
 
-  // Clear on room switch (sync, before paint — prevents wrong-room flash)
+  // Room switch: restore from cache immediately (sync, before paint) or clear.
+  // This prevents both wrong-room flash AND the offline-flicker when cached
+  // presence is available.
   useLayoutEffect(() => {
-    setMembers([]);
-    setAvatarOverrides(new Map());
-    setLoading(true);
-    hasFetched.current = false;
-    memberIdsRef.current = new Set();
-  }, [roomId]);
-
-  // Restore from cache (after paint) or fetch
-  useEffect(() => {
     const cached = memberCache.get(roomId);
     if (cached) {
       memberIdsRef.current = new Set(cached.map((m) => m.userId));
       setMembers(cached);
       setLoading(false);
-      fetchMembers(false);
     } else {
-      fetchMembers(true);
+      setMembers([]);
+      setLoading(true);
+      memberIdsRef.current = new Set();
     }
+    setAvatarOverrides(new Map());
+    hasFetched.current = false;
+  }, [roomId]);
+
+  // After paint: background fetch to pick up any membership changes.
+  useEffect(() => {
+    fetchMembers(false);
   }, [roomId, fetchMembers]);
 
   // Background re-fetch on rooms-changed
