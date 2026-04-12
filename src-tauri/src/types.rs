@@ -38,6 +38,15 @@ pub struct MessageInfo {
     /// When set, the message is a video; same download path as images (`get_matrix_image_path`).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub video_media_request: Option<serde_json::Value>,
+    /// Matrix `m.file`: serialized `MediaRequestParameters` for `get_matrix_image_path`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub file_media_request: Option<serde_json::Value>,
+    /// MIME from event `info` (for attachment icon / viewer).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub file_mime: Option<String>,
+    /// Filename for the attachment chip (Matrix `filename` or `body` when uncaptioned).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub file_display_name: Option<String>,
 }
 
 #[derive(Serialize)]
@@ -110,6 +119,10 @@ pub struct MessageEditPayload {
     pub image_media_request: serde_json::Value,
     /// `null` when the edited event is no longer a video; otherwise the same shape as `MessageInfo.video_media_request`.
     pub video_media_request: serde_json::Value,
+    /// `null` when the edited event is no longer a file attachment.
+    pub file_media_request: serde_json::Value,
+    pub file_mime: serde_json::Value,
+    pub file_display_name: serde_json::Value,
 }
 
 /// Remove a timeline row when an event is redacted (e.g. message deleted).

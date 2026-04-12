@@ -80,14 +80,25 @@ pub async fn get_messages(
         timestamp: u64,
         image_media_request: Option<serde_json::Value>,
         video_media_request: Option<serde_json::Value>,
+        file_media_request: Option<serde_json::Value>,
+        file_mime: Option<String>,
+        file_display_name: Option<String>,
     }
     let mut raw_msgs = Vec::new();
     let mut unique_senders = Vec::new();
     let mut seen_senders = std::collections::HashSet::new();
-    // target event id -> (replacement body, image, video, origin_server_ts); keep latest edit per target
+    // target event id -> replacement fields + origin_server_ts; keep latest edit per target
     let mut latest_replacement: HashMap<
         String,
-        (String, Option<serde_json::Value>, Option<serde_json::Value>, u64),
+        (
+            String,
+            Option<serde_json::Value>,
+            Option<serde_json::Value>,
+            Option<serde_json::Value>,
+            Option<String>,
+            Option<String>,
+            u64,
+        ),
     > = HashMap::new();
 
     for event in response.chunk {
@@ -107,16 +118,27 @@ pub async fn get_messages(
 
             if let Some(Relation::Replacement(repl)) = &original.content.relates_to {
                 let target = repl.event_id.to_string();
-                let (new_body, new_image, new_video) = extract_message_display(
-                    &RoomMessageEventContent::from(repl.new_content.clone()),
-                );
+                let ext = extract_message_display(&RoomMessageEventContent::from(
+                    repl.new_content.clone(),
+                ));
                 let ts: u64 = original.origin_server_ts.0.into();
                 let replace = match latest_replacement.get(&target) {
                     None => true,
-                    Some((_, _, _, prev_ts)) => ts >= *prev_ts,
+                    Some((_, _, _, _, _, _, prev_ts)) => ts >= *prev_ts,
                 };
                 if replace {
-                    latest_replacement.insert(target, (new_body, new_image, new_video, ts));
+                    latest_replacement.insert(
+                        target,
+                        (
+                            ext.body.clone(),
+                            ext.image_media_request.clone(),
+                            ext.video_media_request.clone(),
+                            ext.file_media_request.clone(),
+                            ext.file_mime.clone(),
+                            ext.file_display_name.clone(),
+                            ts,
+                        ),
+                    );
                 }
                 continue;
             }
@@ -126,15 +148,17 @@ pub async fn get_messages(
                 unique_senders.push(original.sender.clone());
             }
 
-            let (body, image_media_request, video_media_request) =
-                extract_message_display(&original.content);
+            let ext = extract_message_display(&original.content);
             raw_msgs.push(RawMsg {
                 event_id: original.event_id.to_string(),
                 sender: sender_str,
-                body,
+                body: ext.body,
                 timestamp: original.origin_server_ts.0.into(),
-                image_media_request,
-                video_media_request,
+                image_media_request: ext.image_media_request,
+                video_media_request: ext.video_media_request,
+                file_media_request: ext.file_media_request,
+                file_mime: ext.file_mime,
+                file_display_name: ext.file_display_name,
             });
         }
     }
@@ -165,14 +189,33 @@ pub async fn get_messages(
             let (sender_name, avatar_url) =
                 sender_meta.get(&m.sender).cloned().unwrap_or((None, None));
             let edited = latest_replacement.contains_key(&m.event_id);
-            let (body, image_media_request, video_media_request) = latest_replacement
+            let (
+                body,
+                image_media_request,
+                video_media_request,
+                file_media_request,
+                file_mime,
+                file_display_name,
+            ) = latest_replacement
                 .get(&m.event_id)
-                .map(|(b, img, vid, _)| (b.clone(), img.clone(), vid.clone()))
+                .map(|(b, img, vid, file, fm, fd, _)| {
+                    (
+                        b.clone(),
+                        img.clone(),
+                        vid.clone(),
+                        file.clone(),
+                        fm.clone(),
+                        fd.clone(),
+                    )
+                })
                 .unwrap_or_else(|| {
                     (
                         m.body.clone(),
                         m.image_media_request.clone(),
                         m.video_media_request.clone(),
+                        m.file_media_request.clone(),
+                        m.file_mime.clone(),
+                        m.file_display_name.clone(),
                     )
                 });
             MessageInfo {
@@ -185,6 +228,9 @@ pub async fn get_messages(
                 edited,
                 image_media_request,
                 video_media_request,
+                file_media_request,
+                file_mime,
+                file_display_name,
             }
         })
         .collect();
@@ -350,23 +396,46 @@ pub async fn start_sync(
             let room_id = room.room_id().to_string();
 
             if let Some(Relation::Replacement(repl)) = &ev.content.relates_to {
-                let (new_body, new_image, new_video) = extract_message_display(
-                    &RoomMessageEventContent::from(repl.new_content.clone()),
-                );
-                let image_media_request = new_image.unwrap_or(serde_json::Value::Null);
-                let video_media_request = new_video.unwrap_or(serde_json::Value::Null);
+                let ext = extract_message_display(&RoomMessageEventContent::from(
+                    repl.new_content.clone(),
+                ));
+                let image_media_request = ext
+                    .image_media_request
+                    .clone()
+                    .unwrap_or(serde_json::Value::Null);
+                let video_media_request = ext
+                    .video_media_request
+                    .clone()
+                    .unwrap_or(serde_json::Value::Null);
+                let file_media_request = ext
+                    .file_media_request
+                    .clone()
+                    .unwrap_or(serde_json::Value::Null);
+                let file_mime = ext
+                    .file_mime
+                    .clone()
+                    .map(serde_json::Value::String)
+                    .unwrap_or(serde_json::Value::Null);
+                let file_display_name = ext
+                    .file_display_name
+                    .clone()
+                    .map(serde_json::Value::String)
+                    .unwrap_or(serde_json::Value::Null);
                 let payload = MessageEditPayload {
                     room_id,
                     target_event_id: repl.event_id.to_string(),
-                    body: new_body,
+                    body: ext.body,
                     image_media_request,
                     video_media_request,
+                    file_media_request,
+                    file_mime,
+                    file_display_name,
                 };
                 let _ = app.emit("room-message-edit", payload);
                 return;
             }
 
-            let (body, image_media_request, video_media_request) = extract_message_display(&ev.content);
+            let ext = extract_message_display(&ev.content);
             let sender = ev.sender.to_string();
 
             let (sender_name, avatar_url) = match room.get_member_no_sync(&ev.sender).await {
@@ -391,12 +460,15 @@ pub async fn start_sync(
                     event_id: ev.event_id.to_string(),
                     sender,
                     sender_name,
-                    body,
+                    body: ext.body,
                     timestamp,
                     avatar_url,
                     edited: false,
-                    image_media_request,
-                    video_media_request,
+                    image_media_request: ext.image_media_request,
+                    video_media_request: ext.video_media_request,
+                    file_media_request: ext.file_media_request,
+                    file_mime: ext.file_mime,
+                    file_display_name: ext.file_display_name,
                 },
             };
             let _ = app.emit("room-message", payload);
@@ -585,14 +657,20 @@ pub async fn send_typing_notice(
     Ok(())
 }
 
-/// Body text for the timeline plus optional image / video download descriptors (`m.room.message`).
+/// Body text for the timeline plus optional image / video / file download descriptors (`m.room.message`).
+#[derive(Clone)]
+struct MessageDisplayExtract {
+    body: String,
+    image_media_request: Option<serde_json::Value>,
+    video_media_request: Option<serde_json::Value>,
+    file_media_request: Option<serde_json::Value>,
+    file_mime: Option<String>,
+    file_display_name: Option<String>,
+}
+
 fn extract_message_display(
     content: &matrix_sdk::ruma::events::room::message::RoomMessageEventContent,
-) -> (
-    String,
-    Option<serde_json::Value>,
-    Option<serde_json::Value>,
-) {
+) -> MessageDisplayExtract {
     use matrix_sdk::ruma::events::room::message::MessageType;
     match &content.msgtype {
         MessageType::Image(img) => {
@@ -617,7 +695,14 @@ fn extract_message_display(
                 format,
             };
             let json = serde_json::to_value(&req).ok();
-            (body, json, None)
+            MessageDisplayExtract {
+                body,
+                image_media_request: json,
+                video_media_request: None,
+                file_media_request: None,
+                file_mime: None,
+                file_display_name: None,
+            }
         }
         MessageType::Video(vid) => {
             let body = vid
@@ -629,14 +714,86 @@ fn extract_message_display(
                 format: MediaFormat::File,
             };
             let json = serde_json::to_value(&req).ok();
-            (body, None, json)
+            MessageDisplayExtract {
+                body,
+                image_media_request: None,
+                video_media_request: json,
+                file_media_request: None,
+                file_mime: None,
+                file_display_name: None,
+            }
         }
-        MessageType::Text(text) => (text.body.clone(), None, None),
-        MessageType::Notice(notice) => (notice.body.clone(), None, None),
-        MessageType::Emote(emote) => (format!("* {}", emote.body), None, None),
-        MessageType::File(_) => ("[File]".to_string(), None, None),
-        MessageType::Audio(_) => ("[Audio]".to_string(), None, None),
-        _ => ("[Unsupported message]".to_string(), None, None),
+        MessageType::Text(text) => MessageDisplayExtract {
+            body: text.body.clone(),
+            image_media_request: None,
+            video_media_request: None,
+            file_media_request: None,
+            file_mime: None,
+            file_display_name: None,
+        },
+        MessageType::Notice(notice) => MessageDisplayExtract {
+            body: notice.body.clone(),
+            image_media_request: None,
+            video_media_request: None,
+            file_media_request: None,
+            file_mime: None,
+            file_display_name: None,
+        },
+        MessageType::Emote(emote) => MessageDisplayExtract {
+            body: format!("* {}", emote.body),
+            image_media_request: None,
+            video_media_request: None,
+            file_media_request: None,
+            file_mime: None,
+            file_display_name: None,
+        },
+        MessageType::File(f) => {
+            let display_name = f
+                .filename
+                .as_ref()
+                .map(|s| s.to_string())
+                .unwrap_or_else(|| f.body.clone());
+            // When `filename` is set, `body` is the caption; otherwise `body` is the filename only.
+            let body = if f.filename.is_some() {
+                f.body.clone()
+            } else {
+                String::new()
+            };
+            let mime = f
+                .info
+                .as_ref()
+                .and_then(|i| i.mimetype.as_ref())
+                .map(|m| m.to_string());
+            let req = MediaRequestParameters {
+                source: f.source.clone(),
+                format: MediaFormat::File,
+            };
+            let json = serde_json::to_value(&req).ok();
+            MessageDisplayExtract {
+                body,
+                image_media_request: None,
+                video_media_request: None,
+                file_media_request: json,
+                file_mime: mime,
+                file_display_name: Some(display_name),
+            }
+        }
+        MessageType::Audio(_) => MessageDisplayExtract {
+            body: "[Audio]".to_string(),
+            image_media_request: None,
+            video_media_request: None,
+            file_media_request: None,
+            file_mime: None,
+            file_display_name: None,
+        },
+        _ => MessageDisplayExtract {
+            body: "[Unsupported message]".to_string(),
+            image_media_request: None,
+            video_media_request: None,
+            file_media_request: None,
+            file_mime: None,
+            file_display_name: None,
+        },
     }
 }
 
@@ -663,6 +820,7 @@ fn mime_to_file_ext(mime: &str) -> &'static str {
         "video/mp4" => "mp4",
         "video/webm" => "webm",
         "video/quicktime" => "mov",
+        "application/pdf" => "pdf",
         _ => "bin",
     }
 }

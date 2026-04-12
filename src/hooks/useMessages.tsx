@@ -14,6 +14,9 @@ interface MessageEditPayload {
   body: string;
   imageMediaRequest: unknown | null;
   videoMediaRequest: unknown | null;
+  fileMediaRequest: unknown | null;
+  fileMime: unknown | null;
+  fileDisplayName: unknown | null;
 }
 
 interface MessageRedactedPayload {
@@ -169,19 +172,44 @@ export function useMessages(roomId: string | null) {
     });
 
     const unlistenEdit = listen<MessageEditPayload>("room-message-edit", (event) => {
-      const { roomId: rid, targetEventId, body, imageMediaRequest, videoMediaRequest } =
-        event.payload;
+      const {
+        roomId: rid,
+        targetEventId,
+        body,
+        imageMediaRequest,
+        videoMediaRequest,
+        fileMediaRequest,
+        fileMime,
+        fileDisplayName,
+      } = event.payload;
       if (rid !== roomId) return;
 
       setMessages((prev) => {
         const next = prev.map((m) => {
           if (m.eventId !== targetEventId) return m;
-          const { imageMediaRequest: _oi, videoMediaRequest: _ov, ...rest } = m;
+          const {
+            imageMediaRequest: _oi,
+            videoMediaRequest: _ov,
+            fileMediaRequest: _of,
+            fileMime: _ofm,
+            fileDisplayName: _ofd,
+            ...rest
+          } = m;
           if (imageMediaRequest != null) {
             return { ...rest, body, edited: true, imageMediaRequest };
           }
           if (videoMediaRequest != null) {
             return { ...rest, body, edited: true, videoMediaRequest };
+          }
+          if (fileMediaRequest != null) {
+            return {
+              ...rest,
+              body,
+              edited: true,
+              fileMediaRequest,
+              fileMime: typeof fileMime === "string" ? fileMime : null,
+              fileDisplayName: typeof fileDisplayName === "string" ? fileDisplayName : null,
+            };
           }
           return { ...rest, body, edited: true };
         });

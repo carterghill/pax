@@ -91,6 +91,10 @@ pub(crate) fn sniff_media_mime(bytes: &[u8]) -> &'static str {
     if bytes.len() >= 4 && bytes[0] == 0x1A && bytes[1] == 0x45 && bytes[2] == 0xDF && bytes[3] == 0xA3 {
         return "video/webm";
     }
+    // PDF
+    if bytes.len() >= 4 && &bytes[0..4] == b"%PDF" {
+        return "application/pdf";
+    }
     "application/octet-stream"
 }
 

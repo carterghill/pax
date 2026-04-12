@@ -28,6 +28,11 @@ export interface Message {
   imageMediaRequest?: unknown;
   /** Matrix `m.video` payload: serialized `MediaRequestParameters` for authenticated download. */
   videoMediaRequest?: unknown;
+  /** Matrix `m.file`: serialized `MediaRequestParameters` for authenticated download. */
+  fileMediaRequest?: unknown;
+  fileMime?: string | null;
+  /** Filename shown on the attachment chip. */
+  fileDisplayName?: string | null;
 }
 
 export interface MessageBatch {

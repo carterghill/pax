@@ -9,6 +9,9 @@ import { userInitialAvatarBackground } from "../utils/userAvatarColor";
 import MessageMarkdown from "./MessageMarkdown";
 import MessageMatrixImage from "./MessageMatrixImage";
 import MessageMatrixVideo from "./MessageMatrixVideo";
+import MessageFileAttachment from "./MessageFileAttachment";
+import MediaViewerModal, { type MediaViewerOpenPayload } from "./MediaViewerModal";
+import { inferMediaViewerKind } from "../utils/mediaViewer";
 
 interface MessageListProps {
   messages: Message[];
@@ -58,6 +61,7 @@ function messageAllowsEdit(msg: Message, userId: string): boolean {
   if (msg.sender !== userId) return false;
   if (msg.imageMediaRequest != null) return false;
   if (msg.videoMediaRequest != null) return false;
+  if (msg.fileMediaRequest != null) return false;
   return !NON_EDITABLE_BODIES.has(msg.body.trim());
 }
 
@@ -85,6 +89,7 @@ interface MessageRowProps {
   showMessageActions: boolean;
   isMenuOpen: boolean;
   onOpenMenu: (eventId: string) => void;
+  onOpenMediaViewer: (payload: MediaViewerOpenPayload) => void;
   menuAnchorRef: React.RefObject<HTMLButtonElement | null>;
   rowHighlight: string;
   spacingUnit: number;
@@ -99,6 +104,7 @@ const MessageRow = memo(function MessageRow({
   showMessageActions,
   isMenuOpen,
   onOpenMenu,
+  onOpenMediaViewer,
   menuAnchorRef,
   rowHighlight,
   spacingUnit,
@@ -191,7 +197,17 @@ const MessageRow = memo(function MessageRow({
         )}
         {msg.imageMediaRequest != null ? (
           <>
-            <MessageMatrixImage request={msg.imageMediaRequest} />
+            <MessageMatrixImage
+              request={msg.imageMediaRequest}
+              onExpand={() =>
+                onOpenMediaViewer({
+                  kind: "image",
+                  request: msg.imageMediaRequest,
+                  fileName: msg.body.trim() || "Image",
+                  mimeType: null,
+                })
+              }
+            />
             {msg.body.trim().length > 0 ? (
               <MessageMarkdown edited={Boolean(msg.edited)}>{msg.body}</MessageMarkdown>
             ) : null}
@@ -199,6 +215,24 @@ const MessageRow = memo(function MessageRow({
         ) : msg.videoMediaRequest != null ? (
           <>
             <MessageMatrixVideo request={msg.videoMediaRequest} />
+            {msg.body.trim().length > 0 ? (
+              <MessageMarkdown edited={Boolean(msg.edited)}>{msg.body}</MessageMarkdown>
+            ) : null}
+          </>
+        ) : msg.fileMediaRequest != null ? (
+          <>
+            <MessageFileAttachment
+              fileName={msg.fileDisplayName ?? "Attachment"}
+              mimeType={msg.fileMime}
+              onOpen={() =>
+                onOpenMediaViewer({
+                  kind: inferMediaViewerKind(msg.fileMime, msg.fileDisplayName ?? ""),
+                  request: msg.fileMediaRequest,
+                  fileName: msg.fileDisplayName ?? "Attachment",
+                  mimeType: msg.fileMime ?? null,
+                })
+              }
+            />
             {msg.body.trim().length > 0 ? (
               <MessageMarkdown edited={Boolean(msg.edited)}>{msg.body}</MessageMarkdown>
             ) : null}
@@ -289,6 +323,7 @@ export default function MessageList({
   const [openMenuEventId, setOpenMenuEventId] = useState<string | null>(null);
   const [menuFixedPos, setMenuFixedPos] = useState<{ top: number; right: number } | null>(null);
   const menuAnchorRef = useRef<HTMLButtonElement>(null);
+  const [mediaViewer, setMediaViewer] = useState<MediaViewerOpenPayload | null>(null);
 
   const scrollRafRef = useRef<number | null>(null);
 
@@ -570,6 +605,7 @@ export default function MessageList({
             showMessageActions={showMessageActions}
             isMenuOpen={openMenuEventId === msg.eventId}
             onOpenMenu={handleOpenMenu}
+            onOpenMediaViewer={setMediaViewer}
             menuAnchorRef={menuAnchorRef}
             rowHighlight={rowHighlight}
             spacingUnit={spacing.unit}
@@ -714,6 +750,12 @@ export default function MessageList({
       )}
 
       <div ref={bottomRef} />
+
+      <MediaViewerModal
+        open={mediaViewer != null}
+        onClose={() => setMediaViewer(null)}
+        payload={mediaViewer}
+      />
     </div>
   );
 }

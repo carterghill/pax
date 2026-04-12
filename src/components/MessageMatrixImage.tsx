@@ -14,9 +14,11 @@ function formatInvokeError(err: unknown): string {
 
 interface MessageMatrixImageProps {
   request: unknown;
+  /** Opens the full-screen media viewer (Discord-style lightbox). */
+  onExpand?: () => void;
 }
 
-export default function MessageMatrixImage({ request }: MessageMatrixImageProps) {
+export default function MessageMatrixImage({ request, onExpand }: MessageMatrixImageProps) {
   const { palette, typography, spacing } = useTheme();
   const [src, setSrc] = useState<string | null>(null);
   const [failed, setFailed] = useState(false);
@@ -115,12 +117,13 @@ export default function MessageMatrixImage({ request }: MessageMatrixImageProps)
     );
   }
 
-  return (
+  const imgEl = (
     <img
       src={src}
       alt=""
       loading="lazy"
       decoding="async"
+      draggable={false}
       style={imgStyle}
       onError={() => {
         console.error("Matrix image <img> failed to decode or load:", src?.slice(0, 80));
@@ -129,5 +132,49 @@ export default function MessageMatrixImage({ request }: MessageMatrixImageProps)
         setSrc(null);
       }}
     />
+  );
+
+  if (!onExpand) return imgEl;
+
+  return (
+    <span
+      role="button"
+      tabIndex={0}
+      onClick={onExpand}
+      onKeyDown={(e) => {
+        if (e.key === "Enter" || e.key === " ") {
+          e.preventDefault();
+          onExpand();
+        }
+      }}
+      style={{
+        display: "inline-block",
+        cursor: "pointer",
+        marginTop: spacing.unit,
+        marginBottom: spacing.unit,
+        borderRadius: spacing.unit,
+        outline: "none",
+      }}
+    >
+      <img
+        src={src}
+        alt=""
+        loading="lazy"
+        decoding="async"
+        draggable={false}
+        style={{
+          maxWidth: "100%",
+          height: "auto",
+          borderRadius: spacing.unit,
+          display: "block",
+        }}
+        onError={() => {
+          console.error("Matrix image <img> failed to decode or load:", src?.slice(0, 80));
+          setFailed(true);
+          setErrorDetail("Image could not be displayed (file missing or invalid).");
+          setSrc(null);
+        }}
+      />
+    </span>
   );
 }
