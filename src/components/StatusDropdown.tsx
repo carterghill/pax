@@ -63,7 +63,7 @@ export default function StatusDropdown({ displayName, avatarUrl, userId }: Statu
 
   return (
     <div ref={dropdownRef} style={{
-      padding: `${spacing.unit * 2}px ${spacing.unit * 3}px`,
+      padding: `${spacing.unit * 2}px`,
       borderTop: `1px solid ${palette.border}`,
       position: "relative",
     }}>
