@@ -12,6 +12,7 @@ import {
   Slash,
   Loader2,
   UserPlus,
+  Plus,
   ChevronRight,
   ChevronDown,
   ExternalLink,
@@ -25,6 +26,8 @@ import RoomSettingsDialog from "./RoomSettingsDialog";
 import { collectRoomIdsInSpaceTree } from "../utils/spaceModeration";
 import InviteDialog from "./InviteDialog";
 import LeaveConfirmDialog from "./LeaveConfirmDialog";
+import CreateRoomDialog from "./CreateRoomDialog";
+import type { RoomsChangedPayload } from "../types/roomsChanged";
 import { useUserVolume } from "../hooks/useUserVolume";
 import { dmPresenceDotColor, effectiveDmTitle, isDmChatUi } from "../utils/dmDisplay";
 import { resolvePresenceWithDnd, parseStatusMsg } from "../utils/statusMessage";
@@ -91,6 +94,9 @@ interface RoomSidebarProps {
   /** Active space (for moderation scope in room settings when the room is in its tree). */
   activeSpaceId: string | null;
   roomsBySpace: (spaceId: string | null) => Room[];
+  /** Global home list (no space): show add/join room above DMs and rooms. */
+  showHomeAddRoom?: boolean;
+  onRoomsChanged?: (payload?: RoomsChangedPayload) => void | Promise<void>;
 }
 
 function VoiceParticipantRow({
@@ -443,6 +449,8 @@ export default function RoomSidebar({
   onLeftRoom,
   activeSpaceId,
   roomsBySpace,
+  showHomeAddRoom = false,
+  onRoomsChanged,
 }: RoomSidebarProps) {
   const { palette, spacing, typography } = useTheme();
   /** Sub-space id → expanded; absence means expanded (default open). */
@@ -468,7 +476,12 @@ export default function RoomSidebar({
   const [leaveRoom, setLeaveRoom] = useState<{ id: string; name: string } | null>(null);
   const [leaveRoomError, setLeaveRoomError] = useState<string | null>(null);
   const [leaveRoomSubmitting, setLeaveRoomSubmitting] = useState(false);
+  const [showAddRoomDialog, setShowAddRoomDialog] = useState(false);
   const settingsRoom = settingsRoomId ? getRoom(settingsRoomId) : null;
+
+  useEffect(() => {
+    if (!showHomeAddRoom) setShowAddRoomDialog(false);
+  }, [showHomeAddRoom]);
 
   const moderationSpaceTreeRoomIds = useMemo(() => {
     if (!settingsRoom || settingsRoom.isDirect) return null;
@@ -617,6 +630,44 @@ export default function RoomSidebar({
       </div>
       <div style={{ flex: 1, overflowY: "auto", padding: spacing.unit * 2 }}>
         <style>{`@keyframes spin { from { transform: rotate(0deg); } to { transform: rotate(360deg); } }`}</style>
+        {showHomeAddRoom && (
+          <div style={{ marginBottom: spacing.unit * 2 }}>
+            <button
+              type="button"
+              title="Join a room or browse the public directory"
+              aria-label="Add or join a room"
+              onClick={() => setShowAddRoomDialog(true)}
+              style={{
+                display: "flex",
+                alignItems: "center",
+                justifyContent: "center",
+                gap: spacing.unit * 1.5,
+                width: "100%",
+                margin: 0,
+                padding: `${spacing.unit * 2.25}px ${spacing.unit * 4}px`,
+                border: "none",
+                borderRadius: 9999,
+                backgroundColor: palette.accent,
+                color: "#fff",
+                fontSize: typography.fontSizeSmall,
+                fontWeight: typography.fontWeightMedium,
+                fontFamily: typography.fontFamily,
+                cursor: "pointer",
+                boxSizing: "border-box",
+                transition: "background-color 0.15s ease",
+              }}
+              onMouseEnter={(e) => {
+                (e.currentTarget as HTMLButtonElement).style.backgroundColor = palette.accentHover;
+              }}
+              onMouseLeave={(e) => {
+                (e.currentTarget as HTMLButtonElement).style.backgroundColor = palette.accent;
+              }}
+            >
+              <Plus size={18} strokeWidth={2} aria-hidden />
+              Add or join room
+            </button>
+          </div>
+        )}
         {showSpaceHomeNav && (
           <div style={{ marginBottom: spacing.unit }}>
             <div
@@ -877,6 +928,17 @@ export default function RoomSidebar({
               setLeaveRoom(null);
               setLeaveRoomError(null);
             }
+          }}
+        />
+      )}
+
+      {showAddRoomDialog && showHomeAddRoom && (
+        <CreateRoomDialog
+          spaceId={null}
+          onClose={() => setShowAddRoomDialog(false)}
+          onCreated={async (payload) => {
+            await onRoomsChanged?.(payload);
+            setShowAddRoomDialog(false);
           }}
         />
       )}

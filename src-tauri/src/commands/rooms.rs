@@ -3178,6 +3178,135 @@ async fn search_public_spaces_direct_fallback(
     }))
 }
 
+/// Remove spaces from a `publicRooms` chunk so the directory lists chat/voice rooms only.
+fn filter_public_chunk_exclude_spaces(mut result: serde_json::Value) -> serde_json::Value {
+    let Some(chunk) = result["chunk"].as_array().cloned() else {
+        return result;
+    };
+    let filtered: Vec<_> = chunk
+        .into_iter()
+        .filter(|r| r["room_type"].as_str() != Some("m.space"))
+        .collect();
+    result["chunk"] = serde_json::json!(filtered);
+    result
+}
+
+async fn search_public_rooms_direct_fallback(
+    state: &AppState,
+    base_urls: &[String],
+    server_input: &str,
+    search_term: Option<&str>,
+    limit: u32,
+) -> Result<serde_json::Value, String> {
+    if base_urls.is_empty() {
+        return Err(format!(
+            "No direct homeserver URL could be discovered for {}",
+            server_input
+        ));
+    }
+
+    let normalized_search_term = search_term.map(|term| term.to_lowercase());
+    let per_page = limit.max(50).min(100);
+    let max_pages = if normalized_search_term.is_some() { 5 } else { 2 };
+    let mut last_err: Option<String> = None;
+
+    'base_urls: for base_url in base_urls {
+        let mut matched_rooms = Vec::new();
+        let mut next_batch: Option<String> = None;
+        let mut saw_success = false;
+
+        for _ in 0..max_pages {
+            let mut url = format!("{}/_matrix/client/v3/publicRooms?limit={}", base_url, per_page);
+            if let Some(since) = &next_batch {
+                url.push_str("&since=");
+                url.push_str(&urlencoding::encode(since));
+            }
+
+            let resp = match state
+                .http_client
+                .get(&url)
+                .timeout(Duration::from_secs(15))
+                .send()
+                .await
+            {
+                Ok(resp) => resp,
+                Err(e) => {
+                    let err = format!("Direct public rooms query failed: {}", fmt_error_chain(&e));
+                    if saw_success {
+                        log::warn!("search_public_rooms: {err}");
+                        break;
+                    }
+                    last_err = Some(err);
+                    continue 'base_urls;
+                }
+            };
+
+            if resp.status() == reqwest::StatusCode::UNAUTHORIZED {
+                let text = resp.text().await.unwrap_or_default();
+                let err = format!(
+                    "Remote homeserver does not allow unauthenticated direct /publicRooms lookup (401 Unauthorized): {}",
+                    text
+                );
+                if saw_success {
+                    log::warn!("search_public_rooms: {err}");
+                    break;
+                }
+                last_err = Some(err);
+                continue 'base_urls;
+            }
+
+            let body = match parse_public_rooms_response(resp).await {
+                Ok(body) => body,
+                Err(err) => {
+                    if saw_success {
+                        log::warn!("search_public_rooms: {err}");
+                        break;
+                    }
+                    last_err = Some(err);
+                    continue 'base_urls;
+                }
+            };
+
+            saw_success = true;
+
+            if let Some(chunk) = body["chunk"].as_array() {
+                for room_data in chunk {
+                    if room_data["room_type"].as_str() == Some("m.space") {
+                        continue;
+                    }
+                    if !public_room_matches_search(
+                        room_data,
+                        normalized_search_term.as_deref(),
+                    ) {
+                        continue;
+                    }
+                    matched_rooms.push(room_data.clone());
+                    if matched_rooms.len() >= limit as usize {
+                        break;
+                    }
+                }
+            }
+
+            if matched_rooms.len() >= limit as usize {
+                break;
+            }
+
+            next_batch = body["next_batch"].as_str().map(String::from);
+            if next_batch.is_none() {
+                break;
+            }
+        }
+
+        if saw_success {
+            return Ok(serde_json::json!({ "chunk": matched_rooms }));
+        }
+    }
+
+    Err(last_err.unwrap_or_else(|| {
+        format!("Direct public rooms lookup failed for {}", server_input)
+    }))
+}
+
 #[tauri::command]
 pub async fn search_public_spaces(
     state: State<'_, Arc<AppState>>,
@@ -3304,6 +3433,139 @@ pub async fn search_public_spaces(
         }?;
 
         let result = normalize_public_room_avatar_urls(&state.http_client, result).await;
+        Ok(enrich_public_rooms_with_membership(&client, result))
+    }
+}
+
+/// Search the public room directory for non-space rooms (chat/voice).
+///
+/// Uses `POST /publicRooms` without `room_types`, then drops `m.space` entries.
+#[tauri::command]
+pub async fn search_public_rooms(
+    state: State<'_, Arc<AppState>>,
+    search_term: Option<String>,
+    server: Option<String>,
+    limit: Option<u32>,
+) -> Result<serde_json::Value, String> {
+    let client = super::get_client(&state).await?;
+    let homeserver = client.homeserver().to_string();
+    let access_token = client.access_token().ok_or("No access token")?;
+    let limit = limit.unwrap_or(20).clamp(1, 100);
+    let search_term = search_term
+        .map(|term| term.trim().to_string())
+        .filter(|term| !term.is_empty());
+    let server = server
+        .map(|server| server.trim().to_string())
+        .filter(|server| !server.is_empty());
+
+    let mut filter = serde_json::json!({});
+    if let Some(term) = &search_term {
+        filter["generic_search_term"] = serde_json::json!(term);
+    }
+
+    let body = serde_json::json!({
+        "filter": filter,
+        "limit": limit,
+    });
+
+    if let Some(server_input) = server.as_deref() {
+        let federation_servers =
+            discover_federation_server_names(&state.http_client, server_input).await;
+        let direct_base_urls = discover_client_base_urls(&state.http_client, server_input).await;
+        let mut last_federation_err: Option<String> = None;
+
+        for federation_server in federation_servers {
+            let url = format!(
+                "{}/_matrix/client/v3/publicRooms?server={}",
+                homeserver.trim_end_matches('/'),
+                urlencoding::encode(&federation_server)
+            );
+
+            let result = match state
+                .http_client
+                .post(&url)
+                .timeout(Duration::from_secs(15))
+                .bearer_auth(&access_token)
+                .json(&body)
+                .send()
+                .await
+            {
+                Ok(resp) => parse_public_rooms_response(resp).await,
+                Err(e) => Err(format!(
+                    "Failed to search public rooms: {}",
+                    super::fmt_error_chain(&e)
+                )),
+            };
+
+            match result {
+                Ok(result) => {
+                    let result = normalize_public_room_avatar_urls(&state.http_client, result).await;
+                    let result = filter_public_chunk_exclude_spaces(result);
+                    return Ok(enrich_public_rooms_with_membership(&client, result));
+                }
+                Err(err) => {
+                    log::warn!(
+                        "search_public_rooms: federation lookup via '{}' failed: {}",
+                        federation_server,
+                        err
+                    );
+                    last_federation_err = Some(format!(
+                        "Federated public rooms query failed via {}: {}",
+                        federation_server, err
+                    ));
+                }
+            }
+        }
+
+        let primary_err = last_federation_err.unwrap_or_else(|| {
+            format!(
+                "Failed to resolve a federation server name for {}",
+                server_input
+            )
+        });
+
+        match search_public_rooms_direct_fallback(
+            &state,
+            &direct_base_urls,
+            server_input,
+            search_term.as_deref(),
+            limit,
+        )
+        .await
+        {
+            Ok(result) => {
+                let result = normalize_public_room_avatar_urls(&state.http_client, result).await;
+                Ok(enrich_public_rooms_with_membership(&client, result))
+            }
+            Err(fallback_err) => Err(format!(
+                "{} | Direct lookup fallback failed: {}",
+                primary_err, fallback_err
+            )),
+        }
+    } else {
+        let url = format!(
+            "{}/_matrix/client/v3/publicRooms",
+            homeserver.trim_end_matches('/')
+        );
+
+        let result = match state
+            .http_client
+            .post(&url)
+            .timeout(Duration::from_secs(15))
+            .bearer_auth(access_token)
+            .json(&body)
+            .send()
+            .await
+        {
+            Ok(resp) => parse_public_rooms_response(resp).await,
+            Err(e) => Err(format!(
+                "Failed to search public rooms: {}",
+                super::fmt_error_chain(&e)
+            )),
+        }?;
+
+        let result = normalize_public_room_avatar_urls(&state.http_client, result).await;
+        let result = filter_public_chunk_exclude_spaces(result);
         Ok(enrich_public_rooms_with_membership(&client, result))
     }
 }

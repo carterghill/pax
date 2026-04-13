@@ -269,6 +269,7 @@ pub fn run() {
             commands::rooms::create_room_in_space,
             commands::rooms::link_room_to_space,
             commands::rooms::search_public_spaces,
+            commands::rooms::search_public_rooms,
             commands::rooms::resolve_room_alias,
             commands::messages::get_messages,
             commands::messages::get_matrix_image_path,

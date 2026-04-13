@@ -544,6 +544,8 @@ export default function MainLayout({
             onLeftRoom={handleLeftRoom}
             activeSpaceId={activeSpaceId}
             roomsBySpace={roomsBySpace}
+            showHomeAddRoom={activeSpaceId === null}
+            onRoomsChanged={handleSpacesChanged}
           />
           <div
             onMouseDown={sidebarResize.onMouseDown}

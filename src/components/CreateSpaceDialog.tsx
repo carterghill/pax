@@ -27,7 +27,7 @@ type HistoryVisibility = "shared" | "joined" | "invited" | "world_readable";
 type GuestAccess = "can_join" | "forbidden";
 type JoinRule = "public" | "invite" | "knock";
 
-interface PublicSpaceResult {
+export interface PublicSpaceResult {
   room_id: string;
   name?: string;
   topic?: string;
@@ -1290,7 +1290,7 @@ export default function CreateSpaceDialog({
 
 // ── Sub-components ──
 
-function SpaceSearchRow({
+export function SpaceSearchRow({
   space,
   joiningId,
   joinSuccess,
