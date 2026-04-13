@@ -161,6 +161,12 @@ fn install_panic_hook() {
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
+    // GTK/Wayland use the program name for the xdg-shell app id when no explicit GTK
+    // application id is set. Match `productName` / `pax.desktop` so the taskbar can
+    // resolve the icon (see StartupWMClass / icon theme name `pax`).
+    #[cfg(target_os = "linux")]
+    glib::set_prgname(Some("pax"));
+
     ensure_system_certs();
     install_panic_hook();
     let display_server = platform::detect_display_server();
@@ -347,7 +353,7 @@ pub fn run() {
             let main_window = app
                 .get_webview_window("main")
                 .expect("main window not found");
-            let icon = tauri::include_image!("icons/32x32.png");
+            let icon = tauri::include_image!("icons/128x128.png");
             let _ = main_window.set_icon(icon);
 
             // Clean up leftover proxy media temp files from previous sessions.
