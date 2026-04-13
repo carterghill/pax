@@ -148,6 +148,9 @@ export default function CreateRoomDialog({
   const [roomAccess, setRoomAccess] = useState<SpaceRoomAccess>("space_members");
   const [historyVisibility, setHistoryVisibility] =
     useState<HistoryVisibility>("shared");
+  const [roomAlias, setRoomAlias] = useState("");
+  const [federate, setFederate] = useState(true);
+  const [advancedOpen, setAdvancedOpen] = useState(false);
   const [creating, setCreating] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
@@ -243,6 +246,7 @@ export default function CreateRoomDialog({
       const roomType = roomKind === "voice" ? VOICE_ROOM_TYPE : null;
       const trimmedName = name.trim();
       const trimmedTopic = topic.trim() || null;
+      const aliasLocal = roomAlias.trim().toLowerCase().replace(/[^a-z0-9_-]/g, "");
 
       if (spaceId) {
         const roomId = await invoke<string>("create_room_in_space", {
@@ -251,8 +255,9 @@ export default function CreateRoomDialog({
           topic: trimmedTopic,
           spaceRoomAccess: roomAccess,
           roomType,
-          roomAlias: null,
+          roomAlias: aliasLocal || null,
           historyVisibility,
+          federate,
         });
         const optimisticRoom: Room = {
           id: roomId,
@@ -273,8 +278,9 @@ export default function CreateRoomDialog({
           topic: trimmedTopic,
           roomAccess,
           roomType,
-          roomAlias: null,
+          roomAlias: aliasLocal || null,
           historyVisibility,
+          federate,
         });
         const optimisticRoom: Room = {
           id: roomId,
@@ -296,7 +302,18 @@ export default function CreateRoomDialog({
     } finally {
       setCreating(false);
     }
-  }, [name, topic, roomKind, roomAccess, historyVisibility, spaceId, onCreated, onClose]);
+  }, [
+    name,
+    topic,
+    roomKind,
+    roomAccess,
+    historyVisibility,
+    roomAlias,
+    federate,
+    spaceId,
+    onCreated,
+    onClose,
+  ]);
 
   const handleSearch = useCallback(async () => {
     homeserverAutoStaleRef.current = true;
@@ -945,6 +962,139 @@ export default function CreateRoomDialog({
                   <option value="invited">Members only (since they were invited)</option>
                   <option value="world_readable">Anyone</option>
                 </select>
+              </div>
+
+              <div style={{ marginBottom: 16 }}>
+                  <label style={labelStyle}>Publish address</label>
+                  <div
+                    style={{
+                      display: "flex",
+                      alignItems: "center",
+                      backgroundColor: palette.bgTertiary,
+                      border: `1px solid ${palette.border}`,
+                      borderRadius: 4,
+                      overflow: "hidden",
+                    }}
+                  >
+                    <span
+                      style={{
+                        padding: "8px 0 8px 12px",
+                        color: palette.textSecondary,
+                        fontSize: typography.fontSizeBase,
+                        userSelect: "none",
+                        flexShrink: 0,
+                      }}
+                    >
+                      #
+                    </span>
+                    <input
+                      type="text"
+                      value={roomAlias}
+                      onChange={(e) =>
+                        setRoomAlias(
+                          e.target.value.toLowerCase().replace(/[^a-z0-9_-]/g, "")
+                        )
+                      }
+                      placeholder="my-room"
+                      style={{
+                        flex: 1,
+                        padding: "8px 12px 8px 4px",
+                        fontSize: typography.fontSizeBase,
+                        fontFamily: typography.fontFamily,
+                        backgroundColor: "transparent",
+                        border: "none",
+                        color: palette.textPrimary,
+                        outline: "none",
+                      }}
+                    />
+                  </div>
+                  <div
+                    style={{
+                      fontSize: typography.fontSizeSmall - 1,
+                      color: palette.textSecondary,
+                      marginTop: 4,
+                      opacity: 0.7,
+                    }}
+                  >
+                    Optional. A memorable alias like{" "}
+                    {`#${roomAlias || "my-room"}:${currentHomeserver ?? "your-homeserver"}`}{" "}
+                    (join rules above still apply).
+                  </div>
+                </div>
+
+              <div style={{ marginBottom: 12 }}>
+                <button
+                  type="button"
+                  onClick={() => setAdvancedOpen((o) => !o)}
+                  style={{
+                    background: "none",
+                    border: "none",
+                    color: palette.textSecondary,
+                    fontSize: typography.fontSizeSmall,
+                    fontFamily: typography.fontFamily,
+                    cursor: "pointer",
+                    padding: "4px 0",
+                    display: "flex",
+                    alignItems: "center",
+                    gap: 4,
+                  }}
+                >
+                  <span
+                    style={{
+                      display: "inline-block",
+                      transform: advancedOpen ? "rotate(90deg)" : "rotate(0deg)",
+                      transition: "transform 0.15s",
+                      fontSize: 10,
+                    }}
+                  >
+                    ▶
+                  </span>
+                  Advanced
+                </button>
+                {advancedOpen && (
+                  <label
+                    style={{
+                      display: "flex",
+                      alignItems: "center",
+                      gap: 10,
+                      cursor: "pointer",
+                      marginTop: 12,
+                      paddingLeft: 4,
+                    }}
+                  >
+                    <input
+                      type="checkbox"
+                      checked={federate}
+                      onChange={(e) => setFederate(e.target.checked)}
+                      style={{
+                        accentColor: palette.accent,
+                        width: 16,
+                        height: 16,
+                        cursor: "pointer",
+                      }}
+                    />
+                    <div>
+                      <div
+                        style={{
+                          fontSize: typography.fontSizeBase,
+                          color: palette.textPrimary,
+                          fontWeight: typography.fontWeightMedium,
+                        }}
+                      >
+                        Allow federation
+                      </div>
+                      <div
+                        style={{
+                          fontSize: typography.fontSizeSmall - 1,
+                          color: palette.textSecondary,
+                          marginTop: 2,
+                        }}
+                      >
+                        Let users from other Matrix homeservers join this room
+                      </div>
+                    </div>
+                  </label>
+                )}
               </div>
 
               {error && (

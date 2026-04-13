@@ -1389,6 +1389,208 @@ async fn http_put_room_state(
     Ok(())
 }
 
+/// Normal chat room `creation_content`: federation flag plus optional custom `type` (e.g. voice).
+fn build_chat_room_creation_content(room_type: Option<&str>, federate: bool) -> serde_json::Value {
+    let mut cc = serde_json::json!({
+        "m.federate": federate,
+    });
+    if let Some(rt) = room_type {
+        if !rt.is_empty() {
+            cc["type"] = serde_json::json!(rt);
+        }
+    }
+    cc
+}
+
+// ─── Room general settings (address / federation display; federation is immutable) ───
+
+#[derive(Debug, Clone, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RoomGeneralSettingsSnapshot {
+    pub room_id: String,
+    pub homeserver_name: String,
+    /// From `m.room.create` (`m.federate`); defaults to true if absent.
+    pub federate: bool,
+    pub join_rule: String,
+    pub room_alias_local: Option<String>,
+    /// Full canonical alias when set (e.g. `#name:server`), for display/copy.
+    pub canonical_alias: Option<String>,
+}
+
+#[derive(Debug, Clone, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RoomGeneralSettingsPermissions {
+    pub room_alias: bool,
+}
+
+#[derive(Debug, Clone, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RoomGeneralSettingsData {
+    pub snapshot: RoomGeneralSettingsSnapshot,
+    pub permissions: RoomGeneralSettingsPermissions,
+}
+
+#[derive(Debug, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ApplyRoomGeneralSettingsPatch {
+    pub room_alias_local: Option<String>,
+}
+
+/// Address, join rule, and federation (read-only) for a normal room.
+#[tauri::command]
+pub async fn get_room_general_settings(
+    state: State<'_, Arc<AppState>>,
+    room_id: String,
+) -> Result<RoomGeneralSettingsData, String> {
+    let client = super::get_client(&state).await?;
+    let parsed =
+        matrix_sdk::ruma::RoomId::parse(&room_id).map_err(|e| format!("Invalid room ID: {e}"))?;
+    let _ = client.get_room(&parsed).ok_or("Room not found")?;
+
+    let user_id = client
+        .user_id()
+        .ok_or("No user ID")?
+        .to_string();
+    let homeserver = client.homeserver().to_string();
+    let access_token = client.access_token().ok_or("No access token")?;
+    let hs_trim = homeserver.trim_end_matches('/');
+
+    let pl_body = http_get_room_state(
+        &state.http_client,
+        hs_trim,
+        &access_token,
+        &room_id,
+        "m.room.power_levels/",
+    )
+    .await?;
+
+    let perms = if let Some(pl) = pl_body {
+        let u = power_level_for_user(&pl, &user_id);
+        RoomGeneralSettingsPermissions {
+            room_alias: u >= power_required_for_state_event(&pl, "m.room.canonical_alias"),
+        }
+    } else {
+        RoomGeneralSettingsPermissions { room_alias: false }
+    };
+
+    let create_body = http_get_room_state(
+        &state.http_client,
+        hs_trim,
+        &access_token,
+        &room_id,
+        "m.room.create/",
+    )
+    .await?;
+    let federate = create_body
+        .as_ref()
+        .and_then(|b| b.get("m.federate"))
+        .and_then(|v| v.as_bool())
+        .unwrap_or(true);
+
+    let join_body = http_get_room_state(
+        &state.http_client,
+        hs_trim,
+        &access_token,
+        &room_id,
+        "m.room.join_rules/",
+    )
+    .await?;
+    let join_rule = join_body
+        .as_ref()
+        .and_then(|b| b.get("join_rule"))
+        .and_then(|v| v.as_str())
+        .unwrap_or("invite")
+        .to_string();
+
+    let canon_body = http_get_room_state(
+        &state.http_client,
+        hs_trim,
+        &access_token,
+        &room_id,
+        "m.room.canonical_alias/",
+    )
+    .await?;
+    let canonical_alias = canon_body
+        .as_ref()
+        .and_then(|b| b.get("alias"))
+        .and_then(|v| v.as_str())
+        .filter(|s| !s.is_empty())
+        .map(|s| s.to_string());
+    let room_alias_local = canonical_alias
+        .as_deref()
+        .and_then(|a| alias_local_part(a));
+
+    let homeserver_name = homeserver_name_from_room_id(&room_id);
+
+    Ok(RoomGeneralSettingsData {
+        snapshot: RoomGeneralSettingsSnapshot {
+            room_id: room_id.clone(),
+            homeserver_name,
+            federate,
+            join_rule,
+            room_alias_local,
+            canonical_alias,
+        },
+        permissions: perms,
+    })
+}
+
+#[tauri::command]
+pub async fn apply_room_general_settings(
+    state: State<'_, Arc<AppState>>,
+    room_id: String,
+    patch: ApplyRoomGeneralSettingsPatch,
+) -> Result<(), String> {
+    let client = super::get_client(&state).await?;
+    let parsed =
+        matrix_sdk::ruma::RoomId::parse(&room_id).map_err(|e| format!("Invalid room ID: {e}"))?;
+    client.get_room(&parsed).ok_or("Room not found")?;
+
+    let homeserver = client.homeserver().to_string();
+    let access_token = client.access_token().ok_or("No access token")?;
+    let hs_trim = homeserver.trim_end_matches('/');
+    let http = &state.http_client;
+
+    if let Some(local_raw) = &patch.room_alias_local {
+        let local = local_raw.trim();
+        if !local.is_empty() {
+            let server = homeserver_name_from_room_id(&room_id);
+            let alias = format!("#{local}:{server}");
+            let encoded_alias = urlencoding::encode(&alias);
+
+            let alias_url = format!(
+                "{}/_matrix/client/v3/directory/room/{}",
+                hs_trim, encoded_alias
+            );
+            let alias_resp = http
+                .put(&alias_url)
+                .timeout(Duration::from_secs(15))
+                .bearer_auth(access_token.to_string())
+                .json(&serde_json::json!({ "room_id": room_id }))
+                .send()
+                .await
+                .map_err(|e| format!("Alias PUT failed: {}", fmt_error_chain(&e)))?;
+            let alias_status = alias_resp.status();
+            if !alias_status.is_success() && alias_status.as_u16() != 409 {
+                let t = alias_resp.text().await.unwrap_or_default();
+                return Err(format!("Failed to create alias ({alias_status}): {t}"));
+            }
+
+            http_put_room_state(
+                http,
+                hs_trim,
+                &access_token,
+                &room_id,
+                "m.room.canonical_alias/",
+                &serde_json::json!({ "alias": alias }),
+            )
+            .await?;
+        }
+    }
+
+    Ok(())
+}
+
 /// Snapshot and per-field edit permissions for a space room (from `m.room.power_levels`).
 #[tauri::command]
 pub async fn get_space_settings(
@@ -2445,6 +2647,7 @@ pub async fn create_room_in_space(
     room_type: Option<String>,
     room_alias: Option<String>,
     history_visibility: Option<String>,
+    federate: bool,
 ) -> Result<String, String> {
     if !can_manage_space_children_for_user(&state, &space_id).await? {
         return Err(
@@ -2545,14 +2748,8 @@ pub async fn create_room_in_space(
         }
     }
 
-    // Set room type in creation_content if specified (e.g. voice room)
-    if let Some(rt) = &room_type {
-        if !rt.is_empty() {
-            body["creation_content"] = serde_json::json!({
-                "type": rt,
-            });
-        }
-    }
+    let rt = room_type.as_deref().filter(|s| !s.is_empty());
+    body["creation_content"] = build_chat_room_creation_content(rt, federate);
 
     // Create the room
     let create_url = format!(
@@ -2655,6 +2852,7 @@ pub async fn create_standalone_room(
     room_type: Option<String>,
     room_alias: Option<String>,
     history_visibility: Option<String>,
+    federate: bool,
 ) -> Result<String, String> {
     let client = super::get_client(&state).await?;
     let homeserver = client.homeserver().to_string();
@@ -2706,13 +2904,8 @@ pub async fn create_standalone_room(
         }
     }
 
-    if let Some(rt) = &room_type {
-        if !rt.is_empty() {
-            body["creation_content"] = serde_json::json!({
-                "type": rt,
-            });
-        }
-    }
+    let rt = room_type.as_deref().filter(|s| !s.is_empty());
+    body["creation_content"] = build_chat_room_creation_content(rt, federate);
 
     let create_url = format!(
         "{}/_matrix/client/v3/createRoom",

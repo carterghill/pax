@@ -44,6 +44,19 @@ const VISIBILITY_OPTIONS: {
 
 type SettingsTab = "general" | "members" | "permissions";
 
+interface RoomGeneralSnapshot {
+  roomId: string;
+  homeserverName: string;
+  federate: boolean;
+  joinRule: string;
+  roomAliasLocal: string | null;
+  canonicalAlias: string | null;
+}
+
+interface RoomGeneralPermissions {
+  roomAlias: boolean;
+}
+
 export interface RoomSettingsDialogProps {
   roomId: string;
   roomName: string;
@@ -94,23 +107,43 @@ export default function RoomSettingsDialog({
   } | null>(null);
   const [moderationBusy, setModerationBusy] = useState(false);
 
+  const [roomGeneralLoading, setRoomGeneralLoading] = useState(true);
+  const [roomSnap, setRoomSnap] = useState<RoomGeneralSnapshot | null>(null);
+  const [roomPerms, setRoomPerms] = useState<RoomGeneralPermissions | null>(null);
+  const [roomAliasDraft, setRoomAliasDraft] = useState("");
+
   useEffect(() => {
     let cancelled = false;
     setVisibilityLoading(true);
+    setRoomGeneralLoading(true);
     setSaveError(null);
-    invoke<string>("get_history_visibility", { roomId })
-      .then((vis) => {
-        if (!cancelled) {
-          const v = vis as HistoryVisibility;
-          setCurrentVisibility(v);
-          setSelectedVisibility(v);
-          setVisibilityLoading(false);
-        }
+    setRoomSnap(null);
+    setRoomPerms(null);
+    setRoomAliasDraft("");
+
+    Promise.all([
+      invoke<string>("get_history_visibility", { roomId }),
+      invoke<{ snapshot: RoomGeneralSnapshot; permissions: RoomGeneralPermissions }>(
+        "get_room_general_settings",
+        { roomId },
+      ),
+    ])
+      .then(([vis, general]) => {
+        if (cancelled) return;
+        const v = vis as HistoryVisibility;
+        setCurrentVisibility(v);
+        setSelectedVisibility(v);
+        setVisibilityLoading(false);
+        setRoomSnap(general.snapshot);
+        setRoomPerms(general.permissions);
+        setRoomAliasDraft(general.snapshot.roomAliasLocal ?? "");
+        setRoomGeneralLoading(false);
       })
       .catch((e) => {
         if (!cancelled) {
           setSaveError(String(e));
           setVisibilityLoading(false);
+          setRoomGeneralLoading(false);
         }
       });
     return () => {
@@ -272,17 +305,43 @@ export default function RoomSettingsDialog({
     ],
   );
 
-  async function handleSaveVisibility() {
-    if (!selectedVisibility || selectedVisibility === currentVisibility) return;
+  async function handleSaveGeneral() {
+    if (!selectedVisibility) return;
+
+    const aliasTrim = roomAliasDraft.trim().toLowerCase().replace(/[^a-z0-9_-]/g, "");
+    const prevAlias = (roomSnap?.roomAliasLocal ?? "").trim().toLowerCase();
+    const hasAliasChange =
+      !!roomPerms?.roomAlias && aliasTrim !== prevAlias && aliasTrim.length > 0;
+
+    const hasVisibilityChange =
+      selectedVisibility !== null && selectedVisibility !== currentVisibility;
+
+    if (!hasVisibilityChange && !hasAliasChange) return;
+
     setSaving(true);
     setSaveError(null);
     setSuccess(false);
     try {
-      await invoke("set_history_visibility", {
-        roomId,
-        visibility: selectedVisibility,
-      });
-      setCurrentVisibility(selectedVisibility);
+      if (hasVisibilityChange) {
+        await invoke("set_history_visibility", {
+          roomId,
+          visibility: selectedVisibility,
+        });
+        setCurrentVisibility(selectedVisibility);
+      }
+      if (hasAliasChange) {
+        await invoke("apply_room_general_settings", {
+          roomId,
+          patch: { roomAliasLocal: aliasTrim },
+        });
+        const refreshed = await invoke<{
+          snapshot: RoomGeneralSnapshot;
+          permissions: RoomGeneralPermissions;
+        }>("get_room_general_settings", { roomId });
+        setRoomSnap(refreshed.snapshot);
+        setRoomPerms(refreshed.permissions);
+        setRoomAliasDraft(refreshed.snapshot.roomAliasLocal ?? "");
+      }
       setSuccess(true);
       setTimeout(() => setSuccess(false), 2000);
     } catch (e) {
@@ -293,6 +352,21 @@ export default function RoomSettingsDialog({
 
   const hasVisibilityChanges =
     selectedVisibility !== null && selectedVisibility !== currentVisibility;
+
+  const aliasTrimForSave = roomAliasDraft
+    .trim()
+    .toLowerCase()
+    .replace(/[^a-z0-9_-]/g, "");
+  const prevAliasForSave = (roomSnap?.roomAliasLocal ?? "").trim().toLowerCase();
+  const hasAliasSave =
+    !!roomPerms?.roomAlias &&
+    !!roomSnap &&
+    aliasTrimForSave !== prevAliasForSave &&
+    aliasTrimForSave.length > 0;
+
+  const hasGeneralChanges = hasVisibilityChanges || hasAliasSave;
+
+  const showPublishAddress = !!roomPerms?.roomAlias && !!roomSnap;
 
   const headerTitle = roomName;
 
@@ -442,6 +516,154 @@ export default function RoomSettingsDialog({
               >
                 {activeTab === "general" && (
                   <div>
+                    {!roomGeneralLoading && roomSnap && (
+                      <div style={{ marginBottom: spacing.unit * 4 }}>
+                        <h3
+                          style={{
+                            margin: "0 0 12px 0",
+                            fontSize: typography.fontSizeBase,
+                            fontWeight: typography.fontWeightBold,
+                            color: palette.textHeading,
+                          }}
+                        >
+                          Federation
+                        </h3>
+                        <label
+                          style={{
+                            display: "flex",
+                            alignItems: "flex-start",
+                            gap: spacing.unit * 2,
+                            padding: `${spacing.unit * 2.5}px ${spacing.unit * 3}px`,
+                            borderRadius: 8,
+                            border: `1px solid ${palette.border}`,
+                            backgroundColor: palette.bgPrimary,
+                            cursor: "not-allowed",
+                            opacity: 0.85,
+                          }}
+                        >
+                          <input
+                            type="checkbox"
+                            checked={roomSnap.federate}
+                            disabled
+                            style={{
+                              accentColor: palette.accent,
+                              width: 16,
+                              height: 16,
+                              marginTop: 2,
+                              cursor: "not-allowed",
+                            }}
+                          />
+                          <div style={{ flex: 1, minWidth: 0 }}>
+                            <div
+                              style={{
+                                fontSize: typography.fontSizeSmall,
+                                fontWeight: typography.fontWeightMedium,
+                                color: palette.textHeading,
+                              }}
+                            >
+                              Allow federation
+                            </div>
+                            <div
+                              style={{
+                                fontSize: 12,
+                                color: palette.textSecondary,
+                                marginTop: spacing.unit,
+                                lineHeight: 1.4,
+                              }}
+                            >
+                              When enabled, users on other Matrix homeservers can participate. This
+                              is fixed when the room is created and cannot be changed afterward.
+                            </div>
+                          </div>
+                        </label>
+                      </div>
+                    )}
+
+                    {showPublishAddress && (
+                      <div style={{ marginBottom: spacing.unit * 4 }}>
+                        <h3
+                          style={{
+                            margin: "0 0 12px 0",
+                            fontSize: typography.fontSizeBase,
+                            fontWeight: typography.fontWeightBold,
+                            color: palette.textHeading,
+                          }}
+                        >
+                          Publish address
+                        </h3>
+                        <div
+                          style={{
+                            display: "flex",
+                            alignItems: "center",
+                            backgroundColor: palette.bgTertiary,
+                            border: `1px solid ${palette.border}`,
+                            borderRadius: 8,
+                            overflow: "hidden",
+                            opacity: roomPerms?.roomAlias ? 1 : 0.5,
+                          }}
+                        >
+                          <span
+                            style={{
+                              padding: "8px 0 8px 12px",
+                              color: palette.textSecondary,
+                              fontSize: typography.fontSizeBase,
+                              userSelect: "none",
+                              flexShrink: 0,
+                            }}
+                          >
+                            #
+                          </span>
+                          <input
+                            type="text"
+                            value={roomAliasDraft}
+                            onChange={(e) =>
+                              setRoomAliasDraft(
+                                e.target.value.toLowerCase().replace(/[^a-z0-9_-]/g, "")
+                              )
+                            }
+                            placeholder="room-name"
+                            disabled={!roomPerms?.roomAlias}
+                            style={{
+                              flex: 1,
+                              padding: "8px 12px 8px 4px",
+                              fontSize: typography.fontSizeBase,
+                              fontFamily: typography.fontFamily,
+                              backgroundColor: "transparent",
+                              border: "none",
+                              color: palette.textPrimary,
+                              outline: "none",
+                            }}
+                          />
+                        </div>
+                        <div
+                          style={{
+                            fontSize: typography.fontSizeSmall - 1,
+                            color: palette.textSecondary,
+                            marginTop: 4,
+                            opacity: 0.75,
+                          }}
+                        >
+                          :{roomSnap.homeserverName}
+                          {roomSnap.canonicalAlias && (
+                            <span style={{ marginLeft: 8, userSelect: "all" }}>
+                              Current: {roomSnap.canonicalAlias}
+                            </span>
+                          )}
+                        </div>
+                        {!roomPerms?.roomAlias && (
+                          <div
+                            style={{
+                              fontSize: typography.fontSizeSmall - 1,
+                              color: palette.textSecondary,
+                              marginTop: 6,
+                            }}
+                          >
+                            You need permission to set the canonical alias for this room.
+                          </div>
+                        )}
+                      </div>
+                    )}
+
                     <h3
                       style={{
                         margin: "0 0 12px 0",
@@ -747,7 +969,7 @@ export default function RoomSettingsDialog({
                 )}
               </div>
 
-              {activeTab === "general" && !visibilityLoading && (
+              {activeTab === "general" && !visibilityLoading && !roomGeneralLoading && (
                 <div
                   style={{
                     display: "flex",
@@ -791,22 +1013,22 @@ export default function RoomSettingsDialog({
                   </button>
                   <button
                     type="button"
-                    onClick={() => void handleSaveVisibility()}
-                    disabled={!hasVisibilityChanges || saving}
+                    onClick={() => void handleSaveGeneral()}
+                    disabled={!hasGeneralChanges || saving}
                     style={{
                       padding: "8px 20px",
                       fontSize: typography.fontSizeBase,
                       fontFamily: typography.fontFamily,
                       fontWeight: typography.fontWeightMedium,
                       backgroundColor:
-                        !hasVisibilityChanges || saving
+                        !hasGeneralChanges || saving
                           ? palette.accent + "80"
                           : palette.accent,
                       border: "none",
                       borderRadius: 4,
                       color: "#fff",
                       cursor:
-                        !hasVisibilityChanges || saving ? "not-allowed" : "pointer",
+                        !hasGeneralChanges || saving ? "not-allowed" : "pointer",
                       display: "flex",
                       alignItems: "center",
                       gap: 8,
