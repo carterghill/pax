@@ -773,8 +773,10 @@ pub async fn join_room(
 ) -> Result<String, String> {
     let client = super::get_client(&state).await?;
 
-    let parsed =
-        matrix_sdk::ruma::RoomId::parse(&room_id).map_err(|e| format!("Invalid room ID: {e}"))?;
+    let room_or_alias =
+        <&matrix_sdk::ruma::RoomOrAliasId>::try_from(room_id.as_str()).map_err(|e| {
+            format!("Invalid room ID or alias: {e}")
+        })?;
 
     // Federation hints (same discovery as the old raw HTTP join).
     let mut server_names = Vec::new();
@@ -799,19 +801,12 @@ pub async fn join_room(
     // Use the SDK join so `finish_join_room` registers the room in the in-memory client
     // immediately. A raw POST /join succeeds before sliding sync runs, so `get_room` would
     // miss and `get_messages` / `get_room_members` returned "Room not found" until sync caught up.
-    let room = if via.is_empty() {
-        client
-            .join_room_by_id(&parsed)
-            .await
-            .map_err(|e| format!("Failed to join room: {}", fmt_error_chain(&e)))?
-    } else {
-        let rid: &matrix_sdk::ruma::RoomId = &*parsed;
-        let id: &matrix_sdk::ruma::RoomOrAliasId = rid.into();
-        client
-            .join_room_by_id_or_alias(id, &via)
-            .await
-            .map_err(|e| format!("Failed to join room: {}", fmt_error_chain(&e)))?
-    };
+    //
+    // Accepts `!roomid:server` or `#alias:server` (public directory often returns canonical_alias).
+    let room = client
+        .join_room_by_id_or_alias(room_or_alias, &via)
+        .await
+        .map_err(|e| format!("Failed to join room: {}", fmt_error_chain(&e)))?;
 
     Ok(room.room_id().to_string())
 }
