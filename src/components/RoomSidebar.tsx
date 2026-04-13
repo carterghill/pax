@@ -1,4 +1,4 @@
-import { useState, useCallback, useEffect } from "react";
+import { useState, useCallback, useEffect, useMemo } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import DmPeerAvatar from "./DmPeerAvatar";
@@ -21,7 +21,8 @@ import { useTheme } from "../theme/ThemeContext";
 import StatusDropdown from "./StatusDropdown";
 import VolumeContextMenu from "./VolumeContextMenu";
 import RoomContextMenu from "./RoomContextMenu";
-import RoomSettingsModal from "./RoomSettingsModal";
+import RoomSettingsDialog from "./RoomSettingsDialog";
+import { collectRoomIdsInSpaceTree } from "../utils/spaceModeration";
 import InviteDialog from "./InviteDialog";
 import LeaveConfirmDialog from "./LeaveConfirmDialog";
 import { useUserVolume } from "../hooks/useUserVolume";
@@ -87,6 +88,9 @@ interface RoomSidebarProps {
   onSetParticipantVolume: (identity: string, volume: number, source: string) => void;
   /** Called after successfully leaving a room from the context menu */
   onLeftRoom?: (roomId: string) => void;
+  /** Active space (for moderation scope in room settings when the room is in its tree). */
+  activeSpaceId: string | null;
+  roomsBySpace: (spaceId: string | null) => Room[];
 }
 
 function VoiceParticipantRow({
@@ -437,6 +441,8 @@ export default function RoomSidebar({
   voiceParticipantStatesByRoom,
   onSetParticipantVolume,
   onLeftRoom,
+  activeSpaceId,
+  roomsBySpace,
 }: RoomSidebarProps) {
   const { palette, spacing, typography } = useTheme();
   /** Sub-space id → expanded; absence means expanded (default open). */
@@ -463,6 +469,29 @@ export default function RoomSidebar({
   const [leaveRoomError, setLeaveRoomError] = useState<string | null>(null);
   const [leaveRoomSubmitting, setLeaveRoomSubmitting] = useState(false);
   const settingsRoom = settingsRoomId ? getRoom(settingsRoomId) : null;
+
+  const moderationSpaceTreeRoomIds = useMemo(() => {
+    if (!settingsRoom || settingsRoom.isDirect) return null;
+    if (!activeSpaceId) return null;
+    const inTree =
+      settingsRoom.id === activeSpaceId ||
+      settingsRoom.parentSpaceIds.includes(activeSpaceId);
+    if (!inTree) return null;
+    return collectRoomIdsInSpaceTree(activeSpaceId, roomsBySpace);
+  }, [settingsRoom, activeSpaceId, roomsBySpace]);
+
+  const moderationSpaceRootId =
+    settingsRoom &&
+    activeSpaceId &&
+    !settingsRoom.isDirect &&
+    (settingsRoom.id === activeSpaceId || settingsRoom.parentSpaceIds.includes(activeSpaceId))
+      ? activeSpaceId
+      : null;
+
+  const moderationSpaceName =
+    moderationSpaceRootId && activeSpaceId
+      ? getRoom(activeSpaceId)?.name ?? null
+      : null;
 
   /** Live DM peer presence from sync (same `presence` event as space home / member list). */
   const [peerPresenceByUserId, setPeerPresenceByUserId] = useState<Record<string, string>>({});
@@ -805,9 +834,12 @@ export default function RoomSidebar({
 
       {/* Room settings modal */}
       {settingsRoom && (
-        <RoomSettingsModal
+        <RoomSettingsDialog
           roomId={settingsRoom.id}
           roomName={settingsRoom.name}
+          moderationSpaceTreeRoomIds={moderationSpaceTreeRoomIds}
+          moderationSpaceName={moderationSpaceName}
+          moderationSpaceRootId={moderationSpaceRootId}
           onClose={() => setSettingsRoomId(null)}
         />
       )}

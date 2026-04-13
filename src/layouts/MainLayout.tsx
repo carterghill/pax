@@ -542,6 +542,8 @@ export default function MainLayout({
             voiceParticipantStatesByRoom={voiceParticipantStatesByRoom}
             onSetParticipantVolume={voiceCall.setParticipantVolume}
             onLeftRoom={handleLeftRoom}
+            activeSpaceId={activeSpaceId}
+            roomsBySpace={roomsBySpace}
           />
           <div
             onMouseDown={sidebarResize.onMouseDown}
