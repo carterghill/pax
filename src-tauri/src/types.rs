@@ -77,6 +77,10 @@ pub struct RoomManagementMemberInfo {
     pub presence: String,
     pub status_msg: Option<String>,
     pub role: String,
+    /// Whether the current user may kick this member (joined members only).
+    pub can_kick: bool,
+    /// Whether the current user may ban this member (joined members only).
+    pub can_ban: bool,
 }
 
 #[derive(Clone, Serialize)]

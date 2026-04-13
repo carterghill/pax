@@ -6,7 +6,7 @@ import { paletteDialogOuterBorderStyle } from "../theme/paletteBorder";
 import { useOverlayObstruction } from "../hooks/useOverlayObstruction";
 
 export interface ModerationScopeDialogProps {
-  kind: "kick" | "ban";
+  kind: "kick" | "ban" | "unban";
   targetDisplayName: string;
   /** Current channel/room label for the secondary action. */
   currentRoomName: string;
@@ -35,8 +35,10 @@ export default function ModerationScopeDialog({
   const modalRef = useRef<HTMLDivElement>(null);
   useOverlayObstruction(modalRef);
 
-  const verb = kind === "kick" ? "Kick" : "Ban";
-  const verbLower = kind === "kick" ? "kick" : "ban";
+  const verb =
+    kind === "kick" ? "Kick" : kind === "ban" ? "Ban" : "Unban";
+  const verbLower = verb.toLowerCase();
+  const isUnban = kind === "unban";
   const hasSpace = showSpaceScope;
   const spaceLabel = spaceName?.trim() || "this space";
 
@@ -116,11 +118,20 @@ export default function ModerationScopeDialog({
 
         <div style={{ padding: spacing.unit * 3, fontSize: typography.fontSizeSmall, color: palette.textSecondary, lineHeight: 1.55 }}>
           {hasSpace ? (
-            <>
-              Choose whether to {verbLower} them only from this room ({currentRoomName}), or from the
-              whole space &quot;{spaceLabel}&quot; (including every room and sub-space in it) where you have
-              permission.
-            </>
+            isUnban ? (
+              <>
+                Choose whether to unban them only in this space room ({currentRoomName}), or lift bans
+                across the whole space &quot;{spaceLabel}&quot; (including every room and sub-space in it).
+              </>
+            ) : (
+              <>
+                Choose whether to {verbLower} them only from this room ({currentRoomName}), or from the
+                whole space &quot;{spaceLabel}&quot; (including every room and sub-space in it) where you have
+                permission.
+              </>
+            )
+          ) : isUnban ? (
+            <>They will be unbanned in {currentRoomName} only.</>
           ) : (
             <>
               They will be {kind === "kick" ? "removed" : "banned"} from {currentRoomName} only.
@@ -148,14 +159,14 @@ export default function ModerationScopeDialog({
                 border: "none",
                 cursor: busy ? "not-allowed" : "pointer",
                 opacity: busy ? 0.7 : 1,
-                backgroundColor: "#ed4245",
+                backgroundColor: isUnban ? "#23a55a" : "#ed4245",
                 color: "#fff",
                 fontSize: typography.fontSizeSmall,
                 fontWeight: typography.fontWeightBold,
                 fontFamily: typography.fontFamily,
               }}
             >
-              {verb} from space and all rooms
+              {isUnban ? "Unban from space and all rooms" : `${verb} from space and all rooms`}
             </button>
           )}
           <button
@@ -176,7 +187,7 @@ export default function ModerationScopeDialog({
               fontFamily: typography.fontFamily,
             }}
           >
-            {verb} from this room only
+            {isUnban ? "Unban from this space only" : `${verb} from this room only`}
           </button>
           <button
             type="button"

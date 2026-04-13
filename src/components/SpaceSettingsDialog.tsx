@@ -16,6 +16,7 @@ import { useTheme } from "../theme/ThemeContext";
 import { paletteDialogShellBorderStyle } from "../theme/paletteBorder";
 import { useOverlayObstruction } from "../hooks/useOverlayObstruction";
 import ModalLayer from "./ModalLayer";
+import ModerationScopeDialog from "./ModerationScopeDialog";
 import type {
   RoomManagementMember,
   RoomManagementMembersResponse,
@@ -67,6 +68,8 @@ interface SpaceSettingsDialogProps {
   spaceId: string;
   /** Shown in header while loading or if name missing */
   titleFallback: string;
+  /** Space room plus every room in the tree (for kick/ban scope); from client room list. */
+  moderationSpaceTreeRoomIds?: string[] | null;
   onClose: () => void;
   onSaved: () => void | Promise<void>;
 }
@@ -74,6 +77,7 @@ interface SpaceSettingsDialogProps {
 export default function SpaceSettingsDialog({
   spaceId,
   titleFallback,
+  moderationSpaceTreeRoomIds = null,
   onClose,
   onSaved,
 }: SpaceSettingsDialogProps) {
@@ -118,6 +122,12 @@ export default function SpaceSettingsDialog({
     banned: [],
   });
   const [unbanBusyId, setUnbanBusyId] = useState<string | null>(null);
+  const [moderationDialog, setModerationDialog] = useState<{
+    kind: "kick" | "ban" | "unban";
+    userId: string;
+    displayName: string;
+  } | null>(null);
+  const [moderationBusy, setModerationBusy] = useState(false);
 
   useEffect(() => {
     let cancelled = false;
@@ -250,36 +260,96 @@ export default function SpaceSettingsDialog({
     [memberData.joined],
   );
 
-  const handleUnbanFromSpace = useCallback(
-    async (userId: string) => {
-      setUnbanBusyId(userId);
-      setMembersError(null);
-      try {
-        await invoke("unban_user", { roomId: spaceId, userId });
-        await loadManagementMembers();
-      } catch (e) {
-        setMembersError(String(e));
-      } finally {
-        setUnbanBusyId(null);
-      }
+  const openUnbanDialog = useCallback(
+    (userId: string) => {
+      const m = memberData.banned.find((x) => x.userId === userId);
+      setModerationDialog({
+        kind: "unban",
+        userId,
+        displayName: m?.displayName ?? userId,
+      });
     },
-    [loadManagementMembers, spaceId],
+    [memberData.banned],
   );
 
-  const handleUnbanFromSpaceTree = useCallback(
-    async (userId: string) => {
-      setUnbanBusyId(userId);
-      setMembersError(null);
+  const openKickDialog = useCallback(
+    (userId: string) => {
+      const m = memberData.joined.find((x) => x.userId === userId);
+      setModerationDialog({
+        kind: "kick",
+        userId,
+        displayName: m?.displayName ?? userId,
+      });
+    },
+    [memberData.joined],
+  );
+
+  const openBanDialog = useCallback(
+    (userId: string) => {
+      const m = memberData.joined.find((x) => x.userId === userId);
+      setModerationDialog({
+        kind: "ban",
+        userId,
+        displayName: m?.displayName ?? userId,
+      });
+    },
+    [memberData.joined],
+  );
+
+  const runModeration = useCallback(
+    async (scope: "space" | "room") => {
+      if (!moderationDialog) return;
+      const { kind, userId } = moderationDialog;
+
+      if (kind === "unban") {
+        setModerationBusy(true);
+        setUnbanBusyId(userId);
+        setMembersError(null);
+        try {
+          const useTree =
+            scope === "space" &&
+            moderationSpaceTreeRoomIds &&
+            moderationSpaceTreeRoomIds.length > 0;
+          if (useTree) {
+            await invoke("unban_user_from_space_tree", { spaceId, userId });
+          } else {
+            await invoke("unban_user", { roomId: spaceId, userId });
+          }
+          await loadManagementMembers();
+        } catch (e) {
+          setMembersError(String(e));
+        } finally {
+          setModerationBusy(false);
+          setUnbanBusyId(null);
+          setModerationDialog(null);
+        }
+        return;
+      }
+
+      const roomIds =
+        scope === "space" && moderationSpaceTreeRoomIds && moderationSpaceTreeRoomIds.length > 0
+          ? moderationSpaceTreeRoomIds
+          : [spaceId];
+      setModerationBusy(true);
       try {
-        await invoke("unban_user_from_space_tree", { spaceId, userId });
+        for (const rid of roomIds) {
+          try {
+            if (kind === "kick") {
+              await invoke("kick_user", { roomId: rid, userId, reason: null });
+            } else {
+              await invoke("ban_user", { roomId: rid, userId, reason: null });
+            }
+          } catch (e) {
+            console.error(`Moderation failed for room ${rid}:`, e);
+          }
+        }
         await loadManagementMembers();
-      } catch (e) {
-        setMembersError(String(e));
       } finally {
-        setUnbanBusyId(null);
+        setModerationBusy(false);
+        setModerationDialog(null);
       }
     },
-    [loadManagementMembers, spaceId],
+    [moderationDialog, moderationSpaceTreeRoomIds, spaceId, loadManagementMembers],
   );
 
   const buildPatch = useCallback(() => {
@@ -414,6 +484,7 @@ export default function SpaceSettingsDialog({
   const headerTitle = snap?.name ?? titleFallback;
 
   return (
+    <>
     <ModalLayer
       onBackdropClick={handleBackdropClick}
       backdropStyle={{
@@ -428,7 +499,7 @@ export default function SpaceSettingsDialog({
         style={{
           backgroundColor: palette.bgSecondary,
           borderRadius: 8,
-          width: "min(1120px, calc(100vw - 40px))",
+          width: "min(720px, calc(100vw - 40px))",
           maxHeight: "min(90vh, 920px)",
           display: "flex",
           flexDirection: "column",
@@ -455,17 +526,8 @@ export default function SpaceSettingsDialog({
                 color: palette.textHeading,
               }}
             >
-              Space Settings
-            </h2>
-            <div
-              style={{
-                fontSize: typography.fontSizeSmall,
-                color: palette.textSecondary,
-                marginTop: 4,
-              }}
-            >
               {headerTitle}
-            </div>
+            </h2>
           </div>
           <button
             type="button"
@@ -549,8 +611,24 @@ export default function SpaceSettingsDialog({
           </div>
 
           {/* Main content area */}
-          <div style={{ flex: 1, display: "flex", flexDirection: "column", minHeight: 0 }}>
-            <div style={{ flex: 1, overflowY: "auto", padding: "16px 20px 20px 20px" }}>
+          <div
+            style={{
+              flex: 1,
+              display: "flex",
+              flexDirection: "column",
+              minHeight: 0,
+              minWidth: 0,
+            }}
+          >
+            <div
+              style={{
+                flex: 1,
+                overflowY: "auto",
+                overflowX: "hidden",
+                padding: "16px 20px 20px 20px",
+                minWidth: 0,
+              }}
+            >
               {loading && activeTab === "general" && (
                 <div
                   style={{
@@ -1020,6 +1098,8 @@ export default function SpaceSettingsDialog({
                       spacing={spacing}
                       emptyMessage="No admins found."
                       alwaysShow
+                      onKick={openKickDialog}
+                      onBan={openBanDialog}
                       resolvedColorScheme={resolvedColorScheme}
                     />
 
@@ -1033,6 +1113,8 @@ export default function SpaceSettingsDialog({
                       spacing={spacing}
                       emptyMessage="No moderators found."
                       alwaysShow
+                      onKick={openKickDialog}
+                      onBan={openBanDialog}
                       resolvedColorScheme={resolvedColorScheme}
                     />
 
@@ -1046,6 +1128,8 @@ export default function SpaceSettingsDialog({
                       spacing={spacing}
                       emptyMessage="No regular members found."
                       alwaysShow
+                      onKick={openKickDialog}
+                      onBan={openBanDialog}
                       resolvedColorScheme={resolvedColorScheme}
                     />
 
@@ -1059,10 +1143,8 @@ export default function SpaceSettingsDialog({
                       spacing={spacing}
                       emptyMessage="No banned users in this space."
                       alwaysShow
-                      onPrimaryAction={handleUnbanFromSpace}
+                      onPrimaryAction={openUnbanDialog}
                       primaryActionLabel="Unban"
-                      onSecondaryAction={handleUnbanFromSpaceTree}
-                      secondaryActionLabel="Unban All Rooms"
                       actionBusyUserId={unbanBusyId}
                       resolvedColorScheme={resolvedColorScheme}
                     />
@@ -1187,6 +1269,20 @@ export default function SpaceSettingsDialog({
         <style>{`@keyframes spin { to { transform: rotate(360deg); } }`}</style>
       </div>
     </ModalLayer>
+    {moderationDialog && (
+      <ModerationScopeDialog
+        kind={moderationDialog.kind}
+        targetDisplayName={moderationDialog.displayName}
+        currentRoomName={headerTitle}
+        showSpaceScope={!!moderationSpaceTreeRoomIds?.length}
+        spaceName={headerTitle}
+        onSpaceScope={() => void runModeration("space")}
+        onRoomOnly={() => void runModeration("room")}
+        onCancel={() => !moderationBusy && setModerationDialog(null)}
+        busy={moderationBusy}
+      />
+    )}
+    </>
   );
 }
 
@@ -1199,6 +1295,8 @@ function MemberCategory({
   spacing,
   emptyMessage,
   alwaysShow = false,
+  onKick,
+  onBan,
   onPrimaryAction,
   primaryActionLabel,
   onSecondaryAction,
@@ -1214,6 +1312,8 @@ function MemberCategory({
   spacing: ThemeSpacing;
   emptyMessage?: string;
   alwaysShow?: boolean;
+  onKick?: (userId: string) => void;
+  onBan?: (userId: string) => void;
   onPrimaryAction?: (userId: string) => void;
   primaryActionLabel?: string;
   onSecondaryAction?: (userId: string) => void;
@@ -1273,6 +1373,8 @@ function MemberCategory({
                 backgroundColor: palette.bgTertiary,
                 borderRadius: 8,
                 border: `1px solid ${palette.border}`,
+                minWidth: 0,
+                maxWidth: "100%",
               }}
             >
               <div style={{ flexShrink: 0 }}>
@@ -1309,8 +1411,9 @@ function MemberCategory({
                   </div>
                 )}
               </div>
-              <div style={{ flex: 1, minWidth: 0 }}>
+              <div style={{ flex: 1, minWidth: 0, overflow: "hidden" }}>
                 <div
+                  title={displayName}
                   style={{
                     fontWeight: typography.fontWeightMedium,
                     color: palette.textPrimary,
@@ -1322,14 +1425,66 @@ function MemberCategory({
                   {displayName}
                 </div>
                 <div
+                  title={member.userId}
                   style={{
                     fontSize: typography.fontSizeSmall - 1,
                     color: palette.textSecondary,
+                    overflow: "hidden",
+                    textOverflow: "ellipsis",
+                    whiteSpace: "nowrap",
                   }}
                 >
                   {member.userId}
                 </div>
               </div>
+              {(onKick || onBan) && (member.canKick || member.canBan) && (
+                <div
+                  style={{
+                    display: "flex",
+                    gap: spacing.unit * 1.5,
+                    flexShrink: 0,
+                    flexWrap: "wrap",
+                    justifyContent: "flex-end",
+                  }}
+                >
+                  {onKick && member.canKick && (
+                    <button
+                      type="button"
+                      onClick={() => onKick(member.userId)}
+                      style={{
+                        padding: `${spacing.unit}px ${spacing.unit * 2.5}px`,
+                        backgroundColor: palette.bgTertiary,
+                        color: palette.textPrimary,
+                        border: `1px solid ${palette.border}`,
+                        borderRadius: 6,
+                        cursor: "pointer",
+                        fontSize: typography.fontSizeSmall,
+                        fontWeight: typography.fontWeightMedium,
+                      }}
+                    >
+                      Kick
+                    </button>
+                  )}
+                  {onBan && member.canBan && (
+                    <button
+                      type="button"
+                      onClick={() => onBan(member.userId)}
+                      style={{
+                        padding: `${spacing.unit}px ${spacing.unit * 2.5}px`,
+                        backgroundColor: "rgba(237,66,69,0.15)",
+                        color: "#ed4245",
+                        border: "1px solid rgba(237,66,69,0.35)",
+                        borderRadius: 6,
+                        cursor: "pointer",
+                        fontSize: typography.fontSizeSmall,
+                        fontWeight: typography.fontWeightMedium,
+                      }}
+                    >
+                      Ban
+                    </button>
+                  )}
+                </div>
+              )}
               {(onPrimaryAction || onSecondaryAction) && (
                 <div
                   style={{

@@ -1,8 +1,9 @@
-import { useState, useCallback, useEffect, useRef } from "react";
+import { useState, useCallback, useEffect, useRef, useMemo } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { Plus, Settings } from "lucide-react";
 import { useTheme } from "../theme/ThemeContext";
 import type { Room } from "../types/matrix";
+import { collectRoomIdsInSpaceTree } from "../utils/spaceModeration";
 import { spaceInitialAvatarBackground } from "../utils/userAvatarColor";
 import CreateSpaceDialog from "./CreateSpaceDialog";
 import CreateRoomDialog from "./CreateRoomDialog";
@@ -18,6 +19,8 @@ type RoomsChangedPayload = {
 
 interface SpaceSidebarProps {
   spaces: Room[];
+  /** Used to kick/ban across the whole space tree from space settings. */
+  roomsBySpace: (spaceId: string | null) => Room[];
   activeSpaceId: string | null;
   /** Top-level space to show as selected when the user is inside a nested sub-space. */
   spaceHighlightId: string | null;
@@ -90,6 +93,7 @@ function SpaceAvatar({ space, isActive }: { space: Room; isActive: boolean }) {
 
 export default function SpaceSidebar({
   spaces,
+  roomsBySpace,
   activeSpaceId,
   spaceHighlightId,
   onSelectSpace,
@@ -188,6 +192,12 @@ export default function SpaceSidebar({
       cancelled = true;
     };
   }, [spaceContextMenu?.spaceId]);
+
+  const moderationSpaceTreeRoomIds = useMemo(() => {
+    if (!spaceSettingsTarget) return null;
+    const ids = collectRoomIdsInSpaceTree(spaceSettingsTarget.spaceId, roomsBySpace);
+    return ids.length > 0 ? ids : null;
+  }, [spaceSettingsTarget, roomsBySpace]);
 
   const handleConfirmLeaveSpace = useCallback(async () => {
     if (!leaveSpace) return;
@@ -408,6 +418,7 @@ export default function SpaceSidebar({
         <SpaceSettingsDialog
           spaceId={spaceSettingsTarget.spaceId}
           titleFallback={spaceSettingsTarget.spaceName}
+          moderationSpaceTreeRoomIds={moderationSpaceTreeRoomIds}
           onClose={() => setSpaceSettingsTarget(null)}
           onSaved={() => onSpacesChanged()}
         />

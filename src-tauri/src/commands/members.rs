@@ -20,6 +20,17 @@ use matrix_sdk::ruma::events::room::MediaSource;
 use matrix_sdk::ruma::events::room::member::MembershipState;
 use matrix_sdk::ruma::events::room::power_levels::UserPowerLevel;
 
+/// True when `own` has strictly higher power than `target` (Matrix kick/ban rules).
+fn user_power_outranks(own: UserPowerLevel, target: UserPowerLevel) -> bool {
+    match (own, target) {
+        (UserPowerLevel::Infinite, UserPowerLevel::Infinite) => false,
+        (UserPowerLevel::Infinite, _) => true,
+        (_, UserPowerLevel::Infinite) => false,
+        (UserPowerLevel::Int(a), UserPowerLevel::Int(b)) => a > b,
+        _ => false,
+    }
+}
+
 fn room_member_role_label(member: &matrix_sdk::room::RoomMember) -> String {
     use matrix_sdk::room::RoomMemberRole;
 
@@ -139,6 +150,12 @@ pub async fn get_room_management_members(
     let status_msg_snapshot = state.status_msg_map.lock().await.clone();
     let avatar_snapshot = state.avatar_cache.lock().await.clone();
 
+    let my_id = client.user_id().ok_or("Not logged in")?;
+    let self_member_opt = room
+        .get_member(my_id)
+        .await
+        .map_err(|e| format!("Failed to load own membership: {}", fmt_error_chain(&e)))?;
+
     let joined = joined_members
         .iter()
         .map(|member| {
@@ -146,6 +163,20 @@ pub async fn get_room_management_members(
             let avatar_url = member
                 .avatar_url()
                 .and_then(|mxc| avatar_snapshot.get(&mxc.to_string()).cloned());
+
+            let (can_kick, can_ban) = if member.user_id() == my_id {
+                (false, false)
+            } else if *member.membership() != MembershipState::Join {
+                (false, false)
+            } else if let Some(ref sm) = self_member_opt {
+                let own_pl = sm.power_level();
+                let target_pl = member.power_level();
+                let can_kick = sm.can_kick() && user_power_outranks(own_pl, target_pl);
+                let can_ban = sm.can_ban() && user_power_outranks(own_pl, target_pl);
+                (can_kick, can_ban)
+            } else {
+                (false, false)
+            };
 
             RoomManagementMemberInfo {
                 user_id: user_id.clone(),
@@ -157,6 +188,8 @@ pub async fn get_room_management_members(
                     .unwrap_or_else(|| "offline".to_string()),
                 status_msg: status_msg_snapshot.get(&user_id).cloned(),
                 role: room_member_role_label(member),
+                can_kick,
+                can_ban,
             }
         })
         .collect();
@@ -208,6 +241,8 @@ pub async fn get_room_management_members(
                 presence: "offline".to_string(),
                 status_msg: None,
                 role: "banned".to_string(),
+                can_kick: false,
+                can_ban: false,
             })
         })
         .collect();
@@ -943,17 +978,6 @@ pub async fn kick_user(
         return Err(format!("Kick failed ({status}): {text}"));
     }
     Ok(())
-}
-
-/// True when `own` has strictly higher power than `target` (Matrix kick/ban rules).
-fn user_power_outranks(own: UserPowerLevel, target: UserPowerLevel) -> bool {
-    match (own, target) {
-        (UserPowerLevel::Infinite, UserPowerLevel::Infinite) => false,
-        (UserPowerLevel::Infinite, _) => true,
-        (_, UserPowerLevel::Infinite) => false,
-        (UserPowerLevel::Int(a), UserPowerLevel::Int(b)) => a > b,
-        _ => false,
-    }
 }
 
 /// Whether the current user may kick or ban `member_user_id` in this room (power levels + membership).

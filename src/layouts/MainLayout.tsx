@@ -503,6 +503,7 @@ export default function MainLayout({
       }}>
         <SpaceSidebar
           spaces={topLevelSpaces}
+          roomsBySpace={roomsBySpace}
           activeSpaceId={activeSpaceId}
           spaceHighlightId={spaceSidebarHighlightId}
           onSelectSpace={handleSelectSpace}
