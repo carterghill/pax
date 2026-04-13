@@ -1591,6 +1591,121 @@ pub async fn apply_room_general_settings(
     Ok(())
 }
 
+/// Full `m.room.power_levels` content plus whether the current user may edit it.
+#[derive(Debug, Clone, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RoomPowerLevelsSettings {
+    pub content: serde_json::Value,
+    pub can_edit: bool,
+    pub user_power_level: i64,
+    /// True when `m.room.create` has `type: "m.space"`.
+    pub is_space: bool,
+}
+
+#[tauri::command]
+pub async fn get_room_power_levels_settings(
+    state: State<'_, Arc<AppState>>,
+    room_id: String,
+) -> Result<RoomPowerLevelsSettings, String> {
+    let client = super::get_client(&state).await?;
+    let parsed =
+        matrix_sdk::ruma::RoomId::parse(&room_id).map_err(|e| format!("Invalid room ID: {e}"))?;
+    let _ = client.get_room(&parsed).ok_or("Room not found")?;
+
+    let user_id = client
+        .user_id()
+        .ok_or("No user ID")?
+        .to_string();
+    let homeserver = client.homeserver().to_string();
+    let access_token = client.access_token().ok_or("No access token")?;
+    let hs_trim = homeserver.trim_end_matches('/');
+
+    let create_body = http_get_room_state(
+        &state.http_client,
+        hs_trim,
+        &access_token,
+        &room_id,
+        "m.room.create/",
+    )
+    .await?;
+    let is_space = create_body
+        .as_ref()
+        .and_then(|b| b.get("type"))
+        .and_then(|v| v.as_str())
+        == Some("m.space");
+
+    let pl_body = http_get_room_state(
+        &state.http_client,
+        hs_trim,
+        &access_token,
+        &room_id,
+        "m.room.power_levels/",
+    )
+    .await?
+    .ok_or("This room has no power levels state (unexpected).")?;
+
+    let u = power_level_for_user(&pl_body, &user_id);
+    let required_edit = power_required_for_state_event(&pl_body, "m.room.power_levels");
+    let can_edit = u >= required_edit;
+
+    Ok(RoomPowerLevelsSettings {
+        content: pl_body,
+        can_edit,
+        user_power_level: u,
+        is_space,
+    })
+}
+
+#[tauri::command]
+pub async fn set_room_power_levels(
+    state: State<'_, Arc<AppState>>,
+    room_id: String,
+    content: serde_json::Value,
+) -> Result<(), String> {
+    let client = super::get_client(&state).await?;
+    let parsed =
+        matrix_sdk::ruma::RoomId::parse(&room_id).map_err(|e| format!("Invalid room ID: {e}"))?;
+    client.get_room(&parsed).ok_or("Room not found")?;
+
+    let user_id = client
+        .user_id()
+        .ok_or("No user ID")?
+        .to_string();
+    let homeserver = client.homeserver().to_string();
+    let access_token = client.access_token().ok_or("No access token")?;
+    let hs_trim = homeserver.trim_end_matches('/');
+
+    let pl_body = http_get_room_state(
+        &state.http_client,
+        hs_trim,
+        &access_token,
+        &room_id,
+        "m.room.power_levels/",
+    )
+    .await?
+    .ok_or("Power levels not found")?;
+
+    let u = power_level_for_user(&pl_body, &user_id);
+    let required_edit = power_required_for_state_event(&pl_body, "m.room.power_levels");
+    if u < required_edit {
+        return Err("You don't have permission to change power levels.".to_string());
+    }
+
+    if !content.is_object() {
+        return Err("Power levels must be a JSON object.".to_string());
+    }
+
+    http_put_room_state(
+        &state.http_client,
+        hs_trim,
+        &access_token,
+        &room_id,
+        "m.room.power_levels/",
+        &content,
+    )
+    .await
+}
+
 /// Snapshot and per-field edit permissions for a space room (from `m.room.power_levels`).
 #[tauri::command]
 pub async fn get_space_settings(

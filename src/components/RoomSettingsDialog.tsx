@@ -7,6 +7,7 @@ import { useOverlayObstruction } from "../hooks/useOverlayObstruction";
 import ModalLayer from "./ModalLayer";
 import ModerationScopeDialog from "./ModerationScopeDialog";
 import SettingsMemberCategory from "./SettingsMemberCategory";
+import PowerLevelsSettingsPanel from "./PowerLevelsSettingsPanel";
 import type { RoomManagementMembersResponse } from "../types/matrix";
 
 type HistoryVisibility = "joined" | "shared" | "invited" | "world_readable";
@@ -943,29 +944,7 @@ export default function RoomSettingsDialog({
                 )}
 
                 {activeTab === "permissions" && (
-                  <div
-                    style={{
-                      padding: spacing.unit * 6,
-                      textAlign: "center",
-                      color: palette.textSecondary,
-                    }}
-                  >
-                    <Shield
-                      size={48}
-                      style={{ marginBottom: spacing.unit * 4, opacity: 0.5 }}
-                    />
-                    <div
-                      style={{
-                        fontSize: typography.fontSizeLarge,
-                        marginBottom: spacing.unit * 2,
-                      }}
-                    >
-                      Permissions
-                    </div>
-                    <div style={{ maxWidth: 400, margin: "0 auto" }}>
-                      Role-based permissions and power level controls will be implemented here.
-                    </div>
-                  </div>
+                  <PowerLevelsSettingsPanel roomId={roomId} />
                 )}
               </div>
 

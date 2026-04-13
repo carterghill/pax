@@ -264,6 +264,8 @@ pub fn run() {
             commands::rooms::set_history_visibility,
             commands::rooms::get_room_general_settings,
             commands::rooms::apply_room_general_settings,
+            commands::rooms::get_room_power_levels_settings,
+            commands::rooms::set_room_power_levels,
             commands::rooms::can_create_rooms,
             commands::rooms::create_space,
             commands::rooms::create_sub_space,
