@@ -125,7 +125,7 @@ const MessageRow = memo(function MessageRow({
         position: "relative",
         ...(showHeader
           ? {
-              paddingTop: spacingUnit * 3,
+              paddingTop: spacingUnit,
               paddingRight: spacingUnit * 2,
               paddingBottom: spacingUnit,
               paddingLeft: spacingUnit * 4,
@@ -138,7 +138,8 @@ const MessageRow = memo(function MessageRow({
             }),
         display: "flex",
         gap: spacingUnit * 3,
-        marginTop: showHeader ? spacingUnit : 0,
+        /* Extra gap between groups lives in margin so row padding stays symmetric for hover */
+        marginTop: showHeader ? spacingUnit * 3 : 0,
         borderTopLeftRadius: 0,
         borderBottomLeftRadius: 0,
         borderTopRightRadius: spacingUnit * 1.5,

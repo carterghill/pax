@@ -1,8 +1,8 @@
 import "./App.css";
-import { useState, useEffect, useRef } from "react";
+import { useState, useEffect, useRef, useMemo } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import MainLayout from "./layouts/MainLayout";
-import { ThemeProvider } from "./theme/ThemeContext";
+import { useTheme } from "./theme/ThemeContext";
 import { useRooms } from "./hooks/useRooms";
 import { clearMessageCache } from "./hooks/useMessages";
 import { clearPersistedSpaceHomeCache } from "./utils/spaceHomeCache";
@@ -16,6 +16,116 @@ interface AuthConfig {
 }
 
 function App() {
+  const { palette, typography, spacing, resolvedColorScheme } = useTheme();
+
+  useEffect(() => {
+    const root = document.getElementById("root");
+    document.body.style.backgroundColor = palette.bgPrimary;
+    document.body.style.color = palette.textPrimary;
+    document.body.style.fontFamily = typography.fontFamily;
+    document.body.style.fontSize = `${typography.fontSizeBase}px`;
+    if (root) {
+      root.style.backgroundColor = palette.bgPrimary;
+      root.style.color = palette.textPrimary;
+    }
+  }, [palette.bgPrimary, palette.textPrimary, typography.fontFamily, typography.fontSizeBase]);
+
+  const authStyles = useMemo(
+    () => ({
+      container: {
+        display: "flex",
+        flexDirection: "column" as const,
+        alignItems: "center",
+        justifyContent: "center",
+        height: "100%",
+        width: "100%",
+        padding: spacing.unit * 5,
+        gap: spacing.unit * 4,
+        backgroundColor: palette.bgPrimary,
+        color: palette.textPrimary,
+        fontFamily: typography.fontFamily,
+      },
+      logo: {
+        width: 80,
+        height: 80,
+        marginBottom: spacing.unit,
+      },
+      signingIn: {
+        color: palette.textSecondary,
+        fontSize: typography.fontSizeBase,
+      },
+      tabRow: {
+        display: "flex",
+        gap: 0,
+        borderRadius: spacing.unit * 2,
+        overflow: "hidden",
+        border: `1px solid ${palette.border}`,
+      },
+      tab: {
+        padding: `${spacing.unit * 2}px ${spacing.unit * 6}px`,
+        background: "transparent",
+        color: palette.textSecondary,
+        border: "none",
+        cursor: "pointer",
+        fontSize: typography.fontSizeBase,
+        fontWeight: typography.fontWeightMedium,
+        transition: "background 0.15s, color 0.15s",
+      },
+      tabActive: {
+        padding: `${spacing.unit * 2}px ${spacing.unit * 6}px`,
+        background: palette.accent,
+        color: "#fff",
+        border: "none",
+        cursor: "pointer",
+        fontSize: typography.fontSizeBase,
+        fontWeight: typography.fontWeightBold,
+      },
+      form: {
+        display: "flex",
+        flexDirection: "column" as const,
+        gap: spacing.unit * 2 + spacing.unit / 2,
+        width: "100%",
+        maxWidth: 340,
+      },
+      input: {
+        padding: `${spacing.unit * 2 + spacing.unit / 2}px ${spacing.unit * 3}px`,
+        borderRadius: spacing.unit * 1.5,
+        border: `1px solid ${palette.border}`,
+        background: palette.bgTertiary,
+        color: palette.textPrimary,
+        fontSize: typography.fontSizeBase,
+        outline: "none",
+      },
+      checkboxLabel: {
+        display: "flex",
+        alignItems: "center",
+        gap: spacing.unit * 2,
+        cursor: "pointer",
+        color: palette.textSecondary,
+        fontSize: typography.fontSizeSmall,
+      },
+      button: {
+        padding: `${spacing.unit * 2 + spacing.unit / 2}px`,
+        borderRadius: spacing.unit * 1.5,
+        border: "none",
+        background: palette.accent,
+        color: "#fff",
+        fontSize: typography.fontSizeBase,
+        fontWeight: typography.fontWeightBold,
+        cursor: "pointer",
+        marginTop: spacing.unit,
+        transition: "background-color 0.15s, opacity 0.15s",
+      },
+      error: {
+        color: resolvedColorScheme === "dark" ? "#f38ba8" : "#c62828",
+        fontSize: typography.fontSizeSmall,
+        textAlign: "center" as const,
+        marginTop: spacing.unit,
+      },
+    }),
+    [palette, typography, spacing, resolvedColorScheme],
+  );
+
   const [homeserver, setHomeserver] = useState("");
   const [username, setUsername] = useState("");
   const [password, setPassword] = useState("");
@@ -177,59 +287,59 @@ function App() {
 
   if (userId && !initialLoadComplete) {
     return (
-      <div style={styles.container}>
-        <img src="/logoIris.png" alt="Pax" style={styles.logo} />
-        <p style={styles.signingIn}>Loading rooms...</p>
+      <div style={authStyles.container}>
+        <img src="/logoIris.png" alt="Pax" style={authStyles.logo} />
+        <p style={authStyles.signingIn}>Loading rooms...</p>
       </div>
     );
   }
 
   if (userId) {
     return (
-      <ThemeProvider>
-        <MainLayout
-          userId={userId}
-          onSignOut={handleSignOut}
-          rooms={{ spaces, roomsBySpace, getRoom, fetchRooms, upsertOptimisticRoom }}
-        />
-      </ThemeProvider>
+      <MainLayout
+        userId={userId}
+        onSignOut={handleSignOut}
+        rooms={{ spaces, roomsBySpace, getRoom, fetchRooms, upsertOptimisticRoom }}
+      />
     );
   }
 
   if (autoLoggingIn) {
     return (
-      <div style={styles.container}>
-        <img src="/logoIris.png" alt="Pax" style={styles.logo} />
-        <p style={styles.signingIn}>Signing in...</p>
+      <div style={authStyles.container}>
+        <img src="/logoIris.png" alt="Pax" style={authStyles.logo} />
+        <p style={authStyles.signingIn}>Signing in...</p>
       </div>
     );
   }
 
   return (
-    <div style={styles.container}>
-      <img src="/logoIris.png" alt="Pax" style={styles.logo} />
+    <div style={authStyles.container}>
+      <img src="/logoIris.png" alt="Pax" style={authStyles.logo} />
 
       {/* Tab switcher */}
-      <div style={styles.tabRow}>
+      <div style={authStyles.tabRow}>
         <button
-          style={tab === "login" ? styles.tabActive : styles.tab}
+          type="button"
+          style={tab === "login" ? authStyles.tabActive : authStyles.tab}
           onClick={() => switchTab("login")}
         >
           Login
         </button>
         <button
-          style={tab === "signup" ? styles.tabActive : styles.tab}
+          type="button"
+          style={tab === "signup" ? authStyles.tabActive : authStyles.tab}
           onClick={() => switchTab("signup")}
         >
           Sign Up
         </button>
       </div>
 
-      <div style={styles.form}>
+      <div style={authStyles.form}>
         {/* Homeserver — hidden when env says so */}
         {!hideServerConfig && (
           <input
-            style={styles.input}
+            style={authStyles.input}
             placeholder="Homeserver URL"
             value={homeserver}
             onChange={(e) => setHomeserver(e.target.value)}
@@ -237,7 +347,7 @@ function App() {
         )}
 
         <input
-          style={styles.input}
+          style={authStyles.input}
           placeholder="Username"
           value={username}
           onChange={(e) => setUsername(e.target.value)}
@@ -246,7 +356,7 @@ function App() {
           }}
         />
         <input
-          style={styles.input}
+          style={authStyles.input}
           type="password"
           placeholder="Password"
           value={password}
@@ -259,7 +369,7 @@ function App() {
         {tab === "signup" && (
           <>
             <input
-              style={styles.input}
+              style={authStyles.input}
               type="password"
               placeholder="Confirm Password"
               value={confirmPassword}
@@ -271,7 +381,7 @@ function App() {
             {/* Registration token — hidden when env says so */}
             {!hideServerConfig && (
               <input
-                style={styles.input}
+                style={authStyles.input}
                 placeholder="Registration Token (if required)"
                 value={registrationToken}
                 onChange={(e) => setRegistrationToken(e.target.value)}
@@ -284,7 +394,7 @@ function App() {
         )}
 
         {tab === "login" && (
-          <label style={styles.checkboxLabel}>
+          <label style={authStyles.checkboxLabel}>
             <input
               type="checkbox"
               checked={rememberMe}
@@ -295,9 +405,20 @@ function App() {
         )}
 
         <button
-          style={styles.button}
+          type="button"
+          style={{
+            ...authStyles.button,
+            opacity: loading ? 0.7 : 1,
+            cursor: loading ? "default" : "pointer",
+          }}
           onClick={() => (tab === "login" ? handleLogin() : handleRegister())}
           disabled={loading}
+          onMouseEnter={(e) => {
+            if (!loading) e.currentTarget.style.backgroundColor = palette.accentHover;
+          }}
+          onMouseLeave={(e) => {
+            e.currentTarget.style.backgroundColor = palette.accent;
+          }}
         >
           {loading
             ? tab === "login"
@@ -308,98 +429,10 @@ function App() {
               : "Create Account"}
         </button>
 
-        {error && <p style={styles.error}>{error}</p>}
+        {error && <p style={authStyles.error}>{error}</p>}
       </div>
     </div>
   );
 }
-
-const styles: Record<string, React.CSSProperties> = {
-  container: {
-    display: "flex",
-    flexDirection: "column",
-    alignItems: "center",
-    justifyContent: "center",
-    height: "100%",
-    padding: "20px",
-    gap: "16px",
-  },
-  logo: {
-    width: "80px",
-    height: "80px",
-    marginBottom: "4px",
-  },
-  signingIn: {
-    color: "#b5bac1",
-    fontSize: "14px",
-  },
-  tabRow: {
-    display: "flex",
-    gap: "0px",
-    borderRadius: "8px",
-    overflow: "hidden",
-    border: "1px solid #3f4147",
-  },
-  tab: {
-    padding: "8px 24px",
-    background: "transparent",
-    color: "#b5bac1",
-    border: "none",
-    cursor: "pointer",
-    fontSize: "14px",
-    fontWeight: 500,
-    transition: "background 0.15s, color 0.15s",
-  },
-  tabActive: {
-    padding: "8px 24px",
-    background: "#5865f2",
-    color: "#fff",
-    border: "none",
-    cursor: "pointer",
-    fontSize: "14px",
-    fontWeight: 600,
-  },
-  form: {
-    display: "flex",
-    flexDirection: "column",
-    gap: "10px",
-    width: "100%",
-    maxWidth: "340px",
-  },
-  input: {
-    padding: "10px 12px",
-    borderRadius: "6px",
-    border: "none",
-    background: "#1e1f22",
-    color: "#dbdee1",
-    fontSize: "14px",
-    outline: "none",
-  },
-  checkboxLabel: {
-    display: "flex",
-    alignItems: "center",
-    gap: "8px",
-    cursor: "pointer",
-    color: "#b5bac1",
-    fontSize: "13px",
-  },
-  button: {
-    padding: "10px",
-    borderRadius: "6px",
-    border: "none",
-    background: "#5865f2",
-    color: "#fff",
-    fontSize: "14px",
-    fontWeight: 600,
-    cursor: "pointer",
-    marginTop: "4px",
-  },
-  error: {
-    color: "#f38ba8",
-    fontSize: "13px",
-    textAlign: "center" as const,
-    marginTop: "4px",
-  },
-};
 
 export default App;

@@ -24,8 +24,9 @@ html, body, #root {
   height: 100%;
   width: 100%;
   overflow: hidden;
-  background-color: #313338;
-  color: #dbdee1;
+  /* App.tsx syncs background/color from the active theme after load. */
+  background-color: #121212;
+  color: #e8e8e8;
   font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
   font-size: 14px;
 }
