@@ -267,6 +267,7 @@ pub fn run() {
             commands::rooms::create_sub_space,
             commands::rooms::can_manage_space_children,
             commands::rooms::create_room_in_space,
+            commands::rooms::create_standalone_room,
             commands::rooms::link_room_to_space,
             commands::rooms::search_public_spaces,
             commands::rooms::search_public_rooms,

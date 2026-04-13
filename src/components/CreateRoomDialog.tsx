@@ -107,11 +107,14 @@ type HistoryVisibility = "shared" | "joined" | "invited" | "world_readable";
 type SpaceRoomAccess = "space_members" | "public" | "invite";
 
 interface CreateRoomDialogProps {
-  /** Parent space when creating a channel; omit or `null` for join-only (e.g. global home list). */
+  /** Parent space when creating a channel in a space; `null` for global Home (standalone room). */
   spaceId: string | null;
   onClose: () => void;
   onCreated: (payload?: RoomsChangedPayload) => void | Promise<void>;
-  /** When false, only the join flow is shown (no tabs). Ignored if `spaceId` is null. */
+  /**
+   * Permission to create in a space (e.g. `can_manage_space_children`). When `spaceId` is null,
+   * this is ignored — the dialog uses `can_create_rooms` from the server instead.
+   */
   canCreate?: boolean;
 }
 
@@ -121,7 +124,18 @@ export default function CreateRoomDialog({
   onCreated,
   canCreate = true,
 }: CreateRoomDialogProps) {
-  const allowCreate = !!spaceId && canCreate;
+  const [canCreateGlobally, setCanCreateGlobally] = useState(true);
+  useEffect(() => {
+    if (spaceId !== null) return;
+    invoke<boolean>("can_create_rooms")
+      .then(setCanCreateGlobally)
+      .catch(() => setCanCreateGlobally(true));
+  }, [spaceId]);
+
+  const allowCreate =
+    spaceId !== null ? !!spaceId && canCreate : canCreateGlobally;
+
+  const isStandaloneHome = spaceId === null;
   const { palette, typography, resolvedColorScheme } = useTheme();
   const modalRef = useRef<HTMLDivElement>(null);
   useOverlayObstruction(modalRef);
@@ -218,7 +232,6 @@ export default function CreateRoomDialog({
   );
 
   const handleCreate = useCallback(async () => {
-    if (!spaceId) return;
     if (!name.trim()) {
       setError("Room name is required.");
       return;
@@ -230,28 +243,53 @@ export default function CreateRoomDialog({
       const roomType = roomKind === "voice" ? VOICE_ROOM_TYPE : null;
       const trimmedName = name.trim();
       const trimmedTopic = topic.trim() || null;
-      const roomId = await invoke<string>("create_room_in_space", {
-        spaceId: spaceId,
-        name: trimmedName,
-        topic: trimmedTopic,
-        spaceRoomAccess: roomAccess,
-        roomType,
-        roomAlias: null,
-        historyVisibility,
-      });
-      const optimisticRoom: Room = {
-        id: roomId,
-        name: trimmedName,
-        avatarUrl: null,
-        isSpace: false,
-        parentSpaceIds: [spaceId],
-        roomType,
-        membership: "joined",
-      };
-      await onCreated({
-        optimisticRoom,
-        newSpaceChildTopic: trimmedTopic,
-      });
+
+      if (spaceId) {
+        const roomId = await invoke<string>("create_room_in_space", {
+          spaceId,
+          name: trimmedName,
+          topic: trimmedTopic,
+          spaceRoomAccess: roomAccess,
+          roomType,
+          roomAlias: null,
+          historyVisibility,
+        });
+        const optimisticRoom: Room = {
+          id: roomId,
+          name: trimmedName,
+          avatarUrl: null,
+          isSpace: false,
+          parentSpaceIds: [spaceId],
+          roomType,
+          membership: "joined",
+        };
+        await onCreated({
+          optimisticRoom,
+          newSpaceChildTopic: trimmedTopic,
+        });
+      } else {
+        const roomId = await invoke<string>("create_standalone_room", {
+          name: trimmedName,
+          topic: trimmedTopic,
+          roomAccess,
+          roomType,
+          roomAlias: null,
+          historyVisibility,
+        });
+        const optimisticRoom: Room = {
+          id: roomId,
+          name: trimmedName,
+          avatarUrl: null,
+          isSpace: false,
+          parentSpaceIds: [],
+          roomType,
+          membership: "joined",
+        };
+        await onCreated({
+          optimisticRoom,
+          newSpaceChildTopic: trimmedTopic,
+        });
+      }
       onClose();
     } catch (e) {
       setError(String(e));
@@ -848,8 +886,12 @@ export default function CreateRoomDialog({
                 >
                   <KindButton
                     icon={<Users size={18} />}
-                    label="Space members"
-                    description="Not listed in the public directory. Anyone already in this space can see it and join without an invite."
+                    label={isStandaloneHome ? "Private" : "Space members"}
+                    description={
+                      isStandaloneHome
+                        ? "Not listed in the public directory. Invite people to join."
+                        : "Not listed in the public directory. Anyone already in this space can see it and join without an invite."
+                    }
                     selected={roomAccess === "space_members"}
                     onClick={() => setRoomAccess("space_members")}
                     palette={palette}
