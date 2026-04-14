@@ -45,10 +45,23 @@ function App() {
         color: palette.textPrimary,
         fontFamily: typography.fontFamily,
       },
-      logo: {
+      logoWrap: {
         width: 80,
         height: 80,
+        borderRadius: "50%",
+        backgroundColor: palette.accent,
         marginBottom: spacing.unit,
+        overflow: "hidden",
+        display: "flex",
+        alignItems: "center",
+        justifyContent: "center",
+        flexShrink: 0,
+      },
+      logoImg: {
+        width: "100%",
+        height: "100%",
+        objectFit: "contain" as const,
+        display: "block",
       },
       signingIn: {
         color: palette.textSecondary,
@@ -288,7 +301,9 @@ function App() {
   if (userId && !initialLoadComplete) {
     return (
       <div style={authStyles.container}>
-        <img src="/logoIris.png" alt="Pax" style={authStyles.logo} />
+        <div style={authStyles.logoWrap}>
+          <img src="/logo.png" alt="Pax" style={authStyles.logoImg} />
+        </div>
         <p style={authStyles.signingIn}>Loading rooms...</p>
       </div>
     );
@@ -307,7 +322,9 @@ function App() {
   if (autoLoggingIn) {
     return (
       <div style={authStyles.container}>
-        <img src="/logoIris.png" alt="Pax" style={authStyles.logo} />
+        <div style={authStyles.logoWrap}>
+          <img src="/logo.png" alt="Pax" style={authStyles.logoImg} />
+        </div>
         <p style={authStyles.signingIn}>Signing in...</p>
       </div>
     );
@@ -315,7 +332,9 @@ function App() {
 
   return (
     <div style={authStyles.container}>
-      <img src="/logoIris.png" alt="Pax" style={authStyles.logo} />
+      <div style={authStyles.logoWrap}>
+        <img src="/logo.png" alt="Pax" style={authStyles.logoImg} />
+      </div>
 
       {/* Tab switcher */}
       <div style={authStyles.tabRow}>

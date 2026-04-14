@@ -234,6 +234,8 @@ export default function SpaceSidebar({
       >
         {/* Home button */}
         <button
+          type="button"
+          aria-label="Home"
           onClick={() => onSelectSpace("")}
           title="Home"
           style={{
@@ -243,8 +245,6 @@ export default function SpaceSidebar({
               activeSpaceId === "" || activeSpaceId === null ? 16 : 24,
             border: "none",
             backgroundColor: palette.accent,
-            color: "#fff",
-            fontSize: 20,
             cursor: "pointer",
             transition: "border-radius 0.2s ease",
             outline:
@@ -253,9 +253,24 @@ export default function SpaceSidebar({
                 : "2px solid transparent",
             outlineOffset: 3,
             flexShrink: 0,
+            display: "flex",
+            alignItems: "center",
+            justifyContent: "center",
+            padding: 8,
           }}
         >
-          P
+          <img
+            src="/logo.png"
+            alt=""
+            draggable={false}
+            style={{
+              width: "100%",
+              height: "100%",
+              objectFit: "contain",
+              display: "block",
+              filter: "brightness(0) invert(1)",
+            }}
+          />
         </button>
 
         {/* Divider */}
