@@ -304,6 +304,24 @@ export default function MainLayout({
     return getRoom(activeSpaceId)?.name ?? null;
   }, [activeSpaceId, getRoom]);
 
+  /** Joined parent space when viewing a nested sub-space (for "back to parent" navigation). */
+  const parentSpaceNav = useMemo(() => {
+    if (!activeSpaceId || !activeSpace) return null;
+    if (!activeSpace.isSpace || activeSpace.membership !== "joined") return null;
+    const parentId = activeSpace.parentSpaceIds.find((pid) =>
+      joinedSpaceIdSet.has(pid)
+    );
+    if (!parentId) return null;
+    const parent = getRoom(parentId);
+    if (!parent?.isSpace) return null;
+    return { id: parentId, name: parent.name };
+  }, [activeSpaceId, activeSpace, joinedSpaceIdSet, getRoom]);
+
+  const handleNavigateToParentSpace = useCallback(() => {
+    if (!parentSpaceNav) return;
+    handleSelectSpace(parentSpaceNav.id);
+  }, [parentSpaceNav, handleSelectSpace]);
+
   // Clear transition hint once sync has caught up and the real room has isDirect
   useEffect(() => {
     if (!dmTransitionHint) return;
@@ -546,6 +564,8 @@ export default function MainLayout({
             roomsBySpace={roomsBySpace}
             showHomeAddRoom={activeSpaceId === null}
             onRoomsChanged={handleSpacesChanged}
+            parentSpace={parentSpaceNav}
+            onNavigateToParentSpace={handleNavigateToParentSpace}
           />
           <div
             onMouseDown={sidebarResize.onMouseDown}
@@ -621,6 +641,8 @@ export default function MainLayout({
               onRoomsChanged={handleSpacesChanged}
               orphanRooms={orphanRoomsForSpaceHome}
               orphanSpaces={orphanSpacesForSpaceHome}
+              parentSpace={parentSpaceNav}
+              onNavigateToParentSpace={handleNavigateToParentSpace}
             />
           ) : (
             <div style={{

@@ -16,6 +16,7 @@ import {
   ChevronRight,
   ChevronDown,
   ExternalLink,
+  ArrowLeft,
 } from "lucide-react";
 import { useTheme } from "../theme/ThemeContext";
 import { Room } from "../types/matrix";
@@ -86,6 +87,9 @@ interface SpaceHomeViewProps {
   orphanRooms: Room[];
   /** Joined top-level spaces (excluding this one) — can be linked as sub-spaces. */
   orphanSpaces: Room[];
+  /** When this space is nested under a joined parent, show back navigation at the top. */
+  parentSpace?: { id: string; name: string } | null;
+  onNavigateToParentSpace?: () => void;
 }
 
 function mergeCreatedChildIntoSpaceInfo(
@@ -148,6 +152,8 @@ export default function SpaceHomeView({
   onRoomsChanged,
   orphanRooms,
   orphanSpaces,
+  parentSpace = null,
+  onNavigateToParentSpace,
 }: SpaceHomeViewProps) {
   const { palette, typography, spacing, resolvedColorScheme } = useTheme();
   const [info, setInfo] = useState<SpaceInfo | null>(null);
@@ -584,11 +590,65 @@ export default function SpaceHomeView({
       display: "flex",
       flexDirection: "column",
       overflow: "hidden",
+      position: "relative",
     }}>
+      {parentSpace && onNavigateToParentSpace ? (
+        <button
+          type="button"
+          onClick={onNavigateToParentSpace}
+          title={`Back to ${parentSpace.name}`}
+          aria-label={`Back to ${parentSpace.name}`}
+          style={{
+            position: "absolute",
+            top: spacing.unit * 6,
+            right: spacing.unit * 6,
+            zIndex: 2,
+            display: "inline-flex",
+            alignItems: "center",
+            gap: spacing.unit * 1.5,
+            margin: 0,
+            padding: `${spacing.unit * 1.5}px ${spacing.unit * 2}px`,
+            border: "none",
+            borderRadius: spacing.unit * 1.5,
+            backgroundColor: palette.bgSecondary,
+            color: palette.textSecondary,
+            fontSize: typography.fontSizeBase,
+            fontWeight: typography.fontWeightMedium,
+            fontFamily: typography.fontFamily,
+            cursor: "pointer",
+            maxWidth: "min(50vw, 280px)",
+          }}
+          onMouseEnter={(e) => {
+            (e.currentTarget as HTMLButtonElement).style.backgroundColor =
+              palette.bgActive;
+            (e.currentTarget as HTMLButtonElement).style.color =
+              palette.textPrimary;
+          }}
+          onMouseLeave={(e) => {
+            (e.currentTarget as HTMLButtonElement).style.backgroundColor =
+              palette.bgSecondary;
+            (e.currentTarget as HTMLButtonElement).style.color =
+              palette.textSecondary;
+          }}
+        >
+          <ArrowLeft size={18} strokeWidth={2} aria-hidden style={{ flexShrink: 0 }} />
+          <span
+            style={{
+              minWidth: 0,
+              overflow: "hidden",
+              textOverflow: "ellipsis",
+              whiteSpace: "nowrap",
+            }}
+          >
+            {parentSpace.name}
+          </span>
+        </button>
+      ) : null}
       <div style={{
         flex: 1,
         overflowY: "auto",
         padding: spacing.unit * 6,
+        minHeight: 0,
       }}>
         {/* Space hero */}
         <div style={{

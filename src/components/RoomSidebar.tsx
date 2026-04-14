@@ -5,6 +5,7 @@ import DmPeerAvatar from "./DmPeerAvatar";
 import {
   Hash,
   House,
+  ArrowLeft,
   Volume2,
   Monitor,
   MicOff,
@@ -97,6 +98,9 @@ interface RoomSidebarProps {
   /** Global home list (no space): show add/join room above DMs and rooms. */
   showHomeAddRoom?: boolean;
   onRoomsChanged?: (payload?: RoomsChangedPayload) => void | Promise<void>;
+  /** When the active space is a sub-space, show back navigation above Home. */
+  parentSpace?: { id: string; name: string } | null;
+  onNavigateToParentSpace?: () => void;
 }
 
 function VoiceParticipantRow({
@@ -451,6 +455,8 @@ export default function RoomSidebar({
   roomsBySpace,
   showHomeAddRoom = false,
   onRoomsChanged,
+  parentSpace = null,
+  onNavigateToParentSpace,
 }: RoomSidebarProps) {
   const { palette, spacing, typography } = useTheme();
   /** Sub-space id → expanded; absence means expanded (default open). */
@@ -670,6 +676,62 @@ export default function RoomSidebar({
         )}
         {showSpaceHomeNav && (
           <div style={{ marginBottom: spacing.unit }}>
+            {parentSpace && onNavigateToParentSpace ? (
+              <button
+                type="button"
+                onClick={onNavigateToParentSpace}
+                title={`Back to ${parentSpace.name}`}
+                aria-label={`Back to ${parentSpace.name}`}
+                style={{
+                  display: "flex",
+                  alignItems: "center",
+                  gap: spacing.unit * 1.5,
+                  width: "100%",
+                  margin: 0,
+                  marginBottom: spacing.unit,
+                  padding: `${spacing.unit * 2}px ${spacing.unit * 3}px`,
+                  border: "none",
+                  borderRadius: spacing.unit,
+                  cursor: "pointer",
+                  color: palette.textSecondary,
+                  backgroundColor: "transparent",
+                  fontSize: typography.fontSizeBase,
+                  fontWeight: typography.fontWeightNormal,
+                  fontFamily: typography.fontFamily,
+                  textAlign: "left",
+                  boxSizing: "border-box",
+                }}
+                onMouseEnter={(e) => {
+                  (e.currentTarget as HTMLButtonElement).style.backgroundColor =
+                    palette.bgActive;
+                  (e.currentTarget as HTMLButtonElement).style.color =
+                    palette.textHeading;
+                }}
+                onMouseLeave={(e) => {
+                  (e.currentTarget as HTMLButtonElement).style.backgroundColor =
+                    "transparent";
+                  (e.currentTarget as HTMLButtonElement).style.color =
+                    palette.textSecondary;
+                }}
+              >
+                <ArrowLeft
+                  size={16}
+                  strokeWidth={2}
+                  aria-hidden
+                  style={{ flexShrink: 0 }}
+                />
+                <span
+                  style={{
+                    minWidth: 0,
+                    overflow: "hidden",
+                    textOverflow: "ellipsis",
+                    whiteSpace: "nowrap",
+                  }}
+                >
+                  {parentSpace.name}
+                </span>
+              </button>
+            ) : null}
             <div
               onClick={() => onSelectSpaceHome()}
               style={{
