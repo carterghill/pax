@@ -593,7 +593,7 @@ export default function MessageList({
         }
       `}</style>
 
-      {hasMore && (
+      {(hasMore || messages.length > 0) && (
         <div
           style={{
             boxSizing: "border-box",
@@ -608,7 +608,11 @@ export default function MessageList({
             lineHeight: typography.lineHeight,
           }}
         >
-          {loading ? "Loading..." : "Scroll up for more"}
+          {hasMore
+            ? loading
+              ? "Loading..."
+              : "Scroll up for more"
+            : "Beginning of conversation"}
         </div>
       )}
 

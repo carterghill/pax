@@ -101,7 +101,18 @@ pub async fn get_messages(
         ),
     > = HashMap::new();
 
-    for event in response.chunk {
+    let matrix_sdk::room::Messages {
+        chunk,
+        end: pagination_end,
+        ..
+    } = response;
+
+    // Per the `/messages` contract: fewer than `limit` timeline events means there
+    // is nothing more to paginate backward. Homeservers often still set `end` in
+    // that case, which would otherwise make the client request a useless page.
+    let timeline_event_count = chunk.len();
+
+    for event in chunk {
         let raw = match event.raw().deserialize() {
             Ok(e) => e,
             Err(_) => continue,
@@ -235,9 +246,16 @@ pub async fn get_messages(
         })
         .collect();
 
+    let limit_usize = limit as usize;
+    let prev_batch = if timeline_event_count < limit_usize {
+        None
+    } else {
+        pagination_end
+    };
+
     Ok(MessageBatch {
         messages,
-        prev_batch: response.end,
+        prev_batch,
     })
 }
 
