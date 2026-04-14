@@ -37,14 +37,11 @@ pub fn detect_display_server() -> DisplayServer {
 ///
 /// Must be called at the very start of `main()`, before `pax_lib::run()`.
 pub fn apply_env_overrides() {
-    let ds = detect_display_server();
-
-    if ds == DisplayServer::Wayland {
-        // WebKitGTK's DMA-BUF renderer triggers "Error 71 (Protocol error)
-        // dispatching to Wayland display" on several compositors. Disabling
-        // it avoids the crash without visible side-effects.
-        if std::env::var_os("WEBKIT_DISABLE_DMABUF_RENDERER").is_none() {
-            std::env::set_var("WEBKIT_DISABLE_DMABUF_RENDERER", "1");
-        }
+    // WebKitGTK's DMA-BUF renderer can fail on both Wayland (Protocol error 71)
+    // and X11 (DRM_IOCTL_MODE_CREATE_DUMB / GBM permission errors) depending
+    // on GPU drivers and /dev/dri permissions. Disable unconditionally —
+    // the SHM fallback is fine for a chat app.
+    if std::env::var_os("WEBKIT_DISABLE_DMABUF_RENDERER").is_none() {
+        std::env::set_var("WEBKIT_DISABLE_DMABUF_RENDERER", "1");
     }
 }
