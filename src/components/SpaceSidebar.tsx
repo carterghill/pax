@@ -256,7 +256,7 @@ export default function SpaceSidebar({
             display: "flex",
             alignItems: "center",
             justifyContent: "center",
-            padding: 8,
+            padding: 5,
           }}
         >
           <img
