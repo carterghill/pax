@@ -223,7 +223,7 @@ const MAX_VISIBLE_MESSAGES = 50;
 /** Max rooms held in the global cache. */
 const MAX_CACHED_ROOMS = 15;
 /** How many evicted newer pages we keep for smooth reverse scrolling. */
-const MAX_NEWER_BUFFER_PAGES = 100;
+const MAX_NEWER_BUFFER_PAGES = 10;
 /** Offer a jump affordance once the user is several loads from recent. */
 const JUMP_TO_RECENT_AFTER_PAGES = 3;
 /** Standard history page size. */
@@ -316,9 +316,6 @@ export function clearMessageCache() {
 /*  Hook                                                               */
 /* ------------------------------------------------------------------ */
 
-// Monotonic counter for log correlation
-let _seqId = 0;
-function seq() { return ++_seqId; }
 
 export function useMessages(roomId: string | null) {
   const cached = roomId ? globalCache.get(roomId) : undefined;
@@ -353,21 +350,9 @@ export function useMessages(roomId: string | null) {
   /** True while the initial fetch (from: null) is in flight — blocks loadMore from racing it. */
   const initialFetchingRef = useRef(false);
 
-  // ---- Logging refs ----
-  const renderCountRef = useRef(0);
-  renderCountRef.current++;
-  const syncEventCountRef = useRef(0);
-
-  console.log(
-    `[useMessages] render #${renderCountRef.current} room=${roomId?.slice(-6) ?? "null"} msgs=${messages.length} prevBatch=${prevBatch ? prevBatch.slice(0, 12) + "…" : "null"} loading=${loading} hasMore=${bufferedOlderRecentPages > 0 || prevBatch !== null} olderRecentBuf=${bufferedOlderRecentPages} newerBuf=${bufferedNewerPages} pagesFromRecent=${pageDistanceFromRecent} pendingRecent=${pendingRecentCount} lockRef=${loadingLockRef.current} initialFetchRef=${initialFetchingRef.current}`
-  );
-
   const commitVisibleWindow = useCallback((nextMessages: Message[], nextPrevBatch: string | null) => {
     let msgs = nextMessages;
     if (msgs.length > MAX_VISIBLE_MESSAGES) {
-      console.warn(
-        `[useMessages] commitVisibleWindow: DEFENSIVE CLAMP ${msgs.length} → ${MAX_VISIBLE_MESSAGES}`,
-      );
       msgs = msgs.slice(msgs.length - MAX_VISIBLE_MESSAGES);
     }
     messagesRef.current = msgs;
@@ -509,13 +494,10 @@ export function useMessages(roomId: string | null) {
     // request from the previous room can't block the new one.
     loadingLockRef.current = false;
     initialFetchingRef.current = false;
-    renderCountRef.current = 0;
-    syncEventCountRef.current = 0;
     clearHistoryWindowState();
     setLoading(false);
 
     if (!roomId) {
-      console.log("[useMessages] layoutEffect: roomId=null, clearing state");
       commitVisibleWindow([], null);
       setInitialLoading(false);
       setRefreshing(false);
@@ -529,16 +511,12 @@ export function useMessages(roomId: string | null) {
           ? setCachedRoom(roomId, cached.messages, cached.prevBatch)
           : cached;
       touchRoom(roomId);
-      console.log(
-        `[useMessages] layoutEffect: restored cache room=${roomId.slice(-6)} msgs=${normalizedCached.messages.length} prevBatch=${normalizedCached.prevBatch ? normalizedCached.prevBatch.slice(0, 12) + "…" : "null"}`
-      );
       commitRecentVisibleWindow(
         normalizedCached.messages,
         normalizedCached.prevBatch,
       );
       setInitialLoading(false);
     } else {
-      console.log(`[useMessages] layoutEffect: no cache for room=${roomId.slice(-6)}, will fetch`);
       commitVisibleWindow([], null);
       setInitialLoading(true);
     }
@@ -555,10 +533,6 @@ export function useMessages(roomId: string | null) {
     if (hadCache) setRefreshing(true);
 
     initialFetchingRef.current = true;
-    const id = seq();
-    console.log(
-      `[useMessages] initialFetch #${id} START room=${targetRoomId.slice(-6)} hadCache=${hadCache}`
-    );
 
     invoke<MessageBatch>("get_messages", {
       roomId: targetRoomId,
@@ -566,15 +540,8 @@ export function useMessages(roomId: string | null) {
       limit: MESSAGE_PAGE_LIMIT,
     })
       .then((batch) => {
-        if (cancelled || activeRoomIdRef.current !== targetRoomId) {
-          console.log(`[useMessages] initialFetch #${id} CANCELLED`);
-          return;
-        }
+        if (cancelled || activeRoomIdRef.current !== targetRoomId) return;
         const snapshot = buildLatestSnapshot(targetRoomId, batch);
-
-        console.log(
-          `[useMessages] initialFetch #${id} DONE fetched=${snapshot.fetched.length} cached=${snapshot.cachedCount} merged=${snapshot.merged.length} cacheExtendsOlder=${snapshot.cacheExtendsOlder} freshToken=${batch.prevBatch ? batch.prevBatch.slice(0, 12) + "…" : "null"} effectiveToken=${snapshot.effectivePrevBatch ? snapshot.effectivePrevBatch.slice(0, 12) + "…" : "null"} cachedToken=${snapshot.cachedPrevBatch ? snapshot.cachedPrevBatch.slice(0, 12) + "…" : "null"}`
-        );
 
         const normalizedSnapshot = setCachedRoom(
           targetRoomId,
@@ -589,7 +556,7 @@ export function useMessages(roomId: string | null) {
       })
       .catch((e) => {
         if (cancelled || activeRoomIdRef.current !== targetRoomId) return;
-        console.error(`[useMessages] initialFetch #${id} ERROR:`, e);
+        console.error("[useMessages] initialFetch ERROR:", e);
         commitVisibleWindow([], null);
       })
       .finally(() => {
@@ -613,11 +580,6 @@ export function useMessages(roomId: string | null) {
       const { roomId: msgRoomId, message } = event.payload;
       if (msgRoomId !== roomId) return;
 
-      const n = ++syncEventCountRef.current;
-      console.log(
-        `[useMessages] sync:room-message #${n} room=${roomId.slice(-6)} eventId=${message.eventId.slice(-8)} sender=${message.sender.slice(-12)} ts=${message.timestamp}`
-      );
-
       const cachedEntry = cacheRef.current.get(roomId);
       const cachedMessages = cachedEntry?.messages ?? [];
       const cachedHadEvent = cachedMessages.some((m) => m.eventId === message.eventId);
@@ -628,13 +590,7 @@ export function useMessages(roomId: string | null) {
 
       if (pageDistanceRef.current === 0 && !loadingLockRef.current) {
         const cachedAfter = cacheRef.current.get(roomId);
-        if (!cachedAfter) {
-          console.log(`[useMessages] sync:room-message #${n} → no-op (same ref)`);
-          return;
-        }
-        console.log(
-          `[useMessages] sync:room-message #${n} → recent snapshot=${cachedAfter.messages.length} visible=${Math.min(cachedAfter.messages.length, MAX_VISIBLE_MESSAGES)}`
-        );
+        if (!cachedAfter) return;
         commitRecentVisibleWindow(cachedAfter.messages, cachedAfter.prevBatch);
         return;
       }
@@ -653,12 +609,8 @@ export function useMessages(roomId: string | null) {
 
     const unlistenEdit = listen<MessageEditPayload>("room-message-edit", (event) => {
       const payload = event.payload;
-      const { roomId: rid, targetEventId } = payload;
+      const { roomId: rid } = payload;
       if (rid !== roomId) return;
-
-      console.log(
-        `[useMessages] sync:room-message-edit room=${roomId.slice(-6)} target=${targetEventId.slice(-8)}`
-      );
 
       patchLatestSnapshot((arr) => applyMessageEdit(arr, payload));
 
@@ -681,10 +633,6 @@ export function useMessages(roomId: string | null) {
     const unlistenRedact = listen<MessageRedactedPayload>("room-message-redacted", (event) => {
       const { roomId: rid, redactedEventId } = event.payload;
       if (rid !== roomId) return;
-
-      console.log(
-        `[useMessages] sync:room-message-redacted room=${roomId.slice(-6)} eventId=${redactedEventId.slice(-8)}`
-      );
 
       patchLatestSnapshot((arr) => removeMessageByEventId(arr, redactedEventId));
 
@@ -719,21 +667,12 @@ export function useMessages(roomId: string | null) {
   ]);
 
   const loadMore = useCallback(async () => {
-    const id = seq();
-    console.log(
-      `[useMessages] loadMore #${id} ENTER room=${roomId?.slice(-6) ?? "null"} prevBatch=${prevBatchRef.current ? prevBatchRef.current.slice(0, 12) + "…" : "null"} lockRef=${loadingLockRef.current} initialFetchRef=${initialFetchingRef.current} pagesFromRecent=${pageDistanceRef.current} olderRecentBuf=${olderRecentPagesRef.current.length} newerBuf=${newerBufferRef.current.length}`
-    );
-
-    // Synchronous ref guards — immune to React's batched state commits.
     if (
       !roomId ||
       loadingLockRef.current ||
       initialFetchingRef.current ||
       (olderRecentPagesRef.current.length === 0 && !prevBatchRef.current)
     ) {
-      console.log(
-        `[useMessages] loadMore #${id} BAILED: roomId=${!!roomId} prevBatch=${!!prevBatchRef.current} olderRecent=${olderRecentPagesRef.current.length} lock=${loadingLockRef.current} initFetch=${initialFetchingRef.current}`
-      );
       return;
     }
 
@@ -760,15 +699,9 @@ export function useMessages(roomId: string | null) {
           remainingCount: evictedNewest.length,
           restorePrevBatch: prevBatchRef.current,
         });
-        console.log(
-          `[useMessages] loadMore #${id} EVICTED ${evictedNewest.length} newest → newerBuf=${newerBufferRef.current.length}`
-        );
       }
 
       setPageDistance(pageDistanceRef.current + 1);
-      console.log(
-        `[useMessages] loadMore #${id} RECENT-BUFFER restored=${olderRecentPage.length} visible=${nextVisible.length} olderRecentBuf=${nextOlderRecentPages.length} newerBuf=${newerBufferRef.current.length}`
-      );
       commitVisibleWindow(nextVisible, prevBatchRef.current);
       return;
     }
@@ -784,7 +717,6 @@ export function useMessages(roomId: string | null) {
     setPageDistance(pageDistanceRef.current + 1);
     let pageDistanceCommitted = false;
 
-    const t0 = performance.now();
     try {
       const batch = await invoke<MessageBatch>("get_messages", {
         roomId: targetRoomId,
@@ -794,7 +726,6 @@ export function useMessages(roomId: string | null) {
       if (activeRoomIdRef.current !== targetRoomId) return;
 
       const older = batch.messages.reverse();
-      const elapsed = (performance.now() - t0).toFixed(0);
       const merged = sortedMergeMessages(older, messagesRef.current);
       const newCount = merged.length - messagesRef.current.length;
 
@@ -814,26 +745,17 @@ export function useMessages(roomId: string | null) {
           remainingCount: evictedNewest.length,
           restorePrevBatch: requestPrevBatch,
         });
-        console.log(
-          `[useMessages] loadMore #${id} EVICTED ${evictedNewest.length} newest → newerBuf=${newerBufferRef.current.length}`
-        );
       }
 
-      console.log(
-        `[useMessages] loadMore #${id} DONE in ${elapsed}ms: fetched=${older.length} prev=${messagesRef.current.length} merged=${merged.length} NEW=${newCount} visible=${nextVisible.length} newerBuf=${newerBufferRef.current.length} newToken=${batch.prevBatch ? batch.prevBatch.slice(0, 12) + "…" : "null"}`
-      );
-
       if (newCount === 0) {
-        console.warn(
-          `[useMessages] loadMore #${id} ⚠ ZERO new messages — prevBatch token likely points into already-loaded content`
-        );
+        // prevBatch token likely points into already-loaded content
       } else {
         pageDistanceCommitted = true;
       }
 
       commitVisibleWindow(nextVisible, batch.prevBatch);
     } catch (e) {
-      console.error(`[useMessages] loadMore #${id} ERROR:`, e);
+      console.error("[useMessages] loadMore ERROR:", e);
     } finally {
       if (activeRoomIdRef.current === targetRoomId) {
         setLoading(false);
@@ -886,10 +808,6 @@ export function useMessages(roomId: string | null) {
       }
     }
 
-    console.log(
-      `[useMessages] loadNewer room=${roomId.slice(-6)} restored=${page.messages.length} overflow=${overflow} visible=${nextVisible.length} newerBuf=${newerBufferRef.current.length} pagesFromRecent=${nextPageDistance}`
-    );
-
     commitVisibleWindow(nextVisible, nextPrevBatch);
   }, [
     roomId,
@@ -904,9 +822,7 @@ export function useMessages(roomId: string | null) {
   const refresh = useCallback(async () => {
     if (!roomId) return;
 
-    const id = seq();
     const targetRoomId = roomId;
-    console.log(`[useMessages] refresh #${id} START room=${targetRoomId.slice(-6)}`);
 
     try {
       const batch = await invoke<MessageBatch>("get_messages", {
@@ -917,10 +833,6 @@ export function useMessages(roomId: string | null) {
       if (activeRoomIdRef.current !== targetRoomId) return;
 
       const snapshot = buildLatestSnapshot(targetRoomId, batch);
-
-      console.log(
-        `[useMessages] refresh #${id} DONE fetched=${snapshot.fetched.length} prev=${snapshot.cachedCount} merged=${snapshot.merged.length} cacheExtendsOlder=${snapshot.cacheExtendsOlder} pagesFromRecent=${pageDistanceRef.current}`
-      );
 
       const normalizedSnapshot = setCachedRoom(
         targetRoomId,
@@ -939,7 +851,7 @@ export function useMessages(roomId: string | null) {
         );
       }
     } catch (e) {
-      console.error(`[useMessages] refresh #${id} ERROR:`, e);
+      console.error("[useMessages] refresh ERROR:", e);
     }
   }, [roomId, buildLatestSnapshot, commitRecentVisibleWindow, setPendingRecent]);
 

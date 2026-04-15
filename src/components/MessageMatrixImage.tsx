@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { convertFileSrc, invoke } from "@tauri-apps/api/core";
 import { useTheme } from "../theme/ThemeContext";
 
@@ -23,6 +23,7 @@ export default function MessageMatrixImage({ request, onExpand }: MessageMatrixI
   const [src, setSrc] = useState<string | null>(null);
   const [failed, setFailed] = useState(false);
   const [errorDetail, setErrorDetail] = useState<string | null>(null);
+  const imgRef = useRef<HTMLImageElement>(null);
 
   const requestKey = JSON.stringify(request);
 
@@ -62,6 +63,14 @@ export default function MessageMatrixImage({ request, onExpand }: MessageMatrixI
       cancelled = true;
     };
   }, [requestKey]);
+
+  // Release decoded image data when src changes or component unmounts
+  useEffect(() => {
+    const img = imgRef.current;
+    return () => {
+      if (img) img.src = "";
+    };
+  }, [src]);
 
   const imgStyle = {
     maxWidth: "100%",
@@ -117,24 +126,26 @@ export default function MessageMatrixImage({ request, onExpand }: MessageMatrixI
     );
   }
 
-  const imgEl = (
-    <img
-      src={src}
-      alt=""
-      loading="lazy"
-      decoding="async"
-      draggable={false}
-      style={imgStyle}
-      onError={() => {
-        console.error("Matrix image <img> failed to decode or load:", src?.slice(0, 80));
-        setFailed(true);
-        setErrorDetail("Image could not be displayed (file missing or invalid).");
-        setSrc(null);
-      }}
-    />
-  );
+  const handleError = () => {
+    setFailed(true);
+    setErrorDetail("Image could not be displayed (file missing or invalid).");
+    setSrc(null);
+  };
 
-  if (!onExpand) return imgEl;
+  if (!onExpand) {
+    return (
+      <img
+        ref={imgRef}
+        src={src}
+        alt=""
+        loading="lazy"
+        decoding="async"
+        draggable={false}
+        style={imgStyle}
+        onError={handleError}
+      />
+    );
+  }
 
   return (
     <span
@@ -157,6 +168,7 @@ export default function MessageMatrixImage({ request, onExpand }: MessageMatrixI
       }}
     >
       <img
+        ref={imgRef}
         src={src}
         alt=""
         loading="lazy"
@@ -168,12 +180,7 @@ export default function MessageMatrixImage({ request, onExpand }: MessageMatrixI
           borderRadius: spacing.unit,
           display: "block",
         }}
-        onError={() => {
-          console.error("Matrix image <img> failed to decode or load:", src?.slice(0, 80));
-          setFailed(true);
-          setErrorDetail("Image could not be displayed (file missing or invalid).");
-          setSrc(null);
-        }}
+        onError={handleError}
       />
     </span>
   );

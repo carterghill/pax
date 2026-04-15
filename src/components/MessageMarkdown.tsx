@@ -168,7 +168,7 @@ export default memo(function MessageMarkdown({
                 ...(onOpenDirectImage ? { cursor: "pointer" } : {}),
               }}
             >
-              <img src={src} alt={alt} loading="lazy" decoding="async" style={imgStyle} />
+              <img src={src} alt={alt} loading="lazy" decoding="async" draggable={false} style={imgStyle} />
             </a>
           );
         }
@@ -611,6 +611,8 @@ export default memo(function MessageMarkdown({
           <img
             src={src}
             alt={alt ?? ""}
+            loading="lazy"
+            decoding="async"
             style={imgStyle}
           />
         );

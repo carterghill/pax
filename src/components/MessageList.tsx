@@ -207,6 +207,8 @@ const MessageRow = memo(function MessageRow({
       className="pax-message-row"
       style={{
         position: "relative",
+        contentVisibility: "auto",
+        containIntrinsicBlockSize: "auto 80px",
         ...(showHeader
           ? {
               paddingTop: spacingUnit,
@@ -238,6 +240,8 @@ const MessageRow = memo(function MessageRow({
             <img
               src={msg.avatarUrl}
               alt={msg.senderName ?? msg.sender}
+              loading="lazy"
+              decoding="async"
               style={{
                 display: "block",
                 width: 40,
@@ -417,13 +421,6 @@ export default function MessageList({
   const [menuFixedPos, setMenuFixedPos] = useState<{ top: number; right: number } | null>(null);
   const menuAnchorRef = useRef<HTMLButtonElement>(null);
   const [mediaViewer, setMediaViewer] = useState<MediaViewerOpenPayload | null>(null);
-
-  // ---- Logging ----
-  const mlRenderCount = useRef(0);
-  mlRenderCount.current++;
-  console.log(
-    `[MessageList] render #${mlRenderCount.current} room=${roomId.slice(-6)} msgs=${messages.length} loading=${loading} hasMore=${hasMore} canRestoreNewer=${canRestoreNewer} pagesFromRecent=${pageDistanceFromRecent} pendingRecent=${pendingRecentCount} initialLoading=${initialLoading} refreshing=${refreshing}`
-  );
 
   const openDirectImage = useCallback((url: string, title: string) => {
     setMediaViewer({
@@ -642,18 +639,12 @@ export default function MessageList({
       if (windowShiftAnchorRef.current || loadingRef.current) return;
 
       if (hasMoreRef.current && container.scrollTop < topPrefetchThreshold) {
-        console.log(
-          `[MessageList] scroll→loadMore: scrollTop=${container.scrollTop.toFixed(0)} topThreshold=${topPrefetchThreshold.toFixed(0)} loadingRef=${loadingRef.current} hasMoreRef=${hasMoreRef.current}`
-        );
         captureWindowShiftAnchor("older");
         onLoadMoreRef.current();
         return;
       }
 
       if (canRestoreNewerRef.current && distanceFromBottom < bottomRestoreThreshold) {
-        console.log(
-          `[MessageList] scroll→loadNewer: distanceFromBottom=${distanceFromBottom.toFixed(0)} bottomThreshold=${bottomRestoreThreshold.toFixed(0)} canRestoreNewer=${canRestoreNewerRef.current}`
-        );
         captureWindowShiftAnchor("newer");
         onLoadNewerRef.current();
       }

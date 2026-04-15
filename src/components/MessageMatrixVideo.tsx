@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { convertFileSrc, invoke } from "@tauri-apps/api/core";
 import { useTheme } from "../theme/ThemeContext";
 
@@ -21,6 +21,7 @@ export default function MessageMatrixVideo({ request }: MessageMatrixVideoProps)
   const [src, setSrc] = useState<string | null>(null);
   const [failed, setFailed] = useState(false);
   const [errorDetail, setErrorDetail] = useState<string | null>(null);
+  const videoRef = useRef<HTMLVideoElement>(null);
 
   const requestKey = JSON.stringify(request);
 
@@ -60,6 +61,18 @@ export default function MessageMatrixVideo({ request }: MessageMatrixVideoProps)
       cancelled = true;
     };
   }, [requestKey]);
+
+  // Release video resources when src changes or component unmounts
+  useEffect(() => {
+    const vid = videoRef.current;
+    return () => {
+      if (vid) {
+        vid.pause();
+        vid.removeAttribute("src");
+        vid.load();
+      }
+    };
+  }, [src]);
 
   const videoStyle = {
     maxWidth: "100%" as const,
@@ -118,18 +131,13 @@ export default function MessageMatrixVideo({ request }: MessageMatrixVideoProps)
 
   return (
     <video
+      ref={videoRef}
       src={src}
       controls
       playsInline
       preload="metadata"
       style={videoStyle}
-      onError={(e) => {
-        const vid = e.currentTarget;
-        console.error("Matrix video failed:", {
-          src: vid.src?.slice(0, 80),
-          code: vid.error?.code,
-          message: vid.error?.message,
-        });
+      onError={() => {
         setFailed(true);
         setErrorDetail("Video could not be played (unsupported format or file missing).");
         setSrc(null);

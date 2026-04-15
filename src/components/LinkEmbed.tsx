@@ -35,8 +35,18 @@ const MAX_EMBED_HEIGHT = 320;
 
 function IframeEmbedView({ embed, href }: { embed: IframeEmbed; href: string }) {
   const { palette, spacing, typography, resolvedColorScheme } = useTheme();
+  const [activated, setActivated] = useState(false);
   const [loaded, setLoaded] = useState(false);
   const [error, setError] = useState(false);
+  const iframeRef = useRef<HTMLIFrameElement>(null);
+
+  useEffect(() => {
+    return () => {
+      if (iframeRef.current) {
+        iframeRef.current.src = "about:blank";
+      }
+    };
+  }, []);
 
   const width = MAX_EMBED_WIDTH;
   const height = Math.round(width / embed.aspect);
@@ -86,7 +96,6 @@ function IframeEmbedView({ embed, href }: { embed: IframeEmbed; href: string }) 
 
   return (
     <div style={containerStyle}>
-      {/* Provider label */}
       <div
         style={{
           display: "flex",
@@ -119,40 +128,66 @@ function IframeEmbedView({ embed, href }: { embed: IframeEmbed; href: string }) 
         </a>
       </div>
 
-      {/* Iframe */}
       <div style={{ position: "relative", width: "100%", height: clampedHeight }}>
-        {!loaded && (
-          <div
+        {!activated ? (
+          <button
+            type="button"
+            onClick={() => setActivated(true)}
             style={{
               position: "absolute",
               inset: 0,
+              width: "100%",
+              height: "100%",
               display: "flex",
               alignItems: "center",
               justifyContent: "center",
+              gap: spacing.unit,
               backgroundColor: palette.bgSecondary,
+              border: "none",
+              cursor: "pointer",
+              color: palette.textSecondary,
+              fontSize: typography.fontSizeSmall,
             }}
           >
-            <Play size={32} color={palette.textSecondary} style={{ opacity: 0.4 }} />
-          </div>
+            <Play size={32} style={{ opacity: 0.5 }} />
+          </button>
+        ) : (
+          <>
+            {!loaded && (
+              <div
+                style={{
+                  position: "absolute",
+                  inset: 0,
+                  display: "flex",
+                  alignItems: "center",
+                  justifyContent: "center",
+                  backgroundColor: palette.bgSecondary,
+                }}
+              >
+                <Play size={32} color={palette.textSecondary} style={{ opacity: 0.4 }} />
+              </div>
+            )}
+            <iframe
+              ref={iframeRef}
+              src={embed.src}
+              title={embed.title ?? `${embed.provider} embed`}
+              allow="accelerometer; autoplay; clipboard-write; encrypted-media; gyroscope; picture-in-picture; web-share"
+              allowFullScreen
+              style={{
+                position: "absolute",
+                top: 0,
+                left: 0,
+                width: "100%",
+                height: "100%",
+                border: "none",
+                opacity: loaded ? 1 : 0,
+                transition: "opacity 0.2s ease",
+              }}
+              onLoad={() => setLoaded(true)}
+              onError={() => setError(true)}
+            />
+          </>
         )}
-        <iframe
-          src={embed.src}
-          title={embed.title ?? `${embed.provider} embed`}
-          allow="accelerometer; autoplay; clipboard-write; encrypted-media; gyroscope; picture-in-picture; web-share"
-          allowFullScreen
-          style={{
-            position: "absolute",
-            top: 0,
-            left: 0,
-            width: "100%",
-            height: "100%",
-            border: "none",
-            opacity: loaded ? 1 : 0,
-            transition: "opacity 0.2s ease",
-          }}
-          onLoad={() => setLoaded(true)}
-          onError={() => setError(true)}
-        />
       </div>
     </div>
   );
@@ -162,16 +197,20 @@ function IframeEmbedView({ embed, href }: { embed: IframeEmbed; href: string }) 
 /*  Module-level metadata cache                                        */
 /* ------------------------------------------------------------------ */
 
-/** Shared cache so duplicate URLs across messages don't re-fetch. */
+const MAX_METADATA_CACHE = 50;
 const metadataCache = new Map<string, Promise<UrlMetadata>>();
 
 function fetchMetadataCached(url: string): Promise<UrlMetadata> {
   const existing = metadataCache.get(url);
   if (existing) return existing;
 
+  if (metadataCache.size >= MAX_METADATA_CACHE) {
+    const oldest = metadataCache.keys().next().value;
+    if (oldest) metadataCache.delete(oldest);
+  }
+
   const promise = invoke<UrlMetadata>("fetch_url_metadata", { url }).catch(
     (err) => {
-      // Evict on failure so the next attempt can retry.
       metadataCache.delete(url);
       throw err;
     }
@@ -344,6 +383,8 @@ function MetadataEmbedView({
           <img
             src={meta.image!}
             alt=""
+            loading="lazy"
+            decoding="async"
             style={{
               display: "block",
               width: "100%",
