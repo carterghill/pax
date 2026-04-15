@@ -68,18 +68,8 @@ pub async fn get_messages(
     let client = get_client(&state).await?;
     let room = resolve_room(&client, &room_id)?;
 
-    let mut options = MessagesOptions::backward();
-    if let Some(token) = &from {
-        options.from = Some(token.to_string());
-    }
-    options.limit = UInt::from(limit);
-
-    let response = room
-        .messages(options)
-        .await
-        .map_err(|e| format!("Failed to fetch messages: {}", fmt_error_chain(&e)))?;
-
     let avatar_cache = state.avatar_cache.clone();
+    let limit_usize = limit as usize;
 
     // First pass: extract message data and collect unique senders
     struct RawMsg {
@@ -110,77 +100,112 @@ pub async fn get_messages(
         ),
     > = HashMap::new();
 
-    let matrix_sdk::room::Messages {
-        chunk,
-        end: pagination_end,
-        ..
-    } = response;
+    let mut current_from = from.clone();
+    let mut pages_scanned: usize = 0;
+    let mut timeline_event_count_total: usize = 0;
+    let mut prev_batch: Option<String>;
 
-    // Per the `/messages` contract: fewer than `limit` timeline events means there
-    // is nothing more to paginate backward. Homeservers often still set `end` in
-    // that case, which would otherwise make the client request a useless page.
-    let timeline_event_count = chunk.len();
+    loop {
+        let mut options = MessagesOptions::backward();
+        if let Some(token) = &current_from {
+            options.from = Some(token.to_string());
+        }
+        options.limit = UInt::from(limit);
 
-    for event in chunk {
-        let raw = match event.raw().deserialize() {
-            Ok(e) => e,
-            Err(_) => continue,
+        let response = room
+            .messages(options)
+            .await
+            .map_err(|e| format!("Failed to fetch messages: {}", fmt_error_chain(&e)))?;
+
+        let matrix_sdk::room::Messages {
+            chunk,
+            end: pagination_end,
+            ..
+        } = response;
+
+        pages_scanned += 1;
+
+        // Per the `/messages` contract: fewer than `limit` timeline events means there
+        // is nothing more to paginate backward. Homeservers often still set `end` in
+        // that case, which would otherwise make the client request a useless page.
+        let timeline_event_count = chunk.len();
+        timeline_event_count_total += timeline_event_count;
+        prev_batch = if timeline_event_count < limit_usize {
+            None
+        } else {
+            pagination_end
         };
 
-        if let matrix_sdk::ruma::events::AnySyncTimelineEvent::MessageLike(
-            matrix_sdk::ruma::events::AnySyncMessageLikeEvent::RoomMessage(msg),
-        ) = raw
-        {
-            let original = match msg {
-                matrix_sdk::ruma::events::SyncMessageLikeEvent::Original(o) => o,
-                _ => continue,
+        for event in chunk {
+            let raw = match event.raw().deserialize() {
+                Ok(e) => e,
+                Err(_) => continue,
             };
 
-            if let Some(Relation::Replacement(repl)) = &original.content.relates_to {
-                let target = repl.event_id.to_string();
-                let ext = extract_message_display(&RoomMessageEventContent::from(
-                    repl.new_content.clone(),
-                ));
-                let ts: u64 = original.origin_server_ts.0.into();
-                let replace = match latest_replacement.get(&target) {
-                    None => true,
-                    Some((_, _, _, _, _, _, prev_ts)) => ts >= *prev_ts,
+            if let matrix_sdk::ruma::events::AnySyncTimelineEvent::MessageLike(
+                matrix_sdk::ruma::events::AnySyncMessageLikeEvent::RoomMessage(msg),
+            ) = raw
+            {
+                let original = match msg {
+                    matrix_sdk::ruma::events::SyncMessageLikeEvent::Original(o) => o,
+                    _ => continue,
                 };
-                if replace {
-                    latest_replacement.insert(
-                        target,
-                        (
-                            ext.body.clone(),
-                            ext.image_media_request.clone(),
-                            ext.video_media_request.clone(),
-                            ext.file_media_request.clone(),
-                            ext.file_mime.clone(),
-                            ext.file_display_name.clone(),
-                            ts,
-                        ),
-                    );
+
+                if let Some(Relation::Replacement(repl)) = &original.content.relates_to {
+                    let target = repl.event_id.to_string();
+                    let ext = extract_message_display(&RoomMessageEventContent::from(
+                        repl.new_content.clone(),
+                    ));
+                    let ts: u64 = original.origin_server_ts.0.into();
+                    let replace = match latest_replacement.get(&target) {
+                        None => true,
+                        Some((_, _, _, _, _, _, prev_ts)) => ts >= *prev_ts,
+                    };
+                    if replace {
+                        latest_replacement.insert(
+                            target,
+                            (
+                                ext.body.clone(),
+                                ext.image_media_request.clone(),
+                                ext.video_media_request.clone(),
+                                ext.file_media_request.clone(),
+                                ext.file_mime.clone(),
+                                ext.file_display_name.clone(),
+                                ts,
+                            ),
+                        );
+                    }
+                    continue;
                 }
-                continue;
-            }
 
-            let sender_str = original.sender.to_string();
-            if seen_senders.insert(sender_str.clone()) {
-                unique_senders.push(original.sender.clone());
-            }
+                let sender_str = original.sender.to_string();
+                if seen_senders.insert(sender_str.clone()) {
+                    unique_senders.push(original.sender.clone());
+                }
 
-            let ext = extract_message_display(&original.content);
-            raw_msgs.push(RawMsg {
-                event_id: original.event_id.to_string(),
-                sender: sender_str,
-                body: ext.body,
-                timestamp: original.origin_server_ts.0.into(),
-                image_media_request: ext.image_media_request,
-                video_media_request: ext.video_media_request,
-                file_media_request: ext.file_media_request,
-                file_mime: ext.file_mime,
-                file_display_name: ext.file_display_name,
-            });
+                let ext = extract_message_display(&original.content);
+                raw_msgs.push(RawMsg {
+                    event_id: original.event_id.to_string(),
+                    sender: sender_str,
+                    body: ext.body,
+                    timestamp: original.origin_server_ts.0.into(),
+                    image_media_request: ext.image_media_request,
+                    video_media_request: ext.video_media_request,
+                    file_media_request: ext.file_media_request,
+                    file_mime: ext.file_mime,
+                    file_display_name: ext.file_display_name,
+                });
+            }
         }
+
+        // A timeline page can contain only edits / filtered events, which makes the
+        // frontend show "loaded" with no visible change. Keep paging until we surface
+        // at least one actual message or we truly run out of history.
+        if !raw_msgs.is_empty() || prev_batch.is_none() {
+            break;
+        }
+
+        current_from = prev_batch.clone();
     }
 
     // Second pass: resolve display name + avatar once per unique sender
@@ -255,24 +280,18 @@ pub async fn get_messages(
         })
         .collect();
 
-    let limit_usize = limit as usize;
-    let prev_batch = if timeline_event_count < limit_usize {
-        None
-    } else {
-        pagination_end
-    };
-
     let elapsed = t0.elapsed();
     let msg_count = messages.len();
     log::info!(
-        "[get_messages] room=…{} DONE in {:?}: chunk_events={} actual_msgs={} edits={} prev_batch={} (chunk<limit={})",
+        "[get_messages] room=…{} DONE in {:?}: pages_scanned={} chunk_events_total={} actual_msgs={} edits={} prev_batch={} skipped_empty_pages={}",
         short_room,
         elapsed,
-        timeline_event_count,
+        pages_scanned,
+        timeline_event_count_total,
         msg_count,
         latest_replacement.len(),
         prev_batch.as_deref().map(|t| if t.len() > 16 { &t[..16] } else { t }).unwrap_or("null"),
-        timeline_event_count < limit_usize,
+        pages_scanned.saturating_sub(1),
     );
 
     Ok(MessageBatch {
