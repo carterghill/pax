@@ -141,10 +141,16 @@ export default function ChatView({
   const {
     messages,
     loadMore,
+    loadNewer,
     hasMore,
     loading,
     initialLoading,
     refreshing,
+    canRestoreNewer,
+    pageDistanceFromRecent,
+    pendingRecentCount,
+    showJumpToRecent,
+    jumpToRecent,
     refresh,
     removeMessageById,
   } = useMessages(isDraft ? null : activeRoom!.id);
@@ -422,6 +428,12 @@ export default function ChatView({
             refreshing={refreshing}
             hasMore={hasMore}
             onLoadMore={loadMore}
+            canRestoreNewer={canRestoreNewer}
+            onLoadNewer={loadNewer}
+            pageDistanceFromRecent={pageDistanceFromRecent}
+            pendingRecentCount={pendingRecentCount}
+            showJumpToRecent={showJumpToRecent}
+            onJumpToRecent={jumpToRecent}
             roomId={activeRoom.id}
             userId={userId}
             redactionPolicy={redactionPolicy}

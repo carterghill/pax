@@ -21,6 +21,12 @@ interface MessageListProps {
   refreshing?: boolean;
   hasMore: boolean;
   onLoadMore: () => void;
+  canRestoreNewer: boolean;
+  onLoadNewer: () => void;
+  pageDistanceFromRecent: number;
+  pendingRecentCount: number;
+  showJumpToRecent: boolean;
+  onJumpToRecent: () => void | Promise<void>;
   roomId: string;
   userId: string;
   redactionPolicy: RoomRedactionPolicy;
@@ -78,6 +84,84 @@ function findMessageRow(container: HTMLElement, eventId: string): HTMLElement | 
     if (el.getAttribute("data-message-event-id") === eventId) return el as HTMLElement;
   }
   return null;
+}
+
+interface WindowShiftAnchor {
+  direction: "older" | "newer";
+  anchorEventId: string | undefined;
+  anchorViewportTop: number | null;
+  baselineFirstEventId: string | undefined;
+  baselineLastEventId: string | undefined;
+  baselineLength: number;
+  scrollHeight: number;
+  scrollTop: number;
+}
+
+function LoadingMessageSkeletons({
+  count,
+  palette,
+  spacingUnit,
+}: {
+  count: number;
+  palette: ReturnType<typeof useTheme>["palette"];
+  spacingUnit: number;
+}) {
+  return (
+    <div
+      aria-hidden
+      style={{
+        padding: `${spacingUnit}px ${spacingUnit * 3}px ${spacingUnit * 2}px`,
+        display: "flex",
+        flexDirection: "column",
+        gap: spacingUnit * 2,
+      }}
+    >
+      {Array.from({ length: count }).map((_, idx) => (
+        <div
+          key={idx}
+          style={{
+            display: "flex",
+            alignItems: "flex-start",
+            gap: spacingUnit * 3,
+            paddingLeft: spacingUnit,
+            paddingRight: spacingUnit,
+          }}
+        >
+          <div
+            style={{
+              width: 36,
+              height: 36,
+              borderRadius: "50%",
+              flexShrink: 0,
+              backgroundColor: palette.bgActive,
+              opacity: 0.8,
+            }}
+          />
+          <div style={{ flex: 1, minWidth: 0, display: "flex", flexDirection: "column", gap: spacingUnit * 1.5 }}>
+            <div
+              style={{
+                width: `${48 + idx * 10}%`,
+                maxWidth: 220,
+                height: 10,
+                borderRadius: 999,
+                backgroundColor: palette.bgActive,
+                opacity: 0.9,
+              }}
+            />
+            <div
+              style={{
+                width: `${72 + ((idx + 1) % 3) * 8}%`,
+                height: 12,
+                borderRadius: 999,
+                backgroundColor: palette.bgHover,
+                opacity: 0.9,
+              }}
+            />
+          </div>
+        </div>
+      ))}
+    </div>
+  );
 }
 
 /* ------------------------------------------------------------------ */
@@ -308,6 +392,12 @@ export default function MessageList({
   refreshing = false,
   hasMore,
   onLoadMore,
+  canRestoreNewer,
+  onLoadNewer,
+  pageDistanceFromRecent,
+  pendingRecentCount,
+  showJumpToRecent,
+  onJumpToRecent,
   roomId,
   userId,
   redactionPolicy,
@@ -317,21 +407,12 @@ export default function MessageList({
 }: MessageListProps) {
   const { palette, typography, spacing, resolvedColorScheme } = useTheme();
   const AUTO_SCROLL_THRESHOLD_PX = 120;
+  const LOADING_SKELETON_ROWS = 3;
   const bottomRef = useRef<HTMLDivElement>(null);
   const containerRef = useRef<HTMLDivElement>(null);
   const shouldAutoScrollRef = useRef(true);
-  const prependScrollAnchorRef = useRef<
-    | { phase: "pending"; firstEventId: string | undefined }
-    | {
-        phase: "captured";
-        scrollHeight: number;
-        scrollTop: number;
-        firstEventId: string | undefined;
-        anchorViewportTop: number | null;
-      }
-    | null
-  >(null);
-  const prevLoadingRef = useRef(loading);
+  const skipAutoScrollOnceRef = useRef(false);
+  const windowShiftAnchorRef = useRef<WindowShiftAnchor | null>(null);
   const [openMenuEventId, setOpenMenuEventId] = useState<string | null>(null);
   const [menuFixedPos, setMenuFixedPos] = useState<{ top: number; right: number } | null>(null);
   const menuAnchorRef = useRef<HTMLButtonElement>(null);
@@ -341,7 +422,7 @@ export default function MessageList({
   const mlRenderCount = useRef(0);
   mlRenderCount.current++;
   console.log(
-    `[MessageList] render #${mlRenderCount.current} room=${roomId.slice(-6)} msgs=${messages.length} loading=${loading} hasMore=${hasMore} initialLoading=${initialLoading} refreshing=${refreshing}`
+    `[MessageList] render #${mlRenderCount.current} room=${roomId.slice(-6)} msgs=${messages.length} loading=${loading} hasMore=${hasMore} canRestoreNewer=${canRestoreNewer} pagesFromRecent=${pageDistanceFromRecent} pendingRecent=${pendingRecentCount} initialLoading=${initialLoading} refreshing=${refreshing}`
   );
 
   const openDirectImage = useCallback((url: string, title: string) => {
@@ -364,28 +445,79 @@ export default function MessageList({
   }
 
   useLayoutEffect(() => {
-    prependScrollAnchorRef.current = null;
+    windowShiftAnchorRef.current = null;
   }, [roomId]);
 
   useLayoutEffect(() => {
-    if (prevLoadingRef.current && !loading && prependScrollAnchorRef.current) {
-      const s = prependScrollAnchorRef.current;
-      if (messages[0]?.eventId === s.firstEventId) {
-        prependScrollAnchorRef.current = null;
+    const container = containerRef.current;
+    const anchor = windowShiftAnchorRef.current;
+    if (!container || !anchor) return;
+
+    const firstEventId = messages[0]?.eventId;
+    const lastEventId = messages[messages.length - 1]?.eventId;
+    const boundaryChanged =
+      anchor.direction === "older"
+        ? firstEventId !== anchor.baselineFirstEventId || messages.length !== anchor.baselineLength
+        : firstEventId !== anchor.baselineFirstEventId ||
+          lastEventId !== anchor.baselineLastEventId ||
+          messages.length !== anchor.baselineLength;
+
+    if (!boundaryChanged) return;
+
+    const alignAnchorToSavedViewport = (el: HTMLElement) => {
+      if (anchor.anchorEventId && anchor.anchorViewportTop != null) {
+        const anchorEl = findMessageRow(el, anchor.anchorEventId);
+        if (anchorEl) {
+          const cr = el.getBoundingClientRect();
+          const ar = anchorEl.getBoundingClientRect();
+          const cur = ar.top - cr.top;
+          el.scrollTop += cur - anchor.anchorViewportTop;
+          return;
+        }
       }
-    }
-    prevLoadingRef.current = loading;
-  }, [loading, messages[0]?.eventId, roomId]);
+      const delta = el.scrollHeight - anchor.scrollHeight;
+      el.scrollTop = anchor.scrollTop + delta;
+    };
+
+    alignAnchorToSavedViewport(container);
+    skipAutoScrollOnceRef.current = true;
+    windowShiftAnchorRef.current = null;
+  }, [messages.length, messages[0]?.eventId, messages[messages.length - 1]?.eventId]);
 
   useLayoutEffect(() => {
-    const container = containerRef.current;
-    const ref = prependScrollAnchorRef.current;
-    if (!container || !ref || ref.phase !== "pending" || !loading) return;
-    if (messages[0]?.eventId !== ref.firstEventId) return;
+    const anchor = windowShiftAnchorRef.current;
+    if (!anchor || anchor.direction !== "older" || loading) return;
+    const firstEventId = messages[0]?.eventId;
+    const lastEventId = messages[messages.length - 1]?.eventId;
+    const unchanged =
+      firstEventId === anchor.baselineFirstEventId &&
+      lastEventId === anchor.baselineLastEventId &&
+      messages.length === anchor.baselineLength;
+    if (unchanged) {
+      windowShiftAnchorRef.current = null;
+    }
+  }, [loading, messages.length, messages[0]?.eventId, messages[messages.length - 1]?.eventId]);
 
+  useLayoutEffect(() => {
+    if (skipAutoScrollOnceRef.current) {
+      skipAutoScrollOnceRef.current = false;
+      return;
+    }
+    if (windowShiftAnchorRef.current) return;
+    if (shouldAutoScrollRef.current) {
+      bottomRef.current?.scrollIntoView();
+    }
+  }, [messages.length, messages[messages.length - 1]?.eventId]);
+
+  const captureWindowShiftAnchor = useCallback((direction: "older" | "newer") => {
+    const container = containerRef.current;
+    if (!container) return;
+    const firstEventId = messagesRef.current[0]?.eventId;
+    const lastEventId = messagesRef.current[messagesRef.current.length - 1]?.eventId;
+    const anchorEventId = direction === "older" ? firstEventId : lastEventId;
     let anchorViewportTop: number | null = null;
-    if (ref.firstEventId) {
-      const anchorEl = findMessageRow(container, ref.firstEventId);
+    if (anchorEventId) {
+      const anchorEl = findMessageRow(container, anchorEventId);
       if (anchorEl) {
         const cr = container.getBoundingClientRect();
         const ar = anchorEl.getBoundingClientRect();
@@ -393,56 +525,17 @@ export default function MessageList({
       }
     }
 
-    prependScrollAnchorRef.current = {
-      phase: "captured",
+    windowShiftAnchorRef.current = {
+      direction,
+      anchorEventId,
+      anchorViewportTop,
+      baselineFirstEventId: firstEventId,
+      baselineLastEventId: lastEventId,
+      baselineLength: messagesRef.current.length,
       scrollHeight: container.scrollHeight,
       scrollTop: container.scrollTop,
-      firstEventId: ref.firstEventId,
-      anchorViewportTop,
     };
-  }, [loading, messages.length, messages[0]?.eventId]);
-
-  useLayoutEffect(() => {
-    const container = containerRef.current;
-    if (!container) return;
-
-    const snap = prependScrollAnchorRef.current;
-    const prepended =
-      snap !== null &&
-      snap.phase === "captured" &&
-      messages[0]?.eventId !== undefined &&
-      messages[0].eventId !== snap.firstEventId;
-    if (prepended && snap) {
-      const {
-        scrollHeight: prevScrollHeight,
-        scrollTop: prevScrollTop,
-        firstEventId: anchorEventId,
-        anchorViewportTop,
-      } = snap;
-      prependScrollAnchorRef.current = null;
-
-      const alignAnchorToSavedViewport = (el: HTMLElement) => {
-        if (anchorEventId && anchorViewportTop != null) {
-          const anchorEl = findMessageRow(el, anchorEventId);
-          if (anchorEl) {
-            const cr = el.getBoundingClientRect();
-            const ar = anchorEl.getBoundingClientRect();
-            const cur = ar.top - cr.top;
-            el.scrollTop += cur - anchorViewportTop;
-            return;
-          }
-        }
-        const delta = el.scrollHeight - prevScrollHeight;
-        el.scrollTop = prevScrollTop + delta;
-      };
-
-      alignAnchorToSavedViewport(container);
-    }
-
-    if (shouldAutoScrollRef.current) {
-      bottomRef.current?.scrollIntoView();
-    }
-  }, [messages.length, messages[0]?.eventId]);
+  }, []);
 
   useEffect(() => {
     const el = containerRef.current;
@@ -517,39 +610,55 @@ export default function MessageList({
   loadingRef.current = loading;
   const hasMoreRef = useRef(hasMore);
   hasMoreRef.current = hasMore;
+  const canRestoreNewerRef = useRef(canRestoreNewer);
+  canRestoreNewerRef.current = canRestoreNewer;
   const messagesRef = useRef(messages);
   messagesRef.current = messages;
   const onLoadMoreRef = useRef(onLoadMore);
   onLoadMoreRef.current = onLoadMore;
+  const onLoadNewerRef = useRef(onLoadNewer);
+  onLoadNewerRef.current = onLoadNewer;
 
   const handleScroll = useCallback(() => {
     if (scrollRafRef.current !== null) return;
     scrollRafRef.current = requestAnimationFrame(() => {
       scrollRafRef.current = null;
-      if (!containerRef.current) return;
+      const container = containerRef.current;
+      if (!container) return;
 
       shouldAutoScrollRef.current = isNearBottom();
 
-      if (loadingRef.current || !hasMoreRef.current) return;
-      if (containerRef.current.scrollTop < 100) {
+      const distanceFromBottom =
+        container.scrollHeight - container.scrollTop - container.clientHeight;
+      const topPrefetchThreshold = Math.max(
+        180,
+        Math.min(600, container.clientHeight * 0.75),
+      );
+      const bottomRestoreThreshold = Math.max(
+        140,
+        Math.min(420, container.clientHeight * 0.45),
+      );
+
+      if (windowShiftAnchorRef.current || loadingRef.current) return;
+
+      if (hasMoreRef.current && container.scrollTop < topPrefetchThreshold) {
         console.log(
-          `[MessageList] scroll→loadMore: scrollTop=${containerRef.current.scrollTop.toFixed(0)} loadingRef=${loadingRef.current} hasMoreRef=${hasMoreRef.current} anchorPhase=${prependScrollAnchorRef.current?.phase ?? "null"}`
+          `[MessageList] scroll→loadMore: scrollTop=${container.scrollTop.toFixed(0)} topThreshold=${topPrefetchThreshold.toFixed(0)} loadingRef=${loadingRef.current} hasMoreRef=${hasMoreRef.current}`
         );
-        // Only set the anchor if there isn't one already in progress.
-        // A "captured" anchor means a load is in flight and scroll
-        // restoration coordinates are saved — overwriting it would
-        // break the restore after messages prepend.
-        const existing = prependScrollAnchorRef.current;
-        if (!existing || existing.phase !== "captured") {
-          prependScrollAnchorRef.current = {
-            phase: "pending",
-            firstEventId: messagesRef.current[0]?.eventId,
-          };
-        }
+        captureWindowShiftAnchor("older");
         onLoadMoreRef.current();
+        return;
+      }
+
+      if (canRestoreNewerRef.current && distanceFromBottom < bottomRestoreThreshold) {
+        console.log(
+          `[MessageList] scroll→loadNewer: distanceFromBottom=${distanceFromBottom.toFixed(0)} bottomThreshold=${bottomRestoreThreshold.toFixed(0)} canRestoreNewer=${canRestoreNewerRef.current}`
+        );
+        captureWindowShiftAnchor("newer");
+        onLoadNewerRef.current();
       }
     });
-  }, []);
+  }, [captureWindowShiftAnchor]);
 
   useEffect(() => {
     return () => {
@@ -581,11 +690,17 @@ export default function MessageList({
   const rowHighlight =
     resolvedColorScheme === "light" ? "rgba(0, 0, 0, 0.055)" : "rgba(255, 255, 255, 0.06)";
 
+  const jumpToRecentLabel =
+    pendingRecentCount > 0
+      ? `Jump to recent (${pendingRecentCount} new${pendingRecentCount === 1 ? "" : "s"})`
+      : "Jump to recent";
+
   return (
     <div
       ref={containerRef}
       onScroll={handleScroll}
       style={{
+        position: "relative",
         flex: 1,
         minHeight: 0,
         overflowY: "auto",
@@ -627,10 +742,18 @@ export default function MessageList({
         >
           {hasMore
             ? loading
-              ? "Loading..."
+              ? "Loading older messages..."
               : "Scroll up for more"
             : "Beginning of conversation"}
         </div>
+      )}
+
+      {loading && (
+        <LoadingMessageSkeletons
+          count={LOADING_SKELETON_ROWS}
+          palette={palette}
+          spacingUnit={spacing.unit}
+        />
       )}
 
       {messages.map((msg, i) => {
@@ -658,6 +781,59 @@ export default function MessageList({
           />
         );
       })}
+
+      {showJumpToRecent && (
+        <div
+          style={{
+            position: "sticky",
+            bottom: spacing.unit * 3,
+            display: "flex",
+            justifyContent: "center",
+            marginTop: spacing.unit * 2,
+            pointerEvents: "none",
+            zIndex: 3,
+          }}
+        >
+          <button
+            type="button"
+            onClick={() => {
+              shouldAutoScrollRef.current = true;
+              void Promise.resolve(onJumpToRecent()).finally(() => {
+                requestAnimationFrame(() => {
+                  bottomRef.current?.scrollIntoView({ block: "end" });
+                });
+              });
+            }}
+            title={
+              pageDistanceFromRecent > 0
+                ? `${pageDistanceFromRecent} page${pageDistanceFromRecent === 1 ? "" : "s"} from recent`
+                : "Jump to recent"
+            }
+            style={{
+              pointerEvents: "auto",
+              display: "inline-flex",
+              alignItems: "center",
+              justifyContent: "center",
+              gap: spacing.unit * 1.5,
+              padding: `${spacing.unit * 2}px ${spacing.unit * 3}px`,
+              borderRadius: 9999,
+              border: `1px solid ${palette.border}`,
+              backgroundColor: palette.bgSecondary,
+              color: palette.textPrimary,
+              fontSize: typography.fontSizeSmall,
+              fontWeight: typography.fontWeightMedium,
+              fontFamily: typography.fontFamily,
+              cursor: "pointer",
+              boxShadow:
+                resolvedColorScheme === "light"
+                  ? "0 6px 20px rgba(0,0,0,0.10)"
+                  : "0 10px 28px rgba(0,0,0,0.38)",
+            }}
+          >
+            {jumpToRecentLabel}
+          </button>
+        </div>
+      )}
 
       {openMenuMsg &&
         menuFixedPos &&
