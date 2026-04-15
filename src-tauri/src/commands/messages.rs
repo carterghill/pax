@@ -961,7 +961,7 @@ pub async fn get_matrix_image_path(
     let bytes = match get_matrix_media_bytes_with_timeout(
         &client,
         &params,
-        true,
+        false,
         first_timeout,
     )
     .await
@@ -976,7 +976,7 @@ pub async fn get_matrix_image_path(
                 match get_matrix_media_bytes_with_timeout(
                     &client,
                     &fallback,
-                    true,
+                    false,
                     MATRIX_IMAGE_FULL_FETCH_TIMEOUT,
                 )
                 .await
@@ -1028,6 +1028,58 @@ pub async fn get_matrix_image_path(
         .insert(cache_key, path_str.clone());
 
     Ok(path_str)
+}
+
+/// Evict cached media + avatar temp files and their `avatar_cache`
+/// entries.  Called by the frontend on room switch so images from the
+/// previous room don't linger in memory / on disk.
+#[tauri::command]
+pub async fn clear_media_cache(
+    state: State<'_, Arc<AppState>>,
+) -> Result<u32, String> {
+    let mut cache = state.avatar_cache.lock().await;
+
+    // Collect keys whose entries point at temp files (mmedia: keys and
+    // mxc:// avatar keys that have been migrated to file-backed URLs).
+    let stale_keys: Vec<String> = cache
+        .iter()
+        .filter(|(k, v)| {
+            k.starts_with("mmedia:")
+                || (k.starts_with("mxc://") && !v.starts_with("data:"))
+        })
+        .map(|(k, _)| k.clone())
+        .collect();
+
+    for key in &stale_keys {
+        cache.remove(key);
+    }
+
+    let evicted = stale_keys.len();
+    drop(cache); // release lock before I/O
+
+    // Walk the temp directory and delete our files.
+    let temp_dir = std::env::temp_dir();
+    let mut deleted = 0u32;
+    if let Ok(entries) = std::fs::read_dir(&temp_dir) {
+        for entry in entries.flatten() {
+            let name = entry.file_name();
+            let n = name.to_string_lossy();
+            if n.starts_with("pax_avatar_") || n.starts_with("pax_matrix_media_") {
+                if std::fs::remove_file(entry.path()).is_ok() {
+                    deleted += 1;
+                }
+            }
+        }
+    }
+
+    if evicted > 0 || deleted > 0 {
+        log::info!(
+            "[clear_media_cache] evicted {} cache entries, deleted {} temp files",
+            evicted,
+            deleted,
+        );
+    }
+    Ok(deleted)
 }
 
 /// Upload a file to the Matrix media repo and send it as an `m.room.message`.

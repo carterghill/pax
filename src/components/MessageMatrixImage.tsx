@@ -72,9 +72,11 @@ export default function MessageMatrixImage({ request, onExpand }: MessageMatrixI
     };
   }, [src]);
 
-  const imgStyle = {
+  const imgStyle: React.CSSProperties = {
     maxWidth: "100%",
+    maxHeight: 400,
     height: "auto" as const,
+    objectFit: "contain" as const,
     borderRadius: spacing.unit,
     display: "block" as const,
     marginTop: spacing.unit,
@@ -176,7 +178,9 @@ export default function MessageMatrixImage({ request, onExpand }: MessageMatrixI
         draggable={false}
         style={{
           maxWidth: "100%",
+          maxHeight: 400,
           height: "auto",
+          objectFit: "contain",
           borderRadius: spacing.unit,
           display: "block",
         }}

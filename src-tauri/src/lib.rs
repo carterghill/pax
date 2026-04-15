@@ -284,6 +284,7 @@ pub fn run() {
             commands::rooms::resolve_room_alias,
             commands::messages::get_messages,
             commands::messages::get_matrix_image_path,
+            commands::messages::clear_media_cache,
             commands::members::get_room_members,
             commands::members::get_room_management_members,
             commands::members::get_room_member_profile,
@@ -368,8 +369,9 @@ pub fn run() {
                                 let name_str = name.to_string_lossy();
                                 let is_proxy_video = name_str.starts_with("pax_media_")
                                     && name_str.ends_with(".mp4");
-                                let is_matrix_img = name_str.starts_with("pax_matrix_img_");
-                                if is_proxy_video || is_matrix_img {
+                                let is_matrix_img = name_str.starts_with("pax_matrix_media_");
+                                let is_avatar = name_str.starts_with("pax_avatar_");
+                                if is_proxy_video || is_matrix_img || is_avatar {
                                     if std::fs::remove_file(entry.path()).is_ok() {
                                         count += 1;
                                     }

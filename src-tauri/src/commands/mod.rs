@@ -98,7 +98,33 @@ pub(crate) fn sniff_media_mime(bytes: &[u8]) -> &'static str {
     "application/octet-stream"
 }
 
+/// Convert a temp-file path to a Tauri asset-protocol URL that works
+/// directly in `<img src>` — no frontend `convertFileSrc()` needed.
+#[cfg(target_os = "windows")]
+pub(crate) fn file_to_asset_url(path: &str) -> String {
+    format!("https://asset.localhost/{}", urlencoding::encode(path))
+}
+
+#[cfg(not(target_os = "windows"))]
+pub(crate) fn file_to_asset_url(path: &str) -> String {
+    format!("asset://localhost/{}", urlencoding::encode(path))
+}
+
+fn mime_to_avatar_ext(mime: &str) -> &'static str {
+    match mime {
+        "image/jpeg" => "jpg",
+        "image/gif" => "gif",
+        "image/webp" => "webp",
+        _ => "png",
+    }
+}
+
 /// Fetch an avatar by MXC URI, with cache.
+///
+/// Avatar bytes are written to a temp file and cached as an `asset://`
+/// URL — NOT as a multi-KB `data:` URL.  This keeps the `avatar_cache`
+/// HashMap small, keeps IPC responses small, and lets the WebView manage
+/// image memory through its own eviction policy.
 ///
 /// `fetch_bytes` is a future that downloads the image — callers pass in
 /// `room.avatar(MediaFormat::File)` or `member.avatar(MediaFormat::File)`.
@@ -109,10 +135,16 @@ pub(crate) async fn get_or_fetch_avatar(
 ) -> Option<String> {
     let mxc = mxc_uri?.to_string();
 
+    // Cache hit — return immediately if the value is a file-backed URL.
+    // Old `data:` entries are treated as stale and re-fetched below.
     {
         let cache = avatar_cache.lock().await;
         if let Some(cached) = cache.get(&mxc) {
-            return Some(cached.clone());
+            if !cached.starts_with("data:") {
+                return Some(cached.clone());
+            }
+            // data: URL from before this fix — fall through to re-fetch
+            // and replace with a temp-file-backed entry.
         }
     }
 
@@ -121,7 +153,19 @@ pub(crate) async fn get_or_fetch_avatar(
         .ok()?
         .ok()
         .flatten()?;
-    let data_url = encode_avatar_data_url(&bytes);
-    avatar_cache.lock().await.insert(mxc, data_url.clone());
-    Some(data_url)
+
+    let mime = sniff_image_mime(&bytes);
+    let ext = mime_to_avatar_ext(mime);
+    let temp_dir = std::env::temp_dir();
+    let path = temp_dir.join(format!("pax_avatar_{}.{}", uuid::Uuid::new_v4(), ext));
+
+    if std::fs::write(&path, &bytes).is_err() {
+        // Disk write failed — don't cache, just return None.
+        return None;
+    }
+
+    let path_str = path.to_str()?;
+    let asset_url = file_to_asset_url(path_str);
+    avatar_cache.lock().await.insert(mxc, asset_url.clone());
+    Some(asset_url)
 }

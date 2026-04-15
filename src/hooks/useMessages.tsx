@@ -3,6 +3,10 @@ import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { Message, MessageBatch } from "../types/matrix";
 
+/* ------------------------------------------------------------------ */
+/*  Payload types for sync events                                      */
+/* ------------------------------------------------------------------ */
+
 interface RoomMessagePayload {
   roomId: string;
   message: Message;
@@ -24,128 +28,24 @@ interface MessageRedactedPayload {
   redactedEventId: string;
 }
 
-interface CachedRoom {
-  messages: Message[];
-  prevBatch: string | null;
-}
-
-interface BufferedNewerPage {
-  messages: Message[];
-  restorePrevBatch: string | null;
-}
-
-interface OlderShiftMeta {
-  remainingCount: number;
-  restorePrevBatch: string | null;
-}
-
-interface RecentVisibleWindowSnapshot extends CachedRoom {
-  olderRecentPages: Message[][];
-}
-
 /* ------------------------------------------------------------------ */
-/*  Merge helpers                                                      */
+/*  Constants                                                          */
 /* ------------------------------------------------------------------ */
 
-/**
- * Merge two timestamp-sorted message arrays. `second` wins on eventId
- * collisions (so newer fetches overwrite stale bodies / `edited` flags).
- * O(n) when both inputs are already sorted — avoids the old Map + full
- * re-sort that fired on every single sync event.
- *
- * Returns `second` by reference when `first` adds nothing new (all dupes),
- * which lets React bail out of re-rendering via referential equality.
- */
-function sortedMergeMessages(first: Message[], second: Message[]): Message[] {
-  if (first.length === 0) return second;
-  if (second.length === 0) return first;
+/** Absolute maximum messages held in JS memory for the active room. */
+const WINDOW_SIZE = 50;
 
-  // Index second's eventIds so we can skip dupes in first.
-  const secondIds = new Set<string>();
-  for (const m of second) secondIds.add(m.eventId);
+/** Messages fetched per backward-pagination request. */
+const PAGE_SIZE = 20;
 
-  // Quick check: if every message in `first` already exists in `second`,
-  // the merge result is identical to `second` — return it directly to
-  // avoid allocating a new array and triggering a React re-render.
-  let firstHasNew = false;
-  for (const m of first) {
-    if (!secondIds.has(m.eventId)) {
-      firstHasNew = true;
-      break;
-    }
-  }
-  if (!firstHasNew) return second;
+/** Messages fetched for the initial load and jumpToRecent. */
+const INITIAL_LOAD_SIZE = 30;
 
-  const result: Message[] = [];
-  let i = 0;
-  let j = 0;
-  while (i < first.length && j < second.length) {
-    // Skip anything in `first` that `second` supersedes.
-    if (secondIds.has(first[i].eventId)) {
-      i++;
-      continue;
-    }
-    if (first[i].timestamp <= second[j].timestamp) {
-      result.push(first[i++]);
-    } else {
-      result.push(second[j++]);
-    }
-  }
-  while (i < first.length) {
-    if (!secondIds.has(first[i].eventId)) result.push(first[i]);
-    i++;
-  }
-  while (j < second.length) result.push(second[j++]);
-  return result;
-}
+/* ------------------------------------------------------------------ */
+/*  Pure helpers                                                       */
+/* ------------------------------------------------------------------ */
 
-/**
- * Fast path for a single live message from sync: update-in-place if it
- * already exists, otherwise binary-insert by timestamp.  Most live
- * messages land at the very end so the common case is O(1).
- */
-function insertOrUpdateMessage(arr: Message[], msg: Message): Message[] {
-  // Update existing?
-  const idx = arr.findIndex((m) => m.eventId === msg.eventId);
-  if (idx !== -1) {
-    // Same reference check — skip no-op updates.
-    if (arr[idx] === msg) return arr;
-    const next = arr.slice();
-    next[idx] = msg;
-    return next;
-  }
-
-  // Append (most common for live messages).
-  if (arr.length === 0 || msg.timestamp >= arr[arr.length - 1].timestamp) {
-    return [...arr, msg];
-  }
-
-  // Rare out-of-order: binary search for the right slot.
-  let lo = 0;
-  let hi = arr.length;
-  while (lo < hi) {
-    const mid = (lo + hi) >>> 1;
-    if (arr[mid].timestamp < msg.timestamp) lo = mid + 1;
-    else hi = mid;
-  }
-  const next = arr.slice();
-  next.splice(lo, 0, msg);
-  return next;
-}
-
-function replaceExistingMessage(arr: Message[], msg: Message): Message[] {
-  const idx = arr.findIndex((m) => m.eventId === msg.eventId);
-  if (idx === -1) return arr;
-  if (arr[idx] === msg) return arr;
-  const next = arr.slice();
-  next[idx] = msg;
-  return next;
-}
-
-function applyMessageEdit(
-  arr: Message[],
-  payload: MessageEditPayload,
-): Message[] {
+function applyMessageEdit(arr: Message[], payload: MessageEditPayload): Message[] {
   const idx = arr.findIndex((m) => m.eventId === payload.targetEventId);
   if (idx === -1) return arr;
 
@@ -180,8 +80,7 @@ function applyMessageEdit(
       edited: true,
       fileMediaRequest,
       fileMime: typeof fileMime === "string" ? fileMime : null,
-      fileDisplayName:
-        typeof fileDisplayName === "string" ? fileDisplayName : null,
+      fileDisplayName: typeof fileDisplayName === "string" ? fileDisplayName : null,
     };
   } else {
     nextMessage = { ...rest, body, edited: true };
@@ -192,757 +91,353 @@ function applyMessageEdit(
   return next;
 }
 
-function removeMessageByEventId(arr: Message[], eventId: string): Message[] {
-  const idx = arr.findIndex((m) => m.eventId === eventId);
-  if (idx === -1) return arr;
-  const next = arr.slice();
-  next.splice(idx, 1);
-  return next;
-}
-
-/**
- * After fetching the latest window from the server, drop any in-memory rows
- * in that time window that the server no longer returned (e.g. redacted /
- * deleted messages).
- */
-function mergeLatestServerWindow(prev: Message[], fetched: Message[]): Message[] {
-  if (fetched.length === 0) return prev;
-  const oldestFetchedTs = fetched[0].timestamp;
-  const olderOnly = prev.filter((m) => m.timestamp < oldestFetchedTs);
-  return sortedMergeMessages(olderOnly, fetched);
-}
-
 /* ------------------------------------------------------------------ */
-/*  Global room cache                                                  */
+/*  Backward-compat export (App.tsx calls on logout)                   */
 /* ------------------------------------------------------------------ */
 
-/** Max messages kept in the cache per room. */
-const MAX_MESSAGES_PER_ROOM = 150;
-/** Max messages mounted in the active timeline window. */
-const MAX_VISIBLE_MESSAGES = 50;
-/** Max rooms held in the global cache. */
-const MAX_CACHED_ROOMS = 15;
-/** How many evicted newer pages we keep for smooth reverse scrolling. */
-const MAX_NEWER_BUFFER_PAGES = 10;
-/** Offer a jump affordance once the user is several loads from recent. */
-const JUMP_TO_RECENT_AFTER_PAGES = 3;
-/** Standard history page size. */
-const MESSAGE_PAGE_LIMIT = 25;
-
-const globalCache = new Map<string, CachedRoom>();
-
-/** Touch a room to mark it most-recently-used (Map preserves insertion order). */
-function touchRoom(roomId: string) {
-  const entry = globalCache.get(roomId);
-  if (entry) {
-    globalCache.delete(roomId);
-    globalCache.set(roomId, entry);
-  }
-}
-
-/** Evict oldest rooms when the cache exceeds the limit. */
-function evictRoomsIfNeeded() {
-  while (globalCache.size > MAX_CACHED_ROOMS) {
-    const oldest = globalCache.keys().next().value;
-    if (oldest) globalCache.delete(oldest);
-    else break;
-  }
-}
-
-/**
- * Store messages for a room, trimming to MAX_MESSAGES_PER_ROOM.
- *
- * When trimming occurs the oldest messages are dropped.  Because the
- * `prevBatch` pagination token pointed at content older than the
- * now-trimmed boundary, it would produce a gap on the next load.
- * Clear it so the UI shows "Beginning of conversation" rather than
- * attempting to paginate into a gap.  The initial fetch on the next
- * room visit will set a fresh, valid token.
- */
-function normalizeCachedRoomSnapshot(
-  messages: Message[],
-  prevBatch: string | null,
-): CachedRoom {
-  let trimmed = messages;
-  let cachedPrevBatch = prevBatch;
-  if (messages.length > MAX_MESSAGES_PER_ROOM) {
-    trimmed = messages.slice(messages.length - MAX_MESSAGES_PER_ROOM);
-    cachedPrevBatch = null; // token is no longer contiguous — invalidate
-  }
-  return { messages: trimmed, prevBatch: cachedPrevBatch };
-}
-
-function buildOlderRecentPages(messages: Message[]): Message[][] {
-  if (messages.length <= MAX_VISIBLE_MESSAGES) return [];
-  const hiddenOlder = messages.slice(0, messages.length - MAX_VISIBLE_MESSAGES);
-  const pages: Message[][] = [];
-  for (let start = 0; start < hiddenOlder.length; start += MESSAGE_PAGE_LIMIT) {
-    pages.push(hiddenOlder.slice(start, start + MESSAGE_PAGE_LIMIT));
-  }
-  return pages;
-}
-
-function normalizeRecentVisibleWindowSnapshot(
-  messages: Message[],
-  prevBatch: string | null,
-): RecentVisibleWindowSnapshot {
-  const olderRecentPages = buildOlderRecentPages(messages);
-  if (olderRecentPages.length === 0) {
-    return { messages, prevBatch, olderRecentPages: [] };
-  }
-  return {
-    messages: messages.slice(messages.length - MAX_VISIBLE_MESSAGES),
-    prevBatch,
-    olderRecentPages,
-  };
-}
-
-function setCachedRoom(
-  roomId: string,
-  messages: Message[],
-  prevBatch: string | null,
-): CachedRoom {
-  const normalized = normalizeCachedRoomSnapshot(messages, prevBatch);
-  globalCache.set(roomId, normalized);
-  evictRoomsIfNeeded();
-  return normalized;
-}
-
+/** No-op — the old global cache is gone. */
 export function clearMessageCache() {
-  globalCache.clear();
+  /* nothing to do */
 }
 
 /* ------------------------------------------------------------------ */
 /*  Hook                                                               */
 /* ------------------------------------------------------------------ */
 
-
 export function useMessages(roomId: string | null) {
-  const cached = roomId ? globalCache.get(roomId) : undefined;
-  const initialVisible = cached
-    ? normalizeRecentVisibleWindowSnapshot(cached.messages, cached.prevBatch)
-    : { messages: [], prevBatch: null, olderRecentPages: [] };
-  const [messages, setMessages] = useState<Message[]>(initialVisible.messages);
-  const [prevBatch, setPrevBatch] = useState<string | null>(initialVisible.prevBatch);
-  const [loading, setLoading] = useState(false);
+  /* ---- State ---- */
+  const [messages, setMessages] = useState<Message[]>([]);
+  const [olderToken, setOlderToken] = useState<string | null>(null);
+  const [isAtLatest, setIsAtLatest] = useState(true);
+  const [loadingOlder, setLoadingOlder] = useState(false);
   const [initialLoading, setInitialLoading] = useState(false);
-  const [refreshing, setRefreshing] = useState(false);
-  const [bufferedOlderRecentPages, setBufferedOlderRecentPages] = useState(
-    initialVisible.olderRecentPages.length,
-  );
-  const [bufferedNewerPages, setBufferedNewerPages] = useState(0);
-  const [pageDistanceFromRecent, setPageDistanceFromRecent] = useState(0);
   const [pendingRecentCount, setPendingRecentCount] = useState(0);
-  const cacheRef = useRef(globalCache);
+
+  /* ---- Refs (sync reads across callbacks) ---- */
+  const messagesRef = useRef<Message[]>(messages);
+  messagesRef.current = messages;
+  const olderTokenRef = useRef<string | null>(olderToken);
+  olderTokenRef.current = olderToken;
+  const isAtLatestRef = useRef(isAtLatest);
+  isAtLatestRef.current = isAtLatest;
   const activeRoomIdRef = useRef(roomId);
   activeRoomIdRef.current = roomId;
-  const messagesRef = useRef<Message[]>(initialVisible.messages);
-  const prevBatchRef = useRef<string | null>(initialVisible.prevBatch);
-  const olderRecentPagesRef = useRef<Message[][]>(initialVisible.olderRecentPages);
-  const newerBufferRef = useRef<BufferedNewerPage[]>([]);
-  const olderShiftMetaRef = useRef<OlderShiftMeta[]>([]);
-  const pageDistanceRef = useRef(0);
-  const pendingRecentCountRef = useRef(0);
-
-  // ---- Synchronous guards (immune to React's async batching) --------
-  /** Prevents concurrent `loadMore` calls between setLoading(true) and the next React commit. */
   const loadingLockRef = useRef(false);
-  /** True while the initial fetch (from: null) is in flight — blocks loadMore from racing it. */
   const initialFetchingRef = useRef(false);
 
-  const commitVisibleWindow = useCallback((nextMessages: Message[], nextPrevBatch: string | null) => {
-    let msgs = nextMessages;
-    if (msgs.length > MAX_VISIBLE_MESSAGES) {
-      msgs = msgs.slice(msgs.length - MAX_VISIBLE_MESSAGES);
-    }
-    messagesRef.current = msgs;
-    prevBatchRef.current = nextPrevBatch;
-    setMessages(msgs);
-    setPrevBatch(nextPrevBatch);
-  }, []);
+  /* ---- Commit helper ---- */
 
-  const setOlderRecentPages = useCallback((pages: Message[][]) => {
-    olderRecentPagesRef.current = pages;
-    setBufferedOlderRecentPages(pages.length);
-  }, []);
-
-  const commitRecentVisibleWindow = useCallback(
-    (nextMessages: Message[], nextPrevBatch: string | null) => {
-      const normalized = normalizeRecentVisibleWindowSnapshot(
-        nextMessages,
-        nextPrevBatch,
-      );
-      setOlderRecentPages(normalized.olderRecentPages);
-      commitVisibleWindow(normalized.messages, normalized.prevBatch);
-    },
-    [commitVisibleWindow, setOlderRecentPages],
-  );
-
-  const commitVisibleMessages = useCallback((nextMessages: Message[]) => {
-    messagesRef.current = nextMessages;
-    setMessages(nextMessages);
-  }, []);
-
-  const setPageDistance = useCallback((next: number) => {
-    const safe = Math.max(0, next);
-    pageDistanceRef.current = safe;
-    setPageDistanceFromRecent(safe);
-  }, []);
-
-  const setPendingRecent = useCallback((next: number) => {
-    const safe = Math.max(0, next);
-    pendingRecentCountRef.current = safe;
-    setPendingRecentCount(safe);
-  }, []);
-
-  const clearHistoryWindowState = useCallback(() => {
-    setOlderRecentPages([]);
-    newerBufferRef.current = [];
-    olderShiftMetaRef.current = [];
-    setBufferedNewerPages(0);
-    setPageDistance(0);
-    setPendingRecent(0);
-  }, [setOlderRecentPages, setPageDistance, setPendingRecent]);
-
-  const pushBufferedNewerPage = useCallback((page: BufferedNewerPage) => {
-    if (page.messages.length === 0) return;
-    const next = [...newerBufferRef.current, page];
-    if (next.length > MAX_NEWER_BUFFER_PAGES) next.shift();
-    newerBufferRef.current = next;
-    setBufferedNewerPages(next.length);
-  }, []);
-
-  const popBufferedNewerPage = useCallback((): BufferedNewerPage | null => {
-    if (newerBufferRef.current.length === 0) return null;
-    const next = newerBufferRef.current.slice();
-    const page = next.pop() ?? null;
-    newerBufferRef.current = next;
-    setBufferedNewerPages(next.length);
-    return page;
-  }, []);
-
-  const patchBufferedNewerPages = useCallback(
-    (updater: (arr: Message[]) => Message[]) => {
-      let changed = false;
-      const nextPages: BufferedNewerPage[] = [];
-      for (const page of newerBufferRef.current) {
-        const nextMessages = updater(page.messages);
-        if (nextMessages !== page.messages) changed = true;
-        if (nextMessages.length > 0) {
-          nextPages.push(
-            nextMessages === page.messages
-              ? page
-              : { ...page, messages: nextMessages },
-          );
-        } else {
-          changed = true;
-        }
-      }
-      if (!changed) return;
-      newerBufferRef.current = nextPages;
-      setBufferedNewerPages(nextPages.length);
+  const commit = useCallback(
+    (next: Message[], token: string | null, atLatest: boolean) => {
+      messagesRef.current = next;
+      olderTokenRef.current = token;
+      isAtLatestRef.current = atLatest;
+      setMessages(next);
+      setOlderToken(token);
+      setIsAtLatest(atLatest);
     },
     [],
   );
 
-  const patchLatestSnapshot = useCallback(
-    (updater: (arr: Message[]) => Message[], prevBatchOverride?: string | null) => {
-      const targetRoomId = activeRoomIdRef.current;
-      if (!targetRoomId) return;
-      const cachedEntry = cacheRef.current.get(targetRoomId);
-      const baseMessages =
-        cachedEntry?.messages ??
-        (pageDistanceRef.current === 0 ? messagesRef.current : []);
-      const nextMessages = updater(baseMessages);
-      const nextPrevBatch =
-        prevBatchOverride === undefined
-          ? (cachedEntry?.prevBatch ?? null)
-          : prevBatchOverride;
-      if (nextMessages === baseMessages && prevBatchOverride === undefined) return;
-      setCachedRoom(targetRoomId, nextMessages, nextPrevBatch);
-    },
-    [],
-  );
+  /* ================================================================ */
+  /*  Room switch: synchronous blank before paint                      */
+  /* ================================================================ */
 
-  const buildLatestSnapshot = useCallback((targetRoomId: string, batch: MessageBatch) => {
-    const fetched = batch.messages.slice().reverse();
-    const cachedEntry = cacheRef.current.get(targetRoomId);
-    const prevLatest = cachedEntry?.messages ?? [];
-    const merged = mergeLatestServerWindow(prevLatest, fetched);
-
-    const cacheExtendsOlder =
-      prevLatest.length > 0 &&
-      fetched.length > 0 &&
-      prevLatest[0].timestamp < fetched[0].timestamp;
-    const effectivePrevBatch = cacheExtendsOlder
-      ? (cachedEntry?.prevBatch ?? batch.prevBatch)
-      : batch.prevBatch;
-
-    return {
-      fetched,
-      merged,
-      cachedCount: prevLatest.length,
-      cacheExtendsOlder,
-      effectivePrevBatch,
-      cachedPrevBatch: cachedEntry?.prevBatch ?? null,
-    };
-  }, []);
-
-  // Before paint: never show another room's timeline (or empty while we have no cache).
   useLayoutEffect(() => {
-    // Reset synchronous guards on room switch so a stale in-flight
-    // request from the previous room can't block the new one.
     loadingLockRef.current = false;
     initialFetchingRef.current = false;
-    clearHistoryWindowState();
-    setLoading(false);
+    setLoadingOlder(false);
+    setPendingRecentCount(0);
 
     if (!roomId) {
-      commitVisibleWindow([], null);
+      commit([], null, true);
       setInitialLoading(false);
-      setRefreshing(false);
       return;
     }
 
-    const cached = cacheRef.current.get(roomId);
-    if (cached) {
-      const normalizedCached =
-        cached.messages.length > MAX_MESSAGES_PER_ROOM
-          ? setCachedRoom(roomId, cached.messages, cached.prevBatch)
-          : cached;
-      touchRoom(roomId);
-      commitRecentVisibleWindow(
-        normalizedCached.messages,
-        normalizedCached.prevBatch,
-      );
-      setInitialLoading(false);
-    } else {
-      commitVisibleWindow([], null);
-      setInitialLoading(true);
-    }
-    setRefreshing(false);
-  }, [roomId, clearHistoryWindowState, commitRecentVisibleWindow, commitVisibleWindow]);
+    commit([], null, true);
+    setInitialLoading(true);
+  }, [roomId, commit]);
 
-  // Fetch from server when room changes (cancelled on switch / unmount).
+  /* ================================================================ */
+  /*  Room switch: async initial fetch                                 */
+  /* ================================================================ */
+
   useEffect(() => {
     if (!roomId) return;
 
     let cancelled = false;
-    const targetRoomId = roomId;
-    const hadCache = !!cacheRef.current.get(targetRoomId);
-    if (hadCache) setRefreshing(true);
-
+    const target = roomId;
     initialFetchingRef.current = true;
 
+    // Free temp files + avatar_cache entries from the previous room's
+    // images.  Fire-and-forget — the initial fetch doesn't depend on it.
+    invoke("clear_media_cache").catch(() => {});
+
     invoke<MessageBatch>("get_messages", {
-      roomId: targetRoomId,
+      roomId: target,
       from: null,
-      limit: MESSAGE_PAGE_LIMIT,
+      limit: INITIAL_LOAD_SIZE,
     })
       .then((batch) => {
-        if (cancelled || activeRoomIdRef.current !== targetRoomId) return;
-        const snapshot = buildLatestSnapshot(targetRoomId, batch);
-
-        const normalizedSnapshot = setCachedRoom(
-          targetRoomId,
-          snapshot.merged,
-          snapshot.effectivePrevBatch,
-        );
-        clearHistoryWindowState();
-        commitRecentVisibleWindow(
-          normalizedSnapshot.messages,
-          normalizedSnapshot.prevBatch,
-        );
+        if (cancelled || activeRoomIdRef.current !== target) return;
+        const msgs = batch.messages.slice().reverse();
+        commit(msgs, batch.prevBatch, true);
+        setPendingRecentCount(0);
       })
       .catch((e) => {
-        if (cancelled || activeRoomIdRef.current !== targetRoomId) return;
-        console.error("[useMessages] initialFetch ERROR:", e);
-        commitVisibleWindow([], null);
+        if (cancelled || activeRoomIdRef.current !== target) return;
+        console.error("[useMessages] initial fetch error:", e);
       })
       .finally(() => {
-        if (cancelled || activeRoomIdRef.current !== targetRoomId) return;
+        if (cancelled || activeRoomIdRef.current !== target) return;
         initialFetchingRef.current = false;
         setInitialLoading(false);
-        setRefreshing(false);
       });
 
     return () => {
       cancelled = true;
       initialFetchingRef.current = false;
     };
-  }, [roomId, buildLatestSnapshot, clearHistoryWindowState, commitRecentVisibleWindow, commitVisibleWindow]);
+  }, [roomId, commit]);
 
-  // Listen for live message events from the sync loop (new, edit, redact)
+  /* ================================================================ */
+  /*  Sync event listeners                                             */
+  /* ================================================================ */
+
   useEffect(() => {
     if (!roomId) return;
 
-    const unlistenMsg = listen<RoomMessagePayload>("room-message", (event) => {
-      const { roomId: msgRoomId, message } = event.payload;
-      if (msgRoomId !== roomId) return;
-
-      const cachedEntry = cacheRef.current.get(roomId);
-      const cachedMessages = cachedEntry?.messages ?? [];
-      const cachedHadEvent = cachedMessages.some((m) => m.eventId === message.eventId);
-      const nextCached = insertOrUpdateMessage(cachedMessages, message);
-      if (nextCached !== cachedMessages) {
-        setCachedRoom(roomId, nextCached, cachedEntry?.prevBatch ?? prevBatchRef.current);
-      }
-
-      if (pageDistanceRef.current === 0 && !loadingLockRef.current) {
-        const cachedAfter = cacheRef.current.get(roomId);
-        if (!cachedAfter) return;
-        commitRecentVisibleWindow(cachedAfter.messages, cachedAfter.prevBatch);
-        return;
-      }
-
-      // In history mode (pageDistance > 0) or during a loadMore fetch:
-      // only update existing messages in the visible window — don't reset it.
-      const nextVisible = replaceExistingMessage(messagesRef.current, message);
-      if (nextVisible !== messagesRef.current) {
-        commitVisibleMessages(nextVisible);
-      }
-      patchBufferedNewerPages((arr) => replaceExistingMessage(arr, message));
-      if (!cachedHadEvent) {
-        setPendingRecent(pendingRecentCountRef.current + 1);
-      }
-    });
-
-    const unlistenEdit = listen<MessageEditPayload>("room-message-edit", (event) => {
-      const payload = event.payload;
-      const { roomId: rid } = payload;
+    const unMsg = listen<RoomMessagePayload>("room-message", (event) => {
+      const { roomId: rid, message } = event.payload;
       if (rid !== roomId) return;
 
-      patchLatestSnapshot((arr) => applyMessageEdit(arr, payload));
-
-      if (pageDistanceRef.current === 0 && !loadingLockRef.current) {
-        const cachedAfter = cacheRef.current.get(roomId);
-        if (cachedAfter) {
-          commitRecentVisibleWindow(cachedAfter.messages, cachedAfter.prevBatch);
-        }
+      if (!isAtLatestRef.current) {
+        setPendingRecentCount((c) => c + 1);
         return;
       }
 
-      const nextVisible = applyMessageEdit(messagesRef.current, payload);
-      if (nextVisible !== messagesRef.current) {
-        commitVisibleMessages(nextVisible);
-      }
+      const prev = messagesRef.current;
+      const idx = prev.findIndex((m) => m.eventId === message.eventId);
 
-      patchBufferedNewerPages((arr) => applyMessageEdit(arr, payload));
-    });
-
-    const unlistenRedact = listen<MessageRedactedPayload>("room-message-redacted", (event) => {
-      const { roomId: rid, redactedEventId } = event.payload;
-      if (rid !== roomId) return;
-
-      patchLatestSnapshot((arr) => removeMessageByEventId(arr, redactedEventId));
-
-      if (pageDistanceRef.current === 0 && !loadingLockRef.current) {
-        const cachedAfter = cacheRef.current.get(roomId);
-        if (cachedAfter) {
-          commitRecentVisibleWindow(cachedAfter.messages, cachedAfter.prevBatch);
+      let next: Message[];
+      if (idx !== -1) {
+        next = prev.slice();
+        next[idx] = message;
+      } else {
+        next = [...prev, message];
+        if (
+          next.length >= 2 &&
+          next[next.length - 2].timestamp > message.timestamp
+        ) {
+          next.sort((a, b) => a.timestamp - b.timestamp);
         }
-        return;
+        if (next.length > WINDOW_SIZE) {
+          next = next.slice(next.length - WINDOW_SIZE);
+        }
       }
-
-      const nextVisible = removeMessageByEventId(messagesRef.current, redactedEventId);
-      if (nextVisible !== messagesRef.current) {
-        commitVisibleMessages(nextVisible);
-      }
-
-      patchBufferedNewerPages((arr) => removeMessageByEventId(arr, redactedEventId));
+      messagesRef.current = next;
+      setMessages(next);
     });
+
+    const unEdit = listen<MessageEditPayload>("room-message-edit", (event) => {
+      if (event.payload.roomId !== roomId) return;
+      const next = applyMessageEdit(messagesRef.current, event.payload);
+      if (next !== messagesRef.current) {
+        messagesRef.current = next;
+        setMessages(next);
+      }
+    });
+
+    const unRedact = listen<MessageRedactedPayload>(
+      "room-message-redacted",
+      (event) => {
+        if (event.payload.roomId !== roomId) return;
+        const eid = event.payload.redactedEventId;
+        const next = messagesRef.current.filter((m) => m.eventId !== eid);
+        if (next.length !== messagesRef.current.length) {
+          messagesRef.current = next;
+          setMessages(next);
+        }
+      },
+    );
 
     return () => {
-      unlistenMsg.then((fn) => fn());
-      unlistenEdit.then((fn) => fn());
-      unlistenRedact.then((fn) => fn());
+      unMsg.then((fn) => fn());
+      unEdit.then((fn) => fn());
+      unRedact.then((fn) => fn());
     };
-  }, [
-    roomId,
-    commitRecentVisibleWindow,
-    commitVisibleMessages,
-    patchBufferedNewerPages,
-    patchLatestSnapshot,
-    setPendingRecent,
-  ]);
+  }, [roomId]);
 
-  const loadMore = useCallback(async () => {
+  /* ================================================================ */
+  /*  loadOlder                                                        */
+  /* ================================================================ */
+
+  const loadOlder = useCallback(async () => {
     if (
       !roomId ||
       loadingLockRef.current ||
       initialFetchingRef.current ||
-      (olderRecentPagesRef.current.length === 0 && !prevBatchRef.current)
+      olderTokenRef.current === null
     ) {
       return;
     }
 
-    if (olderRecentPagesRef.current.length > 0) {
-      const olderRecentPage =
-        olderRecentPagesRef.current[olderRecentPagesRef.current.length - 1];
-      const nextOlderRecentPages = olderRecentPagesRef.current.slice(0, -1);
-      setOlderRecentPages(nextOlderRecentPages);
-
-      const merged = sortedMergeMessages(olderRecentPage, messagesRef.current);
-      const evictedNewest = merged.length > MAX_VISIBLE_MESSAGES
-        ? merged.slice(MAX_VISIBLE_MESSAGES)
-        : [];
-      const nextVisible = evictedNewest.length > 0
-        ? merged.slice(0, MAX_VISIBLE_MESSAGES)
-        : merged;
-
-      if (evictedNewest.length > 0) {
-        pushBufferedNewerPage({
-          messages: evictedNewest,
-          restorePrevBatch: prevBatchRef.current,
-        });
-        olderShiftMetaRef.current.push({
-          remainingCount: evictedNewest.length,
-          restorePrevBatch: prevBatchRef.current,
-        });
-      }
-
-      setPageDistance(pageDistanceRef.current + 1);
-      commitVisibleWindow(nextVisible, prevBatchRef.current);
-      return;
-    }
-
-    const targetRoomId = roomId;
-    const requestPrevBatch = prevBatchRef.current;
+    const target = roomId;
+    const fromToken = olderTokenRef.current;
     loadingLockRef.current = true;
-    setLoading(true);
-
-    // Optimistically enter "history mode" so sync events arriving during
-    // the async fetch won't call commitRecentVisibleWindow and reset the
-    // visible window out from under us.
-    setPageDistance(pageDistanceRef.current + 1);
-    let pageDistanceCommitted = false;
+    setLoadingOlder(true);
 
     try {
       const batch = await invoke<MessageBatch>("get_messages", {
-        roomId: targetRoomId,
-        from: requestPrevBatch,
-        limit: MESSAGE_PAGE_LIMIT,
+        roomId: target,
+        from: fromToken,
+        limit: PAGE_SIZE,
       });
-      if (activeRoomIdRef.current !== targetRoomId) return;
+      if (activeRoomIdRef.current !== target) return;
 
-      const older = batch.messages.reverse();
-      const merged = sortedMergeMessages(older, messagesRef.current);
-      const newCount = merged.length - messagesRef.current.length;
-
-      const evictedNewest = merged.length > MAX_VISIBLE_MESSAGES
-        ? merged.slice(MAX_VISIBLE_MESSAGES)
-        : [];
-      const nextVisible = evictedNewest.length > 0
-        ? merged.slice(0, MAX_VISIBLE_MESSAGES)
-        : merged;
-
-      if (evictedNewest.length > 0) {
-        pushBufferedNewerPage({
-          messages: evictedNewest,
-          restorePrevBatch: requestPrevBatch,
-        });
-        olderShiftMetaRef.current.push({
-          remainingCount: evictedNewest.length,
-          restorePrevBatch: requestPrevBatch,
-        });
+      const older = batch.messages.slice().reverse();
+      if (older.length === 0) {
+        olderTokenRef.current = null;
+        setOlderToken(null);
+        return;
       }
 
-      if (newCount === 0) {
-        // prevBatch token likely points into already-loaded content
-      } else {
-        pageDistanceCommitted = true;
+      const existingIds = new Set(messagesRef.current.map((m) => m.eventId));
+      const genuinelyNew = older.filter((m) => !existingIds.has(m.eventId));
+      if (genuinelyNew.length === 0) {
+        olderTokenRef.current = batch.prevBatch;
+        setOlderToken(batch.prevBatch);
+        return;
       }
 
-      commitVisibleWindow(nextVisible, batch.prevBatch);
+      let combined = [...genuinelyNew, ...messagesRef.current];
+      combined.sort((a, b) => a.timestamp - b.timestamp);
+
+      let nextAtLatest = isAtLatestRef.current;
+      if (combined.length > WINDOW_SIZE) {
+        combined = combined.slice(0, WINDOW_SIZE);
+        nextAtLatest = false;
+      }
+
+      commit(combined, batch.prevBatch, nextAtLatest);
     } catch (e) {
-      console.error("[useMessages] loadMore ERROR:", e);
+      console.error("[useMessages] loadOlder error:", e);
     } finally {
-      if (activeRoomIdRef.current === targetRoomId) {
-        setLoading(false);
-        if (!pageDistanceCommitted) {
-          setPageDistance(pageDistanceRef.current - 1);
-        }
+      if (activeRoomIdRef.current === target) {
+        setLoadingOlder(false);
       }
       loadingLockRef.current = false;
     }
-  }, [
-    roomId,
-    commitVisibleWindow,
-    pushBufferedNewerPage,
-    setOlderRecentPages,
-    setPageDistance,
-  ]);
+  }, [roomId, commit]);
 
-  const loadNewer = useCallback(() => {
-    if (!roomId) return;
-    const page = popBufferedNewerPage();
-    if (!page) return;
-
-    const appended = sortedMergeMessages(messagesRef.current, page.messages);
-    const overflow = Math.max(0, appended.length - MAX_VISIBLE_MESSAGES);
-    const nextVisible = overflow > 0 ? appended.slice(overflow) : appended;
-
-    let nextPrevBatch = prevBatchRef.current;
-    let remainingTrim = overflow;
-    while (remainingTrim > 0 && olderShiftMetaRef.current.length > 0) {
-      const meta = olderShiftMetaRef.current[olderShiftMetaRef.current.length - 1];
-      if (remainingTrim < meta.remainingCount) {
-        meta.remainingCount -= remainingTrim;
-        remainingTrim = 0;
-      } else {
-        remainingTrim -= meta.remainingCount;
-        nextPrevBatch = meta.restorePrevBatch;
-        olderShiftMetaRef.current.pop();
-      }
-    }
-
-    const nextPageDistance = Math.max(0, pageDistanceRef.current - 1);
-    setPageDistance(nextPageDistance);
-    if (nextPageDistance === 0 && newerBufferRef.current.length === 0) {
-      olderShiftMetaRef.current = [];
-      const cachedEntry = cacheRef.current.get(roomId);
-      if (cachedEntry) {
-        commitRecentVisibleWindow(cachedEntry.messages, cachedEntry.prevBatch);
-        setPendingRecent(0);
-        return;
-      }
-    }
-
-    commitVisibleWindow(nextVisible, nextPrevBatch);
-  }, [
-    roomId,
-    commitRecentVisibleWindow,
-    commitVisibleWindow,
-    popBufferedNewerPage,
-    setPageDistance,
-    setPendingRecent,
-  ]);
-
-  // Re-fetch latest messages (after sending)
-  const refresh = useCallback(async () => {
-    if (!roomId) return;
-
-    const targetRoomId = roomId;
-
-    try {
-      const batch = await invoke<MessageBatch>("get_messages", {
-        roomId: targetRoomId,
-        from: null,
-        limit: MESSAGE_PAGE_LIMIT,
-      });
-      if (activeRoomIdRef.current !== targetRoomId) return;
-
-      const snapshot = buildLatestSnapshot(targetRoomId, batch);
-
-      const normalizedSnapshot = setCachedRoom(
-        targetRoomId,
-        snapshot.merged,
-        snapshot.effectivePrevBatch,
-      );
-      if (pageDistanceRef.current === 0) {
-        commitRecentVisibleWindow(
-          normalizedSnapshot.messages,
-          normalizedSnapshot.prevBatch,
-        );
-        setPendingRecent(0);
-      } else if (snapshot.merged.length > snapshot.cachedCount) {
-        setPendingRecent(
-          pendingRecentCountRef.current + (snapshot.merged.length - snapshot.cachedCount),
-        );
-      }
-    } catch (e) {
-      console.error("[useMessages] refresh ERROR:", e);
-    }
-  }, [roomId, buildLatestSnapshot, commitRecentVisibleWindow, setPendingRecent]);
+  /* ================================================================ */
+  /*  jumpToRecent                                                     */
+  /* ================================================================ */
 
   const jumpToRecent = useCallback(async () => {
     if (!roomId) return;
-    const targetRoomId = roomId;
-    const cachedEntry = cacheRef.current.get(targetRoomId);
-    const normalizedCached =
-      cachedEntry == null
-        ? null
-        : cachedEntry.messages.length > MAX_MESSAGES_PER_ROOM
-          ? setCachedRoom(targetRoomId, cachedEntry.messages, cachedEntry.prevBatch)
-          : cachedEntry;
-    clearHistoryWindowState();
-    if (normalizedCached) {
-      touchRoom(targetRoomId);
-      commitRecentVisibleWindow(
-        normalizedCached.messages,
-        normalizedCached.prevBatch,
-      );
-    }
+    const target = roomId;
+    loadingLockRef.current = true;
 
-    setRefreshing(true);
     try {
       const batch = await invoke<MessageBatch>("get_messages", {
-        roomId: targetRoomId,
+        roomId: target,
         from: null,
-        limit: MESSAGE_PAGE_LIMIT,
+        limit: INITIAL_LOAD_SIZE,
       });
-      if (activeRoomIdRef.current !== targetRoomId) return;
+      if (activeRoomIdRef.current !== target) return;
 
-      const snapshot = buildLatestSnapshot(targetRoomId, batch);
-      const normalizedSnapshot = setCachedRoom(
-        targetRoomId,
-        snapshot.merged,
-        snapshot.effectivePrevBatch,
-      );
-      commitRecentVisibleWindow(
-        normalizedSnapshot.messages,
-        normalizedSnapshot.prevBatch,
-      );
-      setPendingRecent(0);
+      const msgs = batch.messages.slice().reverse();
+      commit(msgs, batch.prevBatch, true);
+      setPendingRecentCount(0);
     } catch (e) {
-      console.error("[useMessages] jumpToRecent ERROR:", e);
+      console.error("[useMessages] jumpToRecent error:", e);
     } finally {
-      if (activeRoomIdRef.current === targetRoomId) {
-        setRefreshing(false);
-      }
+      loadingLockRef.current = false;
     }
-  }, [roomId, buildLatestSnapshot, clearHistoryWindowState, commitRecentVisibleWindow, setPendingRecent]);
+  }, [roomId, commit]);
 
-  const removeMessageById = useCallback(
-    (eventId: string) => {
-      if (!roomId) return;
-      patchLatestSnapshot((arr) => removeMessageByEventId(arr, eventId));
-      if (pageDistanceRef.current === 0) {
-        const cachedAfter = cacheRef.current.get(roomId);
-        if (cachedAfter) {
-          commitRecentVisibleWindow(cachedAfter.messages, cachedAfter.prevBatch);
-        }
-        return;
-      }
-      const nextVisible = removeMessageByEventId(messagesRef.current, eventId);
-      if (nextVisible !== messagesRef.current) {
-        commitVisibleMessages(nextVisible);
-      }
-      patchBufferedNewerPages((arr) => removeMessageByEventId(arr, eventId));
-    },
-    [
-      roomId,
-      commitRecentVisibleWindow,
-      commitVisibleMessages,
-      patchBufferedNewerPages,
-      patchLatestSnapshot,
-    ],
-  );
+  /* ================================================================ */
+  /*  loadNewer — reload latest window when scrolled back              */
+  /* ================================================================ */
 
-  const canRestoreNewer = bufferedNewerPages > 0;
-  const showJumpToRecent =
-    pageDistanceFromRecent >= JUMP_TO_RECENT_AFTER_PAGES || pendingRecentCount > 0;
+  const loadNewer = useCallback(async () => {
+    if (!roomId || isAtLatestRef.current || loadingLockRef.current) return;
+    await jumpToRecent();
+  }, [roomId, jumpToRecent]);
+
+  /* ================================================================ */
+  /*  refresh (after sending a message)                                */
+  /* ================================================================ */
+
+  const refresh = useCallback(async () => {
+    if (!roomId) return;
+    const target = roomId;
+
+    try {
+      const batch = await invoke<MessageBatch>("get_messages", {
+        roomId: target,
+        from: null,
+        limit: PAGE_SIZE,
+      });
+      if (activeRoomIdRef.current !== target) return;
+      if (!isAtLatestRef.current) return;
+
+      const fetched = batch.messages.slice().reverse();
+      const prev = messagesRef.current;
+
+      const fetchedIds = new Set(fetched.map((m) => m.eventId));
+      const kept = prev.filter((m) => !fetchedIds.has(m.eventId));
+
+      let combined = [...kept, ...fetched];
+      combined.sort((a, b) => a.timestamp - b.timestamp);
+
+      const seen = new Set<string>();
+      combined = combined.filter((m) => {
+        if (seen.has(m.eventId)) return false;
+        seen.add(m.eventId);
+        return true;
+      });
+
+      if (combined.length > WINDOW_SIZE) {
+        combined = combined.slice(combined.length - WINDOW_SIZE);
+      }
+
+      commit(combined, batch.prevBatch, true);
+    } catch (e) {
+      console.error("[useMessages] refresh error:", e);
+    }
+  }, [roomId, commit]);
+
+  /* ================================================================ */
+  /*  removeMessageById                                                */
+  /* ================================================================ */
+
+  const removeMessageById = useCallback((eventId: string) => {
+    const prev = messagesRef.current;
+    const next = prev.filter((m) => m.eventId !== eventId);
+    if (next.length !== prev.length) {
+      messagesRef.current = next;
+      setMessages(next);
+    }
+  }, []);
+
+  /* ================================================================ */
+  /*  Return                                                           */
+  /* ================================================================ */
+
+  const hasOlder = olderToken !== null;
+  const showJumpToRecent = !isAtLatest || pendingRecentCount > 0;
 
   return {
     messages,
-    loadMore,
+    loadOlder,
     loadNewer,
-    hasMore: bufferedOlderRecentPages > 0 || prevBatch !== null,
-    loading,
+    hasOlder,
+    isAtLatest,
+    loadingOlder,
     initialLoading,
-    refreshing,
-    canRestoreNewer,
-    pageDistanceFromRecent,
     pendingRecentCount,
     showJumpToRecent,
     jumpToRecent,

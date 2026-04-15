@@ -140,14 +140,12 @@ export default function ChatView({
 
   const {
     messages,
-    loadMore,
+    loadOlder,
     loadNewer,
-    hasMore,
-    loading,
+    hasOlder,
+    isAtLatest,
+    loadingOlder,
     initialLoading,
-    refreshing,
-    canRestoreNewer,
-    pageDistanceFromRecent,
     pendingRecentCount,
     showJumpToRecent,
     jumpToRecent,
@@ -423,14 +421,12 @@ export default function ChatView({
         }}>
           <MessageList
             messages={messages}
-            loading={loading}
+            loadingOlder={loadingOlder}
             initialLoading={initialLoading}
-            refreshing={refreshing}
-            hasMore={hasMore}
-            onLoadMore={loadMore}
-            canRestoreNewer={canRestoreNewer}
+            hasOlder={hasOlder}
+            isAtLatest={isAtLatest}
+            onLoadOlder={loadOlder}
             onLoadNewer={loadNewer}
-            pageDistanceFromRecent={pageDistanceFromRecent}
             pendingRecentCount={pendingRecentCount}
             showJumpToRecent={showJumpToRecent}
             onJumpToRecent={jumpToRecent}
