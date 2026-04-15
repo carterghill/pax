@@ -56,6 +56,15 @@ pub async fn get_messages(
     from: Option<String>,
     limit: u32,
 ) -> Result<MessageBatch, String> {
+    let short_room = if room_id.len() > 6 { &room_id[room_id.len()-6..] } else { &room_id };
+    log::info!(
+        "[get_messages] room=…{} from={} limit={}",
+        short_room,
+        from.as_deref().map(|t| if t.len() > 16 { &t[..16] } else { t }).unwrap_or("null"),
+        limit,
+    );
+    let t0 = std::time::Instant::now();
+
     let client = get_client(&state).await?;
     let room = resolve_room(&client, &room_id)?;
 
@@ -194,7 +203,7 @@ pub async fn get_messages(
     }
 
     // Third pass: build final messages using the cached sender metadata
-    let messages = raw_msgs
+    let messages: Vec<_> = raw_msgs
         .into_iter()
         .map(|m| {
             let (sender_name, avatar_url) =
@@ -252,6 +261,19 @@ pub async fn get_messages(
     } else {
         pagination_end
     };
+
+    let elapsed = t0.elapsed();
+    let msg_count = messages.len();
+    log::info!(
+        "[get_messages] room=…{} DONE in {:?}: chunk_events={} actual_msgs={} edits={} prev_batch={} (chunk<limit={})",
+        short_room,
+        elapsed,
+        timeline_event_count,
+        msg_count,
+        latest_replacement.len(),
+        prev_batch.as_deref().map(|t| if t.len() > 16 { &t[..16] } else { t }).unwrap_or("null"),
+        timeline_event_count < limit_usize,
+    );
 
     Ok(MessageBatch {
         messages,
@@ -412,8 +434,10 @@ pub async fn start_sync(
         let avatar_cache = avatar_cache.clone();
         async move {
             let room_id = room.room_id().to_string();
+            let short_room = if room_id.len() > 6 { &room_id[room_id.len()-6..] } else { &room_id };
 
             if let Some(Relation::Replacement(repl)) = &ev.content.relates_to {
+                log::debug!("[sync] room-message-edit room=…{} target={}", short_room, repl.event_id);
                 let ext = extract_message_display(&RoomMessageEventContent::from(
                     repl.new_content.clone(),
                 ));
@@ -471,6 +495,13 @@ pub async fn start_sync(
             };
 
             let timestamp: u64 = ev.origin_server_ts.0.into();
+
+            log::debug!(
+                "[sync] room-message room=…{} event={} sender={}",
+                short_room,
+                ev.event_id,
+                sender,
+            );
 
             let payload = RoomMessagePayload {
                 room_id,
@@ -567,8 +598,12 @@ pub async fn start_sync(
     //   - anything else → set_presence=Offline (explicit PUTs from the frontend handle it)
     let join = tokio::spawn(async move {
         let mut first_sync_done = false;
+        let mut sync_count: u64 = 0;
 
         loop {
+            sync_count += 1;
+            let sync_t0 = std::time::Instant::now();
+
             // Read the user's desired presence for this sync iteration.
             let desired = desired_presence
                 .lock()
@@ -594,6 +629,15 @@ pub async fn start_sync(
                     continue;
                 }
             };
+
+            let sync_elapsed = sync_t0.elapsed();
+            let presence_count = response.presence.len();
+            log::info!(
+                "[sync] iteration #{} took {:?}: presence_updates={}",
+                sync_count,
+                sync_elapsed,
+                presence_count,
+            );
 
             if !first_sync_done {
                 first_sync_done = true;

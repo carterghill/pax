@@ -337,6 +337,13 @@ export default function MessageList({
   const menuAnchorRef = useRef<HTMLButtonElement>(null);
   const [mediaViewer, setMediaViewer] = useState<MediaViewerOpenPayload | null>(null);
 
+  // ---- Logging ----
+  const mlRenderCount = useRef(0);
+  mlRenderCount.current++;
+  console.log(
+    `[MessageList] render #${mlRenderCount.current} room=${roomId.slice(-6)} msgs=${messages.length} loading=${loading} hasMore=${hasMore} initialLoading=${initialLoading} refreshing=${refreshing}`
+  );
+
   const openDirectImage = useCallback((url: string, title: string) => {
     setMediaViewer({
       kind: "image",
@@ -525,10 +532,20 @@ export default function MessageList({
 
       if (loadingRef.current || !hasMoreRef.current) return;
       if (containerRef.current.scrollTop < 100) {
-        prependScrollAnchorRef.current = {
-          phase: "pending",
-          firstEventId: messagesRef.current[0]?.eventId,
-        };
+        console.log(
+          `[MessageList] scroll→loadMore: scrollTop=${containerRef.current.scrollTop.toFixed(0)} loadingRef=${loadingRef.current} hasMoreRef=${hasMoreRef.current} anchorPhase=${prependScrollAnchorRef.current?.phase ?? "null"}`
+        );
+        // Only set the anchor if there isn't one already in progress.
+        // A "captured" anchor means a load is in flight and scroll
+        // restoration coordinates are saved — overwriting it would
+        // break the restore after messages prepend.
+        const existing = prependScrollAnchorRef.current;
+        if (!existing || existing.phase !== "captured") {
+          prependScrollAnchorRef.current = {
+            phase: "pending",
+            firstEventId: messagesRef.current[0]?.eventId,
+          };
+        }
         onLoadMoreRef.current();
       }
     });
