@@ -77,6 +77,12 @@ pub struct AppState {
     /// when "online", the sync itself tells Synapse the user is active (matching
     /// Cinny/Element behaviour); otherwise explicit PUTs handle it.
     pub desired_presence: Arc<StdMutex<String>>,
+    /// Per-room last-emitted unread state.  The sync loop polls `num_unread_*`
+    /// after each iteration and only emits `room-unread-changed` for rooms that
+    /// actually moved.  See `commands::unread` for the data shape and reasoning
+    /// (tl;dr: matrix-sdk 0.16 only flags the broadcast's READ_RECEIPT reason on
+    /// the sliding-sync path; legacy sync_once doesn't, so we poll instead).
+    pub unread_cache: commands::unread::UnreadStateCache,
 }
 
 impl AppState {
@@ -219,6 +225,7 @@ pub fn run() {
         msc4140_supported: AtomicBool::new(true),
         voice_livekit_jwt_service_url: StdMutex::new(None),
         desired_presence: Arc::new(StdMutex::new("online".to_string())),
+        unread_cache: Arc::new(Mutex::new(HashMap::new())),
     });
 
     tauri::Builder::default()
@@ -348,6 +355,10 @@ pub fn run() {
             commands::embed::proxy_media,
             commands::embed::cleanup_proxy_media,
             commands::embed::cleanup_all_proxy_media,
+            commands::unread::get_room_unread_state,
+            commands::unread::get_all_unread_states,
+            commands::unread::send_room_read_receipt,
+            commands::unread::set_room_marked_unread,
         ])
         .setup(|app| {
             // Set the Tauri app-scoped temp dir so avatar / media temp

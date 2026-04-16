@@ -10,6 +10,7 @@ import type { Room } from "../types/matrix";
 import { usePresence } from "../hooks/usePresence";
 import { useVoiceParticipants } from "../hooks/useVoiceParticipants";
 import { useVoiceCall } from "../hooks/useVoiceCall";
+import { useUnreadRooms } from "../hooks/useUnreadRooms";
 import { PresenceContext } from "../hooks/PresenceContext";
 import { useState, useCallback, useMemo, useEffect, startTransition } from "react";
 import { useTheme } from "../theme/ThemeContext";
@@ -105,6 +106,11 @@ export default function MainLayout({
 
   const { manualStatus, setManualStatus, effectivePresence, statusMessage, setStatusMessage } = usePresence();
   const voiceCall = useVoiceCall();
+  // Unread state for every joined room, used by the sidebar to paint rooms in
+  // the primary colour when they have unread activity.  The hook is scoped to
+  // MainLayout so one subscription serves both the sidebar today and future
+  // consumers (e.g. a window-title unread badge) without duplicating listeners.
+  const { isUnread, mentionCount } = useUnreadRooms(userId);
   const [activeSpaceId, setActiveSpaceId] = useState<string | null>(null);
   const [activeRoomBySpace, setActiveRoomBySpace] = useState<Record<string, string | null>>({});
   const [settingsOpen, setSettingsOpen] = useState(false);
@@ -566,6 +572,8 @@ export default function MainLayout({
             onRoomsChanged={handleSpacesChanged}
             parentSpace={parentSpaceNav}
             onNavigateToParentSpace={handleNavigateToParentSpace}
+            isUnread={isUnread}
+            mentionCount={mentionCount}
           />
           <div
             onMouseDown={sidebarResize.onMouseDown}

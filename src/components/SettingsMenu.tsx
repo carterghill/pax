@@ -12,6 +12,7 @@ import {
   User,
   Palette,
   Volume2,
+  Bell,
   LogOut,
 } from "lucide-react";
 import type { LucideIcon } from "lucide-react";
@@ -19,6 +20,10 @@ import type { VoiceCall } from "../hooks/useVoiceCall";
 import VoiceAudioSettingsSection from "./VoiceAudioSettingsSection";
 import { userInitialAvatarBackground } from "../utils/userAvatarColor";
 import { avatarSrc } from "../utils/avatarSrc";
+import {
+  getSendPublicReceipts,
+  setSendPublicReceipts,
+} from "../utils/readReceiptPrefs";
 
 interface SettingsMenuProps {
   onSignOut: () => void;
@@ -28,7 +33,12 @@ interface SettingsMenuProps {
   voiceCall: VoiceCall;
 }
 
-type SettingsSection = "user" | "appearance" | "audio" | "account";
+type SettingsSection =
+  | "user"
+  | "appearance"
+  | "audio"
+  | "notifications"
+  | "account";
 
 interface SettingsNavItem {
   id: SettingsSection;
@@ -48,6 +58,30 @@ export default function SettingsMenu({
 }: SettingsMenuProps) {
   const { palette, typography, spacing, resolvedColorScheme } = useTheme();
   const [activeSection, setActiveSection] = useState<SettingsSection>("user");
+
+  // ---- Notifications ----
+  /**
+   * Public vs private read receipts.  Stored in localStorage via
+   * `readReceiptPrefs`; we mirror it into React state for the checkbox.  We
+   * re-read on `storage` events so another tab / profile toggling this stays
+   * in sync.
+   */
+  const [sendPublicReceipts, setSendPublicReceiptsState] = useState<boolean>(
+    () => getSendPublicReceipts(),
+  );
+  useEffect(() => {
+    function onStorage(e: StorageEvent) {
+      if (e.key === "pax.settings.sendPublicReceipts") {
+        setSendPublicReceiptsState(getSendPublicReceipts());
+      }
+    }
+    window.addEventListener("storage", onStorage);
+    return () => window.removeEventListener("storage", onStorage);
+  }, []);
+  const handleToggleSendPublicReceipts = useCallback((next: boolean) => {
+    setSendPublicReceiptsState(next);
+    setSendPublicReceipts(next);
+  }, []);
 
   const reconnectVoiceAfterDeviceChange = useCallback(async () => {
     const rid = voiceCall.connectedRoomId;
@@ -174,6 +208,14 @@ export default function SettingsMenu({
       title: "Audio",
       blurb: "Manage your microphone, speakers, and noise suppression settings from one place.",
       icon: Volume2,
+    },
+    {
+      id: "notifications",
+      label: "Notifications",
+      description: "Read receipts",
+      title: "Notifications",
+      blurb: "Control what other users can see about when you've read their messages.",
+      icon: Bell,
     },
     {
       id: "account",
@@ -816,6 +858,66 @@ export default function SettingsMenu({
                 isNoiseSuppressed={voiceCall.isNoiseSuppressed}
                 onAfterDevicePreferenceChange={reconnectVoiceAfterDeviceChange}
               />
+            </section>
+          )}
+
+          {activeSection === "notifications" && (
+            <section style={panelStyle}>
+              <h3 style={sectionHeadingStyle}>Read receipts</h3>
+              <p style={{ ...sectionDescriptionStyle, marginBottom: spacing.unit * 4 }}>
+                Pax always tracks what you&rsquo;ve read so rooms with new messages stand out in
+                the sidebar &mdash; this setting controls whether that information is shared with
+                other users, not whether it&rsquo;s tracked.
+              </p>
+              <label
+                style={{
+                  display: "flex",
+                  alignItems: "flex-start",
+                  gap: spacing.unit * 2,
+                  padding: `${spacing.unit * 2.5}px ${spacing.unit * 3}px`,
+                  borderRadius: 8,
+                  border: `1px solid ${palette.border}`,
+                  backgroundColor: palette.bgTertiary,
+                  cursor: "pointer",
+                }}
+              >
+                <input
+                  type="checkbox"
+                  checked={sendPublicReceipts}
+                  onChange={(e) => handleToggleSendPublicReceipts(e.target.checked)}
+                  style={{
+                    accentColor: palette.accent,
+                    width: 16,
+                    height: 16,
+                    marginTop: 2,
+                    cursor: "pointer",
+                  }}
+                />
+                <div style={{ flex: 1, minWidth: 0 }}>
+                  <div
+                    style={{
+                      fontSize: typography.fontSizeSmall,
+                      fontWeight: typography.fontWeightMedium,
+                      color: palette.textHeading,
+                    }}
+                  >
+                    Send read receipts to others
+                  </div>
+                  <div
+                    style={{
+                      fontSize: 12,
+                      color: palette.textSecondary,
+                      marginTop: spacing.unit,
+                      lineHeight: 1.4,
+                    }}
+                  >
+                    When enabled, other Matrix users can see which messages you&rsquo;ve read
+                    (the small avatar indicators in clients like Element).  When disabled
+                    (the default), your read state still syncs across your own devices and
+                    clears your unread counts, but is kept private from other users.
+                  </div>
+                </div>
+              </label>
             </section>
           )}
 
