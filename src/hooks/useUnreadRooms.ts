@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 
@@ -175,3 +175,146 @@ export function useUnreadRooms(userId: string | null): UnreadRoomsApi {
 
 /** Hint type for callers that want to store the latest snapshot outside React. */
 export const EMPTY_UNREAD_STATE: Readonly<RoomUnreadState> = EMPTY;
+
+/** Minimal room shape the space rollup needs — decoupled from the full Room type
+ *  so the hook can be tested / reused without dragging in Matrix-specific fields. */
+export interface RoomForRollup {
+  id: string;
+  isSpace: boolean;
+  parentSpaceIds: string[];
+}
+
+export interface SpaceUnreadRollupApi {
+  /** True when the space (or any descendant space/room) has unread activity. */
+  isSpaceUnread: (spaceId: string) => boolean;
+  /** Sum of mentions across all descendant rooms in the space tree. */
+  spaceMentionCount: (spaceId: string) => number;
+  /** True when any room outside every joined space has unread activity (Home indicator). */
+  isHomeUnread: () => boolean;
+  /** Sum of mentions across rooms outside every joined space (Home badge). */
+  homeMentionCount: () => number;
+}
+
+/**
+ * Aggregate unread state across a space's full descendant tree.
+ *
+ * Matrix spaces don't have unread state of their own — they're state-only rooms
+ * with `m.space.child` pointers at members.  To light up a space icon we have
+ * to walk its tree and OR/sum over children.  Nested spaces recurse.
+ *
+ * The walker is top-down from a space root through `roomsBySpace(spaceId)`,
+ * matching how the sidebar already organises rooms — we do NOT maintain a
+ * separate parent→child index here because Pax's `useRooms` already has one
+ * and exposes it via `roomsBySpace`.
+ *
+ * Cycles: Matrix allows a room to declare multiple parent spaces, but `m.space`
+ * hierarchies should be acyclic per the spec.  We still guard against cycles
+ * with a visited set because a misbehaving server or historical state can
+ * produce them, and an infinite loop inside a render is not a great outcome.
+ *
+ * "Home" aggregates every joined room whose parent-space chain does not
+ * intersect any joined space the user is in — i.e. the same set of rooms that
+ * appear under the Home pseudo-space in the sidebar.  This keeps DMs and
+ * orphaned rooms visible on the Home button when they go unread.
+ *
+ * The returned functions are recomputed via `useCallback` whenever the inputs
+ * change — mainly when the underlying `isUnread`/`mentionCount` functions from
+ * `useUnreadRooms` re-fire on new sync data, or when the rooms list changes
+ * shape (room joined, left, etc.).
+ */
+export function useSpaceUnreadRollup(
+  spaces: readonly RoomForRollup[],
+  roomsBySpace: (spaceId: string | null) => readonly RoomForRollup[],
+  roomUnread: UnreadRoomsApi,
+): SpaceUnreadRollupApi {
+  const { isUnread, mentionCount } = roomUnread;
+
+  const joinedSpaceIdSet = useMemo(() => {
+    const s = new Set<string>();
+    for (const sp of spaces) s.add(sp.id);
+    return s;
+  }, [spaces]);
+
+  const isSpaceUnread = useCallback(
+    (spaceId: string): boolean => {
+      const visited = new Set<string>();
+      const walk = (sid: string): boolean => {
+        if (visited.has(sid)) return false;
+        visited.add(sid);
+        for (const child of roomsBySpace(sid)) {
+          if (child.isSpace) {
+            if (walk(child.id)) return true;
+          } else {
+            if (isUnread(child.id)) return true;
+          }
+        }
+        return false;
+      };
+      return walk(spaceId);
+    },
+    [roomsBySpace, isUnread],
+  );
+
+  const spaceMentionCount = useCallback(
+    (spaceId: string): number => {
+      const visited = new Set<string>();
+      let total = 0;
+      const walk = (sid: string) => {
+        if (visited.has(sid)) return;
+        visited.add(sid);
+        for (const child of roomsBySpace(sid)) {
+          if (child.isSpace) {
+            walk(child.id);
+          } else {
+            total += mentionCount(child.id);
+          }
+        }
+      };
+      walk(spaceId);
+      return total;
+    },
+    [roomsBySpace, mentionCount],
+  );
+
+  // "Home rooms" are rooms with no joined-space parent.  `roomsBySpace(null)`
+  // returns rooms with an empty `parentSpaceIds`; to catch rooms that have
+  // parents pointing only at unjoined spaces, we also include rooms whose
+  // every declared parent is outside our joined-space set.
+  const homeRoomIds = useMemo(() => {
+    const seen = new Set<string>();
+    const ids: string[] = [];
+    const add = (r: RoomForRollup) => {
+      if (r.isSpace) return;
+      if (seen.has(r.id)) return;
+      seen.add(r.id);
+      ids.push(r.id);
+    };
+    for (const r of roomsBySpace(null)) add(r);
+    // Catch rooms orphaned from the user's joined spaces (parents point at
+    // spaces the user isn't in).  These wouldn't be reachable by walking
+    // `joinedSpaceIdSet`, so we surface them under Home instead.
+    for (const sp of spaces) {
+      for (const r of roomsBySpace(sp.id)) {
+        if (r.isSpace) continue;
+        const hasJoinedParent = r.parentSpaceIds.some((pid) =>
+          joinedSpaceIdSet.has(pid),
+        );
+        if (!hasJoinedParent) add(r);
+      }
+    }
+    return ids;
+  }, [roomsBySpace, spaces, joinedSpaceIdSet]);
+
+  const isHomeUnread = useCallback(() => {
+    for (const id of homeRoomIds) if (isUnread(id)) return true;
+    return false;
+  }, [homeRoomIds, isUnread]);
+
+  const homeMentionCount = useCallback(() => {
+    let total = 0;
+    for (const id of homeRoomIds) total += mentionCount(id);
+    return total;
+  }, [homeRoomIds, mentionCount]);
+
+  return { isSpaceUnread, spaceMentionCount, isHomeUnread, homeMentionCount };
+}
