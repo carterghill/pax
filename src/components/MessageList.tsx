@@ -8,12 +8,12 @@ import {
 } from "react";
 import { createPortal } from "react-dom";
 import { invoke } from "@tauri-apps/api/core";
-import { useVirtualizer } from "@tanstack/react-virtual";
 import { MoreVertical, Pencil, Trash2, ArrowDown } from "lucide-react";
 import { Message, RoomRedactionPolicy } from "../types/matrix";
 import { useTheme } from "../theme/ThemeContext";
 import type { ResolvedColorScheme } from "../theme/types";
 import { userInitialAvatarBackground } from "../utils/userAvatarColor";
+import { avatarSrc } from "../utils/avatarSrc";
 import MessageMarkdown from "./MessageMarkdown";
 import MessageMatrixImage from "./MessageMatrixImage";
 import MessageMatrixVideo from "./MessageMatrixVideo";
@@ -23,7 +23,6 @@ import MediaViewerModal, {
 } from "./MediaViewerModal";
 import { inferMediaViewerKind } from "../utils/mediaViewer";
 import { fileNameFromImageUrl } from "../utils/directImageUrl";
-import { avatarSrc } from "../utils/avatarSrc";
 
 /* ------------------------------------------------------------------ */
 /*  Props                                                              */
@@ -52,11 +51,8 @@ interface MessageListProps {
 /*  Constants                                                          */
 /* ------------------------------------------------------------------ */
 
-const ESTIMATED_ROW_HEIGHT = 64;
-const OVERSCAN_COUNT = 8;
-const LOAD_MORE_THRESHOLD = 5;
-const AUTO_SCROLL_THRESHOLD_PX = 120;
-const SKELETON_COUNT = 3;
+const AUTO_SCROLL_THRESHOLD_PX = 150;
+const SKELETON_COUNT = 4;
 const MESSAGE_ACTIONS_MENU_Z = 10_000;
 
 /* ------------------------------------------------------------------ */
@@ -232,6 +228,8 @@ const MessageRow = memo(function MessageRow({
       className="pax-message-row"
       style={{
         position: "relative",
+        contentVisibility: "auto",
+        containIntrinsicBlockSize: "auto 72px",
         ...(showHeader
           ? {
               paddingTop: spacingUnit,
@@ -449,7 +447,7 @@ const MessageRow = memo(function MessageRow({
 });
 
 /* ------------------------------------------------------------------ */
-/*  MessageList (virtualized)                                          */
+/*  MessageList                                                        */
 /* ------------------------------------------------------------------ */
 
 export default function MessageList({
@@ -474,16 +472,9 @@ export default function MessageList({
 
   /* ---- Refs ---- */
   const scrollContainerRef = useRef<HTMLDivElement>(null);
+  const bottomRef = useRef<HTMLDivElement>(null);
   const shouldAutoScrollRef = useRef(true);
   const menuAnchorRef = useRef<HTMLButtonElement>(null);
-
-  /* ---- Scroll anchor state for prepend ---- */
-  const prevFirstEventIdRef = useRef<string | null>(null);
-  const prevMessageCountRef = useRef(0);
-  const prependAnchorRef = useRef<{
-    scrollTop: number;
-    scrollHeight: number;
-  } | null>(null);
 
   /* ---- UI state ---- */
   const [openMenuEventId, setOpenMenuEventId] = useState<string | null>(null);
@@ -509,113 +500,29 @@ export default function MessageList({
     setOpenMenuEventId((id) => (id === eventId ? null : eventId));
   }, []);
 
-  /* ---- Virtualizer ---- */
-  const virtualizer = useVirtualizer({
-    count: messages.length,
-    getScrollElement: () => scrollContainerRef.current,
-    estimateSize: () => ESTIMATED_ROW_HEIGHT,
-    overscan: OVERSCAN_COUNT,
-  });
-
   /* ================================================================ */
-  /*  Room change: reset scroll position                               */
+  /*  Room change: reset                                               */
   /* ================================================================ */
 
   useLayoutEffect(() => {
     shouldAutoScrollRef.current = true;
-    prevFirstEventIdRef.current = null;
-    prevMessageCountRef.current = 0;
-    prependAnchorRef.current = null;
     setOpenMenuEventId(null);
     setMediaViewer(null);
   }, [roomId]);
 
   /* ================================================================ */
-  /*  Detect prepend & capture scroll anchor BEFORE render             */
-  /* ================================================================ */
-
-  // We detect prepends by comparing the first eventId before and after
-  // a messages change. When a prepend is detected, we save the scroll
-  // position so the layout effect can adjust it before paint.
-
-  const firstEventId = messages[0]?.eventId ?? null;
-  const lastEventId = messages[messages.length - 1]?.eventId ?? null;
-  const messageCount = messages.length;
-
-  // This runs during render (not in an effect) to capture scroll state
-  // BEFORE React commits DOM changes. It's safe because we only read
-  // from refs and the scroll container.
-  if (
-    prevFirstEventIdRef.current !== null &&
-    firstEventId !== null &&
-    firstEventId !== prevFirstEventIdRef.current &&
-    messageCount > prevMessageCountRef.current
-  ) {
-    // Items were prepended.
-    const el = scrollContainerRef.current;
-    if (el) {
-      prependAnchorRef.current = {
-        scrollTop: el.scrollTop,
-        scrollHeight: el.scrollHeight,
-      };
-    }
-  }
-
-  /* ================================================================ */
-  /*  Scroll anchoring after prepend (before paint)                    */
-  /* ================================================================ */
-
-  useLayoutEffect(() => {
-    const anchor = prependAnchorRef.current;
-    prependAnchorRef.current = null;
-
-    if (anchor) {
-      const el = scrollContainerRef.current;
-      if (el) {
-        // After the DOM update, scrollHeight has grown by the height of
-        // the prepended items. Offset scrollTop by the same delta so the
-        // viewport stays on the same messages.
-        const delta = el.scrollHeight - anchor.scrollHeight;
-        el.scrollTop = anchor.scrollTop + delta;
-        // Don't auto-scroll to bottom — user is reading history.
-        shouldAutoScrollRef.current = false;
-      }
-    }
-
-    prevFirstEventIdRef.current = firstEventId;
-    prevMessageCountRef.current = messageCount;
-  });
-
-  /* ================================================================ */
   /*  Auto-scroll to bottom on new messages                            */
   /* ================================================================ */
 
+  const lastId = messages[messages.length - 1]?.eventId ?? null;
+
   useLayoutEffect(() => {
-    if (prependAnchorRef.current) return; // handled above
     if (!shouldAutoScrollRef.current) return;
-
-    const el = scrollContainerRef.current;
-    if (el) {
-      el.scrollTop = el.scrollHeight;
-    }
-  }, [lastEventId, messageCount]);
+    bottomRef.current?.scrollIntoView();
+  }, [lastId, messages.length]);
 
   /* ================================================================ */
-  /*  Scroll to bottom on initial load                                 */
-  /* ================================================================ */
-
-  useEffect(() => {
-    if (messages.length > 0 && prevMessageCountRef.current === 0) {
-      // First batch arrived.
-      requestAnimationFrame(() => {
-        const el = scrollContainerRef.current;
-        if (el) el.scrollTop = el.scrollHeight;
-      });
-    }
-  }, [messages.length]);
-
-  /* ================================================================ */
-  /*  Scroll handler: auto-scroll tracking + load triggers             */
+  /*  Scroll handler: track auto-scroll + trigger loads                */
   /* ================================================================ */
 
   const onLoadOlderRef = useRef(onLoadOlder);
@@ -629,6 +536,7 @@ export default function MessageList({
   const loadingOlderRef = useRef(loadingOlder);
   loadingOlderRef.current = loadingOlder;
 
+  const loadCooldownRef = useRef(false);
   const scrollRafRef = useRef<number | null>(null);
 
   const handleScroll = useCallback(() => {
@@ -643,32 +551,28 @@ export default function MessageList({
       shouldAutoScrollRef.current =
         distFromBottom < AUTO_SCROLL_THRESHOLD_PX;
 
-      if (loadingOlderRef.current) return;
+      if (loadCooldownRef.current || loadingOlderRef.current) return;
 
       // Near top → load older
-      if (hasOlderRef.current && el.scrollTop < el.clientHeight * 0.5) {
-        const range = virtualizer.range;
-        if (range && range.startIndex < LOAD_MORE_THRESHOLD) {
-          onLoadOlderRef.current();
-        }
+      if (hasOlderRef.current && el.scrollTop < 400) {
+        loadCooldownRef.current = true;
+        setTimeout(() => {
+          loadCooldownRef.current = false;
+        }, 500);
+        onLoadOlderRef.current();
+        return;
       }
 
       // Near bottom + not at latest → load newer
-      if (
-        !isAtLatestRef.current &&
-        distFromBottom < el.clientHeight * 0.5
-      ) {
-        const range = virtualizer.range;
-        if (
-          range &&
-          messages.length > 0 &&
-          range.endIndex >= messages.length - LOAD_MORE_THRESHOLD
-        ) {
-          onLoadNewerRef.current();
-        }
+      if (!isAtLatestRef.current && distFromBottom < 400) {
+        loadCooldownRef.current = true;
+        setTimeout(() => {
+          loadCooldownRef.current = false;
+        }, 500);
+        onLoadNewerRef.current();
       }
     });
-  }, [virtualizer, messages.length]);
+  }, []);
 
   useEffect(() => {
     return () => {
@@ -688,7 +592,7 @@ export default function MessageList({
     const ro = new ResizeObserver(() => {
       const h = el.clientHeight;
       if (h < prevHeight && shouldAutoScrollRef.current) {
-        el.scrollTop = el.scrollHeight;
+        bottomRef.current?.scrollIntoView();
       }
       prevHeight = h;
     });
@@ -794,10 +698,8 @@ export default function MessageList({
   }
 
   /* ================================================================ */
-  /*  Render: virtualized message list                                 */
+  /*  Render                                                           */
   /* ================================================================ */
-
-  const virtualItems = virtualizer.getVirtualItems();
 
   return (
     <div
@@ -808,7 +710,9 @@ export default function MessageList({
         flex: 1,
         minHeight: 0,
         overflowY: "auto",
-        contain: "strict",
+        overflowAnchor: "auto",
+        paddingTop: spacing.unit * 2,
+        paddingBottom: spacing.unit * 4,
       }}
     >
       {/* CSS hover — no React state on mousemove */}
@@ -824,12 +728,9 @@ export default function MessageList({
           opacity: 1;
           pointer-events: auto;
         }
-        @keyframes messageListSpinner {
-          to { transform: rotate(360deg); }
-        }
       `}</style>
 
-      {/* Top padding + "Beginning" / "Loading" indicator */}
+      {/* Top: "Beginning" / "Loading" indicator */}
       <div
         style={{
           minHeight: spacing.unit * 6,
@@ -841,6 +742,7 @@ export default function MessageList({
           color: palette.textSecondary,
           fontSize: typography.fontSizeSmall,
           lineHeight: typography.lineHeight,
+          overflowAnchor: "none",
         }}
       >
         {hasOlder
@@ -854,76 +756,56 @@ export default function MessageList({
 
       {/* Skeleton rows when loading older */}
       {loadingOlder && (
-        <LoadingSkeletons
-          count={SKELETON_COUNT}
-          palette={palette}
-          spacingUnit={spacing.unit}
-        />
+        <div style={{ overflowAnchor: "none" }}>
+          <LoadingSkeletons
+            count={SKELETON_COUNT}
+            palette={palette}
+            spacingUnit={spacing.unit}
+          />
+        </div>
       )}
 
-      {/* Virtualized rows */}
-      <div
-        style={{
-          height: virtualizer.getTotalSize(),
-          width: "100%",
-          position: "relative",
-        }}
-      >
-        {virtualItems.map((virtualRow) => {
-          const idx = virtualRow.index;
-          const msg = messages[idx];
-          if (!msg) return null;
+      {/* Messages */}
+      {messages.map((msg, i) => {
+        const prevMsg = i > 0 ? messages[i - 1] : null;
+        const showHeader = shouldShowHeader(msg, prevMsg);
+        const canEdit = messageAllowsEdit(msg, userId);
+        const canDelete = messageAllowsDelete(msg, userId, redactionPolicy);
+        const showMessageActions = canEdit || canDelete;
 
-          const prevMsg = idx > 0 ? messages[idx - 1] : null;
-          const showHeader = shouldShowHeader(msg, prevMsg);
-          const canEdit = messageAllowsEdit(msg, userId);
-          const canDelete = messageAllowsDelete(msg, userId, redactionPolicy);
-          const showMessageActions = canEdit || canDelete;
-
-          return (
-            <div
-              key={msg.eventId}
-              data-index={idx}
-              ref={virtualizer.measureElement}
-              style={{
-                position: "absolute",
-                top: 0,
-                left: 0,
-                width: "100%",
-                transform: `translateY(${virtualRow.start}px)`,
-              }}
-            >
-              <MessageRow
-                msg={msg}
-                showHeader={showHeader}
-                showMessageActions={showMessageActions}
-                isMenuOpen={openMenuEventId === msg.eventId}
-                onOpenMenu={handleOpenMenu}
-                onOpenMediaViewer={setMediaViewer}
-                onOpenDirectImage={openDirectImage}
-                menuAnchorRef={menuAnchorRef}
-                rowHighlight={rowHighlight}
-                spacingUnit={spacing.unit}
-                palette={palette}
-                typography={typography}
-                resolvedColorScheme={resolvedColorScheme}
-              />
-            </div>
-          );
-        })}
-      </div>
+        return (
+          <MessageRow
+            key={msg.eventId}
+            msg={msg}
+            showHeader={showHeader}
+            showMessageActions={showMessageActions}
+            isMenuOpen={openMenuEventId === msg.eventId}
+            onOpenMenu={handleOpenMenu}
+            onOpenMediaViewer={setMediaViewer}
+            onOpenDirectImage={openDirectImage}
+            menuAnchorRef={menuAnchorRef}
+            rowHighlight={rowHighlight}
+            spacingUnit={spacing.unit}
+            palette={palette}
+            typography={typography}
+            resolvedColorScheme={resolvedColorScheme}
+          />
+        );
+      })}
 
       {/* Skeleton rows at bottom when not at latest */}
       {!isAtLatest && (
-        <LoadingSkeletons
-          count={SKELETON_COUNT}
-          palette={palette}
-          spacingUnit={spacing.unit}
-        />
+        <div style={{ overflowAnchor: "none" }}>
+          <LoadingSkeletons
+            count={SKELETON_COUNT}
+            palette={palette}
+            spacingUnit={spacing.unit}
+          />
+        </div>
       )}
 
-      {/* Bottom padding */}
-      <div style={{ height: spacing.unit * 4 }} />
+      {/* Scroll anchor target */}
+      <div ref={bottomRef} style={{ overflowAnchor: "none" }} />
 
       {/* Jump to Recent button */}
       {showJumpToRecent && (
@@ -936,6 +818,7 @@ export default function MessageList({
             marginTop: spacing.unit * 2,
             pointerEvents: "none",
             zIndex: 3,
+            overflowAnchor: "none",
           }}
         >
           <button
@@ -944,8 +827,7 @@ export default function MessageList({
               shouldAutoScrollRef.current = true;
               void Promise.resolve(onJumpToRecent()).finally(() => {
                 requestAnimationFrame(() => {
-                  const el = scrollContainerRef.current;
-                  if (el) el.scrollTop = el.scrollHeight;
+                  bottomRef.current?.scrollIntoView();
                 });
               });
             }}

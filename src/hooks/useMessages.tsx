@@ -33,13 +33,13 @@ interface MessageRedactedPayload {
 /* ------------------------------------------------------------------ */
 
 /** Absolute maximum messages held in JS memory for the active room. */
-const WINDOW_SIZE = 50;
+const WINDOW_SIZE = 100;
 
 /** Messages fetched per backward-pagination request. */
-const PAGE_SIZE = 20;
+const PAGE_SIZE = 50;
 
 /** Messages fetched for the initial load and jumpToRecent. */
-const INITIAL_LOAD_SIZE = 30;
+const INITIAL_LOAD_SIZE = 50;
 
 /* ------------------------------------------------------------------ */
 /*  Pure helpers                                                       */
