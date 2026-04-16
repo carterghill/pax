@@ -538,6 +538,49 @@ export default function MessageList({
 
   const loadCooldownRef = useRef(false);
   const scrollRafRef = useRef<number | null>(null);
+  /** Tracks the previous value of loadingOlder to detect completion. */
+  const wasLoadingOlderRef = useRef(false);
+
+  const TRIGGER_THRESHOLD = 400;
+  const COOLDOWN_MS = 500;
+
+  const tryTriggerLoadOlder = useCallback(() => {
+    const el = scrollContainerRef.current;
+    if (!el) return;
+    if (loadCooldownRef.current) return;
+    if (loadingOlderRef.current) return;
+    if (!hasOlderRef.current) return;
+    if (el.scrollTop >= TRIGGER_THRESHOLD) return;
+
+    console.log("[MessageList] → triggering loadOlder", {
+      scrollTop: Math.round(el.scrollTop),
+    });
+    loadCooldownRef.current = true;
+    setTimeout(() => {
+      loadCooldownRef.current = false;
+    }, COOLDOWN_MS);
+    onLoadOlderRef.current();
+  }, []);
+
+  const tryTriggerLoadNewer = useCallback(() => {
+    const el = scrollContainerRef.current;
+    if (!el) return;
+    if (loadCooldownRef.current) return;
+    if (loadingOlderRef.current) return;
+    if (isAtLatestRef.current) return;
+    const distFromBottom =
+      el.scrollHeight - el.scrollTop - el.clientHeight;
+    if (distFromBottom >= TRIGGER_THRESHOLD) return;
+
+    console.log("[MessageList] → triggering loadNewer", {
+      distFromBottom: Math.round(distFromBottom),
+    });
+    loadCooldownRef.current = true;
+    setTimeout(() => {
+      loadCooldownRef.current = false;
+    }, COOLDOWN_MS);
+    onLoadNewerRef.current();
+  }, []);
 
   const handleScroll = useCallback(() => {
     if (scrollRafRef.current !== null) return;
@@ -546,33 +589,23 @@ export default function MessageList({
       const el = scrollContainerRef.current;
       if (!el) return;
 
+      const scrollTop = el.scrollTop;
       const distFromBottom =
-        el.scrollHeight - el.scrollTop - el.clientHeight;
+        el.scrollHeight - scrollTop - el.clientHeight;
       shouldAutoScrollRef.current =
         distFromBottom < AUTO_SCROLL_THRESHOLD_PX;
 
-      if (loadCooldownRef.current || loadingOlderRef.current) return;
+      console.log("[MessageList] scroll", {
+        scrollTop: Math.round(scrollTop),
+        distFromBottom: Math.round(distFromBottom),
+        cooldown: loadCooldownRef.current,
+        loadingOlder: loadingOlderRef.current,
+      });
 
-      // Near top → load older
-      if (hasOlderRef.current && el.scrollTop < 400) {
-        loadCooldownRef.current = true;
-        setTimeout(() => {
-          loadCooldownRef.current = false;
-        }, 500);
-        onLoadOlderRef.current();
-        return;
-      }
-
-      // Near bottom + not at latest → load newer
-      if (!isAtLatestRef.current && distFromBottom < 400) {
-        loadCooldownRef.current = true;
-        setTimeout(() => {
-          loadCooldownRef.current = false;
-        }, 500);
-        onLoadNewerRef.current();
-      }
+      tryTriggerLoadOlder();
+      tryTriggerLoadNewer();
     });
-  }, []);
+  }, [tryTriggerLoadOlder, tryTriggerLoadNewer]);
 
   useEffect(() => {
     return () => {
@@ -580,6 +613,29 @@ export default function MessageList({
         cancelAnimationFrame(scrollRafRef.current);
     };
   }, []);
+
+  /* ================================================================ */
+  /*  Re-check triggers on load completion                             */
+  /*                                                                   */
+  /*  If user is still at scrollTop=0 after the load (either because   */
+  /*  overflow-anchor didn't push them away, or because they're        */
+  /*  actively pinned at the top), this re-fires the trigger so they   */
+  /*  keep loading instead of being stuck.                             */
+  /* ================================================================ */
+
+  useEffect(() => {
+    const wasLoading = wasLoadingOlderRef.current;
+    wasLoadingOlderRef.current = loadingOlder;
+    if (wasLoading && !loadingOlder) {
+      console.log("[MessageList] load completed, re-checking triggers");
+      // Defer one frame so overflow-anchor / measurement adjustments
+      // land before we read scrollTop.
+      requestAnimationFrame(() => {
+        tryTriggerLoadOlder();
+        tryTriggerLoadNewer();
+      });
+    }
+  }, [loadingOlder, tryTriggerLoadOlder, tryTriggerLoadNewer]);
 
   /* ================================================================ */
   /*  Container resize: keep at bottom when shrinking                  */
