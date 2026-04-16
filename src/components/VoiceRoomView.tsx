@@ -16,6 +16,7 @@ import VolumeContextMenu from "./VolumeContextMenu";
 import VoiceAudioSettingsSection from "./VoiceAudioSettingsSection";
 import ScreenShareGrid from "./ScreenShareGrid";
 import { useOverlayObstruction, registerObstruction, unregisterObstruction } from "../hooks/useOverlayObstruction";
+import { avatarSrc } from "../utils/avatarSrc";
 
 interface VoiceRoomViewProps {
   room: Room;
@@ -528,7 +529,7 @@ export default function VoiceRoomView({
           >
             {p.avatarUrl ? (
               <img
-                src={p.avatarUrl}
+                src={avatarSrc(p.avatarUrl)}
                 alt={p.displayName}
                 style={{
                   display: "block",
@@ -651,7 +652,7 @@ export default function VoiceRoomView({
               </div>
             ) : p.avatarUrl ? (
               <img
-                src={p.avatarUrl}
+                src={avatarSrc(p.avatarUrl)}
                 alt={p.displayName}
                 style={{
                   display: "block",

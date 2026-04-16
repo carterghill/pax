@@ -11,6 +11,7 @@ import { resolvePresenceWithDnd, parseStatusMsg, composeStatusMsg } from "../uti
 import MemberContextMenu from "./MemberContextMenu";
 import UserProfileDialog from "./UserProfileDialog";
 import ModerationScopeDialog from "./ModerationScopeDialog";
+import { avatarSrc } from "../utils/avatarSrc";
 
 interface UserMenuProps {
   width: number;
@@ -92,7 +93,7 @@ const MemberRow = memo(function MemberRow({ member, avatarUrl, onContextMenu }: 
       <div style={{ position: "relative", flexShrink: 0 }}>
         {avatarUrl ? (
           <img
-            src={avatarUrl}
+            src={avatarSrc(avatarUrl)}
             alt={member.displayName ?? member.userId}
             style={{ display: "block", width: 32, height: 32, borderRadius: "50%", objectFit: "cover" }}
           />
@@ -467,7 +468,7 @@ export default function UserMenu({
                 }}>
                   <div style={{ flexShrink: 0 }}>
                     {knock.avatarUrl ? (
-                      <img src={knock.avatarUrl} alt={knock.displayName ?? knock.userId}
+                      <img src={avatarSrc(knock.avatarUrl)} alt={knock.displayName ?? knock.userId}
                         style={{ display: "block", width: 32, height: 32, borderRadius: "50%", objectFit: "cover" }} />
                     ) : (
                       <div style={{

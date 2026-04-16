@@ -1,6 +1,7 @@
 import type { RoomManagementMember } from "../types/matrix";
 import { userInitialAvatarBackground } from "../utils/userAvatarColor";
 import type { ThemePalette, ThemeTypography, ThemeSpacing } from "../theme/types";
+import { avatarSrc } from "../utils/avatarSrc";
 
 export default function SettingsMemberCategory({
   title,
@@ -98,7 +99,7 @@ export default function SettingsMemberCategory({
                 <div style={{ flexShrink: 0 }}>
                   {member.avatarUrl ? (
                     <img
-                      src={member.avatarUrl}
+                      src={avatarSrc(member.avatarUrl)}
                       alt=""
                       style={{
                         width: 36,

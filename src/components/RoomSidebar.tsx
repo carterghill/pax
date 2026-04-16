@@ -40,6 +40,7 @@ import {
   voiceStateLookupKeysForParticipant,
 } from "../utils/matrix";
 import { userInitialAvatarBackground } from "../utils/userAvatarColor";
+import { avatarSrc } from "../utils/avatarSrc";
 
 /** DM peer circle in the channel list (slightly larger than default 16px icons). */
 const DM_SIDEBAR_AVATAR_PX = 28;
@@ -144,7 +145,7 @@ function VoiceParticipantRow({
     }}>
       {participant.avatarUrl ? (
         <img
-          src={participant.avatarUrl}
+          src={avatarSrc(participant.avatarUrl)}
           alt={name}
           style={{
             display: "block",

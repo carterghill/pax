@@ -350,6 +350,13 @@ pub fn run() {
             commands::embed::cleanup_all_proxy_media,
         ])
         .setup(|app| {
+            // Set the Tauri app-scoped temp dir so avatar / media temp
+            // files land inside the asset-protocol scope on every OS.
+            if let Ok(tauri_temp) = app.path().temp_dir() {
+                let _ = std::fs::create_dir_all(&tauri_temp);
+                let _ = commands::TAURI_TEMP_DIR.set(tauri_temp);
+            }
+
             // Set window icon (taskbar + title bar) from our bundled icons
             let main_window = app
                 .get_webview_window("main")

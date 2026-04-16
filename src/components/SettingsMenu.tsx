@@ -18,6 +18,7 @@ import type { LucideIcon } from "lucide-react";
 import type { VoiceCall } from "../hooks/useVoiceCall";
 import VoiceAudioSettingsSection from "./VoiceAudioSettingsSection";
 import { userInitialAvatarBackground } from "../utils/userAvatarColor";
+import { avatarSrc } from "../utils/avatarSrc";
 
 interface SettingsMenuProps {
   onSignOut: () => void;
@@ -319,7 +320,7 @@ export default function SettingsMenu({
           <div style={{ flexShrink: 0 }}>
             {userAvatarUrl ? (
               <img
-                src={userAvatarUrl}
+                src={avatarSrc(userAvatarUrl)}
                 alt="Your avatar"
                 style={{
                   display: "block",
@@ -496,7 +497,7 @@ export default function SettingsMenu({
                   <div style={{ flexShrink: 0 }}>
                     {userAvatarUrl ? (
                       <img
-                        src={userAvatarUrl}
+                        src={avatarSrc(userAvatarUrl)}
                         alt="Your avatar"
                         style={{
                           display: "block",

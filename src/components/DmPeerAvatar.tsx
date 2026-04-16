@@ -1,6 +1,7 @@
 import { useTheme } from "../theme/ThemeContext";
 import { userInitialAvatarBackground } from "../utils/userAvatarColor";
 import { dmInitialsFromLabel } from "../utils/dmDisplay";
+import { avatarSrc } from "../utils/avatarSrc";
 
 type DmPeerAvatarProps = {
   peerUserId: string;
@@ -42,7 +43,7 @@ export default function DmPeerAvatar({
       }}
     >
       {avatarUrl ? (
-        <img src={avatarUrl} alt="" style={{ width: "100%", height: "100%", objectFit: "cover" }} />
+        <img src={avatarSrc(avatarUrl)} alt="" style={{ width: "100%", height: "100%", objectFit: "cover" }} />
       ) : (
         dmInitialsFromLabel(label)
       )}

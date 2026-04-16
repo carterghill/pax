@@ -6,6 +6,7 @@ import { paletteDialogOuterBorderStyle } from "../theme/paletteBorder";
 import { useOverlayObstruction } from "../hooks/useOverlayObstruction";
 import ModalLayer from "./ModalLayer";
 import { parseInviteUserInput } from "../utils/matrix";
+import { avatarSrc } from "../utils/avatarSrc";
 
 export type InviteTargetKind = "room" | "space";
 
@@ -492,7 +493,7 @@ export default function InviteDialog({
                           >
                             {c.avatarUrl ? (
                               <img
-                                src={c.avatarUrl}
+                                src={avatarSrc(c.avatarUrl)}
                                 alt=""
                                 width={36}
                                 height={36}

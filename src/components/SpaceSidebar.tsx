@@ -11,6 +11,7 @@ import SpaceContextMenu from "./SpaceContextMenu";
 import SpaceSettingsDialog from "./SpaceSettingsDialog";
 import InviteDialog from "./InviteDialog";
 import LeaveConfirmDialog, { fetchLeaveSpacePreview } from "./LeaveConfirmDialog";
+import { avatarSrc } from "../utils/avatarSrc";
 
 type RoomsChangedPayload = {
   joinedRoomId?: string;
@@ -61,7 +62,7 @@ function SpaceAvatar({ space, isActive }: { space: Room; isActive: boolean }) {
     >
       {space.avatarUrl ? (
         <img
-          src={space.avatarUrl}
+          src={avatarSrc(space.avatarUrl)}
           alt={space.name}
           style={{
             display: "block",

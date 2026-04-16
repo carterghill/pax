@@ -1058,7 +1058,7 @@ pub async fn clear_media_cache(
     drop(cache); // release lock before I/O
 
     // Walk the temp directory and delete our files.
-    let temp_dir = std::env::temp_dir();
+    let temp_dir = super::temp_dir();
     let mut deleted = 0u32;
     if let Ok(entries) = std::fs::read_dir(&temp_dir) {
         for entry in entries.flatten() {

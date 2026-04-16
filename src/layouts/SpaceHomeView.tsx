@@ -33,6 +33,7 @@ import CreateSpaceDialog from "../components/CreateSpaceDialog";
 import LinkExistingToSpaceDialog from "../components/LinkExistingToSpaceDialog";
 import type { SpaceChildInfo, SpaceInfo } from "../utils/spaceHomeCache";
 import { getCachedSpaceInfo, setCachedSpaceInfo } from "../utils/spaceHomeCache";
+import { avatarSrc } from "../utils/avatarSrc";
 
 function isChildMatrixSpace(c: SpaceChildInfo): boolean {
   return c.roomType === SPACE_ROOM_TYPE;
@@ -661,7 +662,7 @@ export default function SpaceHomeView({
         }}>
           {info.avatarUrl ? (
             <img
-              src={info.avatarUrl}
+              src={avatarSrc(info.avatarUrl)}
               alt={info.name}
               style={{
                 width: 72,
@@ -1001,7 +1002,7 @@ export default function SpaceHomeView({
                     <ChevronIcon size={18} strokeWidth={2} style={{ flexShrink: 0, color: palette.textSecondary }} aria-hidden />
                     {sub.avatarUrl ? (
                       <img
-                        src={sub.avatarUrl}
+                        src={avatarSrc(sub.avatarUrl)}
                         alt=""
                         style={{
                           width: 28,
@@ -1395,7 +1396,7 @@ function RoomRow({
       <div style={{ position: "relative", width: 36, height: 36, flexShrink: 0 }}>
         {room.avatarUrl && !imageFailed ? (
           <img
-            src={room.avatarUrl}
+            src={avatarSrc(room.avatarUrl)}
             alt={dmTitle}
             onError={() => setImageFailed(true)}
             style={{
@@ -1612,7 +1613,7 @@ function KnockRow({
       {/* Avatar */}
       {knock.avatarUrl ? (
         <img
-          src={knock.avatarUrl}
+          src={avatarSrc(knock.avatarUrl)}
           alt={knock.displayName ?? knock.userId}
           style={{
             width: 36,

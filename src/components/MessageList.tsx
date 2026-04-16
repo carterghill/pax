@@ -23,6 +23,7 @@ import MediaViewerModal, {
 } from "./MediaViewerModal";
 import { inferMediaViewerKind } from "../utils/mediaViewer";
 import { fileNameFromImageUrl } from "../utils/directImageUrl";
+import { avatarSrc } from "../utils/avatarSrc";
 
 /* ------------------------------------------------------------------ */
 /*  Props                                                              */
@@ -260,7 +261,7 @@ const MessageRow = memo(function MessageRow({
         {showHeader &&
           (msg.avatarUrl ? (
             <img
-              src={msg.avatarUrl}
+              src={avatarSrc(msg.avatarUrl)}
               alt={msg.senderName ?? msg.sender}
               loading="lazy"
               decoding="async"

@@ -5,6 +5,7 @@ import { ManualStatus } from "../hooks/usePresence";
 import { ChevronDown, X } from "lucide-react";
 import { useOverlayObstruction } from "../hooks/useOverlayObstruction";
 import { userInitialAvatarBackground } from "../utils/userAvatarColor";
+import { avatarSrc } from "../utils/avatarSrc";
 
 const presenceColor: Record<string, string> = {
   online: "#23a55a",
@@ -117,7 +118,7 @@ export default function StatusDropdown({ displayName, avatarUrl, userId }: Statu
         <div style={{ position: "relative", flexShrink: 0 }}>
           {avatarUrl ? (
             <img
-              src={avatarUrl}
+              src={avatarSrc(avatarUrl)}
               alt={displayName}
               style={{
                 display: "block",

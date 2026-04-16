@@ -9,6 +9,7 @@ import { usePresenceContext } from "../hooks/PresenceContext";
 import type { RoomMemberProfile } from "../types/matrix";
 import { userInitialAvatarBackground } from "../utils/userAvatarColor";
 import { resolvePresenceWithDnd, parseStatusMsg } from "../utils/statusMessage";
+import { avatarSrc } from "../utils/avatarSrc";
 
 const ROLE_META: Record<
   RoomMemberProfile["role"],
@@ -266,7 +267,7 @@ export default function UserProfileDialog({
                 />
               ) : profile?.avatarUrl ? (
                 <img
-                  src={profile.avatarUrl}
+                  src={avatarSrc(profile.avatarUrl)}
                   alt=""
                   style={{
                     width: avatarPx,

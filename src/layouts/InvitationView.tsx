@@ -3,6 +3,7 @@ import { invoke } from "@tauri-apps/api/core";
 import { useTheme } from "../theme/ThemeContext";
 import { Room } from "../types/matrix";
 import { spaceInitialAvatarBackground } from "../utils/userAvatarColor";
+import { avatarSrc } from "../utils/avatarSrc";
 
 interface InvitationViewProps {
   room: Room;
@@ -55,7 +56,7 @@ export default function InvitationView({ room, onJoined }: InvitationViewProps) 
         {/* Room avatar */}
         {room.avatarUrl ? (
           <img
-            src={room.avatarUrl}
+            src={avatarSrc(room.avatarUrl)}
             alt={room.name}
             style={{
               width: 80,
