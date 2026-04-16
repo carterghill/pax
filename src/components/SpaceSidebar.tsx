@@ -1,4 +1,5 @@
 import { useState, useCallback, useEffect, useRef, useMemo } from "react";
+import { createPortal } from "react-dom";
 import { invoke } from "@tauri-apps/api/core";
 import { Plus, Settings } from "lucide-react";
 import { useTheme } from "../theme/ThemeContext";
@@ -93,8 +94,8 @@ function SpaceAvatar({ space }: { space: Room }) {
 
   return (
     <button
+      type="button"
       onClick={() => {}}
-      title={space.name}
       style={{
         width: ICON_SIZE,
         height: ICON_SIZE,
@@ -247,6 +248,50 @@ export default function SpaceSidebar({
   homeMentionCount,
 }: SpaceSidebarProps) {
   const { palette } = useTheme();
+  const sidebarScrollRef = useRef<HTMLDivElement | null>(null);
+  const sidebarTooltipAnchorRef = useRef<HTMLElement | null>(null);
+  const [sidebarTooltip, setSidebarTooltip] = useState<{
+    name: string;
+    left: number;
+    top: number;
+  } | null>(null);
+
+  const syncSidebarTooltipPosition = useCallback(() => {
+    const el = sidebarTooltipAnchorRef.current;
+    if (!el) return;
+    const r = el.getBoundingClientRect();
+    const left = r.right + 8;
+    const top = r.top + r.height / 2;
+    setSidebarTooltip((prev) => {
+      if (!prev) return null;
+      // Avoid returning a new object when nothing moved — otherwise the scroll/resize
+      // effect (and its initial sync) re-runs in a loop and blocks the main thread.
+      const eps = 0.5;
+      if (
+        Math.abs(prev.left - left) < eps &&
+        Math.abs(prev.top - top) < eps
+      ) {
+        return prev;
+      }
+      return { ...prev, left, top };
+    });
+  }, []);
+
+  const sidebarTooltipActive = sidebarTooltip != null;
+
+  useEffect(() => {
+    if (!sidebarTooltipActive) return;
+    syncSidebarTooltipPosition();
+    const sidebar = sidebarScrollRef.current;
+    if (!sidebar) return;
+    sidebar.addEventListener("scroll", syncSidebarTooltipPosition, { passive: true });
+    window.addEventListener("resize", syncSidebarTooltipPosition);
+    return () => {
+      sidebar.removeEventListener("scroll", syncSidebarTooltipPosition);
+      window.removeEventListener("resize", syncSidebarTooltipPosition);
+    };
+  }, [sidebarTooltipActive, syncSidebarTooltipPosition]);
+
   const [showDialog, setShowDialog] = useState(false);
   const [canCreate, setCanCreate] = useState(true);
   const [addHovered, setAddHovered] = useState(false);
@@ -362,6 +407,7 @@ export default function SpaceSidebar({
   return (
     <>
       <div
+        ref={sidebarScrollRef}
         style={{
           width: 72,
           minWidth: 72,
@@ -377,45 +423,61 @@ export default function SpaceSidebar({
         }}
       >
         {/* Home button */}
-        <SpaceIconRow
-          selected={activeSpaceId === "" || activeSpaceId === null}
-          unread={isHomeUnread}
-          mentions={homeMentionCount}
-          indicatorColor={palette.textHeading}
+        <div
+          onMouseEnter={(e) => {
+            sidebarTooltipAnchorRef.current = e.currentTarget;
+            const r = e.currentTarget.getBoundingClientRect();
+            setSidebarTooltip({
+              name: "Home",
+              left: r.right + 8,
+              top: r.top + r.height / 2,
+            });
+          }}
+          onMouseLeave={() => {
+            sidebarTooltipAnchorRef.current = null;
+            setSidebarTooltip(null);
+          }}
+          style={{ position: "relative" }}
         >
-          <button
-            type="button"
-            aria-label="Home"
-            onClick={() => onSelectSpace("")}
-            title="Home"
-            style={{
-              width: ICON_SIZE,
-              height: ICON_SIZE,
-              borderRadius: ICON_RADIUS,
-              border: "none",
-              backgroundColor: palette.accent,
-              cursor: "pointer",
-              flexShrink: 0,
-              display: "flex",
-              alignItems: "center",
-              justifyContent: "center",
-              padding: 5,
-            }}
+          <SpaceIconRow
+            selected={activeSpaceId === "" || activeSpaceId === null}
+            unread={isHomeUnread}
+            mentions={homeMentionCount}
+            indicatorColor={palette.textHeading}
           >
-            <img
-              src="/logo.png"
-              alt=""
-              draggable={false}
+            <button
+              type="button"
+              aria-label="Home"
+              onClick={() => onSelectSpace("")}
               style={{
-                width: "100%",
-                height: "100%",
-                objectFit: "contain",
-                display: "block",
-                filter: "brightness(0) invert(1)",
+                width: ICON_SIZE,
+                height: ICON_SIZE,
+                borderRadius: ICON_RADIUS,
+                border: "none",
+                backgroundColor: palette.accent,
+                cursor: "pointer",
+                flexShrink: 0,
+                display: "flex",
+                alignItems: "center",
+                justifyContent: "center",
+                padding: 5,
               }}
-            />
-          </button>
-        </SpaceIconRow>
+            >
+              <img
+                src="/logo.png"
+                alt=""
+                draggable={false}
+                style={{
+                  width: "100%",
+                  height: "100%",
+                  objectFit: "contain",
+                  display: "block",
+                  filter: "brightness(0) invert(1)",
+                }}
+              />
+            </button>
+          </SpaceIconRow>
+        </div>
 
         {/* Divider */}
         <div
@@ -436,7 +498,21 @@ export default function SpaceSidebar({
           return (
             <div
               key={space.id}
+              aria-label={space.name}
               onClick={() => onSelectSpace(space.id)}
+              onMouseEnter={(e) => {
+                sidebarTooltipAnchorRef.current = e.currentTarget;
+                const r = e.currentTarget.getBoundingClientRect();
+                setSidebarTooltip({
+                  name: space.name,
+                  left: r.right + 8,
+                  top: r.top + r.height / 2,
+                });
+              }}
+              onMouseLeave={() => {
+                sidebarTooltipAnchorRef.current = null;
+                setSidebarTooltip(null);
+              }}
               onContextMenu={(e) => {
                 e.preventDefault();
                 setSpaceContextMenu({
@@ -446,6 +522,7 @@ export default function SpaceSidebar({
                   spaceName: space.name,
                 });
               }}
+              style={{ position: "relative", cursor: "pointer" }}
             >
               <SpaceIconRow
                 selected={selected}
@@ -618,6 +695,37 @@ export default function SpaceSidebar({
           }}
         />
       )}
+
+      {sidebarTooltip &&
+        createPortal(
+          <div
+            role="tooltip"
+            style={{
+              position: "fixed",
+              left: sidebarTooltip.left,
+              top: sidebarTooltip.top,
+              transform: "translateY(-50%)",
+              zIndex: 10_000,
+              pointerEvents: "none",
+              padding: "6px 10px",
+              borderRadius: 8,
+              backgroundColor: palette.bgPrimary,
+              color: palette.textPrimary,
+              border: `1px solid ${palette.border}`,
+              boxShadow: "0 4px 16px rgba(0, 0, 0, 0.28)",
+              fontSize: 13,
+              fontWeight: 500,
+              lineHeight: 1.3,
+              maxWidth: 280,
+              overflow: "hidden",
+              textOverflow: "ellipsis",
+              whiteSpace: "nowrap",
+            }}
+          >
+            {sidebarTooltip.name}
+          </div>,
+          document.body
+        )}
     </>
   );
 }
