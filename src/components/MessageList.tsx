@@ -518,8 +518,27 @@ export default function MessageList({
 
   useLayoutEffect(() => {
     if (!shouldAutoScrollRef.current) return;
-    bottomRef.current?.scrollIntoView();
-  }, [lastId, messages.length]);
+    if (initialLoading) return;
+
+    const run = () => {
+      const el = scrollContainerRef.current;
+      if (el) {
+        el.scrollTop = el.scrollHeight;
+      }
+      bottomRef.current?.scrollIntoView({
+        block: "nearest",
+        inline: "nearest",
+      });
+    };
+
+    run();
+    // Second frame: flex + async image/layout can leave scrollHeight short on first paint.
+    const raf = requestAnimationFrame(() => {
+      run();
+      requestAnimationFrame(run);
+    });
+    return () => cancelAnimationFrame(raf);
+  }, [lastId, messages.length, initialLoading, roomId]);
 
   /* ================================================================ */
   /*  Scroll handler: track auto-scroll + trigger loads                */
@@ -648,13 +667,17 @@ export default function MessageList({
     const ro = new ResizeObserver(() => {
       const h = el.clientHeight;
       if (h < prevHeight && shouldAutoScrollRef.current) {
-        bottomRef.current?.scrollIntoView();
+        el.scrollTop = el.scrollHeight;
+        bottomRef.current?.scrollIntoView({
+          block: "nearest",
+          inline: "nearest",
+        });
       }
       prevHeight = h;
     });
     ro.observe(el);
     return () => ro.disconnect();
-  }, []);
+  }, [initialLoading]);
 
   /* ================================================================ */
   /*  Context menu: outside-click / escape                             */
@@ -883,7 +906,12 @@ export default function MessageList({
               shouldAutoScrollRef.current = true;
               void Promise.resolve(onJumpToRecent()).finally(() => {
                 requestAnimationFrame(() => {
-                  bottomRef.current?.scrollIntoView();
+                  const el = scrollContainerRef.current;
+                  if (el) el.scrollTop = el.scrollHeight;
+                  bottomRef.current?.scrollIntoView({
+                    block: "nearest",
+                    inline: "nearest",
+                  });
                 });
               });
             }}
