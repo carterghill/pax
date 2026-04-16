@@ -229,8 +229,6 @@ const MessageRow = memo(function MessageRow({
       className="pax-message-row"
       style={{
         position: "relative",
-        contentVisibility: "auto",
-        containIntrinsicBlockSize: "auto 72px",
         ...(showHeader
           ? {
               paddingTop: spacingUnit,
