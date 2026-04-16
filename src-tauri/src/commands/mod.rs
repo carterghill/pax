@@ -8,6 +8,7 @@ pub mod overlay;
 pub mod presence;
 pub mod profile;
 pub mod rooms;
+pub mod unread;
 pub mod voice_matrix;
 
 use std::collections::HashMap;

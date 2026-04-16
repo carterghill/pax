@@ -23,6 +23,7 @@ import MediaViewerModal, {
 } from "./MediaViewerModal";
 import { inferMediaViewerKind } from "../utils/mediaViewer";
 import { fileNameFromImageUrl } from "../utils/directImageUrl";
+import { useReadReceiptSender } from "../hooks/useReadReceiptSender";
 
 /* ------------------------------------------------------------------ */
 /*  Props                                                              */
@@ -228,8 +229,6 @@ const MessageRow = memo(function MessageRow({
       className="pax-message-row"
       style={{
         position: "relative",
-        contentVisibility: "auto",
-        containIntrinsicBlockSize: "auto 72px",
         ...(showHeader
           ? {
               paddingTop: spacingUnit,
@@ -476,6 +475,14 @@ export default function MessageList({
   const shouldAutoScrollRef = useRef(true);
   const menuAnchorRef = useRef<HTMLButtonElement>(null);
 
+  /**
+   * React-visible mirror of `shouldAutoScrollRef` so `useReadReceiptSender`'s
+   * effect re-evaluates when the user scrolls to or away from the bottom.  We
+   * keep the ref as the source of truth for the hot scroll path (avoids extra
+   * renders) and only commit to state when the boolean value actually flips.
+   */
+  const [atBottom, setAtBottom] = useState(true);
+
   /* ---- UI state ---- */
   const [openMenuEventId, setOpenMenuEventId] = useState<string | null>(null);
   const [menuFixedPos, setMenuFixedPos] = useState<{
@@ -506,6 +513,7 @@ export default function MessageList({
 
   useLayoutEffect(() => {
     shouldAutoScrollRef.current = true;
+    setAtBottom(true);
     setOpenMenuEventId(null);
     setMediaViewer(null);
   }, [roomId]);
@@ -560,6 +568,25 @@ export default function MessageList({
   /** Tracks the previous value of loadingOlder to detect completion. */
   const wasLoadingOlderRef = useRef(false);
 
+  /* ================================================================ */
+  /*  Read receipts                                                    */
+  /* ================================================================ */
+
+  // Acknowledge the latest rendered event once the user appears to have seen
+  // it — i.e. we're on the tail page of history AND they're pinned near the
+  // bottom.  The hook also gates internally on window focus/visibility so that
+  // a backgrounded tab doesn't silently mark rooms as read.  Whether the
+  // receipt is public (`m.read`) or private (`m.read.private`) is decided
+  // inside the hook from the user's setting (see `readReceiptPrefs`).
+  useReadReceiptSender(
+    roomId,
+    {
+      latestVisibleEventId: lastId,
+      atBottom: isAtLatest && atBottom,
+    },
+    userId,
+  );
+
   const TRIGGER_THRESHOLD = 400;
   const COOLDOWN_MS = 500;
 
@@ -611,8 +638,13 @@ export default function MessageList({
       const scrollTop = el.scrollTop;
       const distFromBottom =
         el.scrollHeight - scrollTop - el.clientHeight;
-      shouldAutoScrollRef.current =
-        distFromBottom < AUTO_SCROLL_THRESHOLD_PX;
+      const nextAtBottom = distFromBottom < AUTO_SCROLL_THRESHOLD_PX;
+      if (shouldAutoScrollRef.current !== nextAtBottom) {
+        shouldAutoScrollRef.current = nextAtBottom;
+        // Only commit the state mirror on flips — this runs inside the scroll
+        // rAF and must not cause a render per frame.
+        setAtBottom(nextAtBottom);
+      }
 
       console.log("[MessageList] scroll", {
         scrollTop: Math.round(scrollTop),
@@ -904,6 +936,7 @@ export default function MessageList({
             type="button"
             onClick={() => {
               shouldAutoScrollRef.current = true;
+              setAtBottom(true);
               void Promise.resolve(onJumpToRecent()).finally(() => {
                 requestAnimationFrame(() => {
                   const el = scrollContainerRef.current;

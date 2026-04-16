@@ -605,6 +605,7 @@ pub async fn start_sync(
     let avatar_cache = state.avatar_cache.clone();
     let voice_client = client.clone();
     let desired_presence = state.desired_presence.clone();
+    let unread_cache = state.unread_cache.clone();
     let self_user_id = client
         .user_id()
         .map(|u| u.to_string())
@@ -709,6 +710,12 @@ pub async fn start_sync(
             }
 
             let _ = app.emit("rooms-changed", ());
+
+            // Emit per-room unread diffs since last iteration.  Pure in-memory
+            // reads (RwLock) — cheap even for hundreds of rooms.  See
+            // `commands::unread` for why we poll instead of subscribing to
+            // `room_info_notable_update_receiver`.
+            super::unread::emit_unread_snapshot_if_changed(&client, &unread_cache, &app).await;
 
             // Push voice participants from a spawned task so we
             // don't block the sync loop with avatar fetches.

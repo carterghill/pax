@@ -102,6 +102,17 @@ interface RoomSidebarProps {
   /** When the active space is a sub-space, show back navigation above Home. */
   parentSpace?: { id: string; name: string } | null;
   onNavigateToParentSpace?: () => void;
+  /**
+   * Returns true when a room should be painted in the primary colour even if
+   * it's not currently selected — i.e. there are unread messages in it.  Should
+   * come from `useUnreadRooms` (mounted in `MainLayout`).
+   */
+  isUnread: (roomId: string) => boolean;
+  /**
+   * Highlight / mention count for the room.  When > 0 we render a small red
+   * pill next to the room name (Discord-style).
+   */
+  mentionCount: (roomId: string) => number;
 }
 
 function VoiceParticipantRow({
@@ -236,6 +247,8 @@ function ChannelBlock({
   spacing,
   typography,
   indent = false,
+  isUnread,
+  mentionCount,
 }: {
   room: Room;
   activeRoomId: string | null;
@@ -264,6 +277,8 @@ function ChannelBlock({
   spacing: ReturnType<typeof useTheme>["spacing"];
   typography: ReturnType<typeof useTheme>["typography"];
   indent?: boolean;
+  isUnread: (roomId: string) => boolean;
+  mentionCount: (roomId: string) => number;
 }) {
   const isVoice = room.roomType === VOICE_ROOM_TYPE;
   const isDraftDmRow = isPendingDmRoomId(room.id);
@@ -281,6 +296,17 @@ function ChannelBlock({
   const titleFadePx = 20;
   const titleFadeMask = `linear-gradient(to right, #000 calc(100% - ${titleFadePx}px), transparent)`;
 
+  // "Highlighted" = should be painted in the primary foreground colour rather
+  // than the muted secondary.  True when the room is currently selected OR has
+  // unread messages.  Discord-style: selected rooms and unread rooms share the
+  // same bright label treatment, with the selected one additionally getting the
+  // bgActive background so you can still tell which one you're looking at.
+  const isActive = activeRoomId === room.id;
+  const hasUnread = isUnread(room.id);
+  const isHighlighted = isActive || hasUnread;
+  const unreadMentions = mentionCount(room.id);
+  const labelColor = isHighlighted ? palette.textHeading : palette.textSecondary;
+
   return (
     <div>
       <div
@@ -294,11 +320,11 @@ function ChannelBlock({
           paddingLeft: padLeft,
           borderRadius: spacing.unit,
           cursor: "pointer",
-          color: activeRoomId === room.id ? palette.textHeading : palette.textSecondary,
-          backgroundColor: activeRoomId === room.id ? palette.bgActive : "transparent",
+          color: labelColor,
+          backgroundColor: isActive ? palette.bgActive : "transparent",
           fontSize: typography.fontSizeBase,
           fontWeight:
-            activeRoomId === room.id
+            isHighlighted
               ? typography.fontWeightMedium
               : typography.fontWeightNormal,
         }}
@@ -318,7 +344,7 @@ function ChannelBlock({
               color={
                 isConnectedHere
                   ? "#23a55a"
-                  : activeRoomId === room.id
+                  : isHighlighted
                     ? palette.textHeading
                     : palette.textSecondary
               }
@@ -359,7 +385,7 @@ function ChannelBlock({
           ) : (
             <Hash
               size={16}
-              color={activeRoomId === room.id ? palette.textHeading : palette.textSecondary}
+              color={isHighlighted ? palette.textHeading : palette.textSecondary}
             />
           )}
           <div
@@ -389,6 +415,27 @@ function ChannelBlock({
               </div>
             )}
           </div>
+          {unreadMentions > 0 && (
+            <span
+              aria-label={`${unreadMentions} unread mention${unreadMentions === 1 ? "" : "s"}`}
+              style={{
+                flexShrink: 0,
+                minWidth: 18,
+                height: 18,
+                padding: "0 6px",
+                borderRadius: 9,
+                backgroundColor: "#f23f43",
+                color: "#ffffff",
+                fontSize: 11,
+                fontWeight: typography.fontWeightBold,
+                lineHeight: "18px",
+                textAlign: "center",
+                boxSizing: "border-box",
+              }}
+            >
+              {unreadMentions > 99 ? "99+" : unreadMentions}
+            </span>
+          )}
         </span>
       </div>
 
@@ -458,6 +505,8 @@ export default function RoomSidebar({
   onRoomsChanged,
   parentSpace = null,
   onNavigateToParentSpace,
+  isUnread,
+  mentionCount,
 }: RoomSidebarProps) {
   const { palette, spacing, typography } = useTheme();
   /** Sub-space id → expanded; absence means expanded (default open). */
@@ -862,6 +911,8 @@ export default function RoomSidebar({
                     palette={palette}
                     spacing={spacing}
                     typography={typography}
+                    isUnread={isUnread}
+                    mentionCount={mentionCount}
                     indent
                   />
                 ))}
@@ -893,6 +944,8 @@ export default function RoomSidebar({
             palette={palette}
             spacing={spacing}
             typography={typography}
+            isUnread={isUnread}
+            mentionCount={mentionCount}
           />
         ))}
         {!hasChannelList && (

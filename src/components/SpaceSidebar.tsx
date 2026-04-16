@@ -1,4 +1,5 @@
 import { useState, useCallback, useEffect, useRef, useMemo } from "react";
+import { createPortal } from "react-dom";
 import { invoke } from "@tauri-apps/api/core";
 import { Plus, Settings } from "lucide-react";
 import { useTheme } from "../theme/ThemeContext";
@@ -31,10 +32,59 @@ interface SpaceSidebarProps {
   userId: string;
   /** Called after successfully leaving a space from the context menu */
   onLeftSpace?: (spaceId: string) => void;
+  /** Rollup predicate: does this space (or a descendant) have unread activity? */
+  isSpaceUnread: (spaceId: string) => boolean;
+  /** Rollup count: total mentions across the space tree (for the red badge). */
+  spaceMentionCount: (spaceId: string) => number;
+  /** True when any Home-bucket room (not under any joined space) has unread activity. */
+  isHomeUnread: boolean;
+  /** Total mentions across Home-bucket rooms. */
+  homeMentionCount: number;
 }
 
-function SpaceAvatar({ space, isActive }: { space: Room; isActive: boolean }) {
-  const { resolvedColorScheme, palette } = useTheme();
+/** Constant icon geometry shared by every row (Home, spaces, add, settings). */
+const ICON_SIZE = 48;
+/** Always-squircle radius — applied to every icon regardless of state.  The old
+ *  circle-to-squircle shape animation shifted neighbours on click, which is
+ *  exactly the spacing jitter we're getting rid of. */
+const ICON_RADIUS = 16;
+
+/** Width of the parent sidebar column.  Kept in sync with the outer `<div>`'s
+ *  explicit `width`.  Used to position the left-edge indicator relative to the
+ *  window edge instead of the individual icon (otherwise the indicator ends up
+ *  against the icon's left side because the wrapper `<div>` shrinks to fit the
+ *  centered icon, not the full column width). */
+const SIDEBAR_WIDTH = 72;
+
+/** Left-edge "selected / unread" indicator geometry.
+ *
+ *  `INDICATOR_WIDTH` is the total horizontal extent; we position the indicator
+ *  so its horizontal centre lines up with the window's left edge — half of it
+ *  is clipped by the window, half is visible flush against the sidebar's left
+ *  wall.  That gives you a long pill whose right edge reads as a straight line
+ *  running parallel to the icons.
+ *
+ *  The indicator element is always mounted (just at `height: 0` when inactive)
+ *  so that the CSS transitions on `height` / `margin-top` actually animate
+ *  when selection or unread state changes.  If we conditionally mounted it,
+ *  a newly-selected indicator would pop in at full size in one frame because
+ *  there's no previous value for the transition to interpolate from. */
+const INDICATOR_WIDTH = 8;
+const INDICATOR_PILL_HEIGHT = 32;
+const INDICATOR_DOT_HEIGHT = 8;
+/** Horizontal offset that places the indicator's centre on the window's left
+ *  edge.  The wrapper `<div>` is centred in the 72px column, so its own left
+ *  edge sits at `(SIDEBAR_WIDTH - ICON_SIZE) / 2 = 12px` inside the window.
+ *  Subtract `INDICATOR_WIDTH / 2` more to reach x = -INDICATOR_WIDTH / 2 in
+ *  window coordinates. */
+const INDICATOR_LEFT_OFFSET =
+  -((SIDEBAR_WIDTH - ICON_SIZE) / 2) - INDICATOR_WIDTH / 2;
+
+/** The squircle avatar by itself — no selected-state ring, no radius animation.
+ *  Selection is communicated by the external left-edge indicator; the icon
+ *  shape no longer changes on click. */
+function SpaceAvatar({ space }: { space: Room }) {
+  const { resolvedColorScheme } = useTheme();
   const initials = space.name
     .split(" ")
     .map((w) => w[0])
@@ -44,19 +94,16 @@ function SpaceAvatar({ space, isActive }: { space: Room; isActive: boolean }) {
 
   return (
     <button
+      type="button"
       onClick={() => {}}
-      title={space.name}
       style={{
-        width: 48,
-        height: 48,
-        borderRadius: isActive ? 16 : 24,
+        width: ICON_SIZE,
+        height: ICON_SIZE,
+        borderRadius: ICON_RADIUS,
         border: "none",
         cursor: "pointer",
         overflow: "hidden",
         padding: 0,
-        transition: "border-radius 0.2s ease",
-        outline: isActive ? `2px solid ${palette.accent}` : "2px solid transparent",
-        outlineOffset: 3,
         flexShrink: 0,
       }}
     >
@@ -92,6 +139,99 @@ function SpaceAvatar({ space, isActive }: { space: Room; isActive: boolean }) {
   );
 }
 
+/**
+ * Wraps any sidebar icon (Home, a space, etc.) with:
+ *   - a left-edge indicator that morphs between "unread dot" and "selected pill"
+ *   - a top-right mention-count badge when `mentions > 0`
+ *
+ * The wrapper is purely presentational — selection click handlers still live on
+ * the icon itself.  We position the indicator *outside* the wrapper's right
+ * edge using negative `left`, so half of it gets clipped by the parent column
+ * (which has no horizontal padding against the window edge on the left side).
+ *
+ * Rendering the indicator only when `selected || unread` avoids a stray
+ * invisible element sitting in the layout.  The transition from "no indicator"
+ * to "dot" isn't animated (it just appears); dot → pill on click *is* animated
+ * because the element is continuously mounted across both states.
+ */
+function SpaceIconRow({
+  selected,
+  unread,
+  mentions,
+  children,
+  indicatorColor,
+}: {
+  selected: boolean;
+  unread: boolean;
+  mentions: number;
+  children: React.ReactNode;
+  /** Primary text colour for the indicator; threaded from theme by the caller. */
+  indicatorColor: string;
+}) {
+  // Compute target geometry.  The element is always mounted; height 0 means
+  // "invisible for now, ready to grow from the centre on the next state flip".
+  const height = selected
+    ? INDICATOR_PILL_HEIGHT
+    : unread
+      ? INDICATOR_DOT_HEIGHT
+      : 0;
+
+  return (
+    <div style={{ position: "relative" }}>
+      {children}
+      <span
+        aria-hidden
+        style={{
+          position: "absolute",
+          // Position relative to the wrapper, but the offset pushes the
+          // indicator out past the sidebar's left wall so half of it clips
+          // against the window edge.  See INDICATOR_LEFT_OFFSET for the math.
+          left: INDICATOR_LEFT_OFFSET,
+          top: "50%",
+          width: INDICATOR_WIDTH,
+          height,
+          // Keep the indicator vertically centred on the icon as it grows.
+          // Negating half the height via marginTop means height changes expand
+          // symmetrically from the centre (so the pill grows out of a dot, and
+          // the dot grows out of nothing, both centred).
+          marginTop: -height / 2,
+          backgroundColor: indicatorColor,
+          borderRadius: INDICATOR_WIDTH / 2,
+          pointerEvents: "none",
+          transition: "height 0.18s ease, margin-top 0.18s ease",
+        }}
+      />
+      {mentions > 0 && (
+        <span
+          aria-label={`${mentions} unread mention${mentions === 1 ? "" : "s"}`}
+          style={{
+            position: "absolute",
+            top: -2,
+            right: -2,
+            minWidth: 18,
+            height: 18,
+            padding: "0 5px",
+            borderRadius: 9,
+            backgroundColor: "#f23f43",
+            color: "#ffffff",
+            fontSize: 11,
+            fontWeight: 700,
+            lineHeight: "18px",
+            textAlign: "center",
+            boxSizing: "border-box",
+            // Small dark halo so the badge reads on top of both the avatar
+            // and the sidebar background when they have similar tones.
+            border: "2px solid rgba(0,0,0,0.2)",
+            pointerEvents: "none",
+          }}
+        >
+          {mentions > 99 ? "99+" : mentions}
+        </span>
+      )}
+    </div>
+  );
+}
+
 export default function SpaceSidebar({
   spaces,
   roomsBySpace,
@@ -102,8 +242,56 @@ export default function SpaceSidebar({
   onOpenSettings,
   userId,
   onLeftSpace,
+  isSpaceUnread,
+  spaceMentionCount,
+  isHomeUnread,
+  homeMentionCount,
 }: SpaceSidebarProps) {
   const { palette } = useTheme();
+  const sidebarScrollRef = useRef<HTMLDivElement | null>(null);
+  const sidebarTooltipAnchorRef = useRef<HTMLElement | null>(null);
+  const [sidebarTooltip, setSidebarTooltip] = useState<{
+    name: string;
+    left: number;
+    top: number;
+  } | null>(null);
+
+  const syncSidebarTooltipPosition = useCallback(() => {
+    const el = sidebarTooltipAnchorRef.current;
+    if (!el) return;
+    const r = el.getBoundingClientRect();
+    const left = r.right + 8;
+    const top = r.top + r.height / 2;
+    setSidebarTooltip((prev) => {
+      if (!prev) return null;
+      // Avoid returning a new object when nothing moved — otherwise the scroll/resize
+      // effect (and its initial sync) re-runs in a loop and blocks the main thread.
+      const eps = 0.5;
+      if (
+        Math.abs(prev.left - left) < eps &&
+        Math.abs(prev.top - top) < eps
+      ) {
+        return prev;
+      }
+      return { ...prev, left, top };
+    });
+  }, []);
+
+  const sidebarTooltipActive = sidebarTooltip != null;
+
+  useEffect(() => {
+    if (!sidebarTooltipActive) return;
+    syncSidebarTooltipPosition();
+    const sidebar = sidebarScrollRef.current;
+    if (!sidebar) return;
+    sidebar.addEventListener("scroll", syncSidebarTooltipPosition, { passive: true });
+    window.addEventListener("resize", syncSidebarTooltipPosition);
+    return () => {
+      sidebar.removeEventListener("scroll", syncSidebarTooltipPosition);
+      window.removeEventListener("resize", syncSidebarTooltipPosition);
+    };
+  }, [sidebarTooltipActive, syncSidebarTooltipPosition]);
+
   const [showDialog, setShowDialog] = useState(false);
   const [canCreate, setCanCreate] = useState(true);
   const [addHovered, setAddHovered] = useState(false);
@@ -219,6 +407,7 @@ export default function SpaceSidebar({
   return (
     <>
       <div
+        ref={sidebarScrollRef}
         style={{
           width: 72,
           minWidth: 72,
@@ -234,45 +423,61 @@ export default function SpaceSidebar({
         }}
       >
         {/* Home button */}
-        <button
-          type="button"
-          aria-label="Home"
-          onClick={() => onSelectSpace("")}
-          title="Home"
-          style={{
-            width: 48,
-            height: 48,
-            borderRadius:
-              activeSpaceId === "" || activeSpaceId === null ? 16 : 24,
-            border: "none",
-            backgroundColor: palette.accent,
-            cursor: "pointer",
-            transition: "border-radius 0.2s ease",
-            outline:
-              activeSpaceId === "" || activeSpaceId === null
-                ? `2px solid ${palette.accent}`
-                : "2px solid transparent",
-            outlineOffset: 3,
-            flexShrink: 0,
-            display: "flex",
-            alignItems: "center",
-            justifyContent: "center",
-            padding: 5,
+        <div
+          onMouseEnter={(e) => {
+            sidebarTooltipAnchorRef.current = e.currentTarget;
+            const r = e.currentTarget.getBoundingClientRect();
+            setSidebarTooltip({
+              name: "Home",
+              left: r.right + 8,
+              top: r.top + r.height / 2,
+            });
           }}
+          onMouseLeave={() => {
+            sidebarTooltipAnchorRef.current = null;
+            setSidebarTooltip(null);
+          }}
+          style={{ position: "relative" }}
         >
-          <img
-            src="/logo.png"
-            alt=""
-            draggable={false}
-            style={{
-              width: "100%",
-              height: "100%",
-              objectFit: "contain",
-              display: "block",
-              filter: "brightness(0) invert(1)",
-            }}
-          />
-        </button>
+          <SpaceIconRow
+            selected={activeSpaceId === "" || activeSpaceId === null}
+            unread={isHomeUnread}
+            mentions={homeMentionCount}
+            indicatorColor={palette.textHeading}
+          >
+            <button
+              type="button"
+              aria-label="Home"
+              onClick={() => onSelectSpace("")}
+              style={{
+                width: ICON_SIZE,
+                height: ICON_SIZE,
+                borderRadius: ICON_RADIUS,
+                border: "none",
+                backgroundColor: palette.accent,
+                cursor: "pointer",
+                flexShrink: 0,
+                display: "flex",
+                alignItems: "center",
+                justifyContent: "center",
+                padding: 5,
+              }}
+            >
+              <img
+                src="/logo.png"
+                alt=""
+                draggable={false}
+                style={{
+                  width: "100%",
+                  height: "100%",
+                  objectFit: "contain",
+                  display: "block",
+                  filter: "brightness(0) invert(1)",
+                }}
+              />
+            </button>
+          </SpaceIconRow>
+        </div>
 
         {/* Divider */}
         <div
@@ -286,26 +491,50 @@ export default function SpaceSidebar({
         />
 
         {/* Space avatars */}
-        {spaces.map((space) => (
-          <div
-            key={space.id}
-            onClick={() => onSelectSpace(space.id)}
-            onContextMenu={(e) => {
-              e.preventDefault();
-              setSpaceContextMenu({
-                x: e.clientX,
-                y: e.clientY,
-                spaceId: space.id,
-                spaceName: space.name,
-              });
-            }}
-          >
-            <SpaceAvatar
-              space={space}
-              isActive={spaceHighlightId === space.id}
-            />
-          </div>
-        ))}
+        {spaces.map((space) => {
+          const selected = spaceHighlightId === space.id;
+          const unread = !selected && isSpaceUnread(space.id);
+          const mentions = spaceMentionCount(space.id);
+          return (
+            <div
+              key={space.id}
+              aria-label={space.name}
+              onClick={() => onSelectSpace(space.id)}
+              onMouseEnter={(e) => {
+                sidebarTooltipAnchorRef.current = e.currentTarget;
+                const r = e.currentTarget.getBoundingClientRect();
+                setSidebarTooltip({
+                  name: space.name,
+                  left: r.right + 8,
+                  top: r.top + r.height / 2,
+                });
+              }}
+              onMouseLeave={() => {
+                sidebarTooltipAnchorRef.current = null;
+                setSidebarTooltip(null);
+              }}
+              onContextMenu={(e) => {
+                e.preventDefault();
+                setSpaceContextMenu({
+                  x: e.clientX,
+                  y: e.clientY,
+                  spaceId: space.id,
+                  spaceName: space.name,
+                });
+              }}
+              style={{ position: "relative", cursor: "pointer" }}
+            >
+              <SpaceIconRow
+                selected={selected}
+                unread={unread}
+                mentions={mentions}
+                indicatorColor={palette.textHeading}
+              >
+                <SpaceAvatar space={space} />
+              </SpaceIconRow>
+            </div>
+          );
+        })}
 
         {/* Add space button */}
         <button
@@ -314,14 +543,14 @@ export default function SpaceSidebar({
           onMouseLeave={() => setAddHovered(false)}
           title="Create or join a space"
           style={{
-            width: 48,
-            height: 48,
-            borderRadius: addHovered ? 16 : 24,
+            width: ICON_SIZE,
+            height: ICON_SIZE,
+            borderRadius: ICON_RADIUS,
             border: "none",
             backgroundColor: addHovered ? "#3ba55d" : palette.bgPrimary,
             color: addHovered ? "#fff" : "#3ba55d",
             cursor: "pointer",
-            transition: "border-radius 0.2s ease, background-color 0.2s ease, color 0.2s ease",
+            transition: "background-color 0.2s ease, color 0.2s ease",
             flexShrink: 0,
             display: "flex",
             alignItems: "center",
@@ -352,14 +581,14 @@ export default function SpaceSidebar({
           onMouseLeave={() => setSettingsHovered(false)}
           title="Settings"
           style={{
-            width: 48,
-            height: 48,
-            borderRadius: settingsHovered ? 16 : 24,
+            width: ICON_SIZE,
+            height: ICON_SIZE,
+            borderRadius: ICON_RADIUS,
             border: "none",
             backgroundColor: settingsHovered ? palette.bgActive : palette.bgPrimary,
             color: settingsHovered ? palette.textPrimary : palette.textSecondary,
             cursor: "pointer",
-            transition: "border-radius 0.2s ease, background-color 0.2s ease, color 0.2s ease",
+            transition: "background-color 0.2s ease, color 0.2s ease",
             flexShrink: 0,
             display: "flex",
             alignItems: "center",
@@ -466,6 +695,37 @@ export default function SpaceSidebar({
           }}
         />
       )}
+
+      {sidebarTooltip &&
+        createPortal(
+          <div
+            role="tooltip"
+            style={{
+              position: "fixed",
+              left: sidebarTooltip.left,
+              top: sidebarTooltip.top,
+              transform: "translateY(-50%)",
+              zIndex: 10_000,
+              pointerEvents: "none",
+              padding: "6px 10px",
+              borderRadius: 8,
+              backgroundColor: palette.bgPrimary,
+              color: palette.textPrimary,
+              border: `1px solid ${palette.border}`,
+              boxShadow: "0 4px 16px rgba(0, 0, 0, 0.28)",
+              fontSize: 13,
+              fontWeight: 500,
+              lineHeight: 1.3,
+              maxWidth: 280,
+              overflow: "hidden",
+              textOverflow: "ellipsis",
+              whiteSpace: "nowrap",
+            }}
+          >
+            {sidebarTooltip.name}
+          </div>,
+          document.body
+        )}
     </>
   );
 }
