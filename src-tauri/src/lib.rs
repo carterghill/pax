@@ -359,6 +359,22 @@ pub fn run() {
             commands::unread::get_all_unread_states,
             commands::unread::send_room_read_receipt,
             commands::unread::set_room_marked_unread,
+            // --- Push rules (raw CS-API wrappers + master-toggle convenience) ---
+            commands::push_rules::get_push_rules,
+            commands::push_rules::set_push_rule,
+            commands::push_rules::delete_push_rule,
+            commands::push_rules::set_push_rule_enabled,
+            commands::push_rules::set_push_rule_actions,
+            commands::push_rules::get_notifications_enabled_globally,
+            commands::push_rules::set_notifications_enabled_globally,
+            // --- Pax-specific settings (account data) ---
+            commands::pax_settings::get_unread_settings,
+            commands::pax_settings::set_global_unread_indicator,
+            commands::pax_settings::set_space_unread_indicator,
+            commands::pax_settings::set_room_unread_indicator,
+            commands::pax_settings::get_notification_settings,
+            commands::pax_settings::set_global_default_notification_level,
+            commands::pax_settings::set_space_notification_level,
         ])
         .setup(|app| {
             // Set the Tauri app-scoped temp dir so avatar / media temp

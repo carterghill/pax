@@ -8,6 +8,13 @@ import { clearMessageCache } from "./hooks/useMessages";
 import { clearPersistedSpaceHomeCache } from "./utils/spaceHomeCache";
 import { clearPersistedRoomsList } from "./utils/roomsCache";
 import { useExternalLinkInterceptor } from "./hooks/useExternalLinks";
+import { listen } from "@tauri-apps/api/event";
+
+if (import.meta.env.DEV) {
+  const w = window as unknown as { invoke: typeof invoke; listen: typeof listen };
+  w.invoke = invoke;
+  w.listen = listen;
+}
 
 interface AuthConfig {
   default_homeserver: string | null;
