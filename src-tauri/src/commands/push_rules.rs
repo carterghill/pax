@@ -12,10 +12,12 @@
 //! `state.http_client` — same pattern as `commands::presence::sync_presence`.
 //!
 //! Higher-level concepts — notification *levels* like "All", "UserMentions",
-//! etc. — are not in this module.  Those will live in
-//! `commands::notification_levels` (Pass 2) and synthesise onto the primitives
-//! here.  Keeping this module purely mechanical means the synthesis layer can
-//! be unit-tested against a mock ruleset without any HTTP.
+//! etc. — are not in this module.  Those live in
+//! `commands::notification_levels` and synthesise onto the primitives here.
+//! To keep the synthesis layer self-contained, the three low-level
+//! operations (load / put / delete) are exposed as `pub(super)` helpers so
+//! `notification_levels` and `reconciler` can use them without going
+//! through the Tauri State layer.
 //!
 //! ### Rule ID namespacing
 //!
@@ -55,9 +57,12 @@ fn validate_kind(kind: &str) -> Result<&str, String> {
     }
 }
 
-/// Non-command helper used by both `get_push_rules` and the `.m.rule.master`
-/// reader below so the latter doesn't need to go through the Tauri State layer.
-async fn load_push_rules(state: &AppState) -> Result<Value, String> {
+// ---------- Shared helpers (exposed to sibling commands modules) ----------
+
+/// GET `/_matrix/client/v3/pushrules/` — the full ruleset for the logged-in
+/// user as raw JSON.  Exposed to sibling modules so the synthesis layer and
+/// reconciler can classify rules without double-layered command dispatch.
+pub(super) async fn load_push_rules_raw(state: &AppState) -> Result<Value, String> {
     let (hs, token) = hs_auth(state).await?;
     let url = format!("{hs}/_matrix/client/v3/pushrules/");
     let resp = state
@@ -77,6 +82,73 @@ async fn load_push_rules(state: &AppState) -> Result<Value, String> {
     resp.json::<Value>()
         .await
         .map_err(|e| format!("Malformed pushrules response: {}", fmt_error_chain(&e)))
+}
+
+/// PUT a push rule with optional `before` / `after` placement hints.
+/// Exposed to sibling modules; the Tauri command `set_push_rule` also
+/// funnels through this.
+pub(super) async fn put_push_rule_raw(
+    state: &AppState,
+    kind: &str,
+    rule_id: &str,
+    body: &Value,
+    before: Option<&str>,
+    after: Option<&str>,
+) -> Result<(), String> {
+    let kind = validate_kind(kind)?;
+    let (hs, token) = hs_auth(state).await?;
+    let encoded_rule = urlencoding::encode(rule_id);
+    let url = format!("{hs}/_matrix/client/v3/pushrules/global/{kind}/{encoded_rule}");
+
+    let mut req = state.http_client.put(&url).bearer_auth(&token).json(body);
+    if let Some(b) = before {
+        req = req.query(&[("before", b)]);
+    }
+    if let Some(a) = after {
+        req = req.query(&[("after", a)]);
+    }
+
+    let resp = req
+        .send()
+        .await
+        .map_err(|e| format!("Failed to PUT push rule: {}", fmt_error_chain(&e)))?;
+
+    if !resp.status().is_success() {
+        let status = resp.status();
+        let body = resp.text().await.unwrap_or_default();
+        return Err(format!("PUT pushrule {rule_id}: HTTP {status} — {body}"));
+    }
+
+    Ok(())
+}
+
+/// DELETE a push rule.  Treats 404 as success — the reconciler frequently
+/// tries to delete a rule that's already absent and that shouldn't
+/// surface as an error.
+pub(super) async fn delete_push_rule_raw(
+    state: &AppState,
+    kind: &str,
+    rule_id: &str,
+) -> Result<(), String> {
+    let kind = validate_kind(kind)?;
+    let (hs, token) = hs_auth(state).await?;
+    let encoded_rule = urlencoding::encode(rule_id);
+    let url = format!("{hs}/_matrix/client/v3/pushrules/global/{kind}/{encoded_rule}");
+
+    let resp = state
+        .http_client
+        .delete(&url)
+        .bearer_auth(&token)
+        .send()
+        .await
+        .map_err(|e| format!("Failed to DELETE push rule: {}", fmt_error_chain(&e)))?;
+
+    let status = resp.status();
+    if status.is_success() || status == reqwest::StatusCode::NOT_FOUND {
+        return Ok(());
+    }
+    let body = resp.text().await.unwrap_or_default();
+    Err(format!("DELETE pushrule {rule_id}: HTTP {status} — {body}"))
 }
 
 /// Non-command helper so `set_notifications_enabled_globally` can drive the
@@ -115,20 +187,13 @@ async fn do_set_push_rule_enabled(
 
 // ---------- Commands: raw push-rule CRUD ----------
 
-/// GET `/_matrix/client/v3/pushrules/` — the full ruleset for the logged-in
-/// user as raw JSON.  Returned as an untyped `Value` so:
-///
-///   * server-extensible fields (e.g. custom conditions) aren't silently
-///     stripped by a partial model;
-///   * the Pass 2 classifier can read the structure directly rather than
-///     going through a typed shape that would need to evolve alongside the
-///     spec.
-///
-/// Top-level shape: `{ "global": { "override": [...], "content": [...],
-/// "room": [...], "sender": [...], "underride": [...] } }`.
+/// GET the full ruleset as raw JSON.  Returned as an untyped `Value` so
+/// server-extensible fields aren't silently stripped.  Top-level shape:
+/// `{ "global": { "override": [...], "content": [...], "room": [...],
+/// "sender": [...], "underride": [...] } }`.
 #[tauri::command]
 pub async fn get_push_rules(state: State<'_, Arc<AppState>>) -> Result<Value, String> {
-    load_push_rules(&state).await
+    load_push_rules_raw(&state).await
 }
 
 /// Input for `set_push_rule`.  Which of `conditions`/`pattern` is allowed
@@ -146,29 +211,20 @@ pub struct PutPushRuleInput {
     /// Only meaningful for `content`.  Dropped otherwise.
     #[serde(default)]
     pub pattern: Option<String>,
-    /// `?before=<ruleId>` query param — insert this rule before the named
-    /// rule (same kind).  Must not reference a default (`.m.rule.*`) rule.
     #[serde(default)]
     pub before: Option<String>,
-    /// `?after=<ruleId>` query param — insert after the named rule.
     #[serde(default)]
     pub after: Option<String>,
 }
 
-/// PUT `/_matrix/client/v3/pushrules/global/{kind}/{ruleId}` — create or
-/// replace a user push rule.
+/// Create or replace a user push rule.
 #[tauri::command]
 pub async fn set_push_rule(
     state: State<'_, Arc<AppState>>,
     input: PutPushRuleInput,
 ) -> Result<(), String> {
     let kind = validate_kind(&input.kind)?;
-    let (hs, token) = hs_auth(&state).await?;
-    let encoded_rule = urlencoding::encode(&input.rule_id);
-    let url = format!("{hs}/_matrix/client/v3/pushrules/global/{kind}/{encoded_rule}");
 
-    // Build the body with only the fields valid for this kind so the server
-    // doesn't bounce the request with M_BAD_JSON.
     let mut body = serde_json::Map::new();
     body.insert("actions".into(), Value::Array(input.actions));
     if matches!(kind, "override" | "underride") {
@@ -182,70 +238,30 @@ pub async fn set_push_rule(
         }
     }
 
-    let mut req = state
-        .http_client
-        .put(&url)
-        .bearer_auth(&token)
-        .json(&Value::Object(body));
-    if let Some(before) = input.before.as_deref() {
-        req = req.query(&[("before", before)]);
-    }
-    if let Some(after) = input.after.as_deref() {
-        req = req.query(&[("after", after)]);
-    }
-
-    let resp = req
-        .send()
-        .await
-        .map_err(|e| format!("Failed to PUT push rule: {}", fmt_error_chain(&e)))?;
-
-    if !resp.status().is_success() {
-        let status = resp.status();
-        let body = resp.text().await.unwrap_or_default();
-        return Err(format!("PUT pushrule failed: HTTP {status} — {body}"));
-    }
-
-    Ok(())
+    put_push_rule_raw(
+        &state,
+        kind,
+        &input.rule_id,
+        &Value::Object(body),
+        input.before.as_deref(),
+        input.after.as_deref(),
+    )
+    .await
 }
 
-/// DELETE `/_matrix/client/v3/pushrules/global/{kind}/{ruleId}`.
-///
-/// Built-in rules (those starting with `.m.`) can't be deleted — the
-/// homeserver returns M_NOT_FOUND — which we propagate as an error so the
-/// caller can distinguish it from success.
+/// DELETE a push rule.  Built-in rules (those starting with `.m.`) can't
+/// be deleted — the homeserver returns M_NOT_FOUND which the raw helper
+/// treats as success, so this command won't error on that case either.
 #[tauri::command]
 pub async fn delete_push_rule(
     state: State<'_, Arc<AppState>>,
     kind: String,
     rule_id: String,
 ) -> Result<(), String> {
-    let kind = validate_kind(&kind)?;
-    let (hs, token) = hs_auth(&state).await?;
-    let encoded_rule = urlencoding::encode(&rule_id);
-    let url = format!("{hs}/_matrix/client/v3/pushrules/global/{kind}/{encoded_rule}");
-
-    let resp = state
-        .http_client
-        .delete(&url)
-        .bearer_auth(&token)
-        .send()
-        .await
-        .map_err(|e| format!("Failed to DELETE push rule: {}", fmt_error_chain(&e)))?;
-
-    if !resp.status().is_success() {
-        let status = resp.status();
-        let body = resp.text().await.unwrap_or_default();
-        return Err(format!("DELETE pushrule failed: HTTP {status} — {body}"));
-    }
-
-    Ok(())
+    delete_push_rule_raw(&state, &kind, &rule_id).await
 }
 
-/// PUT `/_matrix/client/v3/pushrules/global/{kind}/{ruleId}/enabled`.
-///
-/// Independent of the rule's body — toggling this off preserves the rule's
-/// actions/conditions for later.  Used by the global master toggle and, in
-/// Pass 2, by the reconciler to pause Pax-managed rules without deleting.
+/// Toggle a rule's `enabled` flag.
 #[tauri::command]
 pub async fn set_push_rule_enabled(
     state: State<'_, Arc<AppState>>,
@@ -256,10 +272,7 @@ pub async fn set_push_rule_enabled(
     do_set_push_rule_enabled(&state, &kind, &rule_id, enabled).await
 }
 
-/// PUT `/_matrix/client/v3/pushrules/global/{kind}/{ruleId}/actions`.
-///
-/// Update actions without touching enabled / conditions / pattern.  Typical
-/// use: flipping an existing rule between `notify` and `dont_notify`.
+/// Update actions without touching enabled / conditions / pattern.
 #[tauri::command]
 pub async fn set_push_rule_actions(
     state: State<'_, Arc<AppState>>,
@@ -301,17 +314,13 @@ pub async fn set_push_rule_actions(
 ///
 ///     notifications globally on   ←→  .m.rule.master is disabled (or absent)
 ///     notifications globally off  ←→  .m.rule.master is enabled
-///
-/// These two commands hide the inversion so the settings UI doesn't have to
-/// carry the caveat.
 
-/// Returns `true` when notifications are globally enabled — i.e. the master
-/// rule is either disabled or absent from the ruleset.
+/// Returns `true` when notifications are globally enabled.
 #[tauri::command]
 pub async fn get_notifications_enabled_globally(
     state: State<'_, Arc<AppState>>,
 ) -> Result<bool, String> {
-    let rules = load_push_rules(&state).await?;
+    let rules = load_push_rules_raw(&state).await?;
     let master = rules
         .get("global")
         .and_then(|g| g.get("override"))
@@ -329,8 +338,7 @@ pub async fn get_notifications_enabled_globally(
 }
 
 /// Toggle the global notifications switch.  `enabled=true` disables the
-/// master rule (notifications flow through); `enabled=false` enables it
-/// (everything muted).
+/// master rule; `enabled=false` enables it.
 #[tauri::command]
 pub async fn set_notifications_enabled_globally(
     state: State<'_, Arc<AppState>>,

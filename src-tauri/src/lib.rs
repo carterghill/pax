@@ -375,6 +375,12 @@ pub fn run() {
             commands::pax_settings::get_notification_settings,
             commands::pax_settings::set_global_default_notification_level,
             commands::pax_settings::set_space_notification_level,
+            // --- Notification levels (synthesised onto push rules) ---
+            commands::notification_levels::set_room_notification_level,
+            commands::notification_levels::clear_room_notification_level,
+            commands::notification_levels::get_room_notification_level,
+            commands::notification_levels::get_all_room_notification_levels,
+            commands::reconciler::reconcile_all_notification_levels,
         ])
         .setup(|app| {
             // Set the Tauri app-scoped temp dir so avatar / media temp
