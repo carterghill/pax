@@ -24,6 +24,7 @@ import {
   getSendPublicReceipts,
   setSendPublicReceipts,
 } from "../utils/readReceiptPrefs";
+import NotificationSettingsPanel from "./NotificationSettingsPanel";
 
 interface SettingsMenuProps {
   onSignOut: () => void;
@@ -863,6 +864,16 @@ export default function SettingsMenu({
 
           {activeSection === "notifications" && (
             <section style={panelStyle}>
+              <NotificationSettingsPanel scope="global" />
+
+              <div
+                style={{
+                  height: 1,
+                  backgroundColor: palette.border,
+                  margin: `${spacing.unit * 5}px 0`,
+                }}
+              />
+
               <h3 style={sectionHeadingStyle}>Read receipts</h3>
               <p style={{ ...sectionDescriptionStyle, marginBottom: spacing.unit * 4 }}>
                 Pax always tracks what you&rsquo;ve read so rooms with new messages stand out in

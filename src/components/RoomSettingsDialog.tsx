@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
-import { X, Loader2, Users, Shield, Settings as SettingsIcon } from "lucide-react";
+import { X, Loader2, Users, Shield, Bell, Settings as SettingsIcon } from "lucide-react";
 import { useTheme } from "../theme/ThemeContext";
 import { paletteDialogShellBorderStyle } from "../theme/paletteBorder";
 import { useOverlayObstruction } from "../hooks/useOverlayObstruction";
@@ -8,6 +8,7 @@ import ModalLayer from "./ModalLayer";
 import ModerationScopeDialog from "./ModerationScopeDialog";
 import SettingsMemberCategory from "./SettingsMemberCategory";
 import PowerLevelsSettingsPanel from "./PowerLevelsSettingsPanel";
+import NotificationSettingsPanel from "./NotificationSettingsPanel";
 import type { RoomManagementMembersResponse } from "../types/matrix";
 
 type HistoryVisibility = "joined" | "shared" | "invited" | "world_readable";
@@ -43,7 +44,7 @@ const VISIBILITY_OPTIONS: {
   },
 ];
 
-type SettingsTab = "general" | "members" | "permissions";
+type SettingsTab = "general" | "members" | "permissions" | "notifications";
 
 interface RoomGeneralSnapshot {
   roomId: string;
@@ -463,6 +464,7 @@ export default function RoomSettingsDialog({
               </div>
               {[
                 { id: "general" as SettingsTab, label: "General", icon: SettingsIcon },
+                { id: "notifications" as SettingsTab, label: "Notifications", icon: Bell },
                 { id: "members" as SettingsTab, label: "Members", icon: Users },
                 { id: "permissions" as SettingsTab, label: "Permissions", icon: Shield },
               ].map((cat) => {
@@ -945,6 +947,10 @@ export default function RoomSettingsDialog({
 
                 {activeTab === "permissions" && (
                   <PowerLevelsSettingsPanel roomId={roomId} />
+                )}
+
+                {activeTab === "notifications" && (
+                  <NotificationSettingsPanel scope="room" scopeId={roomId} />
                 )}
               </div>
 

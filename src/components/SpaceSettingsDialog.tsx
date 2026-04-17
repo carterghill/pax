@@ -10,6 +10,7 @@ import {
   DoorOpen,
   Users,
   Shield,
+  Bell,
   Settings as SettingsIcon,
 } from "lucide-react";
 import { useTheme } from "../theme/ThemeContext";
@@ -19,6 +20,7 @@ import ModalLayer from "./ModalLayer";
 import ModerationScopeDialog from "./ModerationScopeDialog";
 import SettingsMemberCategory from "./SettingsMemberCategory";
 import PowerLevelsSettingsPanel from "./PowerLevelsSettingsPanel";
+import NotificationSettingsPanel from "./NotificationSettingsPanel";
 import type { RoomManagementMembersResponse } from "../types/matrix";
 
 type HistoryVisibility = "shared" | "joined" | "invited" | "world_readable";
@@ -59,7 +61,7 @@ function normalizeJoinRule(rule: string): JoinRule {
   return "invite";
 }
 
-type SettingsTab = "general" | "members" | "permissions";
+type SettingsTab = "general" | "members" | "permissions" | "notifications";
 
 interface SpaceSettingsDialogProps {
   spaceId: string;
@@ -574,6 +576,7 @@ export default function SpaceSettingsDialog({
 
             {[
               { id: "general" as SettingsTab, label: "General", icon: SettingsIcon },
+              { id: "notifications" as SettingsTab, label: "Notifications", icon: Bell },
               { id: "members" as SettingsTab, label: "Members", icon: Users },
               { id: "permissions" as SettingsTab, label: "Permissions", icon: Shield },
             ].map((cat) => {
@@ -1178,6 +1181,10 @@ export default function SpaceSettingsDialog({
 
               {activeTab === "permissions" && (
                 <PowerLevelsSettingsPanel roomId={spaceId} onSaved={onSaved} />
+              )}
+
+              {activeTab === "notifications" && (
+                <NotificationSettingsPanel scope="space" scopeId={spaceId} />
               )}
             </div>
 
