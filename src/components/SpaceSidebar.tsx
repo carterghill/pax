@@ -543,10 +543,24 @@ export default function SpaceSidebar({
 
         {/* Add space button */}
         <button
+          type="button"
           onClick={handleOpenDialog}
-          onMouseEnter={() => setAddHovered(true)}
-          onMouseLeave={() => setAddHovered(false)}
-          title="Create or join a space"
+          aria-label="Create or join a space"
+          onMouseEnter={(e) => {
+            setAddHovered(true);
+            sidebarTooltipAnchorRef.current = e.currentTarget;
+            const r = e.currentTarget.getBoundingClientRect();
+            setSidebarTooltip({
+              name: "Create or join a space",
+              left: r.right + 8,
+              top: r.top + r.height / 2,
+            });
+          }}
+          onMouseLeave={() => {
+            setAddHovered(false);
+            sidebarTooltipAnchorRef.current = null;
+            setSidebarTooltip(null);
+          }}
           style={{
             width: ICON_SIZE,
             height: ICON_SIZE,
@@ -581,10 +595,24 @@ export default function SpaceSidebar({
         />
 
         <button
+          type="button"
           onClick={onOpenSettings}
-          onMouseEnter={() => setSettingsHovered(true)}
-          onMouseLeave={() => setSettingsHovered(false)}
-          title="Settings"
+          aria-label="Settings"
+          onMouseEnter={(e) => {
+            setSettingsHovered(true);
+            sidebarTooltipAnchorRef.current = e.currentTarget;
+            const r = e.currentTarget.getBoundingClientRect();
+            setSidebarTooltip({
+              name: "Settings",
+              left: r.right + 8,
+              top: r.top + r.height / 2,
+            });
+          }}
+          onMouseLeave={() => {
+            setSettingsHovered(false);
+            sidebarTooltipAnchorRef.current = null;
+            setSidebarTooltip(null);
+          }}
           style={{
             width: ICON_SIZE,
             height: ICON_SIZE,
