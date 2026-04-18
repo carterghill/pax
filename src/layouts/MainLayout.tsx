@@ -11,6 +11,7 @@ import { usePresence } from "../hooks/usePresence";
 import { useVoiceParticipants } from "../hooks/useVoiceParticipants";
 import { useVoiceCall } from "../hooks/useVoiceCall";
 import { useUnreadRooms, useSpaceUnreadRollup } from "../hooks/useUnreadRooms";
+import { useDesktopNotifications } from "../hooks/useDesktopNotifications";
 import { PresenceContext } from "../hooks/PresenceContext";
 import { useState, useCallback, useMemo, useEffect, startTransition } from "react";
 import { useTheme } from "../theme/ThemeContext";
@@ -143,6 +144,38 @@ export default function MainLayout({
       setActiveRoomBySpace((prev) => ({ ...prev, [spaceKey]: roomId }));
     });
   }, [spaceKey]);
+
+  // Desktop notifications.  The hook watches `room-message`, gates by
+  // per-room level + focus, and dispatches via the notification plugin.
+  // It also fires a `pax-notification-clicked` CustomEvent on click-to-focus.
+  useDesktopNotifications({ userId, activeRoomId, getRoom });
+
+  // Click-to-focus: when the user clicks a notification, jump to that room.
+  // The hook only knows the room id — we resolve which space it belongs to
+  // (picking the first matching ancestor) and switch both.
+  useEffect(() => {
+    function onClicked(e: Event) {
+      const ce = e as CustomEvent<{ roomId: string }>;
+      const targetRoomId = ce.detail?.roomId;
+      if (!targetRoomId) return;
+      const room = getRoom(targetRoomId);
+      if (!room) return;
+      // Pick any joined parent space — if none, null (DMs / orphaned rooms).
+      const parentSpaceId = room.parentSpaceIds.find((pid) =>
+        joinedSpaceIdSet.has(pid),
+      ) ?? null;
+      startTransition(() => {
+        setActiveSpaceId(parentSpaceId);
+        setActiveRoomBySpace((prev) => ({
+          ...prev,
+          [parentSpaceId ?? ""]: targetRoomId,
+        }));
+      });
+    }
+    window.addEventListener("pax-notification-clicked", onClicked);
+    return () =>
+      window.removeEventListener("pax-notification-clicked", onClicked);
+  }, [getRoom, joinedSpaceIdSet]);
 
   // Clicking the already-active space clears room selection to show the space home
   const handleSelectSpace = useCallback((spaceId: string) => {

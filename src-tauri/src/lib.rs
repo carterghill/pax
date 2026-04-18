@@ -252,6 +252,7 @@ pub fn run() {
                 .build(),
         )
         .plugin(tauri_plugin_opener::init())
+        .plugin(tauri_plugin_notification::init())
         .manage(state)
         .manage(voice::VoiceManager::new())
         .register_uri_scheme_protocol("paxvideo", |_app, request| {
@@ -381,6 +382,10 @@ pub fn run() {
             commands::notification_levels::get_room_notification_level,
             commands::notification_levels::get_all_room_notification_levels,
             commands::reconciler::reconcile_all_notification_levels,
+            // --- Desktop notifications ---
+            commands::notifications::notify_supported,
+            commands::notifications::notify_send,
+            commands::notifications::focus_main_window,
         ])
         .setup(|app| {
             // Set the Tauri app-scoped temp dir so avatar / media temp

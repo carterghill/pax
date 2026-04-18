@@ -5,6 +5,7 @@ pub mod embed;
 pub mod members;
 pub mod messages;
 pub mod notification_levels;
+pub mod notifications;
 pub mod overlay;
 pub mod pax_settings;
 pub mod presence;
