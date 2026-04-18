@@ -406,23 +406,46 @@ pub async fn get_user_avatars(
         }
     }
 
+    // Pre-compute the set of joined rooms once; we scan these per user to
+    // find an avatar MXC from local state, which is effectively free.
+    let joined_rooms = client.joined_rooms();
+
     let futs = unique_ids.into_iter().map(|uid| {
         let client = client.clone();
         let cache = avatar_cache.clone();
+        let joined = joined_rooms.clone();
         async move {
             let Ok(parsed) = matrix_sdk::ruma::UserId::parse(&uid) else {
                 return (uid, None);
             };
-            // Profile API: single round-trip per user, runs in parallel.
-            let profile_fut = client.send(GetProfileRequest::new(parsed));
-            let resp = match tokio::time::timeout(Duration::from_secs(10), profile_fut).await {
-                Ok(Ok(r)) => r,
-                _ => return (uid, None),
-            };
-            let owned_mxc = match resp.get_static::<AvatarUrl>() {
-                Ok(m) => m,
-                Err(_) => return (uid, None),
-            };
+
+            // Fast path: every Matrix client already has this user's avatar
+            // MXC locally if we share any joined room with them (sync state
+            // carries m.room.member for every joined user). Walk joined
+            // rooms and take the first hit — no network required.
+            let mut owned_mxc: Option<matrix_sdk::ruma::OwnedMxcUri> = None;
+            for room in &joined {
+                if let Ok(Some(member)) = room.get_member_no_sync(&parsed).await {
+                    if let Some(mxc) = member.avatar_url() {
+                        owned_mxc = Some(mxc.to_owned());
+                        break;
+                    }
+                }
+            }
+
+            // Fallback: hit the profile API only when we genuinely do not
+            // share a room with this user (rare for our UI — most callers
+            // are sidebars/DM headers/message lists for users we already
+            // share state with). Short timeout keeps the batch responsive.
+            if owned_mxc.is_none() {
+                let profile_fut = client.send(GetProfileRequest::new(parsed));
+                if let Ok(Ok(resp)) =
+                    tokio::time::timeout(Duration::from_secs(5), profile_fut).await
+                {
+                    owned_mxc = resp.get_static::<AvatarUrl>().ok().flatten();
+                }
+            }
+
             let Some(owned_mxc) = owned_mxc else {
                 return (uid, None);
             };

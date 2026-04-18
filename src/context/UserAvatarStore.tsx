@@ -166,14 +166,18 @@ class UserAvatarStore {
         userIds: batch,
       });
       for (const id of batch) {
+        // Crucial: do NOT overwrite entries that were populated from a more
+        // authoritative source (message fetch, room list, explicit prime)
+        // while our batch was in flight. get_user_avatars hits the profile
+        // API and may legitimately return null on timeout / federation hiccup
+        // — and clobbering a freshly-primed path back to null traps the
+        // avatar on initials forever (no <img> ever renders to fire onError).
+        if (this.entries.has(id)) continue;
         const url = res[id] ?? null;
         this.writeEntry(id, url);
       }
     } catch (e) {
       console.warn("[userAvatarStore] get_user_avatars failed:", e);
-      // Record null so we stop infinitely retrying. A real `invalidate`
-      // (onError from <img>, or `user-avatar-invalidated` event) will
-      // clear the entry and allow a fresh fetch.
       for (const id of batch) {
         if (!this.entries.has(id)) this.writeEntry(id, null);
       }

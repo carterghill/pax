@@ -1292,23 +1292,28 @@ pub async fn get_matrix_image_path(
     Ok(path_str)
 }
 
-/// Evict cached media + avatar temp files and their `avatar_cache`
-/// entries.  Called by the frontend on room switch so images from the
-/// previous room don't linger in memory / on disk.
+/// Evict cached attachment temp files and their cache entries on room
+/// switch.  Attachments (images/videos/files in message bodies) can be
+/// large and there's no reason to keep the previous room's attachments
+/// around while the user is looking at a different room.
+///
+/// **Avatars are deliberately NOT cleared here.**  They are tiny, shared
+/// across every view (sidebar, home space, chat header, settings,
+/// voice call, …), and cheap to keep.  Wiping them on room switch
+/// broke every `<img>` currently on screen — the sidebar and DM banner
+/// would 404 the moment the user clicked a room, forcing a cascade of
+/// re-fetches, retries, and visible "avatar → initials → avatar-at-
+/// different-resolution" flashes.  Keep avatars alive for the session;
+/// they get evicted naturally on logout and on startup (see `lib.rs`).
 #[tauri::command]
 pub async fn clear_media_cache(
     state: State<'_, Arc<AppState>>,
 ) -> Result<u32, String> {
     let mut cache = state.avatar_cache.lock().await;
 
-    // Collect keys whose entries point at temp files (mmedia: keys and
-    // mxc:// avatar keys that have been migrated to file-backed URLs).
     let stale_keys: Vec<String> = cache
         .iter()
-        .filter(|(k, v)| {
-            k.starts_with("mmedia:")
-                || (k.starts_with("mxc://") && !v.starts_with("data:"))
-        })
+        .filter(|(k, _)| k.starts_with("mmedia:"))
         .map(|(k, _)| k.clone())
         .collect();
 
@@ -1319,14 +1324,13 @@ pub async fn clear_media_cache(
     let evicted = stale_keys.len();
     drop(cache); // release lock before I/O
 
-    // Walk the temp directory and delete our files.
     let temp_dir = super::temp_dir();
     let mut deleted = 0u32;
     if let Ok(entries) = std::fs::read_dir(&temp_dir) {
         for entry in entries.flatten() {
             let name = entry.file_name();
             let n = name.to_string_lossy();
-            if n.starts_with("pax_avatar_") || n.starts_with("pax_matrix_media_") {
+            if n.starts_with("pax_matrix_media_") {
                 if std::fs::remove_file(entry.path()).is_ok() {
                     deleted += 1;
                 }
@@ -1336,7 +1340,7 @@ pub async fn clear_media_cache(
 
     if evicted > 0 || deleted > 0 {
         log::info!(
-            "[clear_media_cache] evicted {} cache entries, deleted {} temp files",
+            "[clear_media_cache] evicted {} attachment entries, deleted {} temp files (avatars preserved)",
             evicted,
             deleted,
         );

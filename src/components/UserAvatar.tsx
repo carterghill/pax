@@ -73,12 +73,17 @@ export default function UserAvatar({
     }
   }, [userId, fromStore, store]);
 
-  // Reset the per-mount "image failed to load" flag whenever the URL
-  // actually changes (avatar update, user switch, etc.). Hint wins
-  // when truthy so a caller supplying a fresh URL renders it on the
-  // first paint (no flash of initials). A falsy hint falls back to
-  // the store so the store's authoritative null/url still applies.
-  const effectiveUrl = avatarUrlHint || fromStore || null;
+  // The STORE is authoritative once it has resolved. The hint is only a
+  // bootstrap value for the first paint (before the store answers), so a
+  // list-provided path that's been invalidated behind our back — e.g. a
+  // `room.avatarUrl` that pointed into the avatar temp dir before
+  // `clear_media_cache` wiped it on room switch — cannot permanently
+  // override a freshly-written path that messages / member sync just
+  // primed into the store. Without this, the sidebar / DM banner sit on
+  // initials forever after `clear_media_cache`, even though the chat
+  // timeline (which has a fresh hint from `get_messages`) renders fine.
+  const effectiveUrl =
+    fromStore !== undefined ? fromStore : avatarUrlHint || null;
   const [imageFailed, setImageFailed] = useState(false);
   useEffect(() => {
     setImageFailed(false);

@@ -188,10 +188,10 @@ export function useMessages(roomId: string | null) {
     const target = roomId;
     initialFetchingRef.current = true;
 
-    // Must finish before get_messages: clear_media_cache deletes all
-    // pax_avatar_* temp files. If get_messages ran in parallel, returned
-    // paths could point at files removed a moment later (broken sidebar +
-    // timeline avatars, stale peer registry).
+    // Drops attachment temp files from the previous room before we
+    // fetch new ones. Avatars are intentionally preserved across room
+    // switches (see `clear_media_cache` in the backend); they're shared
+    // with every other view and wiping them caused widespread 404 flashes.
     void (async () => {
       try {
         await invoke("clear_media_cache");
