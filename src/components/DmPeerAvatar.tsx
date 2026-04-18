@@ -1,3 +1,4 @@
+import { useEffect, useState } from "react";
 import { useTheme } from "../theme/ThemeContext";
 import { userInitialAvatarBackground } from "../utils/userAvatarColor";
 import { dmInitialsFromLabel } from "../utils/dmDisplay";
@@ -24,6 +25,11 @@ export default function DmPeerAvatar({
   const { palette, typography, resolvedColorScheme } = useTheme();
   const label = displayName.trim() || peerUserId;
   const fs = fontSize ?? typography.fontSizeSmall;
+  const [imageFailed, setImageFailed] = useState(false);
+
+  useEffect(() => {
+    setImageFailed(false);
+  }, [avatarUrl]);
 
   return (
     <div
@@ -42,8 +48,13 @@ export default function DmPeerAvatar({
         overflow: "hidden",
       }}
     >
-      {avatarUrl ? (
-        <img src={avatarSrc(avatarUrl)} alt="" style={{ width: "100%", height: "100%", objectFit: "cover" }} />
+      {avatarUrl && !imageFailed ? (
+        <img
+          src={avatarSrc(avatarUrl)}
+          alt=""
+          onError={() => setImageFailed(true)}
+          style={{ width: "100%", height: "100%", objectFit: "cover" }}
+        />
       ) : (
         dmInitialsFromLabel(label)
       )}

@@ -2,6 +2,7 @@ import "./App.css";
 import { useState, useEffect, useRef, useMemo } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import MainLayout from "./layouts/MainLayout";
+import { PeerAvatarProvider } from "./context/PeerAvatarContext";
 import { useTheme } from "./theme/ThemeContext";
 import { useRooms } from "./hooks/useRooms";
 import { clearMessageCache } from "./hooks/useMessages";
@@ -27,6 +28,7 @@ function App() {
 
   useEffect(() => {
     const root = document.getElementById("root");
+    document.documentElement.style.backgroundColor = palette.bgPrimary;
     document.body.style.backgroundColor = palette.bgPrimary;
     document.body.style.color = palette.textPrimary;
     document.body.style.fontFamily = typography.fontFamily;
@@ -318,11 +320,13 @@ function App() {
 
   if (userId) {
     return (
-      <MainLayout
-        userId={userId}
-        onSignOut={handleSignOut}
-        rooms={{ spaces, roomsBySpace, getRoom, fetchRooms, upsertOptimisticRoom }}
-      />
+      <PeerAvatarProvider>
+        <MainLayout
+          userId={userId}
+          onSignOut={handleSignOut}
+          rooms={{ spaces, roomsBySpace, getRoom, fetchRooms, upsertOptimisticRoom }}
+        />
+      </PeerAvatarProvider>
     );
   }
 

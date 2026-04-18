@@ -50,16 +50,45 @@ const ICON_SIZE = 48;
  *  exactly the spacing jitter we're getting rid of. */
 const ICON_RADIUS = 16;
 
-/** Shared surface styles for every 48×48 sidebar tile.
- *
- * Rounded rects can show a 1px light “halo” at the corners when the
- * anti-aliased edge blends with whatever is behind the layer (often the
- * webview default). `overflow: hidden` + `isolation` keeps paint self-contained
- * so the curve composites against the tile’s own background. */
-const ICON_TILE_SURFACE: CSSProperties = {
-  borderRadius: ICON_RADIUS,
-  overflow: "hidden",
-  isolation: "isolate",
+/**
+ * Slight upscale so the squircle clip cuts through more opaque fill and drops
+ * the outermost bad AA ring (faint tinted line at curved corners in WebView2).
+ */
+const SIDEBAR_ICON_BLEED_SCALE = 1.07;
+
+/** Rounded mask only on this shell — inner control stays square and scaled. */
+function SpaceSidebarSquircleClip({ children }: { children: React.ReactNode }) {
+  return (
+    <div
+      style={{
+        width: ICON_SIZE,
+        height: ICON_SIZE,
+        borderRadius: ICON_RADIUS,
+        overflow: "hidden",
+        flexShrink: 0,
+      }}
+    >
+      {children}
+    </div>
+  );
+}
+
+/** Square tile that fills the clip; rounding comes only from the outer shell. */
+const SIDEBAR_ICON_INNER_BUTTON_BASE: CSSProperties = {
+  width: "100%",
+  height: "100%",
+  boxSizing: "border-box",
+  border: "none",
+  padding: 0,
+  margin: 0,
+  display: "flex",
+  alignItems: "center",
+  justifyContent: "center",
+  appearance: "none",
+  WebkitAppearance: "none",
+  MozAppearance: "none",
+  transform: `scale(${SIDEBAR_ICON_BLEED_SCALE})`,
+  transformOrigin: "center center",
 };
 
 /** Width of the parent sidebar column.  Kept in sync with the outer `<div>`'s
@@ -98,6 +127,7 @@ const INDICATOR_LEFT_OFFSET =
  *  shape no longer changes on click. */
 function SpaceAvatar({ space }: { space: Room }) {
   const { resolvedColorScheme } = useTheme();
+  const fill = spaceInitialAvatarBackground(space.id, resolvedColorScheme);
   const initials = space.name
     .split(" ")
     .map((w) => w[0])
@@ -106,48 +136,35 @@ function SpaceAvatar({ space }: { space: Room }) {
     .toUpperCase();
 
   return (
-    <button
-      type="button"
-      onClick={() => {}}
-      style={{
-        ...ICON_TILE_SURFACE,
-        width: ICON_SIZE,
-        height: ICON_SIZE,
-        border: "none",
-        cursor: "pointer",
-        padding: 0,
-        flexShrink: 0,
-      }}
-    >
-      {space.avatarUrl ? (
-        <img
-          src={avatarSrc(space.avatarUrl)}
-          alt={space.name}
-          style={{
-            display: "block",
-            width: "100%",
-            height: "100%",
-            objectFit: "cover",
-          }}
-        />
-      ) : (
-        <div
-          style={{
-            width: "100%",
-            height: "100%",
-            backgroundColor: spaceInitialAvatarBackground(space.id, resolvedColorScheme),
-            color: "#fff",
-            display: "flex",
-            alignItems: "center",
-            justifyContent: "center",
-            fontSize: 14,
-            fontWeight: 600,
-          }}
-        >
-          {initials}
-        </div>
-      )}
-    </button>
+    <SpaceSidebarSquircleClip>
+      <button
+        type="button"
+        onClick={() => {}}
+        style={{
+          ...SIDEBAR_ICON_INNER_BUTTON_BASE,
+          cursor: "pointer",
+          backgroundColor: fill,
+          color: "#fff",
+          fontSize: 14,
+          fontWeight: 600,
+        }}
+      >
+        {space.avatarUrl ? (
+          <img
+            src={avatarSrc(space.avatarUrl)}
+            alt={space.name}
+            style={{
+              display: "block",
+              width: "100%",
+              height: "100%",
+              objectFit: "cover",
+            }}
+          />
+        ) : (
+          initials
+        )}
+      </button>
+    </SpaceSidebarSquircleClip>
   );
 }
 
@@ -462,37 +479,45 @@ export default function SpaceSidebar({
             mentions={homeMentionCount}
             indicatorColor={palette.textHeading}
           >
-            <button
-              type="button"
-              aria-label="Home"
-              onClick={() => onSelectSpace("")}
-              style={{
-                ...ICON_TILE_SURFACE,
-                width: ICON_SIZE,
-                height: ICON_SIZE,
-                border: "none",
-                backgroundColor: palette.accent,
-                cursor: "pointer",
-                flexShrink: 0,
-                display: "flex",
-                alignItems: "center",
-                justifyContent: "center",
-                padding: 5,
-              }}
-            >
-              <img
-                src="/logo.png"
-                alt=""
-                draggable={false}
+            <SpaceSidebarSquircleClip>
+              <button
+                type="button"
+                aria-label="Home"
+                onClick={() => onSelectSpace("")}
                 style={{
-                  width: "100%",
-                  height: "100%",
-                  objectFit: "contain",
-                  display: "block",
-                  filter: "brightness(0) invert(1)",
+                  ...SIDEBAR_ICON_INNER_BUTTON_BASE,
+                  backgroundColor: palette.accent,
+                  cursor: "pointer",
                 }}
-              />
-            </button>
+              >
+                {/* Filter on a child: `filter` can expand paint bounds; keep it
+                    inside the squircle clip so halos don’t leak past corners. */}
+                <div
+                  style={{
+                    width: "100%",
+                    height: "100%",
+                    padding: 5,
+                    boxSizing: "border-box",
+                    display: "flex",
+                    alignItems: "center",
+                    justifyContent: "center",
+                    filter: "brightness(0) invert(1)",
+                  }}
+                >
+                  <img
+                    src="/logo.png"
+                    alt=""
+                    draggable={false}
+                    style={{
+                      width: "100%",
+                      height: "100%",
+                      objectFit: "contain",
+                      display: "block",
+                    }}
+                  />
+                </div>
+              </button>
+            </SpaceSidebarSquircleClip>
           </SpaceIconRow>
         </div>
 
@@ -554,43 +579,41 @@ export default function SpaceSidebar({
         })}
 
         {/* Add space button */}
-        <button
-          type="button"
-          onClick={handleOpenDialog}
-          aria-label="Create or join a space"
-          onMouseEnter={(e) => {
-            setAddHovered(true);
-            sidebarTooltipAnchorRef.current = e.currentTarget;
-            const r = e.currentTarget.getBoundingClientRect();
-            setSidebarTooltip({
-              name: "Create or join a space",
-              left: r.right + 8,
-              top: r.top + r.height / 2,
-            });
-          }}
-          onMouseLeave={() => {
-            setAddHovered(false);
-            sidebarTooltipAnchorRef.current = null;
-            setSidebarTooltip(null);
-          }}
-          style={{
-            ...ICON_TILE_SURFACE,
-            width: ICON_SIZE,
-            height: ICON_SIZE,
-            border: "none",
-            backgroundColor: addHovered ? "#3ba55d" : palette.bgPrimary,
-            color: addHovered ? "#fff" : "#3ba55d",
-            cursor: "pointer",
-            transition: "background-color 0.2s ease, color 0.2s ease",
-            flexShrink: 0,
-            display: "flex",
-            alignItems: "center",
-            justifyContent: "center",
-            padding: 0,
-          }}
-        >
-          <Plus size={24} strokeWidth={2} />
-        </button>
+        <SpaceSidebarSquircleClip>
+          <button
+            type="button"
+            onClick={handleOpenDialog}
+            aria-label="Create or join a space"
+            onMouseEnter={(e) => {
+              setAddHovered(true);
+              sidebarTooltipAnchorRef.current = e.currentTarget;
+              const r = e.currentTarget.getBoundingClientRect();
+              setSidebarTooltip({
+                name: "Create or join a space",
+                left: r.right + 8,
+                top: r.top + r.height / 2,
+              });
+            }}
+            onMouseLeave={() => {
+              setAddHovered(false);
+              sidebarTooltipAnchorRef.current = null;
+              setSidebarTooltip(null);
+            }}
+            style={{
+              ...SIDEBAR_ICON_INNER_BUTTON_BASE,
+              backgroundColor: addHovered ? "#3ba55d" : palette.bgPrimary,
+              color: addHovered ? "#fff" : "#3ba55d",
+              cursor: "pointer",
+              transition: "background-color 0.2s ease, color 0.2s ease",
+            }}
+          >
+            <Plus
+              size={24}
+              strokeWidth={2}
+              style={{ display: "block", shapeRendering: "geometricPrecision" }}
+            />
+          </button>
+        </SpaceSidebarSquircleClip>
 
         {/* Spacer to keep settings pinned at the bottom */}
         <div style={{ flex: 1 }} />
@@ -606,43 +629,41 @@ export default function SpaceSidebar({
           }}
         />
 
-        <button
-          type="button"
-          onClick={onOpenSettings}
-          aria-label="Settings"
-          onMouseEnter={(e) => {
-            setSettingsHovered(true);
-            sidebarTooltipAnchorRef.current = e.currentTarget;
-            const r = e.currentTarget.getBoundingClientRect();
-            setSidebarTooltip({
-              name: "Settings",
-              left: r.right + 8,
-              top: r.top + r.height / 2,
-            });
-          }}
-          onMouseLeave={() => {
-            setSettingsHovered(false);
-            sidebarTooltipAnchorRef.current = null;
-            setSidebarTooltip(null);
-          }}
-          style={{
-            ...ICON_TILE_SURFACE,
-            width: ICON_SIZE,
-            height: ICON_SIZE,
-            border: "none",
-            backgroundColor: settingsHovered ? palette.bgActive : palette.bgPrimary,
-            color: settingsHovered ? palette.textPrimary : palette.textSecondary,
-            cursor: "pointer",
-            transition: "background-color 0.2s ease, color 0.2s ease",
-            flexShrink: 0,
-            display: "flex",
-            alignItems: "center",
-            justifyContent: "center",
-            padding: 0,
-          }}
-        >
-          <Settings size={22} strokeWidth={2} />
-        </button>
+        <SpaceSidebarSquircleClip>
+          <button
+            type="button"
+            onClick={onOpenSettings}
+            aria-label="Settings"
+            onMouseEnter={(e) => {
+              setSettingsHovered(true);
+              sidebarTooltipAnchorRef.current = e.currentTarget;
+              const r = e.currentTarget.getBoundingClientRect();
+              setSidebarTooltip({
+                name: "Settings",
+                left: r.right + 8,
+                top: r.top + r.height / 2,
+              });
+            }}
+            onMouseLeave={() => {
+              setSettingsHovered(false);
+              sidebarTooltipAnchorRef.current = null;
+              setSidebarTooltip(null);
+            }}
+            style={{
+              ...SIDEBAR_ICON_INNER_BUTTON_BASE,
+              backgroundColor: settingsHovered ? palette.bgActive : palette.bgPrimary,
+              color: settingsHovered ? palette.textPrimary : palette.textSecondary,
+              cursor: "pointer",
+              transition: "background-color 0.2s ease, color 0.2s ease",
+            }}
+          >
+            <Settings
+              size={22}
+              strokeWidth={2}
+              style={{ display: "block", shapeRendering: "geometricPrecision" }}
+            />
+          </button>
+        </SpaceSidebarSquircleClip>
       </div>
 
       {/* Create/Join dialog */}

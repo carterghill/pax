@@ -31,6 +31,7 @@ import {
 import CreateRoomDialog from "../components/CreateRoomDialog";
 import CreateSpaceDialog from "../components/CreateSpaceDialog";
 import LinkExistingToSpaceDialog from "../components/LinkExistingToSpaceDialog";
+import { useResolvedDmPeerAvatarUrl } from "../context/PeerAvatarContext";
 import type { SpaceChildInfo, SpaceInfo } from "../utils/spaceHomeCache";
 import { getCachedSpaceInfo, setCachedSpaceInfo } from "../utils/spaceHomeCache";
 import { avatarSrc } from "../utils/avatarSrc";
@@ -1362,6 +1363,11 @@ function RoomRow({
   const { resolvedColorScheme } = useTheme();
   const [hovered, setHovered] = useState(false);
   const [imageFailed, setImageFailed] = useState(false);
+  const resolvedAvatar = useResolvedDmPeerAvatarUrl({
+    avatarUrl: room.avatarUrl,
+    isDirect: room.isDirect,
+    dmPeerUserId: room.dmPeerUserId,
+  });
   const isVoice = room.roomType === VOICE_ROOM_TYPE;
   const isJoined = room.membership === "joined";
   const isInvited = room.membership === "invited";
@@ -1375,6 +1381,31 @@ function RoomRow({
     .join("")
     .slice(0, 2)
     .toUpperCase();
+
+  useEffect(() => {
+    setImageFailed(false);
+  }, [room.id, resolvedAvatar]);
+
+  const fallbackBg =
+    isDm && room.dmPeerUserId
+      ? userInitialAvatarBackground(room.dmPeerUserId, resolvedColorScheme)
+      : palette.bgActive;
+
+  const fallbackIcon = isVoice ? (
+    <Volume2 size={18} color={palette.textSecondary} />
+  ) : isDm ? (
+    <span
+      style={{
+        fontSize: typography.fontSizeSmall,
+        fontWeight: typography.fontWeightBold,
+        color: palette.textPrimary,
+      }}
+    >
+      {initials || "?"}
+    </span>
+  ) : (
+    <Hash size={18} color={palette.textSecondary} />
+  );
 
   return (
     <div
@@ -1394,9 +1425,9 @@ function RoomRow({
     >
       {/* Room icon or avatar */}
       <div style={{ position: "relative", width: 36, height: 36, flexShrink: 0 }}>
-        {room.avatarUrl && !imageFailed ? (
+        {resolvedAvatar && !imageFailed ? (
           <img
-            src={avatarSrc(room.avatarUrl)}
+            src={avatarSrc(resolvedAvatar)}
             alt={dmTitle}
             onError={() => setImageFailed(true)}
             style={{
@@ -1407,31 +1438,18 @@ function RoomRow({
             }}
           />
         ) : (
-          <div style={{
-            width: 36,
-            height: 36,
-            borderRadius: "50%",
-            backgroundColor:
-              isDm && room.dmPeerUserId
-                ? userInitialAvatarBackground(room.dmPeerUserId, resolvedColorScheme)
-                : palette.bgActive,
-            display: "flex",
-            alignItems: "center",
-            justifyContent: "center",
-          }}>
-            {isVoice ? (
-              <Volume2 size={18} color={palette.textSecondary} />
-            ) : isDm ? (
-              <span style={{
-                fontSize: typography.fontSizeSmall,
-                fontWeight: typography.fontWeightBold,
-                color: palette.textPrimary,
-              }}>
-                {initials || "?"}
-              </span>
-            ) : (
-              <Hash size={18} color={palette.textSecondary} />
-            )}
+          <div
+            style={{
+              width: 36,
+              height: 36,
+              borderRadius: "50%",
+              backgroundColor: fallbackBg,
+              display: "flex",
+              alignItems: "center",
+              justifyContent: "center",
+            }}
+          >
+            {fallbackIcon}
           </div>
         )}
         {isDm && isJoined && !!room.dmPeerUserId && (

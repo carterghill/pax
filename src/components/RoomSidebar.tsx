@@ -29,6 +29,7 @@ import InviteDialog from "./InviteDialog";
 import LeaveConfirmDialog from "./LeaveConfirmDialog";
 import CreateRoomDialog from "./CreateRoomDialog";
 import type { RoomsChangedPayload } from "../types/roomsChanged";
+import { useResolvedDmPeerAvatarUrl } from "../context/PeerAvatarContext";
 import { useUserVolume } from "../hooks/useUserVolume";
 import { dmPresenceDotColor, effectiveDmTitle, isDmChatUi } from "../utils/dmDisplay";
 import { resolvePresenceWithDnd, parseStatusMsg } from "../utils/statusMessage";
@@ -306,6 +307,7 @@ function ChannelBlock({
   const isHighlighted = isActive || hasUnread;
   const unreadMentions = mentionCount(room.id);
   const labelColor = isHighlighted ? palette.textHeading : palette.textSecondary;
+  const resolvedDmAvatar = useResolvedDmPeerAvatarUrl(room);
 
   return (
     <div>
@@ -361,7 +363,7 @@ function ChannelBlock({
               <DmPeerAvatar
                 peerUserId={dmPeerId}
                 displayName={effectiveDmTitle(room)}
-                avatarUrl={room.avatarUrl}
+                avatarUrl={resolvedDmAvatar}
                 size={DM_SIDEBAR_AVATAR_PX}
                 fontSize={13}
               />

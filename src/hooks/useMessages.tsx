@@ -1,6 +1,7 @@
 import { useEffect, useLayoutEffect, useState, useCallback, useRef } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
+import { usePeerAvatarRegistryOptional } from "../context/PeerAvatarContext";
 import { Message, MessageBatch } from "../types/matrix";
 
 /* ------------------------------------------------------------------ */
@@ -105,6 +106,12 @@ export function clearMessageCache() {
 /* ------------------------------------------------------------------ */
 
 export function useMessages(roomId: string | null) {
+  const peerAvatarRegistry = usePeerAvatarRegistryOptional();
+  const registerPeerAvatarsRef = useRef(peerAvatarRegistry?.registerFromMessages);
+  registerPeerAvatarsRef.current = peerAvatarRegistry?.registerFromMessages;
+  const clearPeerAvatarsRef = useRef(peerAvatarRegistry?.clearPeerAvatarPaths);
+  clearPeerAvatarsRef.current = peerAvatarRegistry?.clearPeerAvatarPaths;
+
   /* ---- State ---- */
   const [messages, setMessages] = useState<Message[]>([]);
   const [olderToken, setOlderToken] = useState<string | null>(null);
@@ -170,30 +177,40 @@ export function useMessages(roomId: string | null) {
     const target = roomId;
     initialFetchingRef.current = true;
 
-    // Free temp files + avatar_cache entries from the previous room's
-    // images.  Fire-and-forget — the initial fetch doesn't depend on it.
-    invoke("clear_media_cache").catch(() => {});
+    // Must finish before get_messages: clear_media_cache deletes all
+    // pax_avatar_* temp files. If get_messages ran in parallel, returned
+    // paths could point at files removed a moment later (broken sidebar +
+    // timeline avatars, stale peer registry).
+    void (async () => {
+      try {
+        await invoke("clear_media_cache");
+      } catch {
+        /* non-fatal */
+      }
+      clearPeerAvatarsRef.current?.();
+      if (cancelled || activeRoomIdRef.current !== target) return;
 
-    invoke<MessageBatch>("get_messages", {
-      roomId: target,
-      from: null,
-      limit: INITIAL_LOAD_SIZE,
-    })
-      .then((batch) => {
+      try {
+        const batch = await invoke<MessageBatch>("get_messages", {
+          roomId: target,
+          from: null,
+          limit: INITIAL_LOAD_SIZE,
+        });
         if (cancelled || activeRoomIdRef.current !== target) return;
         const msgs = batch.messages.slice().reverse();
         commit(msgs, batch.prevBatch, true);
+        registerPeerAvatarsRef.current?.(msgs);
         setPendingRecentCount(0);
-      })
-      .catch((e) => {
+      } catch (e) {
         if (cancelled || activeRoomIdRef.current !== target) return;
         console.error("[useMessages] initial fetch error:", e);
-      })
-      .finally(() => {
-        if (cancelled || activeRoomIdRef.current !== target) return;
-        initialFetchingRef.current = false;
-        setInitialLoading(false);
-      });
+      } finally {
+        if (!cancelled && activeRoomIdRef.current === target) {
+          initialFetchingRef.current = false;
+          setInitialLoading(false);
+        }
+      }
+    })();
 
     return () => {
       cancelled = true;
@@ -236,6 +253,7 @@ export function useMessages(roomId: string | null) {
           next = next.slice(next.length - WINDOW_SIZE);
         }
       }
+      registerPeerAvatarsRef.current?.([message]);
       messagesRef.current = next;
       setMessages(next);
     });
@@ -321,6 +339,7 @@ export function useMessages(roomId: string | null) {
       }
 
       commit(combined, batch.prevBatch, nextAtLatest);
+      registerPeerAvatarsRef.current?.(combined);
     } catch (e) {
       console.error("[useMessages] loadOlder error:", e);
     } finally {
@@ -350,6 +369,7 @@ export function useMessages(roomId: string | null) {
 
       const msgs = batch.messages.slice().reverse();
       commit(msgs, batch.prevBatch, true);
+      registerPeerAvatarsRef.current?.(msgs);
       setPendingRecentCount(0);
     } catch (e) {
       console.error("[useMessages] jumpToRecent error:", e);
@@ -405,6 +425,7 @@ export function useMessages(roomId: string | null) {
       }
 
       commit(combined, batch.prevBatch, true);
+      registerPeerAvatarsRef.current?.(combined);
     } catch (e) {
       console.error("[useMessages] refresh error:", e);
     }

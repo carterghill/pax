@@ -11,6 +11,7 @@ import { useMatrixUserProfile } from "../hooks/useMatrixUserProfile";
 import { useTheme } from "../theme/ThemeContext";
 import { Message, Room } from "../types/matrix";
 import { useResizeHandle } from "../hooks/useResizeHandle";
+import { useResolvedDmPeerAvatarUrl } from "../context/PeerAvatarContext";
 import { effectiveDmTitle, isDmChatUi } from "../utils/dmDisplay";
 
 const USER_MENU_DEFAULT_WIDTH = 240;
@@ -158,6 +159,10 @@ export default function ChatView({
   const [localTyping, setLocalTyping] = useState(false);
   const [showUsers, setShowUsers] = useState(true);
   const [editingMessage, setEditingMessage] = useState<EditingMessageRef | null>(null);
+
+  const resolvedDmPeerAvatar = useResolvedDmPeerAvatarUrl(
+    activeRoom ?? { avatarUrl: null, isDirect: false, dmPeerUserId: null },
+  );
 
   const containerRef = useRef<HTMLDivElement>(null);
   const userMenuResize = useResizeHandle({
@@ -328,7 +333,7 @@ export default function ChatView({
           <DmPeerAvatar
             peerUserId={activeRoom.dmPeerUserId ?? activeRoom.id}
             displayName={effectiveDmTitle(activeRoom)}
-            avatarUrl={activeRoom.avatarUrl}
+            avatarUrl={resolvedDmPeerAvatar}
             size={32}
           />
           <div style={{ flex: 1, minWidth: 0 }}>
