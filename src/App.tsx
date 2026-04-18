@@ -164,15 +164,6 @@ function App() {
   const [tab, setTab] = useState<"login" | "signup">("login");
   const [authConfig, setAuthConfig] = useState<AuthConfig | null>(null);
 
-  const {
-    spaces,
-    roomsBySpace,
-    getRoom,
-    fetchRooms,
-    upsertOptimisticRoom,
-    initialLoadComplete,
-  } = useRooms(userId);
-
   // Open all external (http/https) link clicks in the system browser.
   useExternalLinkInterceptor();
 
@@ -307,24 +298,19 @@ function App() {
     setError(null);
   }
 
-  if (userId && !initialLoadComplete) {
-    return (
-      <div style={authStyles.container}>
-        <div style={authStyles.logoWrap}>
-          <img src="/logo.png" alt="Pax" style={authStyles.logoImg} />
-        </div>
-        <p style={authStyles.signingIn}>Loading rooms...</p>
-      </div>
-    );
-  }
-
   if (userId) {
+    // `useRooms` primes the `UserAvatarStore` from the get_rooms
+    // response, so it MUST run inside `<UserAvatarStoreProvider>` —
+    // `useUserAvatarStoreOptional()` in App's own scope returns null
+    // (the provider doesn't exist yet at that level) and the
+    // priming path silently no-ops. Split out into a child
+    // component so hooks run in the right context.
     return (
       <UserAvatarStoreProvider>
-        <MainLayout
+        <AuthedApp
           userId={userId}
           onSignOut={handleSignOut}
-          rooms={{ spaces, roomsBySpace, getRoom, fetchRooms, upsertOptimisticRoom }}
+          loadingStyles={authStyles}
         />
       </UserAvatarStoreProvider>
     );
@@ -462,6 +448,63 @@ function App() {
         {error && <p style={authStyles.error}>{error}</p>}
       </div>
     </div>
+  );
+}
+
+type LoadingStyles = {
+  container: React.CSSProperties;
+  logoWrap: React.CSSProperties;
+  logoImg: React.CSSProperties;
+  signingIn: React.CSSProperties;
+};
+
+/**
+ * Authenticated-session shell.
+ *
+ * This component exists so `useRooms` runs inside
+ * `<UserAvatarStoreProvider>` — the provider is rendered by `App`,
+ * which means hooks in `App` itself live *outside* the provider's
+ * context. Without this split, `useUserAvatarStoreOptional()` in
+ * `useRooms` returns null and the `primeDmPeerAvatars` fast-path
+ * silently does nothing; every DM avatar then has to go through the
+ * `requestFetch` fallback, which causes the frame-or-two initials
+ * flash on every warm restart.
+ */
+function AuthedApp({
+  userId,
+  onSignOut,
+  loadingStyles,
+}: {
+  userId: string;
+  onSignOut: () => void;
+  loadingStyles: LoadingStyles;
+}) {
+  const {
+    spaces,
+    roomsBySpace,
+    getRoom,
+    fetchRooms,
+    upsertOptimisticRoom,
+    initialLoadComplete,
+  } = useRooms(userId);
+
+  if (!initialLoadComplete) {
+    return (
+      <div style={loadingStyles.container}>
+        <div style={loadingStyles.logoWrap}>
+          <img src="/logo.png" alt="Pax" style={loadingStyles.logoImg} />
+        </div>
+        <p style={loadingStyles.signingIn}>Loading rooms...</p>
+      </div>
+    );
+  }
+
+  return (
+    <MainLayout
+      userId={userId}
+      onSignOut={onSignOut}
+      rooms={{ spaces, roomsBySpace, getRoom, fetchRooms, upsertOptimisticRoom }}
+    />
   );
 }
 

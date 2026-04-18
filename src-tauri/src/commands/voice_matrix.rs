@@ -13,7 +13,7 @@ use tauri::{Emitter, State};
 use crate::types::{LivekitVoiceParticipantInfo, VoiceJoinResult, VoiceParticipant};
 use crate::{screen, voice, AppState, LivekitConfig};
 
-use super::{fmt_error_chain, get_or_fetch_avatar};
+use super::{fmt_error_chain, get_or_fetch_avatar, AvatarDiskCache};
 
 /// Matrix room type for voice channels (MSC3417).
 /// Also defined in the frontend at `src/utils/matrix.ts` — keep both in sync.
@@ -109,7 +109,7 @@ async fn collect_active_call_users(room: &Room) -> Vec<String> {
 
 async fn collect_room_voice_participants(
     room: &Room,
-    avatar_cache: &Arc<tokio::sync::Mutex<HashMap<String, String>>>,
+    avatar_cache: &Arc<AvatarDiskCache>,
 ) -> Vec<VoiceParticipant> {
     let active_user_ids = collect_active_call_users(room).await;
     let mut participants = Vec::new();
@@ -145,7 +145,7 @@ async fn collect_room_voice_participants(
 
 pub(crate) async fn collect_voice_participants_for_joined_voice_rooms(
     client: &Client,
-    avatar_cache: &Arc<tokio::sync::Mutex<HashMap<String, String>>>,
+    avatar_cache: &Arc<AvatarDiskCache>,
 ) -> HashMap<String, Vec<VoiceParticipant>> {
     let mut participants_by_room: HashMap<String, Vec<VoiceParticipant>> = HashMap::new();
 
@@ -589,7 +589,7 @@ async fn send_or_fallback_leave(
 /// without waiting for the next sync response.
 pub(crate) async fn force_emit_voice_participants(
     client: &Client,
-    avatar_cache: &Arc<tokio::sync::Mutex<HashMap<String, String>>>,
+    avatar_cache: &Arc<AvatarDiskCache>,
     app_handle: &tauri::AppHandle,
 ) {
     let participants_by_room =

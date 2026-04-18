@@ -48,7 +48,7 @@ tauri-plugin-notification = "2"
 nnnoiseless = "0.5.2"
 screenshots = "0.8"
 mime = "0.3"
-uuid = { version = "1", features = ["v4"] }
+uuid = { version = "1", features = ["v4", "v5"] }
 
 # Native GPU overlay rendering (zero-IPC video)
 wgpu = "25"

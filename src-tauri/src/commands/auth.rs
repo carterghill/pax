@@ -113,7 +113,7 @@ pub async fn logout(state: State<'_, Arc<AppState>>, app: tauri::AppHandle) -> R
         m.clear();
     }
     *state.client.lock().await = None;
-    state.avatar_cache.lock().await.clear();
+    state.avatar_cache.clear().await;
     state.presence_map.lock().await.clear();
     *state.sync_running.lock().await = false;
 

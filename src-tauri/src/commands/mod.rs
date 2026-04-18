@@ -1,4 +1,5 @@
 pub mod auth;
+pub mod avatar_cache;
 pub mod codec;
 pub mod config;
 pub mod embed;
@@ -16,14 +17,14 @@ pub mod rooms;
 pub mod unread;
 pub mod voice_matrix;
 
-use std::collections::HashMap;
 use std::sync::Arc;
 
 use data_encoding::BASE64;
 use matrix_sdk::{Client, Room};
-use tokio::sync::Mutex;
 
 use crate::AppState;
+
+pub(crate) use avatar_cache::AvatarDiskCache;
 
 /// Tauri app-scoped temp directory.  Set once during `setup()` in lib.rs.
 /// Falls back to `std::env::temp_dir()` if never initialised (shouldn't
@@ -128,27 +129,42 @@ fn mime_to_avatar_ext(mime: &str) -> &'static str {
 
 /// Fetch an avatar by MXC URI, with cache.
 ///
-/// Avatar bytes are written to a temp file and cached as a raw
-/// filesystem path.  The frontend converts it to an `asset://` URL
-/// via `convertFileSrc()` — the same pattern used for every other
-/// media path in the app.
+/// Avatar bytes are written to a deterministic file under the
+/// persistent avatar directory (`{app_cache_dir}/avatars/`) and
+/// cached as a raw filesystem path. The frontend converts it to an
+/// `asset://` URL via `convertFileSrc()` — the same pattern used for
+/// every other media path in the app.
 ///
-/// `fetch_bytes` is a future that downloads the image — callers pass in
-/// `room.avatar(MediaFormat::File)` or `member.avatar(MediaFormat::File)`.
+/// Because the filename is UUID-v5-derived from the MXC URI, the
+/// same MXC always maps to the same on-disk file; the cache
+/// survives app restart and the bytes don't need to be re-downloaded.
+/// If the persistent dir isn't initialised yet (very early in setup,
+/// or on a platform where `app_cache_dir()` fails), we fall back to
+/// the Tauri temp dir with a UUID-v4 name — behaviour matches the
+/// pre-disk-cache implementation for that session.
+///
+/// `fetch_bytes` is a future that downloads the image — callers pass
+/// in `room.avatar(MediaFormat::File)` or
+/// `member.avatar(MediaFormat::File)`.
 pub(crate) async fn get_or_fetch_avatar(
     mxc_uri: Option<&matrix_sdk::ruma::MxcUri>,
     fetch_bytes: impl std::future::Future<Output = Result<Option<Vec<u8>>, matrix_sdk::Error>>,
-    avatar_cache: &Arc<Mutex<HashMap<String, String>>>,
+    avatar_cache: &Arc<AvatarDiskCache>,
 ) -> Option<String> {
     let mxc = mxc_uri?.to_string();
 
-    // Cache hit — return immediately if the value is a file-backed path.
-    // Old `data:` entries are treated as stale and re-fetched below.
-    {
-        let cache = avatar_cache.lock().await;
-        if let Some(cached) = cache.get(&mxc) {
-            if !cached.starts_with("data:") {
-                return Some(cached.clone());
+    // Cache hit — filesystem-backed entries only. `data:` URLs are
+    // treated as stale and re-fetched (they're leftovers from the
+    // knock-member path before the temp-file migration).
+    if let Some(cached) = avatar_cache.get(&mxc).await {
+        if !cached.starts_with("data:") {
+            // Defensive: if the on-disk file was wiped behind us
+            // (manual cache-dir deletion, etc.), fall through to
+            // re-download rather than trap callers on a dead path.
+            // The frontend `<img onError>` path would eventually
+            // recover, but re-fetching here avoids the flash.
+            if std::path::Path::new(&cached).is_file() {
+                return Some(cached);
             }
         }
     }
@@ -161,14 +177,24 @@ pub(crate) async fn get_or_fetch_avatar(
 
     let mime = sniff_image_mime(&bytes);
     let ext = mime_to_avatar_ext(mime);
-    let td = temp_dir();
-    let path = td.join(format!("pax_avatar_{}.{}", uuid::Uuid::new_v4(), ext));
+
+    // Prefer the persistent avatar dir; if it's not initialised yet
+    // fall back to the Tauri temp dir so the avatar still renders
+    // this session (just won't survive a restart).
+    let (dir, filename) = match avatar_cache.dir() {
+        Some(d) => (d, AvatarDiskCache::filename_for_mxc(&mxc, ext)),
+        None => (
+            temp_dir(),
+            format!("pax_avatar_{}.{}", uuid::Uuid::new_v4(), ext),
+        ),
+    };
+    let path = dir.join(&filename);
 
     if std::fs::write(&path, &bytes).is_err() {
         return None;
     }
 
     let path_str = path.to_str()?.to_string();
-    avatar_cache.lock().await.insert(mxc, path_str.clone());
+    avatar_cache.insert(mxc, path_str.clone()).await;
     Some(path_str)
 }

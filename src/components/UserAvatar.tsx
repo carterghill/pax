@@ -116,9 +116,30 @@ export default function UserAvatar({
       {showImage ? (
         <img
           src={avatarSrc(effectiveUrl)}
-          alt={label}
-          loading="lazy"
-          decoding="async"
+          // No `loading="lazy"`: avatars are tiny and above-the-fold
+          // everywhere they appear. Chromium's lazy-load intervention
+          // swaps in a placeholder for a frame (see browser console
+          // `[Intervention] Images loaded lazily and replaced with
+          // placeholders`) and renders the alt text on top of the
+          // container's color-by-id background — producing a
+          // pixel-perfect facsimile of our initials fallback for one
+          // or two frames before the real image paints. Eager loading
+          // + empty alt eliminates that flash.
+          //
+          // No `alt`: the user's display name is always shown next to
+          // the avatar in every callsite (sidebar rows, member lists,
+          // DM banners, message authors), so the img is decorative
+          // here. An empty alt keeps accessibility tools from
+          // double-announcing the name, and removes the fuel for the
+          // placeholder-text flash.
+          alt=""
+          // `decoding="sync"` pairs with the preload done in
+          // `UserAvatarStore.writeEntry` / hydration: by the time
+          // this `<img>` actually mounts, the bytes are already in
+          // the browser's image cache, and sync decoding forces the
+          // pixels to be ready in the same frame the element is
+          // laid out — no blank-box interstitial.
+          decoding="sync"
           onError={() => {
             setImageFailed(true);
             // The on-disk temp file probably got cleaned up — drop the

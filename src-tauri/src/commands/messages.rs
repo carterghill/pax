@@ -1200,16 +1200,13 @@ pub async fn get_matrix_image_path(
 
     let cache_key = format!("mmedia:{}", params.unique_key());
 
-    {
-        let mut cache = state.avatar_cache.lock().await;
-        if let Some(existing) = cache.get(&cache_key).cloned() {
-            if existing.starts_with("data:") {
-                cache.remove(&cache_key);
-            } else if std::path::Path::new(&existing).is_file() {
-                return Ok(existing);
-            } else {
-                cache.remove(&cache_key);
-            }
+    if let Some(existing) = state.avatar_cache.get(&cache_key).await {
+        if existing.starts_with("data:") {
+            state.avatar_cache.remove(&cache_key).await;
+        } else if std::path::Path::new(&existing).is_file() {
+            return Ok(existing);
+        } else {
+            state.avatar_cache.remove(&cache_key).await;
         }
     }
 
@@ -1285,9 +1282,8 @@ pub async fn get_matrix_image_path(
 
     state
         .avatar_cache
-        .lock()
-        .await
-        .insert(cache_key, path_str.clone());
+        .insert(cache_key, path_str.clone())
+        .await;
 
     Ok(path_str)
 }
@@ -1309,20 +1305,11 @@ pub async fn get_matrix_image_path(
 pub async fn clear_media_cache(
     state: State<'_, Arc<AppState>>,
 ) -> Result<u32, String> {
-    let mut cache = state.avatar_cache.lock().await;
-
-    let stale_keys: Vec<String> = cache
-        .iter()
-        .filter(|(k, _)| k.starts_with("mmedia:"))
-        .map(|(k, _)| k.clone())
-        .collect();
-
-    for key in &stale_keys {
-        cache.remove(key);
-    }
-
-    let evicted = stale_keys.len();
-    drop(cache); // release lock before I/O
+    // Evict only the `mmedia:` entries — avatars (persistent on disk,
+    // tiny, shared across every view) are deliberately preserved so
+    // we don't cascade 404s into every on-screen `<img>` the moment
+    // the user switches rooms.
+    let evicted = state.avatar_cache.remove_by_prefix("mmedia:").await.len();
 
     let temp_dir = super::temp_dir();
     let mut deleted = 0u32;

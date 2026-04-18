@@ -55,7 +55,7 @@ pub async fn set_user_avatar(
         .map_err(|e| format!("Failed to upload avatar: {}", fmt_error_chain(&e)))?;
 
     // Invalidate the cached avatar so the UI picks up the new one
-    state.avatar_cache.lock().await.clear();
+    state.avatar_cache.clear().await;
 
     // Return a data URL so the frontend can display it immediately
     Ok(encode_avatar_data_url(&bytes))
@@ -78,6 +78,6 @@ pub async fn remove_user_avatar(state: State<'_, Arc<AppState>>) -> Result<(), S
         .await
         .map_err(|e| format!("Failed to remove avatar: {}", fmt_error_chain(&e)))?;
 
-    state.avatar_cache.lock().await.clear();
+    state.avatar_cache.clear().await;
     Ok(())
 }

@@ -12,7 +12,7 @@ use crate::types::{
 };
 use crate::AppState;
 
-use super::{fmt_error_chain, get_client, get_or_fetch_avatar, resolve_room, encode_bytes_data_url, sniff_image_mime};
+use super::{fmt_error_chain, get_client, get_or_fetch_avatar, resolve_room, encode_bytes_data_url, sniff_image_mime, AvatarDiskCache};
 use matrix_sdk::media::{MediaFormat, MediaRequestParameters};
 use matrix_sdk::ruma::api::client::profile::get_profile::v3::Request as GetProfileRequest;
 use matrix_sdk::ruma::api::client::profile::{AvatarUrl, DisplayName};
@@ -62,7 +62,7 @@ pub async fn get_room_members(
     let status_msg_snapshot = state.status_msg_map.lock().await.clone();
 
     // Cache-only avatar lookup — no HTTP, returns instantly.
-    let cache_snapshot = avatar_cache.lock().await;
+    let cache_snapshot = avatar_cache.snapshot().await;
     let mut missing_avatars: Vec<(String, matrix_sdk::room::RoomMember)> = Vec::new();
 
     let result: Vec<RoomMemberInfo> = members
@@ -148,7 +148,7 @@ pub async fn get_room_management_members(
 
     let presence_map = state.presence_map.lock().await.clone();
     let status_msg_snapshot = state.status_msg_map.lock().await.clone();
-    let avatar_snapshot = state.avatar_cache.lock().await.clone();
+    let avatar_snapshot = state.avatar_cache.snapshot().await;
 
     let my_id = client.user_id().ok_or("Not logged in")?;
     let self_member_opt = room
@@ -581,10 +581,7 @@ pub async fn get_knock_members(
             // Resolve avatar to data URL if available
             let avatar_url = if let Some(mxc_uri) = mxc {
                 // Check cache first
-                let cached = {
-                    let cache = avatar_cache.lock().await;
-                    cache.get(mxc_uri).cloned()
-                };
+                let cached = avatar_cache.get(mxc_uri).await;
                 if let Some(data_url) = cached {
                     Some(data_url)
                 } else {
@@ -610,8 +607,9 @@ pub async fn get_knock_members(
                                 if let Ok(bytes) = r.bytes().await {
                                     let mime = sniff_image_mime(&bytes);
                                     let data_url = encode_bytes_data_url(&bytes, mime);
-                                    avatar_cache.lock().await
-                                        .insert(mxc_uri.to_string(), data_url.clone());
+                                    avatar_cache
+                                        .insert(mxc_uri.to_string(), data_url.clone())
+                                        .await;
                                     Some(data_url)
                                 } else {
                                     None
@@ -970,13 +968,10 @@ async fn resolve_mxc_avatar_data_url(
     http: &reqwest::Client,
     homeserver: &str,
     mxc_uri: &str,
-    avatar_cache: &Arc<tokio::sync::Mutex<HashMap<String, String>>>,
+    avatar_cache: &Arc<AvatarDiskCache>,
 ) -> Option<String> {
-    {
-        let cache = avatar_cache.lock().await;
-        if let Some(cached) = cache.get(mxc_uri) {
-            return Some(cached.clone());
-        }
+    if let Some(cached) = avatar_cache.get(mxc_uri).await {
+        return Some(cached);
     }
 
     let thumb = mxc_uri
@@ -1000,9 +995,8 @@ async fn resolve_mxc_avatar_data_url(
                 let mime = sniff_image_mime(&bytes);
                 let data_url = encode_bytes_data_url(&bytes, mime);
                 avatar_cache
-                    .lock()
-                    .await
-                    .insert(mxc_uri.to_string(), data_url.clone());
+                    .insert(mxc_uri.to_string(), data_url.clone())
+                    .await;
                 return Some(data_url);
             }
         }

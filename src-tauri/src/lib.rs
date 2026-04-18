@@ -49,7 +49,7 @@ pub struct AppState {
     pub http_client: reqwest::Client,
     pub presence_map: Arc<Mutex<HashMap<String, String>>>,
     pub status_msg_map: Arc<Mutex<HashMap<String, String>>>,
-    pub avatar_cache: Arc<Mutex<HashMap<String, String>>>,
+    pub avatar_cache: Arc<commands::avatar_cache::AvatarDiskCache>,
     pub sync_running: Arc<Mutex<bool>>,
     /// Background `sync_with_callback` task — must be aborted before deleting the SQLite store
     /// or replacing `client`, otherwise the DB stays locked (especially on Windows).
@@ -232,7 +232,7 @@ pub fn run() {
         http_client: reqwest::Client::new(),
         presence_map: Arc::new(Mutex::new(HashMap::new())),
         status_msg_map: Arc::new(Mutex::new(HashMap::new())),
-        avatar_cache: Arc::new(Mutex::new(HashMap::new())),
+        avatar_cache: Arc::new(commands::avatar_cache::AvatarDiskCache::new()),
         sync_running: Arc::new(Mutex::new(false)),
         sync_join: Mutex::new(None),
         display_server,
@@ -418,6 +418,29 @@ pub fn run() {
                 let _ = commands::TAURI_TEMP_DIR.set(tauri_temp);
             }
 
+            // Persistent avatar cache directory. Lives under the
+            // platform's app-cache dir (not the temp dir, which
+            // browsers / OSs are free to sweep and which we ourselves
+            // clean on startup below). Surviving restart is the whole
+            // reason this cache exists — it stops the sidebar DM
+            // avatars from flashing back to initials for a frame or
+            // two while `get_rooms` round-trips.
+            if let Ok(cache_root) = app.path().app_cache_dir() {
+                let avatar_dir = cache_root.join("avatars");
+                let avatar_cache = app.state::<Arc<AppState>>().avatar_cache.clone();
+                if let Err(e) = tauri::async_runtime::block_on(
+                    avatar_cache.init_with_dir(avatar_dir),
+                ) {
+                    log::warn!(
+                        "[avatar_cache] init failed: {e}; avatars will not persist this session"
+                    );
+                }
+            } else {
+                log::warn!(
+                    "[avatar_cache] app_cache_dir() unavailable; avatars will not persist this session"
+                );
+            }
+
             // Set window icon (taskbar + title bar) from our bundled icons
             let main_window = app
                 .get_webview_window("main")
@@ -426,6 +449,12 @@ pub fn run() {
             let _ = main_window.set_icon(icon);
 
             // Clean up leftover proxy media temp files from previous sessions.
+            // NOTE: this sweeps the Tauri *temp* dir — the persistent
+            // avatar cache in `app_cache_dir()/avatars/` is separate
+            // and is untouched by this cleanup. The `pax_avatar_*`
+            // files we clean here are legacy UUID-v4 temp avatars
+            // from the pre-disk-cache code path (and rare fallback
+            // writes when `app_cache_dir()` init fails).
             {
                 let temp_dir = app.path().temp_dir().ok();
                 if let Some(temp_dir) = temp_dir {

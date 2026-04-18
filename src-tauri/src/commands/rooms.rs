@@ -16,7 +16,7 @@ use crate::AppState;
 use super::auth::{
     save_session_to_credentials, spawn_cleanup_stale_matrix_stores, SavedCredentials, SavedSession,
 };
-use super::{fmt_error_chain, get_or_fetch_avatar};
+use super::{fmt_error_chain, get_or_fetch_avatar, AvatarDiskCache};
 
 fn app_data_dir(app: &tauri::AppHandle) -> Result<std::path::PathBuf, String> {
     app.path()
@@ -335,7 +335,7 @@ async fn finish_registration(
 
     *state.client.lock().await = Some(client);
     *state.sync_running.lock().await = false;
-    state.avatar_cache.lock().await.clear();
+    state.avatar_cache.clear().await;
     log::info!("register: done — user_id={}", user_id);
     Ok(user_id)
 }
@@ -393,7 +393,7 @@ pub async fn login(
 
     *state.client.lock().await = Some(client);
     *state.sync_running.lock().await = false;
-    state.avatar_cache.lock().await.clear();
+    state.avatar_cache.clear().await;
     log::info!("login: done — user_id={}", user_id);
     Ok(user_id)
 }
@@ -546,7 +546,7 @@ const GET_ROOMS_AVATAR_CONCURRENCY: usize = 24;
 /// 1:1 direct message: use peer display name, avatar, and presence (like Element).
 async fn dm_one_to_one_peer_summary(
     room: &matrix_sdk::Room,
-    avatar_cache: &Arc<Mutex<HashMap<String, String>>>,
+    avatar_cache: &Arc<AvatarDiskCache>,
     presence_map: &Arc<Mutex<HashMap<String, String>>>,
     status_msg_map: &Arc<Mutex<HashMap<String, String>>>,
 ) -> Option<(String, Option<String>, String, String, Option<String>)> {
