@@ -113,7 +113,7 @@ export default function MainLayout({
   // MainLayout so one subscription serves both the sidebar today and future
   // consumers (e.g. a window-title unread badge) without duplicating listeners.
   const roomUnread = useUnreadRooms(userId);
-  const { isUnread, mentionCount } = roomUnread;
+  const { isUnread } = roomUnread;
 
   // Notification settings drive DM-badge muting: a DM explicitly set to
   // `none` (or inheriting `none` from a parent space / global default)

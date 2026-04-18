@@ -1,4 +1,5 @@
 import { useState, useCallback, useEffect, useRef, useMemo } from "react";
+import type { CSSProperties } from "react";
 import { createPortal } from "react-dom";
 import { invoke } from "@tauri-apps/api/core";
 import { Plus, Settings } from "lucide-react";
@@ -49,6 +50,18 @@ const ICON_SIZE = 48;
  *  exactly the spacing jitter we're getting rid of. */
 const ICON_RADIUS = 16;
 
+/** Shared surface styles for every 48×48 sidebar tile.
+ *
+ * Rounded rects can show a 1px light “halo” at the corners when the
+ * anti-aliased edge blends with whatever is behind the layer (often the
+ * webview default). `overflow: hidden` + `isolation` keeps paint self-contained
+ * so the curve composites against the tile’s own background. */
+const ICON_TILE_SURFACE: CSSProperties = {
+  borderRadius: ICON_RADIUS,
+  overflow: "hidden",
+  isolation: "isolate",
+};
+
 /** Width of the parent sidebar column.  Kept in sync with the outer `<div>`'s
  *  explicit `width`.  Used to position the left-edge indicator relative to the
  *  window edge instead of the individual icon (otherwise the indicator ends up
@@ -97,12 +110,11 @@ function SpaceAvatar({ space }: { space: Room }) {
       type="button"
       onClick={() => {}}
       style={{
+        ...ICON_TILE_SURFACE,
         width: ICON_SIZE,
         height: ICON_SIZE,
-        borderRadius: ICON_RADIUS,
         border: "none",
         cursor: "pointer",
-        overflow: "hidden",
         padding: 0,
         flexShrink: 0,
       }}
@@ -455,9 +467,9 @@ export default function SpaceSidebar({
               aria-label="Home"
               onClick={() => onSelectSpace("")}
               style={{
+                ...ICON_TILE_SURFACE,
                 width: ICON_SIZE,
                 height: ICON_SIZE,
-                borderRadius: ICON_RADIUS,
                 border: "none",
                 backgroundColor: palette.accent,
                 cursor: "pointer",
@@ -562,9 +574,9 @@ export default function SpaceSidebar({
             setSidebarTooltip(null);
           }}
           style={{
+            ...ICON_TILE_SURFACE,
             width: ICON_SIZE,
             height: ICON_SIZE,
-            borderRadius: ICON_RADIUS,
             border: "none",
             backgroundColor: addHovered ? "#3ba55d" : palette.bgPrimary,
             color: addHovered ? "#fff" : "#3ba55d",
@@ -614,9 +626,9 @@ export default function SpaceSidebar({
             setSidebarTooltip(null);
           }}
           style={{
+            ...ICON_TILE_SURFACE,
             width: ICON_SIZE,
             height: ICON_SIZE,
-            borderRadius: ICON_RADIUS,
             border: "none",
             backgroundColor: settingsHovered ? palette.bgActive : palette.bgPrimary,
             color: settingsHovered ? palette.textPrimary : palette.textSecondary,
