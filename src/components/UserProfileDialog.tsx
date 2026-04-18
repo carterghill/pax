@@ -7,9 +7,8 @@ import { useOverlayObstruction } from "../hooks/useOverlayObstruction";
 import ModalLayer from "./ModalLayer";
 import { usePresenceContext } from "../hooks/PresenceContext";
 import type { RoomMemberProfile } from "../types/matrix";
-import { userInitialAvatarBackground } from "../utils/userAvatarColor";
 import { resolvePresenceWithDnd, parseStatusMsg } from "../utils/statusMessage";
-import { avatarSrc } from "../utils/avatarSrc";
+import UserAvatar from "./UserAvatar";
 
 const ROLE_META: Record<
   RoomMemberProfile["role"],
@@ -265,35 +264,14 @@ export default function UserProfileDialog({
                     backgroundColor: palette.bgTertiary,
                   }}
                 />
-              ) : profile?.avatarUrl ? (
-                <img
-                  src={avatarSrc(profile.avatarUrl)}
-                  alt=""
-                  style={{
-                    width: avatarPx,
-                    height: avatarPx,
-                    borderRadius: "50%",
-                    objectFit: "cover",
-                    display: "block",
-                  }}
-                />
               ) : (
-                <div
-                  style={{
-                    width: avatarPx,
-                    height: avatarPx,
-                    borderRadius: "50%",
-                    backgroundColor: userInitialAvatarBackground(userId, resolvedColorScheme),
-                    color: "#fff",
-                    display: "flex",
-                    alignItems: "center",
-                    justifyContent: "center",
-                    fontSize: 34,
-                    fontWeight: typography.fontWeightBold,
-                  }}
-                >
-                  {(displayName ?? userId).charAt(0).toUpperCase()}
-                </div>
+                <UserAvatar
+                  userId={userId}
+                  displayName={displayName ?? profile?.displayName}
+                  avatarUrlHint={profile?.avatarUrl}
+                  size={avatarPx}
+                  fontSize={34}
+                />
               )}
             </div>
           </div>

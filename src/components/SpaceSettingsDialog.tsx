@@ -80,7 +80,7 @@ export default function SpaceSettingsDialog({
   onClose,
   onSaved,
 }: SpaceSettingsDialogProps) {
-  const { palette, typography, spacing, resolvedColorScheme } = useTheme();
+  const { palette, typography, spacing } = useTheme();
   const modalRef = useRef<HTMLDivElement>(null);
   useOverlayObstruction(modalRef);
 
@@ -1100,7 +1100,6 @@ export default function SpaceSettingsDialog({
                       alwaysShow
                       onKick={openKickDialog}
                       onBan={openBanDialog}
-                      resolvedColorScheme={resolvedColorScheme}
                     />
 
                     {/* Moderator */}
@@ -1115,7 +1114,6 @@ export default function SpaceSettingsDialog({
                       alwaysShow
                       onKick={openKickDialog}
                       onBan={openBanDialog}
-                      resolvedColorScheme={resolvedColorScheme}
                     />
 
                     {/* Member */}
@@ -1130,7 +1128,6 @@ export default function SpaceSettingsDialog({
                       alwaysShow
                       onKick={openKickDialog}
                       onBan={openBanDialog}
-                      resolvedColorScheme={resolvedColorScheme}
                     />
 
                     {/* Banned */}
@@ -1146,7 +1143,6 @@ export default function SpaceSettingsDialog({
                       onPrimaryAction={openUnbanDialog}
                       primaryActionLabel="Unban"
                       actionBusyUserId={unbanBusyId}
-                      resolvedColorScheme={resolvedColorScheme}
                     />
                   </div>
 

@@ -1,7 +1,7 @@
 import { useState, useCallback, useEffect, useMemo } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
-import DmPeerAvatar from "./DmPeerAvatar";
+import UserAvatar from "./UserAvatar";
 import {
   Hash,
   House,
@@ -29,7 +29,6 @@ import InviteDialog from "./InviteDialog";
 import LeaveConfirmDialog from "./LeaveConfirmDialog";
 import CreateRoomDialog from "./CreateRoomDialog";
 import type { RoomsChangedPayload } from "../types/roomsChanged";
-import { useResolvedDmPeerAvatarUrl } from "../context/PeerAvatarContext";
 import { useUserVolume } from "../hooks/useUserVolume";
 import { dmPresenceDotColor, effectiveDmTitle, isDmChatUi } from "../utils/dmDisplay";
 import { resolvePresenceWithDnd, parseStatusMsg } from "../utils/statusMessage";
@@ -40,8 +39,6 @@ import {
   parsePendingDmPeerUserId,
   voiceStateLookupKeysForParticipant,
 } from "../utils/matrix";
-import { userInitialAvatarBackground } from "../utils/userAvatarColor";
-import { avatarSrc } from "../utils/avatarSrc";
 
 /** DM peer circle in the channel list (slightly larger than default 16px icons). */
 const DM_SIDEBAR_AVATAR_PX = 28;
@@ -135,7 +132,7 @@ function VoiceParticipantRow({
   isConnecting: boolean;
   onContextMenu: (e: React.MouseEvent) => void;
 }) {
-  const { palette, spacing, typography, resolvedColorScheme } = useTheme();
+  const { palette, spacing, typography } = useTheme();
   const name = participant.displayName ?? participant.userId;
 
   return (
@@ -155,42 +152,18 @@ function VoiceParticipantRow({
       color: palette.textSecondary,
       cursor: isLocalUser ? "default" : "context-menu",
     }}>
-      {participant.avatarUrl ? (
-        <img
-          src={avatarSrc(participant.avatarUrl)}
-          alt={name}
-          style={{
-            display: "block",
-            width: 20,
-            height: 20,
-            borderRadius: "50%",
-            objectFit: "cover",
-            flexShrink: 0,
-            boxSizing: "border-box",
-            boxShadow: isSpeaking ? "0 0 0 2px #23a55a" : "none",
-            transition: "box-shadow 0.15s ease",
-          }}
-        />
-      ) : (
-        <div style={{
-          width: 20,
-          height: 20,
-          borderRadius: "50%",
-          backgroundColor: userInitialAvatarBackground(participant.userId, resolvedColorScheme),
-          color: "#fff",
-          display: "flex",
-          alignItems: "center",
-          justifyContent: "center",
-          fontSize: 10,
-          fontWeight: typography.fontWeightBold,
-          flexShrink: 0,
+      <UserAvatar
+        userId={participant.userId}
+        displayName={name}
+        avatarUrlHint={participant.avatarUrl}
+        size={20}
+        fontSize={10}
+        style={{
           boxSizing: "border-box",
           boxShadow: isSpeaking ? "0 0 0 2px #23a55a" : "none",
           transition: "box-shadow 0.15s ease",
-        }}>
-          {name.charAt(0).toUpperCase()}
-        </div>
-      )}
+        }}
+      />
       <span style={{
         overflow: "hidden",
         textOverflow: "ellipsis",
@@ -307,7 +280,6 @@ function ChannelBlock({
   const isHighlighted = isActive || hasUnread;
   const unreadMentions = mentionCount(room.id);
   const labelColor = isHighlighted ? palette.textHeading : palette.textSecondary;
-  const resolvedDmAvatar = useResolvedDmPeerAvatarUrl(room);
 
   return (
     <div>
@@ -360,10 +332,10 @@ function ChannelBlock({
                 flexShrink: 0,
               }}
             >
-              <DmPeerAvatar
-                peerUserId={dmPeerId}
+              <UserAvatar
+                userId={dmPeerId}
                 displayName={effectiveDmTitle(room)}
-                avatarUrl={resolvedDmAvatar}
+                avatarUrlHint={room.isDirect ? room.avatarUrl : undefined}
                 size={DM_SIDEBAR_AVATAR_PX}
                 fontSize={13}
               />

@@ -577,12 +577,52 @@ async fn dm_one_to_one_peer_summary(
         .display_name()
         .map(|s| s.to_string())
         .unwrap_or_else(|| peer_id.clone());
-    let avatar = get_or_fetch_avatar(
+    let mut avatar = get_or_fetch_avatar(
         m.avatar_url(),
         m.avatar(matrix_sdk::media::MediaFormat::File),
         avatar_cache,
     )
     .await;
+    // Fallback: when the room member has no known avatar MXC yet (freshly
+    // synced DM, peer hasn't federated their profile into our room state),
+    // ask the homeserver directly via the profile API. Short timeout so
+    // slow federation does not block `get_rooms`.
+    if avatar.is_none() {
+        if let Some(uid) = matrix_sdk::ruma::UserId::parse(&peer_id).ok() {
+            let profile_req = matrix_sdk::ruma::api::client::profile::get_profile::v3::Request::new(uid);
+            let profile_fut = client.send(profile_req);
+            if let Ok(Ok(resp)) = tokio::time::timeout(
+                std::time::Duration::from_secs(5),
+                profile_fut,
+            )
+            .await
+            {
+                let owned_mxc = resp
+                    .get_static::<matrix_sdk::ruma::api::client::profile::AvatarUrl>()
+                    .ok()
+                    .flatten();
+                if let Some(owned_mxc) = owned_mxc {
+                    let mxc_ref = Some(owned_mxc.as_ref());
+                    let client_clone = client.clone();
+                    let owned_for_fetch = owned_mxc.clone();
+                    let fetch_bytes = async move {
+                        let request = matrix_sdk::media::MediaRequestParameters {
+                            source: matrix_sdk::ruma::events::room::MediaSource::Plain(
+                                owned_for_fetch,
+                            ),
+                            format: matrix_sdk::media::MediaFormat::File,
+                        };
+                        client_clone
+                            .media()
+                            .get_media_content(&request, true)
+                            .await
+                            .map(Some)
+                    };
+                    avatar = get_or_fetch_avatar(mxc_ref, fetch_bytes, avatar_cache).await;
+                }
+            }
+        }
+    }
     let presence = presence_map
         .lock()
         .await

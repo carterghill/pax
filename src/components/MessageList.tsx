@@ -12,8 +12,7 @@ import { MoreVertical, Pencil, Trash2, ArrowDown } from "lucide-react";
 import { Message, RoomRedactionPolicy } from "../types/matrix";
 import { useTheme } from "../theme/ThemeContext";
 import type { ResolvedColorScheme } from "../theme/types";
-import { userInitialAvatarBackground } from "../utils/userAvatarColor";
-import { avatarSrc } from "../utils/avatarSrc";
+import UserAvatar from "./UserAvatar";
 import MessageMarkdown from "./MessageMarkdown";
 import MessageMatrixImage from "./MessageMatrixImage";
 import MessageMatrixVideo from "./MessageMatrixVideo";
@@ -255,42 +254,14 @@ const MessageRow = memo(function MessageRow({
     >
       {/* Avatar column */}
       <div style={{ width: 40, flexShrink: 0 }}>
-        {showHeader &&
-          (msg.avatarUrl ? (
-            <img
-              src={avatarSrc(msg.avatarUrl)}
-              alt={msg.senderName ?? msg.sender}
-              loading="lazy"
-              decoding="async"
-              style={{
-                display: "block",
-                width: 40,
-                height: 40,
-                borderRadius: "50%",
-                objectFit: "cover",
-              }}
-            />
-          ) : (
-            <div
-              style={{
-                width: 40,
-                height: 40,
-                borderRadius: "50%",
-                backgroundColor: userInitialAvatarBackground(
-                  msg.sender,
-                  resolvedColorScheme,
-                ),
-                color: "#fff",
-                display: "flex",
-                alignItems: "center",
-                justifyContent: "center",
-                fontSize: typography.fontSizeBase,
-                fontWeight: typography.fontWeightBold,
-              }}
-            >
-              {(msg.senderName ?? msg.sender).charAt(0).toUpperCase()}
-            </div>
-          ))}
+        {showHeader && (
+          <UserAvatar
+            userId={msg.sender}
+            displayName={msg.senderName ?? msg.sender}
+            avatarUrlHint={msg.avatarUrl}
+            size={40}
+          />
+        )}
       </div>
 
       {/* Content column */}

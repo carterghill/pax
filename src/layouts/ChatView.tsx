@@ -2,7 +2,7 @@ import { useState, useEffect, useRef, useCallback, type CSSProperties } from "re
 import { useRoomRedactionPolicy } from "../hooks/useRoomRedactionPolicy";
 import { listen } from "@tauri-apps/api/event";
 import { ArrowLeft, Hash, MessageCircle, Users } from "lucide-react";
-import DmPeerAvatar from "../components/DmPeerAvatar";
+import UserAvatar from "../components/UserAvatar";
 import MessageList from "../components/MessageList";
 import MessageInput, { type EditingMessageRef } from "../components/MessageInput";
 import UserMenu from "../components/UserMenu";
@@ -11,7 +11,6 @@ import { useMatrixUserProfile } from "../hooks/useMatrixUserProfile";
 import { useTheme } from "../theme/ThemeContext";
 import { Message, Room } from "../types/matrix";
 import { useResizeHandle } from "../hooks/useResizeHandle";
-import { useResolvedDmPeerAvatarUrl } from "../context/PeerAvatarContext";
 import { effectiveDmTitle, isDmChatUi } from "../utils/dmDisplay";
 
 const USER_MENU_DEFAULT_WIDTH = 240;
@@ -160,10 +159,6 @@ export default function ChatView({
   const [showUsers, setShowUsers] = useState(true);
   const [editingMessage, setEditingMessage] = useState<EditingMessageRef | null>(null);
 
-  const resolvedDmPeerAvatar = useResolvedDmPeerAvatarUrl(
-    activeRoom ?? { avatarUrl: null, isDirect: false, dmPeerUserId: null },
-  );
-
   const containerRef = useRef<HTMLDivElement>(null);
   const userMenuResize = useResizeHandle({
     width: userMenuWidth,
@@ -249,10 +244,10 @@ export default function ChatView({
           >
             <ArrowLeft size={20} />
           </button>
-          <DmPeerAvatar
-            peerUserId={draftDm.peerUserId}
+          <UserAvatar
+            userId={draftDm.peerUserId}
             displayName={title}
-            avatarUrl={draftPeerProfile.avatarUrl}
+            avatarUrlHint={draftPeerProfile.avatarUrl}
             size={32}
           />
           <div style={{ flex: 1, minWidth: 0 }}>
@@ -330,10 +325,10 @@ export default function ChatView({
       {/* Channel header — 1:1 DM matches draft banner (no member list toggle) */}
       {isDmChatUi(activeRoom) ? (
         <div style={dmBannerStyle}>
-          <DmPeerAvatar
-            peerUserId={activeRoom.dmPeerUserId ?? activeRoom.id}
+          <UserAvatar
+            userId={activeRoom.dmPeerUserId ?? activeRoom.id}
             displayName={effectiveDmTitle(activeRoom)}
-            avatarUrl={resolvedDmPeerAvatar}
+            avatarUrlHint={activeRoom.isDirect ? activeRoom.avatarUrl : undefined}
             size={32}
           />
           <div style={{ flex: 1, minWidth: 0 }}>

@@ -79,7 +79,7 @@ export default function RoomSettingsDialog({
   moderationSpaceName = null,
   moderationSpaceRootId = null,
 }: RoomSettingsDialogProps) {
-  const { palette, typography, spacing, resolvedColorScheme } = useTheme();
+  const { palette, typography, spacing } = useTheme();
   const modalRef = useRef<HTMLDivElement>(null);
   useOverlayObstruction(modalRef);
 
@@ -872,7 +872,6 @@ export default function RoomSettingsDialog({
                         alwaysShow
                         onKick={openKickDialog}
                         onBan={openBanDialog}
-                        resolvedColorScheme={resolvedColorScheme}
                       />
                       <SettingsMemberCategory
                         title="Moderators"
@@ -885,7 +884,6 @@ export default function RoomSettingsDialog({
                         alwaysShow
                         onKick={openKickDialog}
                         onBan={openBanDialog}
-                        resolvedColorScheme={resolvedColorScheme}
                       />
                       <SettingsMemberCategory
                         title="Members"
@@ -898,7 +896,6 @@ export default function RoomSettingsDialog({
                         alwaysShow
                         onKick={openKickDialog}
                         onBan={openBanDialog}
-                        resolvedColorScheme={resolvedColorScheme}
                       />
                       <SettingsMemberCategory
                         title="Banned"
@@ -912,7 +909,6 @@ export default function RoomSettingsDialog({
                         onPrimaryAction={openUnbanDialog}
                         primaryActionLabel="Unban"
                         actionBusyUserId={unbanBusyId}
-                        resolvedColorScheme={resolvedColorScheme}
                       />
                     </div>
 

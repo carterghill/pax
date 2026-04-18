@@ -4,8 +4,7 @@ import { usePresenceContext } from "../hooks/PresenceContext";
 import { ManualStatus } from "../hooks/usePresence";
 import { ChevronDown, X } from "lucide-react";
 import { useOverlayObstruction } from "../hooks/useOverlayObstruction";
-import { userInitialAvatarBackground } from "../utils/userAvatarColor";
-import { avatarSrc } from "../utils/avatarSrc";
+import UserAvatar from "./UserAvatar";
 
 const presenceColor: Record<string, string> = {
   online: "#23a55a",
@@ -43,7 +42,7 @@ interface StatusDropdownProps {
 }
 
 export default function StatusDropdown({ displayName, avatarUrl, userId }: StatusDropdownProps) {
-  const { palette, typography, spacing, resolvedColorScheme } = useTheme();
+  const { palette, typography, spacing } = useTheme();
   const { manualStatus, setManualStatus, effectivePresence, statusMessage, setStatusMessage } = usePresenceContext();
   const [open, setOpen] = useState(false);
   const [editingStatus, setEditingStatus] = useState(false);
@@ -116,34 +115,13 @@ export default function StatusDropdown({ displayName, avatarUrl, userId }: Statu
       >
         {/* Avatar */}
         <div style={{ position: "relative", flexShrink: 0 }}>
-          {avatarUrl ? (
-            <img
-              src={avatarSrc(avatarUrl)}
-              alt={displayName}
-              style={{
-                display: "block",
-                width: 32,
-                height: 32,
-                borderRadius: "50%",
-                objectFit: "cover",
-              }}
-            />
-          ) : (
-            <div style={{
-              width: 32,
-              height: 32,
-              borderRadius: "50%",
-              backgroundColor: userInitialAvatarBackground(userId, resolvedColorScheme),
-              color: "#fff",
-              display: "flex",
-              alignItems: "center",
-              justifyContent: "center",
-              fontSize: typography.fontSizeSmall,
-              fontWeight: typography.fontWeightBold,
-            }}>
-              {displayName.charAt(0).toUpperCase()}
-            </div>
-          )}
+          <UserAvatar
+            userId={userId}
+            displayName={displayName}
+            avatarUrlHint={avatarUrl}
+            size={32}
+            fontSize={typography.fontSizeSmall}
+          />
           <div style={{
             position: "absolute",
             bottom: -1,

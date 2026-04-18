@@ -1,7 +1,6 @@
 import type { RoomManagementMember } from "../types/matrix";
-import { userInitialAvatarBackground } from "../utils/userAvatarColor";
 import type { ThemePalette, ThemeTypography, ThemeSpacing } from "../theme/types";
-import { avatarSrc } from "../utils/avatarSrc";
+import UserAvatar from "./UserAvatar";
 
 export default function SettingsMemberCategory({
   title,
@@ -19,7 +18,6 @@ export default function SettingsMemberCategory({
   onSecondaryAction,
   secondaryActionLabel,
   actionBusyUserId,
-  resolvedColorScheme,
 }: {
   title: string;
   members: RoomManagementMember[];
@@ -36,7 +34,6 @@ export default function SettingsMemberCategory({
   onSecondaryAction?: (userId: string) => void;
   secondaryActionLabel?: string;
   actionBusyUserId?: string | null;
-  resolvedColorScheme: "light" | "dark";
 }) {
   const q = searchTerm.trim().toLowerCase();
   const filtered = members.filter((m) => {
@@ -96,40 +93,13 @@ export default function SettingsMemberCategory({
                   maxWidth: "100%",
                 }}
               >
-                <div style={{ flexShrink: 0 }}>
-                  {member.avatarUrl ? (
-                    <img
-                      src={avatarSrc(member.avatarUrl)}
-                      alt=""
-                      style={{
-                        width: 36,
-                        height: 36,
-                        borderRadius: "50%",
-                        objectFit: "cover",
-                      }}
-                    />
-                  ) : (
-                    <div
-                      style={{
-                        width: 36,
-                        height: 36,
-                        borderRadius: "50%",
-                        backgroundColor: userInitialAvatarBackground(
-                          member.userId,
-                          resolvedColorScheme,
-                        ),
-                        display: "flex",
-                        alignItems: "center",
-                        justifyContent: "center",
-                        color: "#fff",
-                        fontSize: typography.fontSizeSmall,
-                        fontWeight: typography.fontWeightBold,
-                      }}
-                    >
-                      {(displayName || "?").charAt(0).toUpperCase()}
-                    </div>
-                  )}
-                </div>
+                <UserAvatar
+                  userId={member.userId}
+                  displayName={member.displayName}
+                  avatarUrlHint={member.avatarUrl}
+                  size={36}
+                  fontSize={typography.fontSizeSmall}
+                />
                 <div style={{ flex: 1, minWidth: 0, overflow: "hidden" }}>
                   <div
                     title={displayName}

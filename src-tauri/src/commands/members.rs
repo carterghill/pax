@@ -376,6 +376,84 @@ pub async fn get_matrix_user_profile(
     })
 }
 
+/// Batched avatar resolver for arbitrary users via the profile API.
+///
+/// Returns a `userId → fileSystemPath | null` map for every requested user.
+/// Hits the homeserver profile endpoint in parallel, then funnels bytes
+/// through the shared `avatar_cache` so every other command (messages,
+/// members, DM peer summary) sees the same file.
+///
+/// Used by the frontend `userAvatarStore` to back `<UserAvatar userId=…>`.
+/// Keeping it batched means sidebars with N users do one round-trip, not N.
+#[tauri::command]
+pub async fn get_user_avatars(
+    state: State<'_, Arc<AppState>>,
+    user_ids: Vec<String>,
+) -> Result<HashMap<String, Option<String>>, String> {
+    let client = get_client(&state).await?;
+    let avatar_cache = state.avatar_cache.clone();
+
+    // Dedupe the request (same user appearing across multiple rooms, etc.).
+    let mut seen: HashSet<String> = HashSet::new();
+    let mut unique_ids: Vec<String> = Vec::new();
+    for uid in user_ids {
+        let trimmed = uid.trim().to_string();
+        if trimmed.is_empty() {
+            continue;
+        }
+        if seen.insert(trimmed.clone()) {
+            unique_ids.push(trimmed);
+        }
+    }
+
+    let futs = unique_ids.into_iter().map(|uid| {
+        let client = client.clone();
+        let cache = avatar_cache.clone();
+        async move {
+            let Ok(parsed) = matrix_sdk::ruma::UserId::parse(&uid) else {
+                return (uid, None);
+            };
+            // Profile API: single round-trip per user, runs in parallel.
+            let profile_fut = client.send(GetProfileRequest::new(parsed));
+            let resp = match tokio::time::timeout(Duration::from_secs(10), profile_fut).await {
+                Ok(Ok(r)) => r,
+                _ => return (uid, None),
+            };
+            let owned_mxc = match resp.get_static::<AvatarUrl>() {
+                Ok(m) => m,
+                Err(_) => return (uid, None),
+            };
+            let Some(owned_mxc) = owned_mxc else {
+                return (uid, None);
+            };
+            let mxc_ref = Some(owned_mxc.as_ref());
+
+            let client_clone = client.clone();
+            let owned_for_fetch = owned_mxc.clone();
+            let fetch_bytes = async move {
+                let request = MediaRequestParameters {
+                    source: MediaSource::Plain(owned_for_fetch),
+                    format: MediaFormat::File,
+                };
+                client_clone
+                    .media()
+                    .get_media_content(&request, true)
+                    .await
+                    .map(Some)
+            };
+            let path = get_or_fetch_avatar(mxc_ref, fetch_bytes, &cache).await;
+            (uid, path)
+        }
+    });
+
+    let results = join_all(futs).await;
+    let mut map: HashMap<String, Option<String>> = HashMap::new();
+    for (uid, path) in results {
+        map.insert(uid, path);
+    }
+    Ok(map)
+}
+
 /// Fetch the logged-in user's own avatar as a data URL.
 #[tauri::command]
 pub async fn get_user_avatar(state: State<'_, Arc<AppState>>) -> Result<Option<String>, String> {

@@ -24,14 +24,11 @@ import type { RoomsChangedPayload } from "../types/roomsChanged";
 import { dmPresenceDotColor, effectiveDmTitle } from "../utils/dmDisplay";
 import { resolvePresenceWithDnd } from "../utils/statusMessage";
 import { VOICE_ROOM_TYPE, SPACE_ROOM_TYPE, compareByDisplayThenKey } from "../utils/matrix";
-import {
-  spaceInitialAvatarBackground,
-  userInitialAvatarBackground,
-} from "../utils/userAvatarColor";
+import { spaceInitialAvatarBackground } from "../utils/userAvatarColor";
 import CreateRoomDialog from "../components/CreateRoomDialog";
 import CreateSpaceDialog from "../components/CreateSpaceDialog";
 import LinkExistingToSpaceDialog from "../components/LinkExistingToSpaceDialog";
-import { useResolvedDmPeerAvatarUrl } from "../context/PeerAvatarContext";
+import UserAvatar from "../components/UserAvatar";
 import type { SpaceChildInfo, SpaceInfo } from "../utils/spaceHomeCache";
 import { getCachedSpaceInfo, setCachedSpaceInfo } from "../utils/spaceHomeCache";
 import { avatarSrc } from "../utils/avatarSrc";
@@ -1185,7 +1182,6 @@ export default function SpaceHomeView({
                     palette={palette}
                     typography={typography}
                     spacing={spacing}
-                    resolvedColorScheme={resolvedColorScheme}
                   />
                 );
               })}
@@ -1360,14 +1356,8 @@ function RoomRow({
   typography: ReturnType<typeof useTheme>["typography"];
   spacing: ReturnType<typeof useTheme>["spacing"];
 }) {
-  const { resolvedColorScheme } = useTheme();
   const [hovered, setHovered] = useState(false);
   const [imageFailed, setImageFailed] = useState(false);
-  const resolvedAvatar = useResolvedDmPeerAvatarUrl({
-    avatarUrl: room.avatarUrl,
-    isDirect: room.isDirect,
-    dmPeerUserId: room.dmPeerUserId,
-  });
   const isVoice = room.roomType === VOICE_ROOM_TYPE;
   const isJoined = room.membership === "joined";
   const isInvited = room.membership === "invited";
@@ -1375,34 +1365,17 @@ function RoomRow({
   const isDm = room.isDirect === true;
   const dmPresence = resolvePresenceWithDnd(room.dmPeerPresence ?? "offline", room.dmPeerStatusMsg);
   const dmTitle = effectiveDmTitle({ name: room.name, dmPeerUserId: room.dmPeerUserId ?? null });
-  const initials = dmTitle
-    .split(/\s+/)
-    .map((w) => w[0])
-    .join("")
-    .slice(0, 2)
-    .toUpperCase();
 
+  // Non-DM rooms still use the room avatar (keyed by room id, separate
+  // concept from user avatars). DM rows delegate to <UserAvatar>, which
+  // handles its own loading / fallback / on-error invalidation.
+  const nonDmAvatar = !isDm ? room.avatarUrl : null;
   useEffect(() => {
     setImageFailed(false);
-  }, [room.id, resolvedAvatar]);
+  }, [room.id, nonDmAvatar]);
 
-  const fallbackBg =
-    isDm && room.dmPeerUserId
-      ? userInitialAvatarBackground(room.dmPeerUserId, resolvedColorScheme)
-      : palette.bgActive;
-
-  const fallbackIcon = isVoice ? (
+  const nonDmFallbackIcon = isVoice ? (
     <Volume2 size={18} color={palette.textSecondary} />
-  ) : isDm ? (
-    <span
-      style={{
-        fontSize: typography.fontSizeSmall,
-        fontWeight: typography.fontWeightBold,
-        color: palette.textPrimary,
-      }}
-    >
-      {initials || "?"}
-    </span>
   ) : (
     <Hash size={18} color={palette.textSecondary} />
   );
@@ -1425,9 +1398,16 @@ function RoomRow({
     >
       {/* Room icon or avatar */}
       <div style={{ position: "relative", width: 36, height: 36, flexShrink: 0 }}>
-        {resolvedAvatar && !imageFailed ? (
+        {isDm && room.dmPeerUserId ? (
+          <UserAvatar
+            userId={room.dmPeerUserId}
+            displayName={dmTitle}
+            avatarUrlHint={room.avatarUrl}
+            size={36}
+          />
+        ) : nonDmAvatar && !imageFailed ? (
           <img
-            src={avatarSrc(resolvedAvatar)}
+            src={avatarSrc(nonDmAvatar)}
             alt={dmTitle}
             onError={() => setImageFailed(true)}
             style={{
@@ -1443,13 +1423,13 @@ function RoomRow({
               width: 36,
               height: 36,
               borderRadius: "50%",
-              backgroundColor: fallbackBg,
+              backgroundColor: palette.bgActive,
               display: "flex",
               alignItems: "center",
               justifyContent: "center",
             }}
           >
-            {fallbackIcon}
+            {nonDmFallbackIcon}
           </div>
         )}
         {isDm && isJoined && !!room.dmPeerUserId && (
@@ -1599,7 +1579,6 @@ function KnockRow({
   palette,
   typography,
   spacing,
-  resolvedColorScheme,
 }: {
   knock: { userId: string; displayName: string | null; avatarUrl: string | null; reason: string | null };
   isActing: boolean;
@@ -1610,7 +1589,6 @@ function KnockRow({
   palette: ReturnType<typeof useTheme>["palette"];
   typography: ReturnType<typeof useTheme>["typography"];
   spacing: ReturnType<typeof useTheme>["spacing"];
-  resolvedColorScheme: ReturnType<typeof useTheme>["resolvedColorScheme"];
 }) {
   const [hovered, setHovered] = useState(false);
 
@@ -1629,35 +1607,13 @@ function KnockRow({
       }}
     >
       {/* Avatar */}
-      {knock.avatarUrl ? (
-        <img
-          src={avatarSrc(knock.avatarUrl)}
-          alt={knock.displayName ?? knock.userId}
-          style={{
-            width: 36,
-            height: 36,
-            borderRadius: "50%",
-            objectFit: "cover",
-            flexShrink: 0,
-          }}
-        />
-      ) : (
-        <div style={{
-          width: 36,
-          height: 36,
-          borderRadius: "50%",
-          backgroundColor: userInitialAvatarBackground(knock.userId, resolvedColorScheme),
-          color: "#fff",
-          display: "flex",
-          alignItems: "center",
-          justifyContent: "center",
-          flexShrink: 0,
-          fontSize: typography.fontSizeSmall,
-          fontWeight: typography.fontWeightBold,
-        }}>
-          {(knock.displayName ?? knock.userId).charAt(0).toUpperCase()}
-        </div>
-      )}
+      <UserAvatar
+        userId={knock.userId}
+        displayName={knock.displayName}
+        avatarUrlHint={knock.avatarUrl}
+        size={36}
+        fontSize={typography.fontSizeSmall}
+      />
 
       {/* Name + reason */}
       <div style={{ flex: 1, minWidth: 0 }}>

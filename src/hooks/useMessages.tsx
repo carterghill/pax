@@ -1,7 +1,7 @@
 import { useEffect, useLayoutEffect, useState, useCallback, useRef } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
-import { usePeerAvatarRegistryOptional } from "../context/PeerAvatarContext";
+import { useUserAvatarStoreOptional } from "../context/UserAvatarStore";
 import { Message, MessageBatch } from "../types/matrix";
 
 /* ------------------------------------------------------------------ */
@@ -106,11 +106,22 @@ export function clearMessageCache() {
 /* ------------------------------------------------------------------ */
 
 export function useMessages(roomId: string | null) {
-  const peerAvatarRegistry = usePeerAvatarRegistryOptional();
-  const registerPeerAvatarsRef = useRef(peerAvatarRegistry?.registerFromMessages);
-  registerPeerAvatarsRef.current = peerAvatarRegistry?.registerFromMessages;
-  const clearPeerAvatarsRef = useRef(peerAvatarRegistry?.clearPeerAvatarPaths);
-  clearPeerAvatarsRef.current = peerAvatarRegistry?.clearPeerAvatarPaths;
+  // Feed the global user-avatar store from every message batch we fetch so
+  // sidebars/members/headers can resolve sender avatars without a separate
+  // round-trip. Clearing is delegated to the store's own event listeners
+  // (logout / clear_media_cache invalidation).
+  const userAvatarStore = useUserAvatarStoreOptional();
+  const primeAvatarsFromMessages = useCallback(
+    (msgs: Message[]) => {
+      if (!userAvatarStore || msgs.length === 0) return;
+      userAvatarStore.primeMany(
+        msgs.map((m) => ({ userId: m.sender, avatarUrl: m.avatarUrl })),
+      );
+    },
+    [userAvatarStore],
+  );
+  const primeAvatarsFromMessagesRef = useRef(primeAvatarsFromMessages);
+  primeAvatarsFromMessagesRef.current = primeAvatarsFromMessages;
 
   /* ---- State ---- */
   const [messages, setMessages] = useState<Message[]>([]);
@@ -187,7 +198,6 @@ export function useMessages(roomId: string | null) {
       } catch {
         /* non-fatal */
       }
-      clearPeerAvatarsRef.current?.();
       if (cancelled || activeRoomIdRef.current !== target) return;
 
       try {
@@ -199,7 +209,7 @@ export function useMessages(roomId: string | null) {
         if (cancelled || activeRoomIdRef.current !== target) return;
         const msgs = batch.messages.slice().reverse();
         commit(msgs, batch.prevBatch, true);
-        registerPeerAvatarsRef.current?.(msgs);
+        primeAvatarsFromMessagesRef.current(msgs);
         setPendingRecentCount(0);
       } catch (e) {
         if (cancelled || activeRoomIdRef.current !== target) return;
@@ -253,7 +263,7 @@ export function useMessages(roomId: string | null) {
           next = next.slice(next.length - WINDOW_SIZE);
         }
       }
-      registerPeerAvatarsRef.current?.([message]);
+      primeAvatarsFromMessagesRef.current([message]);
       messagesRef.current = next;
       setMessages(next);
     });
@@ -339,7 +349,7 @@ export function useMessages(roomId: string | null) {
       }
 
       commit(combined, batch.prevBatch, nextAtLatest);
-      registerPeerAvatarsRef.current?.(combined);
+      primeAvatarsFromMessagesRef.current(combined);
     } catch (e) {
       console.error("[useMessages] loadOlder error:", e);
     } finally {
@@ -369,7 +379,7 @@ export function useMessages(roomId: string | null) {
 
       const msgs = batch.messages.slice().reverse();
       commit(msgs, batch.prevBatch, true);
-      registerPeerAvatarsRef.current?.(msgs);
+      primeAvatarsFromMessagesRef.current(msgs);
       setPendingRecentCount(0);
     } catch (e) {
       console.error("[useMessages] jumpToRecent error:", e);
@@ -425,7 +435,7 @@ export function useMessages(roomId: string | null) {
       }
 
       commit(combined, batch.prevBatch, true);
-      registerPeerAvatarsRef.current?.(combined);
+      primeAvatarsFromMessagesRef.current(combined);
     } catch (e) {
       console.error("[useMessages] refresh error:", e);
     }

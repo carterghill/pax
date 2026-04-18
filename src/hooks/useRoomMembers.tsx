@@ -10,6 +10,7 @@ import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { RoomMember } from "../types/matrix";
 import { resolvePresenceWithDnd } from "../utils/statusMessage";
+import { useUserAvatarStoreOptional } from "../context/UserAvatarStore";
 
 interface PresencePayload {
   userId: string;
@@ -52,6 +53,10 @@ export function useRoomMembers(roomId: string) {
   // ── Avatar overrides (cheap to update — does NOT trigger sort/filter) ──
   const [avatarOverrides, setAvatarOverrides] = useState<Map<string, string>>(new Map());
 
+  // Every member row we fetch feeds the global user-avatar store so
+  // sidebars and banners render the same image without re-fetching.
+  const userAvatarStore = useUserAvatarStoreOptional();
+
   const hasFetched = useRef(false);
   const debounceRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const activeRoomIdRef = useRef(roomId);
@@ -73,6 +78,9 @@ export function useRoomMembers(roomId: string) {
           setMembers(deduped);
           setLoading(false);
           hasFetched.current = true;
+          userAvatarStore?.primeMany(
+            deduped.map((m) => ({ userId: m.userId, avatarUrl: m.avatarUrl })),
+          );
         })
         .catch((e) => {
           if (activeRoomIdRef.current !== requestedRoomId) return;
@@ -181,6 +189,8 @@ export function useRoomMembers(roomId: string) {
             for (const [uid, url] of patches) next.set(uid, url);
             return next;
           });
+          // The global store has its own `member-avatar-updated` listener,
+          // so this path only needs to update the per-room override map.
         });
       }
     });

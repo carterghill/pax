@@ -1,12 +1,12 @@
 import { useState, useRef, useEffect, useCallback } from "react";
 import { invoke } from "@tauri-apps/api/core";
-import { X, UserPlus, Loader2, Check, User } from "lucide-react";
+import { X, UserPlus, Loader2, Check } from "lucide-react";
 import { useTheme } from "../theme/ThemeContext";
 import { paletteDialogOuterBorderStyle } from "../theme/paletteBorder";
 import { useOverlayObstruction } from "../hooks/useOverlayObstruction";
 import ModalLayer from "./ModalLayer";
 import { parseInviteUserInput } from "../utils/matrix";
-import { avatarSrc } from "../utils/avatarSrc";
+import UserAvatar from "./UserAvatar";
 
 export type InviteTargetKind = "room" | "space";
 
@@ -478,31 +478,12 @@ export default function InviteDialog({
                             color: palette.textPrimary,
                           }}
                         >
-                          <div
-                            style={{
-                              width: 36,
-                              height: 36,
-                              borderRadius: "50%",
-                              overflow: "hidden",
-                              flexShrink: 0,
-                              backgroundColor: palette.bgSecondary,
-                              display: "flex",
-                              alignItems: "center",
-                              justifyContent: "center",
-                            }}
-                          >
-                            {c.avatarUrl ? (
-                              <img
-                                src={avatarSrc(c.avatarUrl)}
-                                alt=""
-                                width={36}
-                                height={36}
-                                style={{ objectFit: "cover" }}
-                              />
-                            ) : (
-                              <User size={18} color={palette.textSecondary} strokeWidth={2} />
-                            )}
-                          </div>
+                          <UserAvatar
+                            userId={c.userId}
+                            displayName={c.displayName}
+                            avatarUrlHint={c.avatarUrl}
+                            size={36}
+                          />
                           <div style={{ flex: 1, minWidth: 0 }}>
                             <div
                               style={{

@@ -1,5 +1,6 @@
 import { useEffect, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
+import { useUserAvatarStoreOptional } from "../context/UserAvatarStore";
 
 export type MatrixUserProfileState = {
   loading: boolean;
@@ -14,6 +15,7 @@ export function useMatrixUserProfile(userId: string | null): MatrixUserProfileSt
   const [loading, setLoading] = useState(false);
   const [displayName, setDisplayName] = useState<string | null>(null);
   const [avatarUrl, setAvatarUrl] = useState<string | null>(null);
+  const userAvatarStore = useUserAvatarStoreOptional();
 
   useEffect(() => {
     if (!userId) {
@@ -34,6 +36,7 @@ export function useMatrixUserProfile(userId: string | null): MatrixUserProfileSt
         setDisplayName(p.displayName ?? null);
         setAvatarUrl(p.avatarUrl ?? null);
         setLoading(false);
+        userAvatarStore?.prime(userId, p.avatarUrl ?? null);
       })
       .catch(() => {
         if (cancelled) return;
@@ -44,7 +47,7 @@ export function useMatrixUserProfile(userId: string | null): MatrixUserProfileSt
     return () => {
       cancelled = true;
     };
-  }, [userId]);
+  }, [userId, userAvatarStore]);
 
   return { loading, displayName, avatarUrl };
 }

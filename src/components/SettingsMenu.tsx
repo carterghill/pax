@@ -18,8 +18,7 @@ import {
 import type { LucideIcon } from "lucide-react";
 import type { VoiceCall } from "../hooks/useVoiceCall";
 import VoiceAudioSettingsSection from "./VoiceAudioSettingsSection";
-import { userInitialAvatarBackground } from "../utils/userAvatarColor";
-import { avatarSrc } from "../utils/avatarSrc";
+import UserAvatar from "./UserAvatar";
 import {
   getSendPublicReceipts,
   setSendPublicReceipts,
@@ -57,7 +56,7 @@ export default function SettingsMenu({
   onAvatarChanged,
   voiceCall,
 }: SettingsMenuProps) {
-  const { palette, typography, spacing, resolvedColorScheme } = useTheme();
+  const { palette, typography, spacing } = useTheme();
   const [activeSection, setActiveSection] = useState<SettingsSection>("user");
 
   // ---- Notifications ----
@@ -360,38 +359,13 @@ export default function SettingsMenu({
             border: `1px solid ${palette.border}`,
           }}
         >
-          <div style={{ flexShrink: 0 }}>
-            {userAvatarUrl ? (
-              <img
-                src={avatarSrc(userAvatarUrl)}
-                alt="Your avatar"
-                style={{
-                  display: "block",
-                  width: 44,
-                  height: 44,
-                  borderRadius: "50%",
-                  objectFit: "cover",
-                }}
-              />
-            ) : (
-              <div
-                style={{
-                  width: 44,
-                  height: 44,
-                  borderRadius: "50%",
-                  backgroundColor: userInitialAvatarBackground(userId, resolvedColorScheme),
-                  color: "#fff",
-                  display: "flex",
-                  alignItems: "center",
-                  justifyContent: "center",
-                  fontSize: 18,
-                  fontWeight: typography.fontWeightBold,
-                }}
-              >
-                {displayName ? displayName.charAt(0).toUpperCase() : "?"}
-              </div>
-            )}
-          </div>
+          <UserAvatar
+            userId={userId}
+            displayName={displayName}
+            avatarUrlHint={userAvatarUrl}
+            size={44}
+            fontSize={18}
+          />
           <div style={{ minWidth: 0 }}>
             <div
               style={{
@@ -537,38 +511,13 @@ export default function SettingsMenu({
                     flexWrap: "wrap",
                   }}
                 >
-                  <div style={{ flexShrink: 0 }}>
-                    {userAvatarUrl ? (
-                      <img
-                        src={avatarSrc(userAvatarUrl)}
-                        alt="Your avatar"
-                        style={{
-                          display: "block",
-                          width: 84,
-                          height: 84,
-                          borderRadius: "50%",
-                          objectFit: "cover",
-                        }}
-                      />
-                    ) : (
-                      <div
-                        style={{
-                          width: 84,
-                          height: 84,
-                          borderRadius: "50%",
-                          backgroundColor: userInitialAvatarBackground(userId, resolvedColorScheme),
-                          color: "#fff",
-                          display: "flex",
-                          alignItems: "center",
-                          justifyContent: "center",
-                          fontSize: 30,
-                          fontWeight: typography.fontWeightBold,
-                        }}
-                      >
-                        {displayName ? displayName.charAt(0).toUpperCase() : "?"}
-                      </div>
-                    )}
-                  </div>
+                  <UserAvatar
+                    userId={userId}
+                    displayName={displayName}
+                    avatarUrlHint={userAvatarUrl}
+                    size={84}
+                    fontSize={30}
+                  />
 
                   <div
                     style={{

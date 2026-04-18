@@ -10,13 +10,12 @@ import {
   localpartFromUserId,
   normalizeUserId,
 } from "../utils/matrix";
-import { userInitialAvatarBackground } from "../utils/userAvatarColor";
+import UserAvatar from "./UserAvatar";
 import { useUserVolume } from "../hooks/useUserVolume";
 import VolumeContextMenu from "./VolumeContextMenu";
 import VoiceAudioSettingsSection from "./VoiceAudioSettingsSection";
 import ScreenShareGrid from "./ScreenShareGrid";
 import { useOverlayObstruction, registerObstruction, unregisterObstruction } from "../hooks/useOverlayObstruction";
-import { avatarSrc } from "../utils/avatarSrc";
 
 interface VoiceRoomViewProps {
   room: Room;
@@ -53,7 +52,7 @@ export default function VoiceRoomView({
     setParticipantVolume: onSetParticipantVolume,
     listAudioDevices: onListAudioDevices,
   } = voiceCall;
-  const { palette, spacing, typography, resolvedColorScheme } = useTheme();
+  const { palette, spacing, typography } = useTheme();
   const { getVolume, setVolume } = useUserVolume();
   const [screenShareMenuOpen, setScreenShareMenuOpen] = useState(false);
   const [generalSettingsOpen, setGeneralSettingsOpen] = useState(false);
@@ -527,38 +526,17 @@ export default function VoiceRoomView({
               width: 120,
             }}
           >
-            {p.avatarUrl ? (
-              <img
-                src={avatarSrc(p.avatarUrl)}
-                alt={p.displayName}
-                style={{
-                  display: "block",
-                  width: 80,
-                  height: 80,
-                  borderRadius: "50%",
-                  objectFit: "cover",
-                  boxShadow: p.isSpeaking ? "0 0 0 3px #23a55a" : "none",
-                  transition: "box-shadow 0.15s ease",
-                }}
-              />
-            ) : (
-              <div style={{
-                width: 80,
-                height: 80,
-                borderRadius: "50%",
-                backgroundColor: userInitialAvatarBackground(p.identity, resolvedColorScheme),
-                display: "flex",
-                alignItems: "center",
-                justifyContent: "center",
-                fontSize: 28,
-                fontWeight: typography.fontWeightBold,
-                color: "#fff",
+            <UserAvatar
+              userId={extractMatrixUserId(p.identity)}
+              displayName={p.displayName}
+              avatarUrlHint={p.avatarUrl}
+              size={80}
+              fontSize={28}
+              style={{
                 boxShadow: p.isSpeaking ? "0 0 0 3px #23a55a" : "none",
                 transition: "box-shadow 0.15s ease",
-              }}>
-                {p.displayName.charAt(0).toUpperCase()}
-              </div>
-            )}
+              }}
+            />
             <span style={{
               fontSize: typography.fontSizeSmall,
               color: palette.textPrimary,
@@ -650,37 +628,18 @@ export default function VoiceRoomView({
                   style={{ animation: "spin 1s linear infinite" }}
                 />
               </div>
-            ) : p.avatarUrl ? (
-              <img
-                src={avatarSrc(p.avatarUrl)}
-                alt={p.displayName}
+            ) : (
+              <UserAvatar
+                userId={extractMatrixUserId(p.identity)}
+                displayName={p.displayName}
+                avatarUrlHint={p.avatarUrl}
+                size={80}
+                fontSize={28}
                 style={{
-                  display: "block",
-                  width: 80,
-                  height: 80,
-                  borderRadius: "50%",
-                  objectFit: "cover",
                   boxShadow: p.isSpeaking ? "0 0 0 3px #23a55a" : "none",
                   transition: "box-shadow 0.15s ease",
                 }}
               />
-            ) : (
-              <div style={{
-                width: 80,
-                height: 80,
-                borderRadius: "50%",
-                backgroundColor: userInitialAvatarBackground(p.identity, resolvedColorScheme),
-                display: "flex",
-                alignItems: "center",
-                justifyContent: "center",
-                fontSize: 28,
-                fontWeight: typography.fontWeightBold,
-                color: "#fff",
-                boxShadow: p.isSpeaking ? "0 0 0 3px #23a55a" : "none",
-                transition: "box-shadow 0.15s ease",
-              }}>
-                {p.displayName.charAt(0).toUpperCase()}
-              </div>
             )}
             <span style={{
               fontSize: typography.fontSizeSmall,

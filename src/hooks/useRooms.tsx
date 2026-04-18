@@ -3,6 +3,7 @@ import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { Room } from "../types/matrix";
 import { loadPersistedRooms, savePersistedRooms } from "../utils/roomsCache";
+import { useUserAvatarStoreOptional } from "../context/UserAvatarStore";
 
 /** Matches the Rust fallback in `get_rooms` when the SDK has no m.room.name yet. */
 const GENERIC_UNNAMED = "Unnamed";
@@ -51,6 +52,24 @@ export function useRooms(userId: string | null) {
   const optimisticRoomsRef = useRef<Room[]>([]);
   optimisticRoomsRef.current = optimisticRooms;
 
+  // For 1:1 DMs, `get_rooms` returns the peer's avatar on the room row —
+  // prime the global store so every <UserAvatar userId={peer}/> instance
+  // renders the same resolved path without a separate fetch.
+  const userAvatarStore = useUserAvatarStoreOptional();
+  const primeDmPeerAvatars = useCallback(
+    (list: Room[]) => {
+      if (!userAvatarStore) return;
+      userAvatarStore.primeMany(
+        list
+          .filter((r) => r.isDirect && r.dmPeerUserId)
+          .map((r) => ({ userId: r.dmPeerUserId as string, avatarUrl: r.avatarUrl })),
+      );
+    },
+    [userAvatarStore],
+  );
+  const primeDmPeerAvatarsRef = useRef(primeDmPeerAvatars);
+  primeDmPeerAvatarsRef.current = primeDmPeerAvatars;
+
   const mergeRooms = useCallback((serverRooms: Room[], pendingRooms: Room[]) => {
     const pendingById = new Map(pendingRooms.map((r) => [r.id, r]));
     const mergedServer = serverRooms.map((room) =>
@@ -67,6 +86,7 @@ export function useRooms(userId: string | null) {
 
     try {
       const list = await invoke<Room[]>("get_rooms");
+      primeDmPeerAvatars(list);
       const optById = new Map(
         optimisticRoomsRef.current.map((r) => [r.id, r])
       );
@@ -128,6 +148,7 @@ export function useRooms(userId: string | null) {
     invoke<Room[]>("get_rooms")
       .then((list) => {
         if (cancelled) return;
+        primeDmPeerAvatarsRef.current(list);
         setFetchedRooms((prev) => {
           const merged = mergeFetchedRoomsPreserveNames(prev, list);
           savePersistedRooms(userId, merged);

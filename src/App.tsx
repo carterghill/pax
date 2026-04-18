@@ -2,7 +2,7 @@ import "./App.css";
 import { useState, useEffect, useRef, useMemo } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import MainLayout from "./layouts/MainLayout";
-import { PeerAvatarProvider } from "./context/PeerAvatarContext";
+import { UserAvatarStoreProvider } from "./context/UserAvatarStore";
 import { useTheme } from "./theme/ThemeContext";
 import { useRooms } from "./hooks/useRooms";
 import { clearMessageCache } from "./hooks/useMessages";
@@ -320,13 +320,13 @@ function App() {
 
   if (userId) {
     return (
-      <PeerAvatarProvider>
+      <UserAvatarStoreProvider>
         <MainLayout
           userId={userId}
           onSignOut={handleSignOut}
           rooms={{ spaces, roomsBySpace, getRoom, fetchRooms, upsertOptimisticRoom }}
         />
-      </PeerAvatarProvider>
+      </UserAvatarStoreProvider>
     );
   }
 

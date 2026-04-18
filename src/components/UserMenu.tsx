@@ -3,7 +3,6 @@ import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { Check, X, Loader2 } from "lucide-react";
 import { useTheme } from "../theme/ThemeContext";
-import { userInitialAvatarBackground } from "../utils/userAvatarColor";
 import { useRoomMembers } from "../hooks/useRoomMembers";
 import type { MemberModerationPermissions, RoomMember } from "../types/matrix";
 import { usePresenceContext } from "../hooks/PresenceContext";
@@ -11,7 +10,7 @@ import { resolvePresenceWithDnd, parseStatusMsg, composeStatusMsg } from "../uti
 import MemberContextMenu from "./MemberContextMenu";
 import UserProfileDialog from "./UserProfileDialog";
 import ModerationScopeDialog from "./ModerationScopeDialog";
-import { avatarSrc } from "../utils/avatarSrc";
+import UserAvatar from "./UserAvatar";
 
 interface UserMenuProps {
   width: number;
@@ -62,7 +61,7 @@ interface MemberRowProps {
 }
 
 const MemberRow = memo(function MemberRow({ member, avatarUrl, onContextMenu }: MemberRowProps) {
-  const { palette, typography, spacing, resolvedColorScheme } = useTheme();
+  const { palette, typography, spacing } = useTheme();
   const resolved = resolvePresenceWithDnd(member.presence, member.statusMsg);
   const { text: statusText } = parseStatusMsg(member.statusMsg);
   return (
@@ -91,22 +90,13 @@ const MemberRow = memo(function MemberRow({ member, avatarUrl, onContextMenu }: 
       }}
     >
       <div style={{ position: "relative", flexShrink: 0 }}>
-        {avatarUrl ? (
-          <img
-            src={avatarSrc(avatarUrl)}
-            alt={member.displayName ?? member.userId}
-            style={{ display: "block", width: 32, height: 32, borderRadius: "50%", objectFit: "cover" }}
-          />
-        ) : (
-          <div style={{
-            width: 32, height: 32, borderRadius: "50%",
-            backgroundColor: userInitialAvatarBackground(member.userId, resolvedColorScheme),
-            color: "#fff", display: "flex", alignItems: "center", justifyContent: "center",
-            fontSize: typography.fontSizeSmall, fontWeight: typography.fontWeightBold,
-          }}>
-            {(member.displayName ?? member.userId).charAt(0).toUpperCase()}
-          </div>
-        )}
+        <UserAvatar
+          userId={member.userId}
+          displayName={member.displayName ?? member.userId}
+          avatarUrlHint={avatarUrl}
+          size={32}
+          fontSize={typography.fontSizeSmall}
+        />
         <div style={{
           position: "absolute", bottom: -1, right: -1, width: 10, height: 10,
           borderRadius: "50%",
@@ -172,7 +162,7 @@ export default function UserMenu({
   moderationSpaceName = null,
   onStartDirectMessage,
 }: UserMenuProps) {
-  const { palette, typography, spacing, resolvedColorScheme } = useTheme();
+  const { palette, typography, spacing } = useTheme();
   const { members, loading, avatarOverrides } = useRoomMembers(roomId);
   const { effectivePresence, statusMessage: localStatusMessage, manualStatus } = usePresenceContext();
 
@@ -467,19 +457,13 @@ export default function UserMenu({
                   margin: `0 ${spacing.unit * 2}px`, borderRadius: spacing.unit,
                 }}>
                   <div style={{ flexShrink: 0 }}>
-                    {knock.avatarUrl ? (
-                      <img src={avatarSrc(knock.avatarUrl)} alt={knock.displayName ?? knock.userId}
-                        style={{ display: "block", width: 32, height: 32, borderRadius: "50%", objectFit: "cover" }} />
-                    ) : (
-                      <div style={{
-                        width: 32, height: 32, borderRadius: "50%",
-                        backgroundColor: userInitialAvatarBackground(knock.userId, resolvedColorScheme),
-                        color: "#fff", display: "flex", alignItems: "center", justifyContent: "center",
-                        fontSize: typography.fontSizeSmall, fontWeight: typography.fontWeightBold,
-                      }}>
-                        {(knock.displayName ?? knock.userId).charAt(0).toUpperCase()}
-                      </div>
-                    )}
+                    <UserAvatar
+                      userId={knock.userId}
+                      displayName={knock.displayName ?? knock.userId}
+                      avatarUrlHint={knock.avatarUrl}
+                      size={32}
+                      fontSize={typography.fontSizeSmall}
+                    />
                   </div>
                   <div style={{ flex: 1, minWidth: 0 }}>
                     <div style={{
