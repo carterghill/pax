@@ -455,10 +455,30 @@ pub async fn start_sync(
     // Handler for incoming room messages
     let app_handle = app.clone();
     let avatar_cache = state.avatar_cache.clone();
+    let raw_unread_for_msg = state.raw_unread_messages.clone();
+    let self_user_id_for_msg = client
+        .user_id()
+        .map(|u| u.to_owned());
     client.add_event_handler(move |ev: OriginalSyncRoomMessageEvent, room: Room| {
         let app = app_handle.clone();
         let avatar_cache = avatar_cache.clone();
+        let raw_unread = raw_unread_for_msg.clone();
+        let self_uid = self_user_id_for_msg.clone();
         async move {
+            // Bump the raw-message counter for any non-self, non-edit message.
+            // `Relation::Replacement` is an edit (m.replace) — it shouldn't
+            // bump a fresh-message counter.  All other relations (replies,
+            // threads; reactions are a different event type) count.
+            let is_self = self_uid.as_deref().is_some_and(|u| u == ev.sender);
+            let is_edit = matches!(
+                &ev.content.relates_to,
+                Some(Relation::Replacement(_))
+            );
+            if !is_self && !is_edit {
+                let mut map = raw_unread.lock().await;
+                *map.entry(room.room_id().to_owned()).or_insert(0) += 1;
+            }
+
             let room_id = room.room_id().to_string();
             let short_room = if room_id.len() > 6 { &room_id[room_id.len()-6..] } else { &room_id };
 
@@ -730,6 +750,46 @@ pub async fn start_sync(
         });
     }
 
+    // Read-receipt handler — clears the raw-message counter for a room
+    // whenever a receipt for our MXID arrives.  This covers two paths:
+    //
+    //   * Our own `send_single_receipt` echoes back through sync; that's
+    //     harmless because `send_room_read_receipt` already cleared the
+    //     counter locally.
+    //   * Another device of ours (Element mobile, Cinny, etc.) reads the
+    //     room; the receipt syncs down and we need to drop our local
+    //     unread indicator.  The matrix-sdk `num_unread_*` fields will
+    //     also drop to zero on the same sync, so `from_room_with_raw`
+    //     needs us to clear our counter to report `messages=0`.
+    //
+    // The handler filters by MXID so other users' receipts don't reset
+    // our counter — they read the room, we haven't.
+    {
+        let raw_unread = state.raw_unread_messages.clone();
+        let self_uid = client.user_id().map(|u| u.to_owned());
+        client.add_event_handler(
+            move |ev: matrix_sdk::ruma::events::receipt::SyncReceiptEvent, room: Room| {
+                let raw_unread = raw_unread.clone();
+                let self_uid = self_uid.clone();
+                async move {
+                    let Some(me) = self_uid else { return };
+                    // `ev.content.0` is `EventId → ReceiptType → UserId → Receipt`.
+                    // We just need to know "was there any receipt for our MXID
+                    // anywhere in this event?"  One walk is enough.
+                    let mine = ev
+                        .content
+                        .0
+                        .values()
+                        .flat_map(|by_type| by_type.values())
+                        .any(|by_user| by_user.contains_key(&me));
+                    if mine {
+                        raw_unread.lock().await.remove(room.room_id());
+                    }
+                }
+            },
+        );
+    }
+
     // Clone shared state needed inside the sync loop.
     let presence_map = state.presence_map.clone();
     let status_msg_map = state.status_msg_map.clone();
@@ -737,6 +797,7 @@ pub async fn start_sync(
     let voice_client = client.clone();
     let desired_presence = state.desired_presence.clone();
     let unread_cache = state.unread_cache.clone();
+    let raw_unread = state.raw_unread_messages.clone();
     let reconcile_state_arc = state_arc.clone();
     let reconcile_gate_for_loop = reconcile_gate.clone();
     let self_user_id = client
@@ -866,7 +927,7 @@ pub async fn start_sync(
             // reads (RwLock) — cheap even for hundreds of rooms.  See
             // `commands::unread` for why we poll instead of subscribing to
             // `room_info_notable_update_receiver`.
-            super::unread::emit_unread_snapshot_if_changed(&client, &unread_cache, &app).await;
+            super::unread::emit_unread_snapshot_if_changed(&client, &unread_cache, &raw_unread, &app).await;
 
             // Push voice participants from a spawned task so we
             // don't block the sync loop with avatar fetches.

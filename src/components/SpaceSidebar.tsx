@@ -216,8 +216,13 @@ function SpaceIconRow({
             color: "#ffffff",
             fontSize: 11,
             fontWeight: 700,
-            lineHeight: "18px",
-            textAlign: "center",
+            // Use flex centering rather than lineHeight: the 2px border
+            // below + border-box box-sizing leaves 14px of content area,
+            // so a lineHeight of 18px overflows and sinks to the bottom.
+            display: "flex",
+            alignItems: "center",
+            justifyContent: "center",
+            lineHeight: 1,
             boxSizing: "border-box",
             // Small dark halo so the badge reads on top of both the avatar
             // and the sidebar background when they have similar tones.

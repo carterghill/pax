@@ -19,6 +19,18 @@
 //! `sync_once` (which Pax uses) does not mark it, so the broadcast wouldn't fire on
 //! incoming messages.  Polling the in-memory counts each sync iteration is cheap
 //! (synchronous `RwLock` reads) and matches how Cinny/Element-web surface unread state.
+//!
+//! ### Push-rule-independent unread tracking
+//!
+//! The SDK's `num_unread_*` helpers and the server's `notification_count` are both
+//! push-rule filtered — so a room muted via a `room`-kind `dont_notify` rule (what
+//! Pass 2's notification levels install for anything below "All") reports zero
+//! unread even when messages are actively arriving.  To keep the sidebar indicator
+//! accurate for muted rooms, we augment both with `raw_unread_messages` — a counter
+//! fed by the sync loop's `OriginalSyncRoomMessageEvent` handler, cleared by read
+//! receipts (local sends and remote syncs from other devices).  The final
+//! `messages` value is the max of all three sources, so nothing ever gets counted
+//! less than reality.
 
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -41,7 +53,11 @@ use super::{fmt_error_chain, get_client, resolve_room};
 ///
 /// * `messages` — client-side-computed count of unread message events since the
 ///   user's last read receipt.  Used for the sidebar "primary-colour when unread"
-///   treatment.
+///   treatment.  Combines three sources: the SDK's `num_unread_messages`, the
+///   server's `notification_count`, and Pax's own event-handler-fed counter
+///   (`raw_unread_messages` on AppState).  The last one is the fallback for
+///   muted rooms where the first two are zeroed by push rules — see the module
+///   doc for the full rationale.
 /// * `notifications` — subset of `messages` that would push-notify per the user's
 ///   push rules.  Same value as `messages` with default rules; differs only if the
 ///   user has muted the room.  The UI can use this instead of `messages` if it
@@ -60,25 +76,9 @@ pub struct RoomUnreadState {
 }
 
 impl RoomUnreadState {
-    fn from_room(room: &matrix_sdk::Room) -> Self {
-        // matrix-sdk exposes two sources of unread state:
-        //
-        //   (A) `num_unread_*()` — client-side-computed from the SDK's
-        //       read-receipts tracker.  Populated reliably on sliding sync,
-        //       but on legacy `sync_once` (what Pax uses) it stays at 0 for
-        //       most rooms because the tracker isn't primed the same way.
-        //
-        //   (B) `unread_notification_counts()` — the raw `unread_notifications`
-        //       counts the homeserver computes and ships inside every sync
-        //       response.  Always populated on legacy sync.  Less precise for
-        //       E2EE rooms (the server can't evaluate push rules against
-        //       encrypted content) but accurate enough for the sidebar's
-        //       "is there activity here" predicate.
-        //
-        // We prefer (A) when it's non-zero (which will be the case once we
-        // migrate to sliding sync, or for rooms where the tracker has been
-        // seeded), and fall back to (B) otherwise.  This future-proofs the
-        // module for sliding sync while fixing legacy sync today.
+    /// Build a snapshot, taking the `raw_unread_messages` counter into account.
+    /// `raw_count` is this room's current counter value (0 if absent).
+    fn from_room_with_raw(room: &matrix_sdk::Room, raw_count: u64) -> Self {
         let server = room.unread_notification_counts();
         let server_notifications = u64::from(server.notification_count);
         let server_mentions = u64::from(server.highlight_count);
@@ -87,7 +87,10 @@ impl RoomUnreadState {
         let client_notifications = room.num_unread_notifications();
         let client_mentions = room.num_unread_mentions();
 
-        let messages = client_messages.max(server_notifications);
+        // For `messages`: take the max across the SDK, server, and our raw
+        // counter.  The raw counter is the only source that correctly tracks
+        // activity in push-rule-muted rooms.
+        let messages = client_messages.max(server_notifications).max(raw_count);
         let notifications = client_notifications.max(server_notifications);
         let mentions = client_mentions.max(server_mentions);
 
@@ -113,6 +116,9 @@ pub struct RoomUnreadChangedPayload {
 /// any single sync iteration and is read/written from the sync task.
 pub type UnreadStateCache = Arc<Mutex<HashMap<OwnedRoomId, RoomUnreadState>>>;
 
+/// Shared type alias for the raw-message-counter map on AppState.
+pub type RawUnreadMessageCounts = Arc<Mutex<HashMap<OwnedRoomId, u64>>>;
+
 // ---------- Commands ----------
 
 /// Snapshot read for one room.  The frontend calls this on mount to seed its map
@@ -125,7 +131,14 @@ pub async fn get_room_unread_state(
 ) -> Result<RoomUnreadState, String> {
     let client = get_client(&state).await?;
     let room = resolve_room(&client, &room_id)?;
-    Ok(RoomUnreadState::from_room(&room))
+    let raw = state
+        .raw_unread_messages
+        .lock()
+        .await
+        .get(room.room_id())
+        .copied()
+        .unwrap_or(0);
+    Ok(RoomUnreadState::from_room_with_raw(&room, raw))
 }
 
 /// Bulk snapshot over every joined room.  Cheaper than N individual invokes on
@@ -135,9 +148,14 @@ pub async fn get_all_unread_states(
     state: State<'_, Arc<AppState>>,
 ) -> Result<HashMap<String, RoomUnreadState>, String> {
     let client = get_client(&state).await?;
+    let raw_map = state.raw_unread_messages.lock().await.clone();
     let mut out = HashMap::new();
     for room in client.joined_rooms() {
-        out.insert(room.room_id().to_string(), RoomUnreadState::from_room(&room));
+        let raw = raw_map.get(room.room_id()).copied().unwrap_or(0);
+        out.insert(
+            room.room_id().to_string(),
+            RoomUnreadState::from_room_with_raw(&room, raw),
+        );
     }
     Ok(out)
 }
@@ -175,11 +193,20 @@ pub async fn send_room_read_receipt(
         .await
         .map_err(|e| format!("Failed to send read receipt: {}", fmt_error_chain(&e)))?;
 
+    // Clear the raw-message counter for this room; we've acknowledged up through
+    // `event_id`.  Any fresh messages arriving after this point will be
+    // counted anew via the message-event handler.
+    state
+        .raw_unread_messages
+        .lock()
+        .await
+        .remove(room.room_id());
+
     // Echo locally so the sidebar updates immediately, even before the server's
     // next sync response returns.  `send_single_receipt` already zeroed the counts
     // in the SDK's in-memory `RoomInfo` (via `compute_unread_counts`), so this
     // just reads them and ships them to the UI.
-    let new_state = RoomUnreadState::from_room(&room);
+    let new_state = RoomUnreadState::from_room_with_raw(&room, 0);
     let payload = RoomUnreadChangedPayload {
         room_id: room.room_id().to_string(),
         state: new_state.clone(),
@@ -221,13 +248,24 @@ pub async fn set_room_marked_unread(
 pub async fn emit_unread_snapshot_if_changed(
     client: &Client,
     cache: &UnreadStateCache,
+    raw_unread: &RawUnreadMessageCounts,
     app: &AppHandle,
 ) {
+    // Snapshot the raw-message map first so we hold its lock briefly; the
+    // matrix-sdk room reads are synchronous below.
+    let raw_map: HashMap<OwnedRoomId, u64> = raw_unread.lock().await.clone();
+
     // Snapshot current state first (no locks held across .emit()).
     let snapshots: Vec<(OwnedRoomId, RoomUnreadState)> = client
         .joined_rooms()
         .into_iter()
-        .map(|r| (r.room_id().to_owned(), RoomUnreadState::from_room(&r)))
+        .map(|r| {
+            let raw = raw_map.get(r.room_id()).copied().unwrap_or(0);
+            (
+                r.room_id().to_owned(),
+                RoomUnreadState::from_room_with_raw(&r, raw),
+            )
+        })
         .collect();
 
     // Also detect rooms that have been left since last pass: emit a zero state so

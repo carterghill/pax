@@ -83,6 +83,27 @@ pub struct AppState {
     /// (tl;dr: matrix-sdk 0.16 only flags the broadcast's READ_RECEIPT reason on
     /// the sliding-sync path; legacy sync_once doesn't, so we poll instead).
     pub unread_cache: commands::unread::UnreadStateCache,
+    /// Per-room raw message count since the user's last read receipt, observed
+    /// by counting non-self `m.room.message` events in the sync loop's event
+    /// handler.
+    ///
+    /// Why this exists: on legacy `sync_once` (Pax's sync path), matrix-sdk
+    /// 0.16's `num_unread_messages()` stays at 0 for most rooms because the
+    /// read-receipt tracker isn't populated the same way it is under sliding
+    /// sync.  The fallback — the server's `notification_count` — is filtered
+    /// by push rules, so a room muted via a room-kind `dont_notify` rule
+    /// reports zero even when messages are arriving.  Without this counter,
+    /// a muted room would never light up its unread indicator.
+    ///
+    /// Mutation points:
+    ///   - Incremented in the `OriginalSyncRoomMessageEvent` handler in
+    ///     `start_sync`, for non-self messages.
+    ///   - Cleared in `send_room_read_receipt` (local send).
+    ///   - Cleared in the `SyncReceiptEvent` handler in `start_sync`
+    ///     when a receipt for our MXID arrives (covers reads on other
+    ///     devices syncing down).
+    pub raw_unread_messages:
+        Arc<Mutex<HashMap<matrix_sdk::ruma::OwnedRoomId, u64>>>,
 }
 
 impl AppState {
@@ -226,6 +247,7 @@ pub fn run() {
         voice_livekit_jwt_service_url: StdMutex::new(None),
         desired_presence: Arc::new(StdMutex::new("online".to_string())),
         unread_cache: Arc::new(Mutex::new(HashMap::new())),
+        raw_unread_messages: Arc::new(Mutex::new(HashMap::new())),
     });
 
     tauri::Builder::default()
