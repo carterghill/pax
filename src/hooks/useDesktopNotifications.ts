@@ -1,6 +1,7 @@
 import { useEffect, useRef } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
+import { useSound } from "react-sounds";
 import type { Message, Room } from "../types/matrix";
 import type { NotificationLevel } from "./useNotificationSettings";
 
@@ -142,6 +143,14 @@ export function useDesktopNotifications({
   activeRoomId,
   getRoom,
 }: DesktopNotificationsOptions): void {
+  // `useSound().play()` resumes Howler's AudioContext before playing;
+  // standalone `playSound()` does not, so the first inbound notifications
+  // (before / without a matching user gesture) can be silent while voice
+  // UI sounds still work after the user has clicked around.
+  const { play: playNotificationSound } = useSound("/sounds/notification.mp3");
+  const playNotificationRef = useRef(playNotificationSound);
+  playNotificationRef.current = playNotificationSound;
+
   // Refs so the main effect body reads live values without re-subscribing
   // on every change.  Without this the `room-message` listener would tear
   // down and re-bind on every keystroke-driven render of MainLayout.
@@ -277,6 +286,13 @@ export function useDesktopNotifications({
           body: truncate(message.body ?? "", 200),
           iconPath: null,
         });
+        void playNotificationRef.current()
+          .catch((err) =>
+            console.warn(
+              "[useDesktopNotifications] notification sound failed:",
+              err,
+            ),
+          );
       } catch (e) {
         console.warn("[useDesktopNotifications] notify_send failed:", e);
       }
