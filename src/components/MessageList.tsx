@@ -549,6 +549,67 @@ export default function MessageList({
   }, [lastId, messages.length, initialLoading, roomId]);
 
   /* ================================================================ */
+  /*  Preserve scroll position on prepend                              */
+  /*                                                                   */
+  /*  The browser's native `overflow-anchor` adjustment is suppressed  */
+  /*  when the scroll container is at (or very near) scrollTop = 0,    */
+  /*  which is exactly where users land when they scroll up to trigger */
+  /*  a load of older history. To keep their reading position stable,  */
+  /*  we track the first message's viewport offset across renders and  */
+  /*  compensate for any shift by adjusting scrollTop ourselves.       */
+  /*                                                                   */
+  /*  Measuring *viewport* offset (offsetTop − scrollTop) rather than  */
+  /*  raw offsetTop makes this correct whether or not the browser's    */
+  /*  anchoring already kicked in: if it did, delta === 0 and we no-op.*/
+  /* ================================================================ */
+
+  const anchorRef = useRef<{ id: string; viewportTop: number } | null>(null);
+
+  useLayoutEffect(() => {
+    const el = scrollContainerRef.current;
+    if (!el) return;
+
+    if (
+      anchorRef.current &&
+      !shouldAutoScrollRef.current &&
+      !initialLoading
+    ) {
+      const { id, viewportTop: prevViewportTop } = anchorRef.current;
+      const anchorEl = el.querySelector(
+        `[data-message-event-id="${CSS.escape(id)}"]`,
+      ) as HTMLElement | null;
+      if (anchorEl) {
+        const currentViewportTop = anchorEl.offsetTop - el.scrollTop;
+        const delta = currentViewportTop - prevViewportTop;
+        if (delta !== 0) {
+          el.scrollTop += delta;
+        }
+      }
+    }
+
+    const firstMsg = messages[0];
+    if (firstMsg) {
+      const firstEl = el.querySelector(
+        `[data-message-event-id="${CSS.escape(firstMsg.eventId)}"]`,
+      ) as HTMLElement | null;
+      anchorRef.current = firstEl
+        ? {
+            id: firstMsg.eventId,
+            viewportTop: firstEl.offsetTop - el.scrollTop,
+          }
+        : null;
+    } else {
+      anchorRef.current = null;
+    }
+  }, [messages, initialLoading]);
+
+  // Clear the anchor when switching rooms so the new room's first render
+  // doesn't try to compensate against an id from the previous room.
+  useLayoutEffect(() => {
+    anchorRef.current = null;
+  }, [roomId]);
+
+  /* ================================================================ */
   /*  Scroll handler: track auto-scroll + trigger loads                */
   /* ================================================================ */
 
@@ -644,6 +705,24 @@ export default function MessageList({
         // Only commit the state mirror on flips — this runs inside the scroll
         // rAF and must not cause a render per frame.
         setAtBottom(nextAtBottom);
+      }
+
+      // Keep the prepend-preservation anchor fresh. Without this, the stored
+      // viewportTop reflects whatever scroll position we were at the last
+      // time `messages` changed (often the bottom, right after initial load)
+      // which would cause the prepend compensation to mis-calculate delta
+      // and whip the user to a wildly wrong scroll position.
+      const firstAnchorEl = el.querySelector(
+        "[data-message-event-id]",
+      ) as HTMLElement | null;
+      if (firstAnchorEl) {
+        const id = firstAnchorEl.getAttribute("data-message-event-id");
+        if (id) {
+          anchorRef.current = {
+            id,
+            viewportTop: firstAnchorEl.offsetTop - scrollTop,
+          };
+        }
       }
 
       console.log("[MessageList] scroll", {
@@ -821,6 +900,13 @@ export default function MessageList({
         flex: 1,
         minHeight: 0,
         overflowY: "auto",
+        // Let the browser keep the reading position stable when content is
+        // inserted above the viewport (older messages prepending). The
+        // non-content elements below (top indicator, skeletons, bottom ref,
+        // jump-to-recent) set `overflow-anchor: none` so the anchor lands on
+        // a real MessageRow. Bottom-append auto-scroll is still handled
+        // manually via `shouldAutoScrollRef`, which isn't affected by
+        // anchoring because appended content doesn't shift the anchor.
         overflowAnchor: "auto",
         paddingTop: spacing.unit * 2,
         paddingBottom: spacing.unit * 4,
