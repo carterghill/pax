@@ -199,7 +199,7 @@ export default function UserAvatar({
               with border-radius + overflow:hidden on the avatar can read as a
               horizontal shift; the img's box matches the composited pixels. */}
           <img
-            src="/logo.png"
+            src="/logoWhiteAlt.png"
             alt=""
             draggable={false}
             style={{
@@ -209,7 +209,6 @@ export default function UserAvatar({
               height: "auto",
               objectFit: "contain",
               display: "block",
-              filter: "brightness(0) invert(1)",
             }}
           />
         </div>
