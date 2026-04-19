@@ -1,18 +1,17 @@
 import { useEffect, useState, type CSSProperties } from "react";
 import { useTheme } from "../theme/ThemeContext";
 import { userInitialAvatarBackground } from "../utils/userAvatarColor";
-import { dmInitialsFromLabel } from "../utils/dmDisplay";
 import { avatarSrc } from "../utils/avatarSrc";
 import { useUserAvatar, useUserAvatarStore } from "../context/UserAvatarStore";
 
 export type UserAvatarProps = {
   /** Matrix user id (e.g. `@alice:example.org`). Required to key the store. */
   userId: string;
-  /** Display name for alt text + initials fallback. Falls back to userId. */
+  /** Display name (surrounding UI; avatar image is decorative). */
   displayName?: string | null;
   /** Square size in px. */
   size: number;
-  /** Initials font size. Defaults to a size-proportional value. */
+  /** Kept for call-site compatibility; ignored. */
   fontSize?: number;
   /**
    * Override URL hint — when the caller has a freshly-fetched avatar URL
@@ -31,8 +30,8 @@ export type UserAvatarProps = {
  *     `UserAvatarStore`.
  *   - On miss, kicks off a batched `get_user_avatars([userId, …])`
  *     round-trip via the store.
- *   - Falls back to a colored circle with initials while loading or
- *     when the user has no avatar set.
+ *   - Falls back to a user-id-colored circle with the app logo (white glyph)
+ *     when the user has no avatar set; neutral placeholder while loading.
  *   - Defends against stale on-disk paths: if the `<img>` fails to
  *     load (e.g. the temp file was cleaned up), the entry is
  *     invalidated so the next mount re-fetches.
@@ -42,14 +41,14 @@ export type UserAvatarProps = {
  */
 export default function UserAvatar({
   userId,
-  displayName,
+  displayName: _displayName,
   size,
-  fontSize,
+  fontSize: _fontSize,
   avatarUrlHint,
   className,
   style,
 }: UserAvatarProps) {
-  const { palette, typography, resolvedColorScheme } = useTheme();
+  const { palette, resolvedColorScheme } = useTheme();
   const store = useUserAvatarStore();
 
   // When the caller knows a non-null URL (e.g. from a freshly-returned
@@ -89,20 +88,16 @@ export default function UserAvatar({
     setImageFailed(false);
   }, [effectiveUrl]);
 
-  const label = (displayName ?? "").trim() || userId;
-  const initials = dmInitialsFromLabel(label);
-  const fs = fontSize ?? Math.max(10, Math.round(size * 0.4));
-
   // Three display states, NOT two. Collapsing "unknown" and "known
-  // absent" into the same "initials" branch was the real cause of
+  // absent" into the same fallback branch was the real cause of
   // the sidebar flash: every time a <UserAvatar> mounted for a user
-  // whose data wasn't in the store yet, we painted a full colored
-  // initials circle for one or more frames, then flipped to the
-  // image when the store resolved. Now we only paint initials when
+  // whose data wasn't in the store yet, we painted a full branded
+  // fallback for one or more frames, then flipped to the
+  // image when the store resolved. Now we only paint the logo fallback when
   // we KNOW the user has no avatar (store confirmed `null`), and
   // show a neutral empty circle while the answer is still unknown.
   //
-  //   fromStore === null          → confirmed "no avatar"      → initials
+  //   fromStore === null          → confirmed "no avatar"      → logo
   //   fromStore === undefined     → unknown (fetch in flight)  → empty
   //                                 AND no hint
   //   otherwise (path)            → render image
@@ -119,7 +114,7 @@ export default function UserAvatar({
   // avatars. If a flash shows something other than `image` we want
   // to see which one and for how many frames.
   if (import.meta.env.DEV && size >= 24 && size <= 32) {
-    const branch = showImage ? "image" : showInitials ? "initials" : "empty";
+    const branch = showImage ? "image" : showInitials ? "logo" : "empty";
     // eslint-disable-next-line no-console
     console.log(
       `[UserAvatar ${userId}] render → ${branch} (fromStore=${fromStore === null ? "null" : fromStore === undefined ? "undefined" : "<path>"}, hint=${avatarUrlHint === null ? "null" : avatarUrlHint === undefined ? "undefined" : "<path>"}, failed=${imageFailed})`,
@@ -130,15 +125,11 @@ export default function UserAvatar({
     width: size,
     height: size,
     borderRadius: "50%",
-    // The color-by-id background is ONLY painted when we're actually
-    // showing initials — i.e. when the store has confirmed the user
-    // has no avatar. If we're showing the image, the image owns the
-    // full circle (via `objectFit: cover`) and the background must
-    // be neutral: if it were colored, any frame of fetch+decode lag
-    // would show the colored circle under the still-loading img,
-    // which is visually identical to an initials fallback — the
-    // exact flash we're trying to kill. Unknown state is also
-    // neutral.
+    // The color-by-id background is ONLY painted when we're actually showing
+    // the logo fallback — i.e. when the store has confirmed the user has no
+    // avatar. If we're showing the image, the background must be neutral: if
+    // it were colored, any frame of fetch+decode lag would show the colored
+    // circle under the still-loading img — the same flash we're avoiding.
     backgroundColor: showInitials
       ? userInitialAvatarBackground(userId, resolvedColorScheme)
       : palette.bgSecondary,
@@ -146,9 +137,6 @@ export default function UserAvatar({
     alignItems: "center",
     justifyContent: "center",
     flexShrink: 0,
-    fontSize: fs,
-    fontWeight: typography.fontWeightBold,
-    color: palette.textPrimary,
     overflow: "hidden",
     ...style,
   };
@@ -164,7 +152,7 @@ export default function UserAvatar({
           // `[Intervention] Images loaded lazily and replaced with
           // placeholders`) and renders the alt text on top of the
           // container's color-by-id background — producing a
-          // pixel-perfect facsimile of our initials fallback for one
+          // pixel-perfect facsimile of our logo fallback for one
           // or two frames before the real image paints. Eager loading
           // + empty alt eliminates that flash.
           //
@@ -196,7 +184,35 @@ export default function UserAvatar({
           style={{ width: "100%", height: "100%", objectFit: "cover" }}
         />
       ) : showInitials ? (
-        initials
+        <div
+          style={{
+            width: "100%",
+            height: "100%",
+            padding: Math.max(2, Math.round((5 / 48) * size)),
+            boxSizing: "border-box",
+            display: "flex",
+            alignItems: "center",
+            justifyContent: "center",
+          }}
+        >
+          {/* Filter on the img only: a filtered wrapper expands paint bounds and
+              with border-radius + overflow:hidden on the avatar can read as a
+              horizontal shift; the img's box matches the composited pixels. */}
+          <img
+            src="/logo.png"
+            alt=""
+            draggable={false}
+            style={{
+              maxWidth: "100%",
+              maxHeight: "100%",
+              width: "auto",
+              height: "auto",
+              objectFit: "contain",
+              display: "block",
+              filter: "brightness(0) invert(1)",
+            }}
+          />
+        </div>
       ) : null}
     </div>
   );
