@@ -35,9 +35,10 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 
+use matrix_sdk::room::MessagesOptions;
 use matrix_sdk::ruma::api::client::receipt::create_receipt::v3::ReceiptType;
 use matrix_sdk::ruma::events::receipt::ReceiptThread;
-use matrix_sdk::ruma::{EventId, OwnedRoomId};
+use matrix_sdk::ruma::{EventId, OwnedEventId, OwnedRoomId, UInt};
 use matrix_sdk::Client;
 use serde::Serialize;
 use tauri::{AppHandle, Emitter, State};
@@ -160,29 +161,13 @@ pub async fn get_all_unread_states(
     Ok(out)
 }
 
-/// Send a read receipt for `event_id` in `room_id`.
-///
-/// When `public` is true, sends `m.read` (federated — other users see the avatar
-/// indicator).  Otherwise sends `m.read.private`, which clears notifications on the
-/// server and syncs the read state across the user's own devices but is NEVER
-/// federated (per MSC2285 / the spec's privacy guarantees).
-///
-/// Both receipt types also clear the MSC2867 "marked unread" flag as a side effect
-/// when the thread is `Unthreaded`.  We only ever send unthreaded receipts here —
-/// thread-scoped read state is a future concern.
-#[tauri::command]
-pub async fn send_room_read_receipt(
-    state: State<'_, Arc<AppState>>,
-    app: AppHandle,
-    room_id: String,
-    event_id: String,
+async fn apply_room_read_receipt(
+    state: &Arc<AppState>,
+    app: &AppHandle,
+    room: &matrix_sdk::Room,
+    event_id: OwnedEventId,
     as_public: bool,
 ) -> Result<(), String> {
-    let client = get_client(&state).await?;
-    let room = resolve_room(&client, &room_id)?;
-
-    let event_id = EventId::parse(&event_id).map_err(|e| format!("Invalid event ID: {e}"))?;
-
     let receipt_type = if as_public {
         ReceiptType::Read
     } else {
@@ -206,7 +191,7 @@ pub async fn send_room_read_receipt(
     // next sync response returns.  `send_single_receipt` already zeroed the counts
     // in the SDK's in-memory `RoomInfo` (via `compute_unread_counts`), so this
     // just reads them and ships them to the UI.
-    let new_state = RoomUnreadState::from_room_with_raw(&room, 0);
+    let new_state = RoomUnreadState::from_room_with_raw(room, 0);
     let payload = RoomUnreadChangedPayload {
         room_id: room.room_id().to_string(),
         state: new_state.clone(),
@@ -214,6 +199,104 @@ pub async fn send_room_read_receipt(
     let _ = app.emit("room-unread-changed", payload);
 
     // Update the dedup cache so the sync-loop emitter doesn't re-emit the same value.
+    let mut cache = state.unread_cache.lock().await;
+    cache.insert(room.room_id().to_owned(), new_state);
+
+    Ok(())
+}
+
+/// Send a read receipt for `event_id` in `room_id`.
+///
+/// When `public` is true, sends `m.read` (federated — other users see the avatar
+/// indicator).  Otherwise sends `m.read.private`, which clears notifications on the
+/// server and syncs the read state across the user's own devices but is NEVER
+/// federated (per MSC2285 / the spec's privacy guarantees).
+///
+/// Both receipt types also clear the MSC2867 "marked unread" flag as a side effect
+/// when the thread is `Unthreaded`.  We only ever send unthreaded receipts here —
+/// thread-scoped read state is a future concern.
+#[tauri::command]
+pub async fn send_room_read_receipt(
+    state: State<'_, Arc<AppState>>,
+    app: AppHandle,
+    room_id: String,
+    event_id: String,
+    as_public: bool,
+) -> Result<(), String> {
+    let client = get_client(&state).await?;
+    let room = resolve_room(&client, &room_id)?;
+
+    let event_id = EventId::parse(&event_id).map_err(|e| format!("Invalid event ID: {e}"))?;
+
+    apply_room_read_receipt(&state, &app, &room, event_id, as_public).await
+}
+
+/// Like [`send_room_read_receipt`], but resolves the latest timeline event from the
+/// SDK/homeserver (including encrypted or non-text events that `get_messages` omits).
+/// Used when the UI timeline is empty so read receipts can still clear notifications.
+#[tauri::command]
+pub async fn send_read_receipt_to_latest_timeline_event(
+    state: State<'_, Arc<AppState>>,
+    app: AppHandle,
+    room_id: String,
+    as_public: bool,
+) -> Result<(), String> {
+    let client = get_client(&state).await?;
+    let room = resolve_room(&client, &room_id)?;
+    let limit_usize = 50usize;
+
+    let mut current_from: Option<String> = None;
+    loop {
+        let mut options = MessagesOptions::backward();
+        if let Some(token) = &current_from {
+            options.from = Some(token.to_string());
+        }
+        options.limit = UInt::from(limit_usize as u32);
+
+        let response = room
+            .messages(options)
+            .await
+            .map_err(|e| format!("Failed to fetch timeline: {}", fmt_error_chain(&e)))?;
+
+        let matrix_sdk::room::Messages {
+            chunk,
+            end: pagination_end,
+            ..
+        } = response;
+
+        let timeline_event_count = chunk.len();
+        for ev in chunk {
+            if let Some(eid) = ev.event_id() {
+                return apply_room_read_receipt(&state, &app, &room, eid, as_public).await;
+            }
+        }
+
+        let prev_batch = if timeline_event_count < limit_usize {
+            None
+        } else {
+            pagination_end
+        };
+
+        if prev_batch.is_none() {
+            break;
+        }
+        current_from = prev_batch;
+    }
+
+    // No event ids found (very new / empty room): still clear local raw counter.
+    state
+        .raw_unread_messages
+        .lock()
+        .await
+        .remove(room.room_id());
+
+    let new_state = RoomUnreadState::from_room_with_raw(&room, 0);
+    let payload = RoomUnreadChangedPayload {
+        room_id: room.room_id().to_string(),
+        state: new_state.clone(),
+    };
+    let _ = app.emit("room-unread-changed", payload);
+
     let mut cache = state.unread_cache.lock().await;
     cache.insert(room.room_id().to_owned(), new_state);
 

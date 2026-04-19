@@ -28,6 +28,12 @@ export interface ReadReceiptTrigger {
   readonly latestVisibleEventId: string | null;
   /** True when the user is scrolled near the bottom of the timeline. */
   readonly atBottom: boolean;
+  /**
+   * Initial fetch produced no rows the UI can render (e.g. only encrypted events),
+   * but the room may still have unread — ask the backend for the latest timeline
+   * event id and send a receipt for that.
+   */
+  readonly fallbackWhenNoVisibleEvent: boolean;
 }
 
 export function useReadReceiptSender(
@@ -82,15 +88,19 @@ export function useReadReceiptSender(
 
   useEffect(() => {
     if (!roomId || !userId) return;
-    const eventId = trigger.latestVisibleEventId;
-    if (!eventId) return;
     if (!trigger.atBottom) return;
     if (!isFocusedRef.current) return;
 
-    // Dedup: don't re-fire for the same event id in the same room.
+    const eventId = trigger.latestVisibleEventId;
+    const useFallback =
+      !eventId && trigger.fallbackWhenNoVisibleEvent;
+
+    if (!eventId && !useFallback) return;
+
+    const dedupKey = eventId ?? "__fallback_latest_timeline__";
     if (
       sentForRoomRef.current.roomId === roomId &&
-      sentForRoomRef.current.lastSent === eventId
+      sentForRoomRef.current.lastSent === dedupKey
     ) {
       return;
     }
@@ -99,20 +109,25 @@ export function useReadReceiptSender(
     // else triggers this effect, we don't double-fire.  On error we roll back
     // so a transient failure can be retried on the next trigger.
     const prev = sentForRoomRef.current.lastSent;
-    sentForRoomRef.current = { roomId, lastSent: eventId };
+    sentForRoomRef.current = { roomId, lastSent: dedupKey };
 
     const publicReceipt = getSendPublicReceipts();
 
-    invoke("send_room_read_receipt", {
-      roomId,
-      eventId,
-      asPublic: publicReceipt,
-    }).catch((e) => {
-      // Roll back so retry is possible, but only if the latest attempt is still
-      // the one we just made (don't clobber a later success).
+    const invokePromise = useFallback
+      ? invoke("send_read_receipt_to_latest_timeline_event", {
+          roomId,
+          asPublic: publicReceipt,
+        })
+      : invoke("send_room_read_receipt", {
+          roomId,
+          eventId: eventId!,
+          asPublic: publicReceipt,
+        });
+
+    invokePromise.catch((e) => {
       if (
         sentForRoomRef.current.roomId === roomId &&
-        sentForRoomRef.current.lastSent === eventId
+        sentForRoomRef.current.lastSent === dedupKey
       ) {
         sentForRoomRef.current = { roomId, lastSent: prev };
       }
@@ -124,31 +139,44 @@ export function useReadReceiptSender(
     // focused-state to React state (which would re-render the whole MessageList
     // on every focus/blur).
     function onRetry() {
-      // Re-check conditions by poking state again via a microtask.  Using a
-      // microtask instead of setTimeout avoids a 4ms+ delay on Chromium.
       queueMicrotask(() => {
         if (!roomId || !userId) return;
-        if (!trigger.latestVisibleEventId) return;
         if (!trigger.atBottom) return;
         if (!isFocusedRef.current) return;
+        const eid = trigger.latestVisibleEventId;
+        const retryFallback =
+          !eid && trigger.fallbackWhenNoVisibleEvent;
+        if (!eid && !retryFallback) return;
+        const retryKey = eid ?? "__fallback_latest_timeline__";
         if (
           sentForRoomRef.current.roomId === roomId &&
-          sentForRoomRef.current.lastSent === trigger.latestVisibleEventId
+          sentForRoomRef.current.lastSent === retryKey
         ) {
           return;
         }
-        const eid = trigger.latestVisibleEventId;
-        sentForRoomRef.current = { roomId, lastSent: eid };
-        void invoke("send_room_read_receipt", {
-          roomId,
-          eventId: eid,
-          asPublic: getSendPublicReceipts(),
-        }).catch((e) => {
+        sentForRoomRef.current = { roomId, lastSent: retryKey };
+        const p = retryFallback
+          ? invoke("send_read_receipt_to_latest_timeline_event", {
+              roomId,
+              asPublic: getSendPublicReceipts(),
+            })
+          : invoke("send_room_read_receipt", {
+              roomId,
+              eventId: eid!,
+              asPublic: getSendPublicReceipts(),
+            });
+        void p.catch((e) => {
           console.warn("[useReadReceiptSender] retry invoke failed:", e);
         });
       });
     }
     window.addEventListener("pax:rr-retry", onRetry);
     return () => window.removeEventListener("pax:rr-retry", onRetry);
-  }, [roomId, userId, trigger.latestVisibleEventId, trigger.atBottom]);
+  }, [
+    roomId,
+    userId,
+    trigger.latestVisibleEventId,
+    trigger.atBottom,
+    trigger.fallbackWhenNoVisibleEvent,
+  ]);
 }

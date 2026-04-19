@@ -51,7 +51,7 @@ interface MessageListProps {
 /*  Constants                                                          */
 /* ------------------------------------------------------------------ */
 
-const AUTO_SCROLL_THRESHOLD_PX = 150;
+const AUTO_SCROLL_THRESHOLD_PX = 200;
 const SKELETON_COUNT = 4;
 const MESSAGE_ACTIONS_MENU_Z = 10_000;
 
@@ -442,6 +442,8 @@ export default function MessageList({
 
   /* ---- Refs ---- */
   const scrollContainerRef = useRef<HTMLDivElement>(null);
+  /** Grows with message rows / media; observed so we can pin scroll when content height changes. */
+  const scrollContentRef = useRef<HTMLDivElement>(null);
   const bottomRef = useRef<HTMLDivElement>(null);
   const shouldAutoScrollRef = useRef(true);
   const menuAnchorRef = useRef<HTMLButtonElement>(null);
@@ -508,6 +510,9 @@ export default function MessageList({
         block: "nearest",
         inline: "nearest",
       });
+      // Programmatic scroll does not always emit `scroll`; keep read-receipt + pin state in sync.
+      shouldAutoScrollRef.current = true;
+      setAtBottom(true);
     };
 
     run();
@@ -615,6 +620,7 @@ export default function MessageList({
     {
       latestVisibleEventId: lastId,
       atBottom: isAtLatest && atBottom,
+      fallbackWhenNoVisibleEvent: !initialLoading && messages.length === 0,
     },
     userId,
   );
@@ -670,7 +676,10 @@ export default function MessageList({
       const scrollTop = el.scrollTop;
       const distFromBottom =
         el.scrollHeight - scrollTop - el.clientHeight;
-      const nextAtBottom = distFromBottom < AUTO_SCROLL_THRESHOLD_PX;
+      const nextAtBottom =
+        distFromBottom < AUTO_SCROLL_THRESHOLD_PX ||
+        // Short timelines: no overflow, or sub-pixel noise at the tail.
+        (el.scrollHeight <= el.clientHeight + 2 && el.scrollTop <= 2);
       if (shouldAutoScrollRef.current !== nextAtBottom) {
         shouldAutoScrollRef.current = nextAtBottom;
         // Only commit the state mirror on flips — this runs inside the scroll
@@ -743,23 +752,40 @@ export default function MessageList({
   /* ================================================================ */
 
   useEffect(() => {
-    const el = scrollContainerRef.current;
-    if (!el) return;
-    let prevHeight = el.clientHeight;
-    const ro = new ResizeObserver(() => {
-      const h = el.clientHeight;
-      if (h < prevHeight && shouldAutoScrollRef.current) {
-        el.scrollTop = el.scrollHeight;
-        bottomRef.current?.scrollIntoView({
-          block: "nearest",
-          inline: "nearest",
-        });
-      }
-      prevHeight = h;
+    const outer = scrollContainerRef.current;
+    const inner = scrollContentRef.current;
+    if (!outer || !inner) return;
+
+    let prevOuterH = outer.clientHeight;
+    const pinIfFollowing = () => {
+      if (!shouldAutoScrollRef.current) return;
+      outer.scrollTop = outer.scrollHeight;
+      bottomRef.current?.scrollIntoView({
+        block: "nearest",
+        inline: "nearest",
+      });
+      setAtBottom(true);
+    };
+
+    const roInner = new ResizeObserver(() => {
+      pinIfFollowing();
     });
-    ro.observe(el);
-    return () => ro.disconnect();
-  }, [initialLoading]);
+    roInner.observe(inner);
+
+    const roOuter = new ResizeObserver(() => {
+      const h = outer.clientHeight;
+      if (h !== prevOuterH) {
+        pinIfFollowing();
+      }
+      prevOuterH = h;
+    });
+    roOuter.observe(outer);
+
+    return () => {
+      roInner.disconnect();
+      roOuter.disconnect();
+    };
+  }, [initialLoading, roomId]);
 
   /* ================================================================ */
   /*  Context menu: outside-click / escape                             */
@@ -898,6 +924,14 @@ export default function MessageList({
         }
       `}</style>
 
+      <div
+        ref={scrollContentRef}
+        style={{
+          display: "flex",
+          flexDirection: "column",
+          minHeight: "min-content",
+        }}
+      >
       {/* Top: "Beginning" / "Loading" indicator */}
       <div
         style={{
@@ -919,7 +953,7 @@ export default function MessageList({
             : "Scroll up for more"
           : messages.length > 0
             ? "Beginning of conversation"
-            : null}
+            : "No messages yet"}
       </div>
 
       {/* Skeleton rows when loading older */}
@@ -1032,6 +1066,7 @@ export default function MessageList({
           </button>
         </div>
       )}
+      </div>
 
       {/* Context menu portal */}
       {openMenuMsg &&

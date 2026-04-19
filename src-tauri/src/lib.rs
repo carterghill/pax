@@ -383,6 +383,7 @@ pub fn run() {
             commands::unread::get_room_unread_state,
             commands::unread::get_all_unread_states,
             commands::unread::send_room_read_receipt,
+            commands::unread::send_read_receipt_to_latest_timeline_event,
             commands::unread::set_room_marked_unread,
             // --- Push rules (raw CS-API wrappers + master-toggle convenience) ---
             commands::push_rules::get_push_rules,
