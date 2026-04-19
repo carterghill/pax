@@ -167,7 +167,11 @@ export default function MessageInput({
     const el = editorRef.current;
     if (!el) return;
     el.style.height = "auto";
-    el.style.height = `${Math.min(el.scrollHeight, composerMaxHeightPx)}px`;
+    const sh = el.scrollHeight;
+    const capped = Math.min(sh, composerMaxHeightPx);
+    el.style.height = `${capped}px`;
+    // `overflow-y: auto` always reserves a track in some hosts; only enable when we cap at max height.
+    el.style.overflowY = sh > composerMaxHeightPx ? "auto" : "hidden";
   }, [composerMaxHeightPx]);
 
   /** Sync React state and height from the live editor DOM (needed after GIF/image insert when synthetic `input` may not run). */
@@ -795,6 +799,8 @@ export default function MessageInput({
         [data-pax-composer] h2 { font-size: 1.2em; font-weight: bold; margin: 0; }
         [data-pax-composer] hr { border: none; border-top: 1px solid ${palette.border}; margin: ${spacing.unit}px 0; }
         [data-pax-composer] ul, [data-pax-composer] ol { margin: 0; padding-left: ${spacing.unit * 5}px; }
+        /* Single block wrapper (incl. empty div+br); UA margin can inflate scrollHeight and show a bogus scrollbar. */
+        [data-pax-composer] > div:only-child { margin: 0; }
         [data-pax-composer-root] button:disabled { cursor: default !important; }
         [data-pax-composer-root] [data-pax-composer][contenteditable="false"] { cursor: default !important; }
       `}</style>
@@ -1044,7 +1050,7 @@ export default function MessageInput({
               lineHeight: typography.lineHeight,
               padding: `${spacing.unit * 3}px ${spacing.unit * 2}px ${spacing.unit * 3}px ${spacing.unit * 2}px`,
               maxHeight: composerMaxHeightPx,
-              overflowY: "auto",
+              overflowY: "hidden",
               boxSizing: "border-box",
               whiteSpace: "pre-wrap",
               wordBreak: "break-word",
