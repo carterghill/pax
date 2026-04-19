@@ -62,6 +62,8 @@ export interface EditingMessageRef {
   body: string;
 }
 
+export type ComposerPermission = "loading" | "allowed" | "forbidden";
+
 interface MessageInputProps {
   roomId: string;
   roomName: string;
@@ -73,6 +75,8 @@ interface MessageInputProps {
   /** When set, first text send creates the DM room then delivers the message (no room until send). */
   draftDmPeerUserId?: string | null;
   onDraftDmFirstMessage?: (roomId: string) => void | Promise<void>;
+  /** Read-only channel / power levels: disables the composer until allowed. */
+  composerPermission?: ComposerPermission;
 }
 
 /** Below `MODAL_LAYER_Z` so emoji/GIF popovers stay under full-screen modals. */
@@ -96,7 +100,19 @@ export default function MessageInput({
   onLocalTypingActive,
   draftDmPeerUserId = null,
   onDraftDmFirstMessage,
+  composerPermission = "allowed",
 }: MessageInputProps) {
+  const interactionLocked =
+    !draftDmPeerUserId &&
+    (composerPermission === "loading" || composerPermission === "forbidden");
+  const interactionLockedRef = useRef(interactionLocked);
+  interactionLockedRef.current = interactionLocked;
+
+  const editingMessageRef = useRef(editingMessage);
+  const onCancelEditRef = useRef(onCancelEdit);
+  editingMessageRef.current = editingMessage;
+  onCancelEditRef.current = onCancelEdit;
+
   const [plainText, setPlainText] = useState("");
   /** True when the editor contains an embedded image (GIF, pasted image). Plain text alone is tracked in `plainText`. */
   const [hasComposerMedia, setHasComposerMedia] = useState(false);
@@ -176,6 +192,7 @@ export default function MessageInput({
   const sendTyping = useCallback(
     (typing: boolean) => {
       if (draftDmPeerUserId) return;
+      if (interactionLockedRef.current) return;
 
       if (typing) {
         const now = Date.now();
@@ -225,6 +242,7 @@ export default function MessageInput({
   // ─── Editor input handler ─────────────────────────────────────────────────
 
   function handleEditorInput() {
+    if (interactionLocked) return;
     const el = editorRef.current;
     if (!el) return;
     const text = getEditorPlainText(el);
@@ -307,6 +325,7 @@ export default function MessageInput({
   // ─── Emoji picker mount ───────────────────────────────────────────────────
 
   insertEmojiFromPickerRef.current = (native: string) => {
+    if (interactionLockedRef.current) return;
     const el = editorRef.current;
     if (!el) return;
     el.focus();
@@ -408,6 +427,7 @@ export default function MessageInput({
   // ─── Send / key handling ──────────────────────────────────────────────────
 
   async function handleSend() {
+    if (interactionLocked) return;
     const el = editorRef.current;
     if (!el) return;
     const markdown = serializeComposerEditor(el);
@@ -506,6 +526,7 @@ export default function MessageInput({
   }
 
   function handleKeyDown(e: React.KeyboardEvent) {
+    if (interactionLocked) return;
     if (e.key === "Enter" && !e.shiftKey) {
       e.preventDefault();
       handleSend();
@@ -534,6 +555,7 @@ export default function MessageInput({
   // ─── File upload ──────────────────────────────────────────────────────────
 
   async function handleFileSelected(e: React.ChangeEvent<HTMLInputElement>) {
+    if (interactionLocked) return;
     const file = e.target.files?.[0];
     if (!file) return;
     e.target.value = "";
@@ -563,6 +585,42 @@ export default function MessageInput({
     setPendingFile(null);
   }
 
+  useEffect(() => {
+    if (composerPermission !== "loading") return;
+    setPickerOpen(false);
+    setFormatOpen(false);
+  }, [composerPermission]);
+
+  useEffect(() => {
+    if (draftDmPeerUserId) return;
+    if (composerPermission !== "forbidden") return;
+
+    sendTyping(false);
+    if (typingTimeout.current) {
+      clearTimeout(typingTimeout.current);
+      typingTimeout.current = null;
+    }
+    if (isTyping.current) {
+      isTyping.current = false;
+      onLocalTypingActive?.(false);
+      invoke("send_typing_notice", { roomId, typing: false }).catch(() => {});
+    }
+    setPickerOpen(false);
+    setFormatOpen(false);
+    clearPendingFile();
+
+    const el = editorRef.current;
+    if (el) {
+      el.innerHTML = "";
+      setPlainText("");
+      setHasComposerMedia(false);
+    }
+    syncHeight();
+    if (editingMessageRef.current && onCancelEditRef.current) {
+      onCancelEditRef.current();
+    }
+  }, [composerPermission, draftDmPeerUserId, roomId, sendTyping, onLocalTypingActive, syncHeight]);
+
   // ─── Layout constants ─────────────────────────────────────────────────────
 
   const formatBtnGap = spacing.unit * 0.75;
@@ -575,7 +633,17 @@ export default function MessageInput({
     e.currentTarget.style.backgroundColor = enter ? palette.bgHover : "transparent";
     e.currentTarget.style.color = enter ? palette.textPrimary : palette.textSecondary;
   };
-  const canSend = (plainText.trim().length > 0 || hasComposerMedia || !!pendingFile) && !sending;
+  const canSend =
+    !interactionLocked &&
+    (plainText.trim().length > 0 || hasComposerMedia || !!pendingFile) &&
+    !sending;
+
+  const defaultPlaceholder = editingMessage ? "Edit message" : `Message #${roomName}`;
+  const placeholderText = interactionLocked
+    ? composerPermission === "loading"
+      ? "Loading…"
+      : "You don’t have permission to send messages in this channel."
+    : defaultPlaceholder;
 
   // ─── Picker portal (emoji + GIF tabs) ─────────────────────────────────────
 
@@ -727,10 +795,13 @@ export default function MessageInput({
         [data-pax-composer] h2 { font-size: 1.2em; font-weight: bold; margin: 0; }
         [data-pax-composer] hr { border: none; border-top: 1px solid ${palette.border}; margin: ${spacing.unit}px 0; }
         [data-pax-composer] ul, [data-pax-composer] ol { margin: 0; padding-left: ${spacing.unit * 5}px; }
+        [data-pax-composer-root] button:disabled { cursor: default !important; }
+        [data-pax-composer-root] [data-pax-composer][contenteditable="false"] { cursor: default !important; }
       `}</style>
 
       <div
         ref={rootRef}
+        data-pax-composer-root
         style={{ padding: `0 ${spacing.unit * 3}px ${spacing.unit * 3}px`, position: "relative" }}
       >
       <div
@@ -865,7 +936,7 @@ export default function MessageInput({
                 ? "File attached"
                 : "Upload file"
           }
-          disabled={!!pendingFile || !!draftDmPeerUserId}
+          disabled={!!pendingFile || !!draftDmPeerUserId || interactionLocked}
           onMouseDown={(e) => e.preventDefault()}
           onClick={() => fileInputRef.current?.click()}
           style={{
@@ -882,16 +953,16 @@ export default function MessageInput({
             borderRadius: inputToolBtnRadius,
             backgroundColor: "transparent",
             color: palette.textSecondary,
-            cursor: pendingFile || draftDmPeerUserId ? "not-allowed" : "pointer",
-            opacity: pendingFile || draftDmPeerUserId ? 0.35 : 1,
+            cursor: pendingFile || draftDmPeerUserId || interactionLocked ? "default" : "pointer",
+            opacity: pendingFile || draftDmPeerUserId || interactionLocked ? 0.35 : 1,
           }}
           onMouseEnter={(e) => {
-            if (pendingFile || draftDmPeerUserId) return;
+            if (pendingFile || draftDmPeerUserId || interactionLocked) return;
             e.currentTarget.style.backgroundColor = palette.bgHover;
             e.currentTarget.style.color = palette.textPrimary;
           }}
           onMouseLeave={(e) => {
-            if (pendingFile || draftDmPeerUserId) return;
+            if (pendingFile || draftDmPeerUserId || interactionLocked) return;
             e.currentTarget.style.backgroundColor = "transparent";
             e.currentTarget.style.color = palette.textSecondary;
           }}
@@ -906,7 +977,7 @@ export default function MessageInput({
             alignSelf: "stretch",
           }}
         >
-          {!plainText.trim() && !hasComposerMedia && (
+          {((!plainText.trim() && !hasComposerMedia) || interactionLocked) && (
             <div
               aria-hidden
               style={{
@@ -929,20 +1000,24 @@ export default function MessageInput({
                 maskImage: `linear-gradient(to right, #fff 0%, #fff calc(100% - ${spacing.unit * 5}px), transparent 100%)`,
               }}
             >
-              {editingMessage ? "Edit message" : `Message #${roomName}`}
+              {placeholderText}
             </div>
           )}
           <div
             ref={editorRef}
             data-pax-composer
-            contentEditable
+            contentEditable={!interactionLocked}
             role="textbox"
             aria-multiline="true"
-            aria-label={editingMessage ? "Edit message" : `Message ${roomName}`}
+            aria-label={placeholderText}
             suppressContentEditableWarning
             onInput={handleEditorInput}
             onKeyDown={handleKeyDown}
             onPaste={(e) => {
+              if (interactionLocked) {
+                e.preventDefault();
+                return;
+              }
               e.preventDefault();
               const text = e.clipboardData.getData("text/plain");
               const el = editorRef.current;
@@ -973,6 +1048,8 @@ export default function MessageInput({
               boxSizing: "border-box",
               whiteSpace: "pre-wrap",
               wordBreak: "break-word",
+              opacity: interactionLocked ? 0.65 : 1,
+              cursor: interactionLocked ? "default" : "text",
             }}
           />
         </div>
@@ -994,6 +1071,7 @@ export default function MessageInput({
               aria-label="Emoji & GIF"
               aria-expanded={pickerOpen}
               aria-haspopup="dialog"
+              disabled={interactionLocked}
               onMouseDown={(e) => e.preventDefault()}
               onClick={() => setPickerOpen((o) => !o)}
               style={{
@@ -1010,10 +1088,17 @@ export default function MessageInput({
                 borderRadius: inputToolBtnRadius,
                 backgroundColor: pickerOpen ? palette.bgHover : "transparent",
                 color: pickerOpen ? palette.textPrimary : palette.textSecondary,
-                cursor: "pointer",
+                cursor: interactionLocked ? "default" : "pointer",
+                opacity: interactionLocked ? 0.35 : 1,
               }}
-              onMouseEnter={(e) => hoverToolBtn(e, pickerOpen, true)}
-              onMouseLeave={(e) => hoverToolBtn(e, pickerOpen, false)}
+              onMouseEnter={(e) => {
+                if (interactionLocked) return;
+                hoverToolBtn(e, pickerOpen, true);
+              }}
+              onMouseLeave={(e) => {
+                if (interactionLocked) return;
+                hoverToolBtn(e, pickerOpen, false);
+              }}
             >
               <Smile size={inputToolIconSize} strokeWidth={2} />
             </button>
@@ -1024,6 +1109,7 @@ export default function MessageInput({
           title="Text formatting"
           aria-expanded={formatOpen}
           aria-haspopup="menu"
+          disabled={interactionLocked}
           onMouseDown={(e) => e.preventDefault()}
           onClick={() => setFormatOpen((o) => !o)}
           style={{
@@ -1040,10 +1126,17 @@ export default function MessageInput({
             borderRadius: inputToolBtnRadius,
             backgroundColor: formatOpen ? palette.bgHover : "transparent",
             color: formatOpen ? palette.textPrimary : palette.textSecondary,
-            cursor: "pointer",
+            cursor: interactionLocked ? "default" : "pointer",
+            opacity: interactionLocked ? 0.35 : 1,
           }}
-          onMouseEnter={(e) => hoverToolBtn(e, formatOpen, true)}
-          onMouseLeave={(e) => hoverToolBtn(e, formatOpen, false)}
+          onMouseEnter={(e) => {
+            if (interactionLocked) return;
+            hoverToolBtn(e, formatOpen, true);
+          }}
+          onMouseLeave={(e) => {
+            if (interactionLocked) return;
+            hoverToolBtn(e, formatOpen, false);
+          }}
         >
           <Type size={inputToolIconSize} strokeWidth={2} />
         </button>
@@ -1070,7 +1163,7 @@ export default function MessageInput({
             borderRadius: inputToolBtnRadius,
             backgroundColor: "transparent",
             color: palette.textSecondary,
-            cursor: canSend ? "pointer" : "not-allowed",
+            cursor: canSend ? "pointer" : "default",
             opacity: canSend ? 1 : 0.45,
           }}
           onMouseEnter={(e) => {

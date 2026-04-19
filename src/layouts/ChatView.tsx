@@ -1,5 +1,6 @@
 import { useState, useEffect, useRef, useCallback, type CSSProperties } from "react";
 import { useRoomRedactionPolicy } from "../hooks/useRoomRedactionPolicy";
+import { useRoomCanSendMessages } from "../hooks/useRoomCanSendMessages";
 import { listen } from "@tauri-apps/api/event";
 import { ArrowLeft, Hash, MessageCircle, Users } from "lucide-react";
 import UserAvatar from "../components/UserAvatar";
@@ -153,6 +154,7 @@ export default function ChatView({
     removeMessageById,
   } = useMessages(isDraft ? null : activeRoom!.id);
   const redactionPolicy = useRoomRedactionPolicy(isDraft ? null : activeRoom!.id);
+  const canSendMessages = useRoomCanSendMessages(isDraft ? null : activeRoom!.id);
   const { palette, typography, spacing } = useTheme();
   const [typingNames, setTypingNames] = useState<string[]>([]);
   const [localTyping, setLocalTyping] = useState(false);
@@ -171,14 +173,12 @@ export default function ChatView({
   useEffect(() => {
     if (isDraft || !activeRoom) return;
     const unlisten = listen<TypingPayload>("typing", (event) => {
-      console.log("typing event", event.payload);
       const { roomId, displayNames, userIds } = event.payload;
       if (roomId !== activeRoom.id) return;
       const filtered = displayNames.filter((_, i) => userIds[i] !== userId);
       setTypingNames(filtered);
     });
 
-    console.log("ChatView typing effect running, resetting state", { activeRoomId: activeRoom?.id });
     setTypingNames([]);
     setLocalTyping(false);
 
@@ -193,6 +193,10 @@ export default function ChatView({
 
   const handleRequestEdit = useCallback((msg: Message) => {
     setEditingMessage({ eventId: msg.eventId, body: msg.body });
+  }, []);
+
+  const handleCancelEdit = useCallback(() => {
+    setEditingMessage(null);
   }, []);
 
   const handleDraftDmFirstMessage = useCallback(
@@ -449,9 +453,16 @@ export default function ChatView({
               key={activeRoom.id}
               roomId={activeRoom.id}
               roomName={activeRoom.name}
+              composerPermission={
+                canSendMessages === null
+                  ? "loading"
+                  : canSendMessages
+                    ? "allowed"
+                    : "forbidden"
+              }
               onMessageSent={refresh}
               editingMessage={editingMessage}
-              onCancelEdit={() => setEditingMessage(null)}
+              onCancelEdit={handleCancelEdit}
               onLocalTypingActive={setLocalTyping}
             />
           </div>

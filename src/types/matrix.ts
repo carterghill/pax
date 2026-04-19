@@ -46,6 +46,10 @@ export interface RoomRedactionPolicy {
   canRedactOther: boolean;
 }
 
+export interface RoomSendPermission {
+  canSend: boolean;
+}
+
 export interface RoomMember {
   userId: string;
   displayName: string | null;

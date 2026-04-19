@@ -354,6 +354,7 @@ pub fn run() {
             commands::messages::edit_message,
             commands::messages::redact_message,
             commands::messages::get_room_redaction_policy,
+            commands::messages::get_room_can_send_messages,
             commands::messages::start_sync,
             commands::messages::send_typing_notice,
             commands::messages::upload_and_send_file,

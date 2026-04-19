@@ -17,6 +17,7 @@ use matrix_sdk::ruma::events::space::child::SpaceChildEventContent;
 use matrix_sdk::ruma::events::typing::SyncTypingEvent;
 use matrix_sdk::ruma::events::AnyMessageLikeEventContent;
 use matrix_sdk::ruma::events::GlobalAccountDataEvent;
+use matrix_sdk::ruma::events::MessageLikeEventType;
 use matrix_sdk::ruma::events::OriginalSyncStateEvent;
 use matrix_sdk::media::{MediaFormat, MediaRequestParameters, MediaThumbnailSettings, UniqueKey};
 use matrix_sdk::ruma::EventId;
@@ -26,7 +27,8 @@ use tauri::{AppHandle, Emitter, Manager, State};
 
 use crate::types::{
     MessageBatch, MessageEditPayload, MessageInfo, MessageRedactedPayload, PresencePayload,
-    RoomMessagePayload, RoomRedactionPolicy, TypingPayload, VoiceParticipantsChangedPayload,
+    RoomMessagePayload, RoomRedactionPolicy, RoomSendPermission, TypingPayload,
+    VoiceParticipantsChangedPayload,
 };
 use crate::AppState;
 
@@ -377,6 +379,27 @@ pub async fn get_room_redaction_policy(
         can_redact_own: pl.user_can_redact_own_event(own),
         can_redact_other: pl.user_can_redact_event_of_other(own),
     })
+}
+
+#[tauri::command]
+pub async fn get_room_can_send_messages(
+    state: State<'_, Arc<AppState>>,
+    room_id: String,
+) -> Result<RoomSendPermission, String> {
+    let client = get_client(&state).await?;
+    let room = resolve_room(&client, &room_id)?;
+    let own = client.user_id().ok_or("Not logged in")?;
+
+    let member = room
+        .get_member(own)
+        .await
+        .map_err(|e| format!("Failed to load membership: {}", fmt_error_chain(&e)))?;
+
+    let can_send = member
+        .map(|m| m.can_send_message(MessageLikeEventType::RoomMessage))
+        .unwrap_or(false);
+
+    Ok(RoomSendPermission { can_send })
 }
 
 #[tauri::command]

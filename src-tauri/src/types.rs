@@ -208,6 +208,12 @@ pub struct RoomRedactionPolicy {
 
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
+pub struct RoomSendPermission {
+    pub can_send: bool,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
 pub struct SpaceChildInfo {
     pub id: String,
     pub name: String,
