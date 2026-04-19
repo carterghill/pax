@@ -113,6 +113,7 @@ export default function MessageInput({
   const insertEmojiFromPickerRef = useRef<(native: string) => void>(() => {});
   const typingTimeout = useRef<ReturnType<typeof setTimeout> | null>(null);
   const isTyping = useRef(false);
+  const lastTypingSentAt = useRef(0);
   const { palette, typography, spacing, resolvedColorScheme } = useTheme();
   const [giphyApiKey, setGiphyApiKey] = useState("");
   const fileInputRef = useRef<HTMLInputElement>(null);
@@ -175,10 +176,23 @@ export default function MessageInput({
   const sendTyping = useCallback(
     (typing: boolean) => {
       if (draftDmPeerUserId) return;
-      if (typing === isTyping.current) return;
-      isTyping.current = typing;
-      onLocalTypingActive?.(typing);
-      invoke("send_typing_notice", { roomId, typing }).catch(() => {});
+
+      if (typing) {
+        const now = Date.now();
+        if (isTyping.current && now - lastTypingSentAt.current < 3000) return;
+        lastTypingSentAt.current = now;
+        if (!isTyping.current) {
+          isTyping.current = true;
+          onLocalTypingActive?.(true);
+        }
+        invoke("send_typing_notice", { roomId, typing: true }).catch(() => {});
+      } else {
+        if (!isTyping.current) return;
+        isTyping.current = false;
+        lastTypingSentAt.current = 0;
+        onLocalTypingActive?.(false);
+        invoke("send_typing_notice", { roomId, typing: false }).catch(() => {});
+      }
     },
     [roomId, onLocalTypingActive, draftDmPeerUserId],
   );
@@ -224,7 +238,10 @@ export default function MessageInput({
     if (text.trim().length > 0 || media) {
       sendTyping(true);
       if (typingTimeout.current) clearTimeout(typingTimeout.current);
-      typingTimeout.current = setTimeout(() => sendTyping(false), 3000);
+      // typingTimeout.current = setTimeout(() => sendTyping(false), 3000);
+      typingTimeout.current = setTimeout(() => {
+        sendTyping(false);
+      }, 3000);
     } else {
       sendTyping(false);
       if (typingTimeout.current) clearTimeout(typingTimeout.current);
@@ -406,7 +423,6 @@ export default function MessageInput({
     try {
       if (draftDmPeerUserId) {
         if (pendingFile) {
-          console.warn("Attachments are available after the conversation is created.");
           setSending(false);
           return;
         }

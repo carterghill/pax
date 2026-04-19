@@ -171,19 +171,21 @@ export default function ChatView({
   useEffect(() => {
     if (isDraft || !activeRoom) return;
     const unlisten = listen<TypingPayload>("typing", (event) => {
+      console.log("typing event", event.payload);
       const { roomId, displayNames, userIds } = event.payload;
       if (roomId !== activeRoom.id) return;
       const filtered = displayNames.filter((_, i) => userIds[i] !== userId);
       setTypingNames(filtered);
     });
 
+    console.log("ChatView typing effect running, resetting state", { activeRoomId: activeRoom?.id });
     setTypingNames([]);
     setLocalTyping(false);
 
     return () => {
       unlisten.then((fn) => fn());
     };
-  }, [isDraft, activeRoom, userId]);
+  }, [isDraft, activeRoom?.id, userId]);
 
   useEffect(() => {
     setEditingMessage(null);
