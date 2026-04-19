@@ -93,11 +93,55 @@ export default function UserAvatar({
   const initials = dmInitialsFromLabel(label);
   const fs = fontSize ?? Math.max(10, Math.round(size * 0.4));
 
+  // Three display states, NOT two. Collapsing "unknown" and "known
+  // absent" into the same "initials" branch was the real cause of
+  // the sidebar flash: every time a <UserAvatar> mounted for a user
+  // whose data wasn't in the store yet, we painted a full colored
+  // initials circle for one or more frames, then flipped to the
+  // image when the store resolved. Now we only paint initials when
+  // we KNOW the user has no avatar (store confirmed `null`), and
+  // show a neutral empty circle while the answer is still unknown.
+  //
+  //   fromStore === null          → confirmed "no avatar"      → initials
+  //   fromStore === undefined     → unknown (fetch in flight)  → empty
+  //                                 AND no hint
+  //   otherwise (path)            → render image
+  //
+  // `avatarUrlHint === null` deliberately does NOT count as
+  // confirmed absence: list responses often pass null to mean
+  // "backend did not resolve yet", not "user has no avatar".
+  const hasKnownUrl = !!effectiveUrl && !imageFailed;
+  const confirmedNoAvatar = fromStore === null && !avatarUrlHint;
+  const showImage = hasKnownUrl;
+  const showInitials = !hasKnownUrl && confirmedNoAvatar;
+
+  // DIAGNOSTIC: log which branch we render in for sidebar-sized
+  // avatars. If a flash shows something other than `image` we want
+  // to see which one and for how many frames.
+  if (import.meta.env.DEV && size >= 24 && size <= 32) {
+    const branch = showImage ? "image" : showInitials ? "initials" : "empty";
+    // eslint-disable-next-line no-console
+    console.log(
+      `[UserAvatar ${userId}] render → ${branch} (fromStore=${fromStore === null ? "null" : fromStore === undefined ? "undefined" : "<path>"}, hint=${avatarUrlHint === null ? "null" : avatarUrlHint === undefined ? "undefined" : "<path>"}, failed=${imageFailed})`,
+    );
+  }
+
   const containerStyle: CSSProperties = {
     width: size,
     height: size,
     borderRadius: "50%",
-    backgroundColor: userInitialAvatarBackground(userId, resolvedColorScheme),
+    // The color-by-id background is ONLY painted when we're actually
+    // showing initials — i.e. when the store has confirmed the user
+    // has no avatar. If we're showing the image, the image owns the
+    // full circle (via `objectFit: cover`) and the background must
+    // be neutral: if it were colored, any frame of fetch+decode lag
+    // would show the colored circle under the still-loading img,
+    // which is visually identical to an initials fallback — the
+    // exact flash we're trying to kill. Unknown state is also
+    // neutral.
+    backgroundColor: showInitials
+      ? userInitialAvatarBackground(userId, resolvedColorScheme)
+      : palette.bgSecondary,
     display: "flex",
     alignItems: "center",
     justifyContent: "center",
@@ -108,8 +152,6 @@ export default function UserAvatar({
     overflow: "hidden",
     ...style,
   };
-
-  const showImage = !!effectiveUrl && !imageFailed;
 
   return (
     <div className={className} style={containerStyle}>
@@ -141,6 +183,11 @@ export default function UserAvatar({
           // laid out — no blank-box interstitial.
           decoding="sync"
           onError={() => {
+            // eslint-disable-next-line no-console
+            console.log(
+              `[UserAvatar ${userId}] img onError — invalidating, src was:`,
+              avatarSrc(effectiveUrl),
+            );
             setImageFailed(true);
             // The on-disk temp file probably got cleaned up — drop the
             // entry so the next mount re-fetches through the store.
@@ -148,9 +195,9 @@ export default function UserAvatar({
           }}
           style={{ width: "100%", height: "100%", objectFit: "cover" }}
         />
-      ) : (
+      ) : showInitials ? (
         initials
-      )}
+      ) : null}
     </div>
   );
 }
