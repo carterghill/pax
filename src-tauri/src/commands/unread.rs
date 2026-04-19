@@ -35,10 +35,9 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 
-use matrix_sdk::room::MessagesOptions;
 use matrix_sdk::ruma::api::client::receipt::create_receipt::v3::ReceiptType;
 use matrix_sdk::ruma::events::receipt::ReceiptThread;
-use matrix_sdk::ruma::{EventId, OwnedEventId, OwnedRoomId, UInt};
+use matrix_sdk::ruma::{EventId, OwnedEventId, OwnedRoomId};
 use matrix_sdk::Client;
 use serde::Serialize;
 use tauri::{AppHandle, Emitter, State};
@@ -229,78 +228,6 @@ pub async fn send_room_read_receipt(
     let event_id = EventId::parse(&event_id).map_err(|e| format!("Invalid event ID: {e}"))?;
 
     apply_room_read_receipt(&state, &app, &room, event_id, as_public).await
-}
-
-/// Like [`send_room_read_receipt`], but resolves the latest timeline event from the
-/// SDK/homeserver (including encrypted or non-text events that `get_messages` omits).
-/// Used when the UI timeline is empty so read receipts can still clear notifications.
-#[tauri::command]
-pub async fn send_read_receipt_to_latest_timeline_event(
-    state: State<'_, Arc<AppState>>,
-    app: AppHandle,
-    room_id: String,
-    as_public: bool,
-) -> Result<(), String> {
-    let client = get_client(&state).await?;
-    let room = resolve_room(&client, &room_id)?;
-    let limit_usize = 50usize;
-
-    let mut current_from: Option<String> = None;
-    loop {
-        let mut options = MessagesOptions::backward();
-        if let Some(token) = &current_from {
-            options.from = Some(token.to_string());
-        }
-        options.limit = UInt::from(limit_usize as u32);
-
-        let response = room
-            .messages(options)
-            .await
-            .map_err(|e| format!("Failed to fetch timeline: {}", fmt_error_chain(&e)))?;
-
-        let matrix_sdk::room::Messages {
-            chunk,
-            end: pagination_end,
-            ..
-        } = response;
-
-        let timeline_event_count = chunk.len();
-        for ev in chunk {
-            if let Some(eid) = ev.event_id() {
-                return apply_room_read_receipt(&state, &app, &room, eid, as_public).await;
-            }
-        }
-
-        let prev_batch = if timeline_event_count < limit_usize {
-            None
-        } else {
-            pagination_end
-        };
-
-        if prev_batch.is_none() {
-            break;
-        }
-        current_from = prev_batch;
-    }
-
-    // No event ids found (very new / empty room): still clear local raw counter.
-    state
-        .raw_unread_messages
-        .lock()
-        .await
-        .remove(room.room_id());
-
-    let new_state = RoomUnreadState::from_room_with_raw(&room, 0);
-    let payload = RoomUnreadChangedPayload {
-        room_id: room.room_id().to_string(),
-        state: new_state.clone(),
-    };
-    let _ = app.emit("room-unread-changed", payload);
-
-    let mut cache = state.unread_cache.lock().await;
-    cache.insert(room.room_id().to_owned(), new_state);
-
-    Ok(())
 }
 
 /// Mark / unmark a room as unread (MSC2867).  The Matrix server stores this flag

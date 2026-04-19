@@ -28,12 +28,6 @@ export interface ReadReceiptTrigger {
   readonly latestVisibleEventId: string | null;
   /** True when the user is scrolled near the bottom of the timeline. */
   readonly atBottom: boolean;
-  /**
-   * Initial fetch produced no rows the UI can render (e.g. only encrypted events),
-   * but the room may still have unread — ask the backend for the latest timeline
-   * event id and send a receipt for that.
-   */
-  readonly fallbackWhenNoVisibleEvent: boolean;
 }
 
 export function useReadReceiptSender(
@@ -48,13 +42,16 @@ export function useReadReceiptSender(
   });
 
   // Track focus in a ref so the main effect can read it without re-running.
+  // Match desktop notifications: `hasFocus` reflects whether the user is actually
+  // looking at the window (visibility alone stays "visible" on a background monitor).
   const isFocusedRef = useRef<boolean>(
-    typeof document === "undefined" ? true : document.visibilityState === "visible"
+    typeof document === "undefined" ? true : document.hasFocus(),
   );
 
   useEffect(() => {
     function onVisibilityChange() {
-      isFocusedRef.current = document.visibilityState === "visible";
+      isFocusedRef.current =
+        document.visibilityState === "visible" && document.hasFocus();
       // Schedule a fire attempt — if we're now at the bottom of an unread room,
       // this is the moment to acknowledge it.  We dispatch a no-op event on
       // the current room-id bucket to re-enter the main effect's fire path
@@ -62,7 +59,7 @@ export function useReadReceiptSender(
       window.dispatchEvent(new CustomEvent("pax:rr-retry"));
     }
     function onFocus() {
-      isFocusedRef.current = true;
+      isFocusedRef.current = document.hasFocus();
       window.dispatchEvent(new CustomEvent("pax:rr-retry"));
     }
     function onBlur() {
@@ -90,17 +87,14 @@ export function useReadReceiptSender(
     if (!roomId || !userId) return;
     if (!trigger.atBottom) return;
     if (!isFocusedRef.current) return;
+    if (typeof document !== "undefined" && !document.hasFocus()) return;
 
     const eventId = trigger.latestVisibleEventId;
-    const useFallback =
-      !eventId && trigger.fallbackWhenNoVisibleEvent;
+    if (!eventId) return;
 
-    if (!eventId && !useFallback) return;
-
-    const dedupKey = eventId ?? "__fallback_latest_timeline__";
     if (
       sentForRoomRef.current.roomId === roomId &&
-      sentForRoomRef.current.lastSent === dedupKey
+      sentForRoomRef.current.lastSent === eventId
     ) {
       return;
     }
@@ -109,25 +103,18 @@ export function useReadReceiptSender(
     // else triggers this effect, we don't double-fire.  On error we roll back
     // so a transient failure can be retried on the next trigger.
     const prev = sentForRoomRef.current.lastSent;
-    sentForRoomRef.current = { roomId, lastSent: dedupKey };
+    sentForRoomRef.current = { roomId, lastSent: eventId };
 
     const publicReceipt = getSendPublicReceipts();
 
-    const invokePromise = useFallback
-      ? invoke("send_read_receipt_to_latest_timeline_event", {
-          roomId,
-          asPublic: publicReceipt,
-        })
-      : invoke("send_room_read_receipt", {
-          roomId,
-          eventId: eventId!,
-          asPublic: publicReceipt,
-        });
-
-    invokePromise.catch((e) => {
+    invoke("send_room_read_receipt", {
+      roomId,
+      eventId,
+      asPublic: publicReceipt,
+    }).catch((e) => {
       if (
         sentForRoomRef.current.roomId === roomId &&
-        sentForRoomRef.current.lastSent === dedupKey
+        sentForRoomRef.current.lastSent === eventId
       ) {
         sentForRoomRef.current = { roomId, lastSent: prev };
       }
@@ -143,40 +130,26 @@ export function useReadReceiptSender(
         if (!roomId || !userId) return;
         if (!trigger.atBottom) return;
         if (!isFocusedRef.current) return;
+        if (typeof document !== "undefined" && !document.hasFocus()) return;
         const eid = trigger.latestVisibleEventId;
-        const retryFallback =
-          !eid && trigger.fallbackWhenNoVisibleEvent;
-        if (!eid && !retryFallback) return;
-        const retryKey = eid ?? "__fallback_latest_timeline__";
+        if (!eid) return;
         if (
           sentForRoomRef.current.roomId === roomId &&
-          sentForRoomRef.current.lastSent === retryKey
+          sentForRoomRef.current.lastSent === eid
         ) {
           return;
         }
-        sentForRoomRef.current = { roomId, lastSent: retryKey };
-        const p = retryFallback
-          ? invoke("send_read_receipt_to_latest_timeline_event", {
-              roomId,
-              asPublic: getSendPublicReceipts(),
-            })
-          : invoke("send_room_read_receipt", {
-              roomId,
-              eventId: eid!,
-              asPublic: getSendPublicReceipts(),
-            });
-        void p.catch((e) => {
+        sentForRoomRef.current = { roomId, lastSent: eid };
+        void invoke("send_room_read_receipt", {
+          roomId,
+          eventId: eid,
+          asPublic: getSendPublicReceipts(),
+        }).catch((e) => {
           console.warn("[useReadReceiptSender] retry invoke failed:", e);
         });
       });
     }
     window.addEventListener("pax:rr-retry", onRetry);
     return () => window.removeEventListener("pax:rr-retry", onRetry);
-  }, [
-    roomId,
-    userId,
-    trigger.latestVisibleEventId,
-    trigger.atBottom,
-    trigger.fallbackWhenNoVisibleEvent,
-  ]);
+  }, [roomId, userId, trigger.latestVisibleEventId, trigger.atBottom]);
 }

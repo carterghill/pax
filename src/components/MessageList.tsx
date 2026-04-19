@@ -620,7 +620,6 @@ export default function MessageList({
     {
       latestVisibleEventId: lastId,
       atBottom: isAtLatest && atBottom,
-      fallbackWhenNoVisibleEvent: !initialLoading && messages.length === 0,
     },
     userId,
   );
