@@ -7,6 +7,31 @@ export const SPACE_ROOM_TYPE = "m.space";
 
  export const normalizeUserId = (id: string): string => id.trim().toLowerCase();
 
+ const SIGNUP_LOCALPART_ALLOWED = /[^0-9a-z._=\-\/]/g;
+
+ /**
+  * Registration username as stored: first whitespace-delimited word only, lowercased,
+  * characters limited to Matrix unquoted localpart set (digits, a-z, . _ = - /).
+  */
+ export function sanitizeSignupUsernameInput(raw: string): string {
+   const trimmed = raw.trim();
+   if (!trimmed) return "";
+   const first = trimmed.split(/\s+/)[0] ?? "";
+   return first.toLowerCase().replace(SIGNUP_LOCALPART_ALLOWED, "");
+ }
+
+ /** Hostname from a homeserver base URL (for @user:server previews). */
+ export function homeserverUrlToHostname(url: string): string | null {
+   const t = url.trim();
+   if (!t) return null;
+   try {
+     const parsed = new URL(t.includes("://") ? t : `https://${t}`);
+     return parsed.hostname || null;
+   } catch {
+     return null;
+   }
+ }
+
  const MXID_RE = /^@[^:\s]+:[^:\s/]+$/;
 
  /**

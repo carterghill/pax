@@ -1,6 +1,8 @@
 use std::sync::Arc;
+use std::time::Duration;
 
 use serde::{Deserialize, Serialize};
+use tokio::time::timeout;
 use tauri::{Manager, State};
 
 use crate::AppState;
@@ -93,15 +95,27 @@ fn credentials_path(app: &tauri::AppHandle) -> Result<std::path::PathBuf, String
 pub async fn logout(state: State<'_, Arc<AppState>>, app: tauri::AppHandle) -> Result<(), String> {
     // Tell the server we're offline BEFORE tearing anything down, while the
     // client and access token still exist.
-    if let Some(client) = state.client.lock().await.as_ref() {
-        if let Some(user_id) = client.user_id() {
-            let request =
-                matrix_sdk::ruma::api::client::presence::set_presence::v3::Request::new(
-                    user_id.to_owned(),
-                    matrix_sdk::ruma::presence::PresenceState::Offline,
-                );
-            let _ = client.send(request).await;
+    //
+    // Cap wait time: a stuck homeserver must not block sign-out indefinitely
+    // (the UI awaits this command before clearing session state).
+    let presence_deadline = Duration::from_secs(3);
+    let send_offline = async {
+        if let Some(client) = state.client.lock().await.as_ref() {
+            if let Some(user_id) = client.user_id() {
+                let request =
+                    matrix_sdk::ruma::api::client::presence::set_presence::v3::Request::new(
+                        user_id.to_owned(),
+                        matrix_sdk::ruma::presence::PresenceState::Offline,
+                    );
+                let _ = client.send(request).await;
+            }
         }
+    };
+    if timeout(presence_deadline, send_offline).await.is_err() {
+        log::warn!(
+            "logout: presence set_offline timed out after {:?}, continuing teardown",
+            presence_deadline
+        );
     }
 
     state.stop_sync_task().await;

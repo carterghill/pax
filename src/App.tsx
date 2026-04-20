@@ -11,6 +11,7 @@ import { clearPersistedRoomsList } from "./utils/roomsCache";
 import { useExternalLinkInterceptor } from "./hooks/useExternalLinks";
 import { listen } from "@tauri-apps/api/event";
 import QuitConfirmDialog from "./components/QuitConfirmDialog";
+import { homeserverUrlToHostname, sanitizeSignupUsernameInput } from "./utils/matrix";
 
 if (import.meta.env.DEV) {
   const w = window as unknown as { invoke: typeof invoke; listen: typeof listen };
@@ -144,6 +145,21 @@ function App() {
         fontSize: typography.fontSizeSmall,
         textAlign: "center" as const,
         marginTop: spacing.unit,
+      },
+      usernameHint: {
+        color: palette.textSecondary,
+        fontSize: typography.fontSizeSmall,
+        lineHeight: 1.45,
+        margin: 0,
+      },
+      usernamePreview: {
+        color: palette.textSecondary,
+        fontSize: typography.fontSizeSmall,
+        lineHeight: 1.45,
+        margin: 0,
+        fontFamily:
+          'ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", monospace',
+        wordBreak: "break-all" as const,
       },
     }),
     [palette, typography, spacing, resolvedColorScheme],
@@ -326,7 +342,15 @@ function App() {
   function switchTab(newTab: "login" | "signup") {
     setTab(newTab);
     setError(null);
+    if (newTab === "signup") {
+      setUsername((u) => sanitizeSignupUsernameInput(u));
+    }
   }
+
+  const signupHomeserverHost = useMemo(
+    () => (tab === "signup" ? homeserverUrlToHostname(homeserver) : null),
+    [tab, homeserver],
+  );
 
   const quitOverlay =
     quitConfirmOpen ? (
@@ -406,13 +430,40 @@ function App() {
 
         <input
           style={authStyles.input}
-          placeholder="Username"
+          placeholder={
+            tab === "signup"
+              ? "Username (one word — e.g. janedoe)"
+              : "Username"
+          }
           value={username}
-          onChange={(e) => setUsername(e.target.value)}
+          onChange={(e) =>
+            setUsername(
+              tab === "signup"
+                ? sanitizeSignupUsernameInput(e.target.value)
+                : e.target.value,
+            )
+          }
           onKeyDown={(e) => {
+            if (tab === "signup" && e.key === " ") {
+              e.preventDefault();
+              return;
+            }
             if (e.key === "Enter" && tab === "login") handleLogin();
           }}
         />
+        {tab === "signup" && (
+          <>
+            <p style={authStyles.usernameHint}>
+              One word, lowercased as you type. Space is disabled; only letters, numbers, and{" "}
+              <span style={authStyles.usernamePreview}>. _ = - /</span> are kept.
+            </p>
+            {username ? (
+              <p style={authStyles.usernamePreview}>
+                Your account ID: @{username}:{signupHomeserverHost ?? "your-homeserver"}
+              </p>
+            ) : null}
+          </>
+        )}
         <input
           style={authStyles.input}
           type="password"
