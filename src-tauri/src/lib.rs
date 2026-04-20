@@ -424,6 +424,7 @@ pub fn run() {
             commands::notifications::notify_supported,
             commands::notifications::notify_send,
             commands::notifications::focus_main_window,
+            commands::tray_indicator::set_tray_unread_indicator,
             commands::lifecycle::exit_app,
             commands::lifecycle::hide_main_window,
             commands::lifecycle::get_close_window_preference,
@@ -479,7 +480,7 @@ pub fn run() {
                     .text("tray_quit", "Quit")
                     .build()?;
 
-                let _tray = tauri::tray::TrayIconBuilder::new()
+                let _tray = tauri::tray::TrayIconBuilder::with_id(commands::tray_indicator::PAX_TRAY_ICON_ID)
                     .menu(&menu)
                     .icon(tray_icon)
                     .tooltip("Pax")

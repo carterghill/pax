@@ -15,6 +15,7 @@ pub mod profile;
 pub mod push_rules;
 pub mod reconciler;
 pub mod rooms;
+pub mod tray_indicator;
 pub mod unread;
 pub mod voice_matrix;
 

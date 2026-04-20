@@ -15,6 +15,7 @@ import { useNotificationSettings } from "../hooks/useNotificationSettings";
 import { useDesktopNotifications } from "../hooks/useDesktopNotifications";
 import { PresenceContext } from "../hooks/PresenceContext";
 import { useState, useCallback, useMemo, useEffect, startTransition } from "react";
+import { invoke } from "@tauri-apps/api/core";
 import { useTheme } from "../theme/ThemeContext";
 import SettingsDialog from "../components/SettingsDialog";
 import {
@@ -156,6 +157,25 @@ export default function MainLayout({
     effectiveSpaceMentionCount,
     effectiveHomeMentionCount,
   } = useSpaceUnreadRollup(spaces, roomsBySpace, roomUnread, isRoomEffectivelyMuted);
+
+  // Tray icon: red dot when any sidebar-visible bucket has unread (same rollup as Home / spaces).
+  useEffect(() => {
+    const hasUnread =
+      isHomeUnread() ||
+      topLevelSpaces.some(
+        (s) => s.membership === "joined" && isSpaceUnread(s.id),
+      );
+    void invoke("set_tray_unread_indicator", { hasUnread }).catch(() => {
+      /* web / early startup */
+    });
+  }, [isHomeUnread, isSpaceUnread, topLevelSpaces]);
+
+  useEffect(() => {
+    return () => {
+      void invoke("set_tray_unread_indicator", { hasUnread: false }).catch(() => {});
+    };
+  }, []);
+
   const [activeSpaceId, setActiveSpaceId] = useState<string | null>(null);
   const [activeRoomBySpace, setActiveRoomBySpace] = useState<Record<string, string | null>>({});
   const [settingsOpen, setSettingsOpen] = useState(false);
