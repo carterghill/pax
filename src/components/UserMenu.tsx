@@ -58,9 +58,15 @@ interface MemberRowProps {
   member: RoomMember;
   avatarUrl: string | null;
   onContextMenu: (e: React.MouseEvent, userId: string, displayName: string) => void;
+  onOpenProfile: (userId: string) => void;
 }
 
-const MemberRow = memo(function MemberRow({ member, avatarUrl, onContextMenu }: MemberRowProps) {
+const MemberRow = memo(function MemberRow({
+  member,
+  avatarUrl,
+  onContextMenu,
+  onOpenProfile,
+}: MemberRowProps) {
   const { palette, typography, spacing } = useTheme();
   const resolved = resolvePresenceWithDnd(member.presence, member.statusMsg);
   const { text: statusText } = parseStatusMsg(member.statusMsg);
@@ -78,6 +84,7 @@ const MemberRow = memo(function MemberRow({ member, avatarUrl, onContextMenu }: 
         height: MEMBER_HEIGHT,
         boxSizing: "border-box",
       }}
+      onClick={() => onOpenProfile(member.userId)}
       onContextMenu={(e) => {
         e.preventDefault();
         onContextMenu(e, member.userId, member.displayName ?? member.userId);
@@ -313,6 +320,10 @@ export default function UserMenu({
     }, []
   );
 
+  const handleOpenMemberProfile = useCallback((uid: string) => {
+    setProfileUserId(uid);
+  }, []);
+
   const handleStartDirectMessageFromMenu = useCallback(() => {
     if (!memberContextMenu) return;
     const peerId = memberContextMenu.userId;
@@ -451,11 +462,24 @@ export default function UserMenu({
             {knockMembers.map((knock) => {
               const isActing = actionInProgress === knock.userId;
               return (
-                <div key={knock.userId} style={{
+                <div
+                  key={knock.userId}
+                  role="button"
+                  tabIndex={0}
+                  onClick={() => setProfileUserId(knock.userId)}
+                  onKeyDown={(e) => {
+                    if (e.key === "Enter" || e.key === " ") {
+                      e.preventDefault();
+                      setProfileUserId(knock.userId);
+                    }
+                  }}
+                  style={{
                   display: "flex", alignItems: "center", gap: spacing.unit * 2,
                   padding: `${spacing.unit * 2}px ${spacing.unit * 4}px`,
                   margin: `0 ${spacing.unit * 2}px`, borderRadius: spacing.unit,
-                }}>
+                  cursor: "pointer",
+                }}
+                >
                   <div style={{ flexShrink: 0 }}>
                     <UserAvatar
                       userId={knock.userId}
@@ -483,7 +507,13 @@ export default function UserMenu({
                   </div>
                   <div style={{ display: "flex", gap: spacing.unit, flexShrink: 0 }}>
                     {canInvite && (
-                      <button onClick={() => handleAccept(knock.userId)} disabled={isActing} title="Accept"
+                      <button
+                        onClick={(e) => {
+                          e.stopPropagation();
+                          void handleAccept(knock.userId);
+                        }}
+                        disabled={isActing}
+                        title="Accept"
                         style={{
                           display: "flex", alignItems: "center", justifyContent: "center",
                           width: 28, height: 28, borderRadius: "50%", border: "none",
@@ -494,7 +524,13 @@ export default function UserMenu({
                       </button>
                     )}
                     {canKick && (
-                      <button onClick={() => handleDeny(knock.userId)} disabled={isActing} title="Deny"
+                      <button
+                        onClick={(e) => {
+                          e.stopPropagation();
+                          void handleDeny(knock.userId);
+                        }}
+                        disabled={isActing}
+                        title="Deny"
                         style={{
                           display: "flex", alignItems: "center", justifyContent: "center",
                           width: 28, height: 28, borderRadius: "50%", border: "none",
@@ -544,7 +580,12 @@ export default function UserMenu({
 
               return (
                 <div key={row.key} style={{ position: "absolute", top, left: 0, right: 0, height: MEMBER_HEIGHT }}>
-                  <MemberRow member={row.member} avatarUrl={resolvedAvatar} onContextMenu={handleMemberContextMenu} />
+                  <MemberRow
+                    member={row.member}
+                    avatarUrl={resolvedAvatar}
+                    onContextMenu={handleMemberContextMenu}
+                    onOpenProfile={handleOpenMemberProfile}
+                  />
                 </div>
               );
             })}
