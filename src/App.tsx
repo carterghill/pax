@@ -359,7 +359,7 @@ function App() {
       <>
         <div style={authStyles.container}>
           <div style={authStyles.logoWrap}>
-            <img src="/logo.png" alt="Pax" style={authStyles.logoImg} />
+            <img src="/logoIrisWhite.png" alt="Pax" style={authStyles.logoImg} />
           </div>
           <p style={authStyles.signingIn}>Signing in...</p>
         </div>
@@ -372,7 +372,7 @@ function App() {
     <>
     <div style={authStyles.container}>
       <div style={authStyles.logoWrap}>
-        <img src="/logo.png" alt="Pax" style={authStyles.logoImg} />
+        <img src="/logoIrisWhite.png" alt="Pax" style={authStyles.logoImg} />
       </div>
 
       {/* Tab switcher */}
@@ -536,7 +536,7 @@ function AuthedApp({
     return (
       <div style={loadingStyles.container}>
         <div style={loadingStyles.logoWrap}>
-          <img src="/logo.png" alt="Pax" style={loadingStyles.logoImg} />
+          <img src="/logoIrisWhite.png" alt="Pax" style={loadingStyles.logoImg} />
         </div>
         <p style={loadingStyles.signingIn}>Loading rooms...</p>
       </div>
