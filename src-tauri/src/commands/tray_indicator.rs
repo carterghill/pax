@@ -14,8 +14,8 @@ static TRAY_ICONS: OnceLock<(tauri::image::Image<'static>, tauri::image::Image<'
 #[cfg(desktop)]
 fn tray_icon_pair() -> &'static (tauri::image::Image<'static>, tauri::image::Image<'static>) {
     TRAY_ICONS.get_or_init(|| {
-        let bytes = include_bytes!("../../icons/tray_logo_white.png");
-        let base = tauri::image::Image::from_bytes(bytes).expect("tray_logo_white.png");
+        let bytes = include_bytes!("../../../public/logoWhiteAltBig.png");
+        let base = tauri::image::Image::from_bytes(bytes).expect("logoWhiteAltBig.png");
         let base_owned = base.to_owned();
         let w = base_owned.width();
         let h = base_owned.height();

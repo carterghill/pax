@@ -472,7 +472,7 @@ pub fn run() {
             #[cfg(desktop)]
             {
                 let tray_icon = tauri::image::Image::from_bytes(include_bytes!(
-                    "../icons/tray_logo_white.png"
+                    "../../public/logoWhiteAltBig.png"
                 ))
                 .map_err(|e| format!("tray icon: {e}"))?;
                 let menu = tauri::menu::MenuBuilder::new(app)
