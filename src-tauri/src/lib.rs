@@ -426,6 +426,9 @@ pub fn run() {
             commands::notifications::focus_main_window,
             commands::lifecycle::exit_app,
             commands::lifecycle::hide_main_window,
+            commands::lifecycle::get_close_window_preference,
+            commands::lifecycle::set_close_window_preference,
+            commands::lifecycle::clear_close_window_preference,
         ])
         .setup(|app| {
             // Set the Tauri app-scoped temp dir so avatar / media temp

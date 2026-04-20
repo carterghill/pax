@@ -83,6 +83,43 @@ export default function SettingsMenu({
     setSendPublicReceipts(next);
   }, []);
 
+  /** Desktop: remembered close action, or "ask" when the confirmation dialog should show each time. */
+  const [closeWindowBehavior, setCloseWindowBehavior] = useState<
+    "ask" | "minimize_tray" | "quit" | null
+  >(null);
+
+  useEffect(() => {
+    let cancelled = false;
+    invoke<string | null>("get_close_window_preference")
+      .then((p) => {
+        if (cancelled) return;
+        if (p === "minimize_tray" || p === "quit") setCloseWindowBehavior(p);
+        else setCloseWindowBehavior("ask");
+      })
+      .catch(() => {
+        if (!cancelled) setCloseWindowBehavior("ask");
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
+  const handleCloseWindowBehaviorChange = useCallback(
+    async (next: "ask" | "minimize_tray" | "quit") => {
+      setCloseWindowBehavior(next);
+      try {
+        if (next === "ask") {
+          await invoke("clear_close_window_preference");
+        } else {
+          await invoke("set_close_window_preference", { action: next });
+        }
+      } catch (e) {
+        console.error(e);
+      }
+    },
+    [],
+  );
+
   const reconnectVoiceAfterDeviceChange = useCallback(async () => {
     const rid = voiceCall.connectedRoomId;
     if (rid && !voiceCall.isConnecting) {
@@ -788,6 +825,58 @@ export default function SettingsMenu({
                     </div>
                   </div>
                   <ThemeSelector />
+                </div>
+
+                <div
+                  style={{
+                    display: "flex",
+                    flexDirection: "column",
+                    gap: spacing.unit * 2,
+                    padding: spacing.unit * 3,
+                    borderRadius: 12,
+                    backgroundColor: palette.bgTertiary,
+                    border: `1px solid ${palette.border}`,
+                  }}
+                >
+                  <div>
+                    <div
+                      style={{
+                        fontSize: typography.fontSizeBase,
+                        fontWeight: typography.fontWeightMedium,
+                        color: palette.textPrimary,
+                      }}
+                    >
+                      When closing the window
+                    </div>
+                    <div
+                      style={{
+                        marginTop: spacing.unit / 2,
+                        fontSize: typography.fontSizeSmall,
+                        color: palette.textSecondary,
+                      }}
+                    >
+                      Applies when you click the window close button. You can always quit from the
+                      system tray menu.
+                    </div>
+                  </div>
+                  <select
+                    value={closeWindowBehavior ?? "ask"}
+                    onChange={(e) =>
+                      handleCloseWindowBehaviorChange(
+                        e.target.value as "ask" | "minimize_tray" | "quit",
+                      )
+                    }
+                    disabled={closeWindowBehavior === null}
+                    style={{
+                      ...textInputStyle,
+                      cursor: closeWindowBehavior === null ? "default" : "pointer",
+                      opacity: closeWindowBehavior === null ? 0.6 : 1,
+                    }}
+                  >
+                    <option value="ask">Always ask</option>
+                    <option value="minimize_tray">Minimize to tray</option>
+                    <option value="quit">Quit completely</option>
+                  </select>
                 </div>
               </div>
             </section>

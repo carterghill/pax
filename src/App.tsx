@@ -169,8 +169,21 @@ function App() {
   useEffect(() => {
     let cancelled = false;
     let unlisten: (() => void) | undefined;
-    listen("app-close-request", () => {
-      setQuitConfirmOpen(true);
+    listen("app-close-request", async () => {
+      try {
+        const pref = await invoke<string | null>("get_close_window_preference");
+        if (pref === "minimize_tray") {
+          await invoke("hide_main_window");
+          return;
+        }
+        if (pref === "quit") {
+          await invoke("exit_app");
+          return;
+        }
+      } catch (e) {
+        console.error(e);
+      }
+      if (!cancelled) setQuitConfirmOpen(true);
     }).then((fn) => {
       if (!cancelled) unlisten = fn;
       else fn();
