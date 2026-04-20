@@ -10,6 +10,7 @@ import { clearPersistedSpaceHomeCache } from "./utils/spaceHomeCache";
 import { clearPersistedRoomsList } from "./utils/roomsCache";
 import { useExternalLinkInterceptor } from "./hooks/useExternalLinks";
 import { listen } from "@tauri-apps/api/event";
+import QuitConfirmDialog from "./components/QuitConfirmDialog";
 
 if (import.meta.env.DEV) {
   const w = window as unknown as { invoke: typeof invoke; listen: typeof listen };
@@ -163,6 +164,22 @@ function App() {
 
   const [tab, setTab] = useState<"login" | "signup">("login");
   const [authConfig, setAuthConfig] = useState<AuthConfig | null>(null);
+  const [quitConfirmOpen, setQuitConfirmOpen] = useState(false);
+
+  useEffect(() => {
+    let cancelled = false;
+    let unlisten: (() => void) | undefined;
+    listen("app-close-request", () => {
+      setQuitConfirmOpen(true);
+    }).then((fn) => {
+      if (!cancelled) unlisten = fn;
+      else fn();
+    });
+    return () => {
+      cancelled = true;
+      unlisten?.();
+    };
+  }, []);
 
   // Open all external (http/https) link clicks in the system browser.
   useExternalLinkInterceptor();
@@ -298,6 +315,11 @@ function App() {
     setError(null);
   }
 
+  const quitOverlay =
+    quitConfirmOpen ? (
+      <QuitConfirmDialog onClose={() => setQuitConfirmOpen(false)} />
+    ) : null;
+
   if (userId) {
     // `useRooms` primes the `UserAvatarStore` from the get_rooms
     // response, so it MUST run inside `<UserAvatarStoreProvider>` —
@@ -306,28 +328,35 @@ function App() {
     // priming path silently no-ops. Split out into a child
     // component so hooks run in the right context.
     return (
-      <UserAvatarStoreProvider>
-        <AuthedApp
-          userId={userId}
-          onSignOut={handleSignOut}
-          loadingStyles={authStyles}
-        />
-      </UserAvatarStoreProvider>
+      <>
+        <UserAvatarStoreProvider>
+          <AuthedApp
+            userId={userId}
+            onSignOut={handleSignOut}
+            loadingStyles={authStyles}
+          />
+        </UserAvatarStoreProvider>
+        {quitOverlay}
+      </>
     );
   }
 
   if (autoLoggingIn) {
     return (
-      <div style={authStyles.container}>
-        <div style={authStyles.logoWrap}>
-          <img src="/logo.png" alt="Pax" style={authStyles.logoImg} />
+      <>
+        <div style={authStyles.container}>
+          <div style={authStyles.logoWrap}>
+            <img src="/logo.png" alt="Pax" style={authStyles.logoImg} />
+          </div>
+          <p style={authStyles.signingIn}>Signing in...</p>
         </div>
-        <p style={authStyles.signingIn}>Signing in...</p>
-      </div>
+        {quitOverlay}
+      </>
     );
   }
 
   return (
+    <>
     <div style={authStyles.container}>
       <div style={authStyles.logoWrap}>
         <img src="/logo.png" alt="Pax" style={authStyles.logoImg} />
@@ -448,6 +477,8 @@ function App() {
         {error && <p style={authStyles.error}>{error}</p>}
       </div>
     </div>
+    {quitOverlay}
+    </>
   );
 }
 

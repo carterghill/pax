@@ -3,6 +3,7 @@ pub mod avatar_cache;
 pub mod codec;
 pub mod config;
 pub mod embed;
+pub mod lifecycle;
 pub mod members;
 pub mod messages;
 pub mod notification_levels;

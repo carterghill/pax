@@ -16,7 +16,10 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex as StdMutex};
 
 use matrix_sdk::Client;
+use tauri::Emitter;
 use tauri::Manager;
+#[cfg(desktop)]
+use tauri::WindowEvent;
 use tokio::sync::Mutex;
 use tokio::task::JoinHandle;
 
@@ -251,6 +254,17 @@ pub fn run() {
     });
 
     tauri::Builder::default()
+        .on_window_event(|window, event| {
+            #[cfg(not(desktop))]
+            let _ = (window, event);
+            #[cfg(desktop)]
+            if let WindowEvent::CloseRequested { api, .. } = event {
+                if window.label() == "main" {
+                    api.prevent_close();
+                    let _ = window.app_handle().emit("app-close-request", ());
+                }
+            }
+        })
         .plugin(
             tauri_plugin_log::Builder::new()
                 .level(log::LevelFilter::Info)
@@ -410,6 +424,8 @@ pub fn run() {
             commands::notifications::notify_supported,
             commands::notifications::notify_send,
             commands::notifications::focus_main_window,
+            commands::lifecycle::exit_app,
+            commands::lifecycle::hide_main_window,
         ])
         .setup(|app| {
             // Set the Tauri app-scoped temp dir so avatar / media temp
@@ -448,6 +464,47 @@ pub fn run() {
                 .expect("main window not found");
             let icon = tauri::include_image!("icons/128x128.png");
             let _ = main_window.set_icon(icon);
+
+            #[cfg(desktop)]
+            {
+                let tray_icon = tauri::image::Image::from_bytes(include_bytes!(
+                    "../icons/tray_logo_white.png"
+                ))
+                .map_err(|e| format!("tray icon: {e}"))?;
+                let menu = tauri::menu::MenuBuilder::new(app)
+                    .text("tray_show", "Show Pax")
+                    .text("tray_quit", "Quit")
+                    .build()?;
+
+                let _tray = tauri::tray::TrayIconBuilder::new()
+                    .menu(&menu)
+                    .icon(tray_icon)
+                    .tooltip("Pax")
+                    .on_menu_event(|app, event| {
+                        match event.id().as_ref() {
+                            "tray_show" => {
+                                if let Some(win) = app.get_webview_window("main") {
+                                    let _ = win.unminimize();
+                                    let _ = win.show();
+                                    let _ = win.set_focus();
+                                }
+                            }
+                            "tray_quit" => app.exit(0),
+                            _ => {}
+                        }
+                    })
+                    .on_tray_icon_event(|tray, event| {
+                        use tauri::tray::TrayIconEvent;
+                        if let TrayIconEvent::DoubleClick { .. } = event {
+                            if let Some(win) = tray.app_handle().get_webview_window("main") {
+                                let _ = win.unminimize();
+                                let _ = win.show();
+                                let _ = win.set_focus();
+                            }
+                        }
+                    })
+                    .build(app)?;
+            }
 
             // Clean up leftover proxy media temp files from previous sessions.
             // NOTE: this sweeps the Tauri *temp* dir — the persistent

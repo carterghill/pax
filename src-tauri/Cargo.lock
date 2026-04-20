@@ -756,6 +756,12 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "1fd0f2584146f6f2ef48085050886acf353beff7305ebd1ae69500e27c67f64b"
 
 [[package]]
+name = "byteorder-lite"
+version = "0.1.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "8f1fe948ff07f4bd06c30984e69f5b4899c516a3ef74f34df92a2df2ab535495"
+
+[[package]]
 name = "bytes"
 version = "1.11.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3603,6 +3609,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "image"
+version = "0.25.10"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "85ab80394333c02fe689eaf900ab500fbd0c2213da414687ebf995a65d5a6104"
+dependencies = [
+ "bytemuck",
+ "byteorder-lite",
+ "moxcms",
+ "num-traits",
+ "png 0.18.1",
+]
+
+[[package]]
 name = "imbl"
 version = "6.1.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -4103,7 +4122,7 @@ version = "0.2.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "896d0e594158b7f5188034836a6c4886492078352c39760786e54f1b796caaea"
 dependencies = [
- "image",
+ "image 0.24.9",
  "log",
  "memmap2",
  "nix 0.26.4",
@@ -4807,6 +4826,16 @@ dependencies = [
  "libc",
  "wasi 0.11.1+wasi-snapshot-preview1",
  "windows-sys 0.61.2",
+]
+
+[[package]]
+name = "moxcms"
+version = "0.8.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "bb85c154ba489f01b25c0d36ae69a87e4a1c73a72631fc6c0eb6dde34a73e44b"
+dependencies = [
+ "num-traits",
+ "pxfm",
 ]
 
 [[package]]
@@ -6161,6 +6190,12 @@ dependencies = [
 ]
 
 [[package]]
+name = "pxfm"
+version = "0.1.28"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "b5a041e753da8b807c9255f28de81879c78c876392ff2469cde94799b2896b9d"
+
+[[package]]
 name = "qoi"
 version = "0.4.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -7198,7 +7233,7 @@ dependencies = [
  "dbus",
  "display-info",
  "fxhash",
- "image",
+ "image 0.24.9",
  "libwayshot",
  "percent-encoding",
  "widestring",
@@ -7979,6 +8014,7 @@ dependencies = [
  "heck 0.5.0",
  "http 1.4.0",
  "http-range",
+ "image 0.25.10",
  "jni",
  "libc",
  "log",
