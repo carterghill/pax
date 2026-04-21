@@ -11,7 +11,10 @@ import { usePresence } from "../hooks/usePresence";
 import { useVoiceParticipants } from "../hooks/useVoiceParticipants";
 import { useVoiceCall } from "../hooks/useVoiceCall";
 import { useUnreadRooms, useSpaceUnreadRollup } from "../hooks/useUnreadRooms";
-import { useNotificationSettings } from "../hooks/useNotificationSettings";
+import {
+  useNotificationSettings,
+  type TrayUnreadIndicatorMode,
+} from "../hooks/useNotificationSettings";
 import { useDesktopNotifications } from "../hooks/useDesktopNotifications";
 import { PresenceContext } from "../hooks/PresenceContext";
 import { useState, useCallback, useMemo, useEffect, startTransition } from "react";
@@ -152,27 +155,58 @@ export default function MainLayout({
   // tree edges (direct children), `spaces` is the flat list of joined spaces.
   const {
     isSpaceUnread,
+    isSpaceNotified,
     isHomeUnread,
+    isHomeNotified,
     effectiveMentionCount,
     effectiveSpaceMentionCount,
     effectiveHomeMentionCount,
   } = useSpaceUnreadRollup(spaces, roomsBySpace, roomUnread, isRoomEffectivelyMuted);
 
-  // Tray icon: red dot when any sidebar-visible bucket has unread (same rollup as Home / spaces).
+  // Tray icon: behaviour from notification settings (default: red = notify-worthy, blue = other unread).
   useEffect(() => {
     const hasUnread =
       isHomeUnread() ||
       topLevelSpaces.some(
         (s) => s.membership === "joined" && isSpaceUnread(s.id),
       );
-    void invoke("set_tray_unread_indicator", { hasUnread }).catch(() => {
+    const hasNotify =
+      isHomeNotified() ||
+      topLevelSpaces.some(
+        (s) => s.membership === "joined" && isSpaceNotified(s.id),
+      );
+    const mode: TrayUnreadIndicatorMode =
+      notificationSettings.trayUnreadIndicator ?? "split";
+    let dot: "none" | "red" | "blue" = "none";
+    switch (mode) {
+      case "allRed":
+        if (hasUnread) dot = "red";
+        break;
+      case "split":
+        if (hasNotify) dot = "red";
+        else if (hasUnread) dot = "blue";
+        break;
+      case "notifyOnly":
+        if (hasNotify) dot = "red";
+        break;
+      case "never":
+        break;
+    }
+    void invoke("set_tray_unread_indicator", { dot }).catch(() => {
       /* web / early startup */
     });
-  }, [isHomeUnread, isSpaceUnread, topLevelSpaces]);
+  }, [
+    isHomeUnread,
+    isHomeNotified,
+    isSpaceUnread,
+    isSpaceNotified,
+    topLevelSpaces,
+    notificationSettings.trayUnreadIndicator,
+  ]);
 
   useEffect(() => {
     return () => {
-      void invoke("set_tray_unread_indicator", { hasUnread: false }).catch(() => {});
+      void invoke("set_tray_unread_indicator", { dot: "none" }).catch(() => {});
     };
   }, []);
 

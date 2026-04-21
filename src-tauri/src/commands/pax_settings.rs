@@ -106,6 +106,21 @@ impl Default for UnreadSettings {
 /// (Synapse's limitations — see `notification_levels` module docs).  The
 /// finer-grained variants are stored here so the client-side notification
 /// handler can honour them when it renders local notifications.
+/// How the desktop tray icon shows unread / notification state.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "camelCase")]
+pub enum TrayUnreadIndicatorMode {
+    /// Red dot for any unread (previous Pax default).
+    AllRed,
+    /// Red when something would notify; blue for other unread; nothing if clear.
+    #[default]
+    Split,
+    /// Red only when there is notification-worthy unread; no dot for muted-only unread.
+    NotifyOnly,
+    /// Never show a tray badge.
+    Never,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub enum NotificationLevel {
@@ -128,6 +143,8 @@ pub enum NotificationLevel {
 pub struct NotificationSettings {
     #[serde(default = "default_schema_version")]
     pub version: u32,
+    #[serde(default)]
+    pub tray_unread_indicator: TrayUnreadIndicatorMode,
     /// Default level for rooms with no explicit setting and no
     /// space-scoped setting.  `None` → fall through to Element-style
     /// per-room-type defaults (`All` for DMs, `AllMentions` for group
@@ -150,6 +167,7 @@ impl Default for NotificationSettings {
     fn default() -> Self {
         Self {
             version: SCHEMA_VERSION,
+            tray_unread_indicator: TrayUnreadIndicatorMode::default(),
             global_default: None,
             spaces: HashMap::new(),
             rooms: HashMap::new(),
@@ -390,6 +408,19 @@ pub async fn get_notification_settings(
     state: State<'_, Arc<AppState>>,
 ) -> Result<NotificationSettings, String> {
     load_notification_settings_inner(&state).await
+}
+
+#[tauri::command]
+pub async fn set_tray_unread_indicator_mode(
+    state: State<'_, Arc<AppState>>,
+    app: AppHandle,
+    mode: TrayUnreadIndicatorMode,
+) -> Result<NotificationSettings, String> {
+    let _guard = PAX_SETTINGS_LOCK.lock().await;
+    let mut settings = load_notification_settings_inner(&state).await?;
+    settings.tray_unread_indicator = mode;
+    save_notification_settings(&state, &app, &settings).await?;
+    Ok(settings)
 }
 
 /// Set the global default notification level.  Triggers a full reconcile

@@ -18,6 +18,13 @@ export type NotificationLevel =
   | "allMentions"
   | "none";
 
+/** Mirrors `commands::pax_settings::TrayUnreadIndicatorMode`. */
+export type TrayUnreadIndicatorMode =
+  | "allRed"
+  | "split"
+  | "notifyOnly"
+  | "never";
+
 /**
  * User-facing labels + short descriptions.  Kept here so the panel and any
  * future surfaces (room-context-menu, etc.) stay aligned.
@@ -32,6 +39,7 @@ export const NOTIFICATION_LEVEL_LABELS: Record<NotificationLevel, string> = {
 
 export interface NotificationSettings {
   version: number;
+  trayUnreadIndicator?: TrayUnreadIndicatorMode;
   globalDefault: NotificationLevel | null;
   spaces: Record<string, NotificationLevel>;
   rooms: Record<string, NotificationLevel>;
@@ -46,6 +54,7 @@ export interface UnreadSettings {
 
 const defaultNotificationSettings: NotificationSettings = {
   version: 1,
+  trayUnreadIndicator: "split",
   globalDefault: null,
   spaces: {},
   rooms: {},
@@ -143,6 +152,13 @@ export function useNotificationSettings() {
     [],
   );
 
+  const setTrayUnreadIndicatorMode = useCallback(
+    async (mode: TrayUnreadIndicatorMode): Promise<void> => {
+      await invoke("set_tray_unread_indicator_mode", { mode });
+    },
+    [],
+  );
+
   /** Set a space's default.  `null` removes the entry; child rooms then
    *  revert to the global default / Element defaults on reconcile. */
   const setSpaceLevel = useCallback(
@@ -212,6 +228,7 @@ export function useNotificationSettings() {
     loading,
 
     setGlobalDefault,
+    setTrayUnreadIndicatorMode,
     setSpaceLevel,
     setRoomLevel,
     clearRoomLevel,

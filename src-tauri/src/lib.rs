@@ -509,6 +509,7 @@ pub fn run() {
             commands::pax_settings::set_space_unread_indicator,
             commands::pax_settings::set_room_unread_indicator,
             commands::pax_settings::get_notification_settings,
+            commands::pax_settings::set_tray_unread_indicator_mode,
             commands::pax_settings::set_global_default_notification_level,
             commands::pax_settings::set_space_notification_level,
             // --- Notification levels (synthesised onto push rules) ---

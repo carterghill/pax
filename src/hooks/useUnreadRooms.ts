@@ -41,6 +41,8 @@ export interface UnreadRoomsApi {
    * want muted rooms to stay grey, switch this to `notifications`.
    */
   isUnread: (roomId: string) => boolean;
+  /** Subset of unread that would notify per push rules; drives tray red dot in split mode. */
+  notificationCount: (roomId: string) => number;
   /** Count for the red pill.  0 means no pill. */
   mentionCount: (roomId: string) => number;
   /** For a potential "you have 3 new messages" tooltip / aria-label. */
@@ -158,6 +160,12 @@ export function useUnreadRooms(userId: string | null): UnreadRoomsApi {
     [version]
   );
 
+  const notificationCount = useCallback(
+    (roomId: string) => mapRef.current.get(roomId)?.notifications ?? 0,
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [version]
+  );
+
   const mentionCount = useCallback(
     (roomId: string) => mapRef.current.get(roomId)?.mentions ?? 0,
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -170,7 +178,7 @@ export function useUnreadRooms(userId: string | null): UnreadRoomsApi {
     [version]
   );
 
-  return { isUnread, mentionCount, messageCount };
+  return { isUnread, notificationCount, mentionCount, messageCount };
 }
 
 /** Hint type for callers that want to store the latest snapshot outside React. */
@@ -194,11 +202,15 @@ export interface RoomForRollup {
 export interface SpaceUnreadRollupApi {
   /** True when the space (or any descendant space/room) has unread activity. */
   isSpaceUnread: (spaceId: string) => boolean;
+  /** True when any descendant room has notification-worthy unread (`notifications` > 0). */
+  isSpaceNotified: (spaceId: string) => boolean;
   /** Sum of raw mentions across descendant rooms.  Use `effectiveSpaceMentionCount`
    *  for the sidebar badge — it also counts unread DM messages. */
   spaceMentionCount: (spaceId: string) => number;
   /** True when any room outside every joined space has unread activity (Home indicator). */
   isHomeUnread: () => boolean;
+  /** Home rollup for notification-worthy unread. */
+  isHomeNotified: () => boolean;
   /** Sum of raw mentions across rooms outside every joined space. */
   homeMentionCount: () => number;
   /**
@@ -255,7 +267,7 @@ export function useSpaceUnreadRollup(
    */
   isRoomEffectivelyMuted: (roomId: string) => boolean,
 ): SpaceUnreadRollupApi {
-  const { isUnread, mentionCount, messageCount } = roomUnread;
+  const { isUnread, notificationCount, mentionCount, messageCount } = roomUnread;
 
   const joinedSpaceIdSet = useMemo(() => {
     const s = new Set<string>();
@@ -298,6 +310,26 @@ export function useSpaceUnreadRollup(
       return walk(spaceId);
     },
     [roomsBySpace, isUnread],
+  );
+
+  const isSpaceNotified = useCallback(
+    (spaceId: string): boolean => {
+      const visited = new Set<string>();
+      const walk = (sid: string): boolean => {
+        if (visited.has(sid)) return false;
+        visited.add(sid);
+        for (const child of roomsBySpace(sid)) {
+          if (child.isSpace) {
+            if (walk(child.id)) return true;
+          } else {
+            if (notificationCount(child.id) > 0) return true;
+          }
+        }
+        return false;
+      };
+      return walk(spaceId);
+    },
+    [roomsBySpace, notificationCount],
   );
 
   /**
@@ -396,6 +428,11 @@ export function useSpaceUnreadRollup(
     return false;
   }, [homeRoomIds, isUnread]);
 
+  const isHomeNotified = useCallback(() => {
+    for (const id of homeRoomIds) if (notificationCount(id) > 0) return true;
+    return false;
+  }, [homeRoomIds, notificationCount]);
+
   const homeMentionCount = useCallback(() => {
     let total = 0;
     for (const id of homeRoomIds) total += mentionCount(id);
@@ -410,8 +447,10 @@ export function useSpaceUnreadRollup(
 
   return {
     isSpaceUnread,
+    isSpaceNotified,
     spaceMentionCount,
     isHomeUnread,
+    isHomeNotified,
     homeMentionCount,
     effectiveMentionCount,
     effectiveSpaceMentionCount,

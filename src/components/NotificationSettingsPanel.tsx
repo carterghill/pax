@@ -3,6 +3,7 @@ import { useTheme } from "../theme/ThemeContext";
 import {
   useNotificationSettings,
   type NotificationLevel,
+  type TrayUnreadIndicatorMode,
   NOTIFICATION_LEVEL_LABELS,
 } from "../hooks/useNotificationSettings";
 
@@ -31,6 +32,35 @@ interface LevelOption {
  * 3.3).  Users who just want the simple picks can safely treat the three
  * "Mentions" variants as a group.
  */
+const TRAY_UNREAD_OPTIONS: readonly {
+  mode: TrayUnreadIndicatorMode;
+  label: string;
+  description: string;
+}[] = [
+  {
+    mode: "split",
+    label: "Red for notifications, blue for other unread",
+    description:
+      "Red when something would notify you; blue when you only have unread that would not trigger a notification.",
+  },
+  {
+    mode: "allRed",
+    label: "Red for all unread",
+    description: "A red dot whenever there is unread activity anywhere (previous default).",
+  },
+  {
+    mode: "notifyOnly",
+    label: "Red for notifications only",
+    description:
+      "Red when something would notify you; no tray dot for unread in muted or quiet rooms.",
+  },
+  {
+    mode: "never",
+    label: "No tray dot",
+    description: "Never show a badge on the system tray icon.",
+  },
+] as const;
+
 const LEVEL_OPTIONS: readonly LevelOption[] = [
   {
     level: "all",
@@ -69,6 +99,7 @@ export default function NotificationSettingsPanel({
     unreadSettings,
     loading,
     setGlobalDefault,
+    setTrayUnreadIndicatorMode,
     setSpaceLevel,
     setRoomLevel,
     clearRoomLevel,
@@ -306,6 +337,61 @@ export default function NotificationSettingsPanel({
           </div>
         )}
       </div>
+
+      {/* ============ Tray icon (desktop) ============ */}
+      {scope === "global" && (
+        <div>
+          <h3 style={sectionHeading}>Tray icon</h3>
+          <p style={sectionDescription}>
+            Choose how the Pax icon in the system tray shows unread activity
+            (desktop app only).
+          </p>
+          <div
+            style={{ display: "flex", flexDirection: "column", gap: spacing.unit * 1.5 }}
+          >
+            {TRAY_UNREAD_OPTIONS.map((opt) => {
+              const current =
+                notificationSettings.trayUnreadIndicator ?? "split";
+              const selected = current === opt.mode;
+              return (
+                <label
+                  key={opt.mode}
+                  style={selected ? radioRowSelected : radioRowBase}
+                >
+                  <input
+                    type="radio"
+                    name="pax-tray-unread-mode"
+                    checked={selected}
+                    onChange={() => void setTrayUnreadIndicatorMode(opt.mode)}
+                    style={{ accentColor: palette.accent, marginTop: 2 }}
+                  />
+                  <div style={{ flex: 1, minWidth: 0 }}>
+                    <div
+                      style={{
+                        fontSize: typography.fontSizeBase,
+                        fontWeight: typography.fontWeightMedium,
+                        color: palette.textHeading,
+                      }}
+                    >
+                      {opt.label}
+                    </div>
+                    <div
+                      style={{
+                        fontSize: typography.fontSizeSmall,
+                        color: palette.textSecondary,
+                        marginTop: spacing.unit / 2,
+                        lineHeight: 1.4,
+                      }}
+                    >
+                      {opt.description}
+                    </div>
+                  </div>
+                </label>
+              );
+            })}
+          </div>
+        </div>
+      )}
 
       {/* ============ Unread indicators ============ */}
       <div>
