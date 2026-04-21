@@ -78,7 +78,6 @@ pub async fn get_messages(
     let room = resolve_room(&client, &room_id)?;
 
     let avatar_cache = state.avatar_cache.clone();
-    let limit_usize = limit as usize;
 
     // First pass: extract message data and collect unique senders
     struct RawMsg {
@@ -114,6 +113,27 @@ pub async fn get_messages(
     let mut timeline_event_count_total: usize = 0;
     let mut prev_batch: Option<String>;
 
+    // Cap on how many pages we'll walk in one `get_messages` call while looking
+    // for enough visible messages.  With the end-token-based stop below we can
+    // legitimately keep paging through filtered-but-non-empty pages (rooms with
+    // a run of membership churn, reactions, redactions, etc. at the head), so
+    // bound it to keep worst-case backend work predictable.  At limit=50 this
+    // is up to ~1000 timeline events per call, which has always been enough in
+    // practice.
+    const MAX_PAGES_PER_CALL: usize = 20;
+
+    // How many *visible* (`m.room.message`) events we want to surface before
+    // returning.  A Matrix `/messages` page is a page of *timeline events*, so
+    // a federated or state-heavy room (membership churn, reactions, receipts,
+    // non-message state) can easily come back with only 1–3 actual messages
+    // out of a 50-event chunk.  If that tiny result fits inside the viewport
+    // there is no scrollbar, `scrollTop` stays at 0, and the user physically
+    // cannot scroll up to trigger further pagination even though a valid
+    // `prev_batch` token exists.  Keep paging backward until we've surfaced
+    // enough messages to reliably overflow a chat viewport (bounded by the
+    // caller's `limit`, so a caller asking for 5 doesn't suddenly get 20).
+    let target_visible: usize = (limit as usize).min(20);
+
     loop {
         let mut options = MessagesOptions::backward();
         if let Some(token) = &current_from {
@@ -134,12 +154,27 @@ pub async fn get_messages(
 
         pages_scanned += 1;
 
-        // Per the `/messages` contract: fewer than `limit` timeline events means there
-        // is nothing more to paginate backward. Homeservers often still set `end` in
-        // that case, which would otherwise make the client request a useless page.
-        let timeline_event_count = chunk.len();
-        timeline_event_count_total += timeline_event_count;
-        prev_batch = if timeline_event_count < limit_usize {
+        // Trust the server's `end` token.  `chunk.len() < limit` is NOT a
+        // reliable end-of-history signal: the `/messages` spec makes no such
+        // guarantee, and Synapse routinely returns fewer than `limit` timeline
+        // events per page (state events filtered server-side, lazy-loaded
+        // membership, undecryptable events, matrix-sdk's own filter dropping
+        // non-message-like events) while hundreds of older messages are still
+        // available.  The previous heuristic caused rooms to appear to have no
+        // more history whenever the first backward page happened to be mostly
+        // non-`m.room.message` events — the user saw 1–2 messages with no way
+        // to scroll back.
+        //
+        // Stop only when:
+        //   * the server returns no `end` token at all (true start of room), or
+        //   * the server didn't advance `end` past what we just sent (defensive:
+        //     some homeservers echo the token when there is no more), or
+        //   * the chunk was completely empty (no events at all — treat as end,
+        //     otherwise an endlessly-repeating `end` token could spin us).
+        let chunk_len = chunk.len();
+        timeline_event_count_total += chunk_len;
+        let end_advanced = pagination_end.as_deref() != current_from.as_deref();
+        prev_batch = if chunk_len == 0 || !end_advanced {
             None
         } else {
             pagination_end
@@ -207,10 +242,21 @@ pub async fn get_messages(
             }
         }
 
-        // A timeline page can contain only edits / filtered events, which makes the
-        // frontend show "loaded" with no visible change. Keep paging until we surface
-        // at least one actual message or we truly run out of history.
-        if !raw_msgs.is_empty() || prev_batch.is_none() {
+        // Keep paging until we have enough visible messages to overflow the
+        // viewport (so the user can actually scroll and re-trigger pagination),
+        // we truly run out of history, or we hit the per-call page cap.
+        if raw_msgs.len() >= target_visible || prev_batch.is_none() {
+            break;
+        }
+        if pages_scanned >= MAX_PAGES_PER_CALL {
+            log::warn!(
+                "[get_messages] room=…{} page cap hit ({} pages, {} events walked, {} visible msgs found of target {}); returning partial result",
+                short_room,
+                pages_scanned,
+                timeline_event_count_total,
+                raw_msgs.len(),
+                target_visible,
+            );
             break;
         }
 
