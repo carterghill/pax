@@ -7,6 +7,7 @@ import UserAvatar from "../components/UserAvatar";
 import MessageList from "../components/MessageList";
 import MessageInput, { type EditingMessageRef } from "../components/MessageInput";
 import UserMenu from "../components/UserMenu";
+import RoomDownloadsButton from "../components/RoomDownloadsButton";
 import { useMessages } from "../hooks/useMessages";
 import { useMatrixUserProfile } from "../hooks/useMatrixUserProfile";
 import { useTheme } from "../theme/ThemeContext";
@@ -274,7 +275,10 @@ export default function ChatView({
               Direct message
             </div>
           </div>
-          <MessageCircle size={20} color={palette.textSecondary} style={{ flexShrink: 0 }} />
+          <div style={{ display: "flex", alignItems: "center", gap: spacing.unit * 0.5, flexShrink: 0 }}>
+            <RoomDownloadsButton roomId={`draft:${draftDm.peerUserId}`} />
+            <MessageCircle size={20} color={palette.textSecondary} style={{ marginLeft: spacing.unit }} />
+          </div>
         </div>
 
         <div style={{
@@ -355,7 +359,10 @@ export default function ChatView({
               Direct message
             </div>
           </div>
-          <MessageCircle size={20} color={palette.textSecondary} style={{ flexShrink: 0 }} />
+          <div style={{ display: "flex", alignItems: "center", gap: spacing.unit * 0.5, flexShrink: 0 }}>
+            <RoomDownloadsButton roomId={activeRoom.id} />
+            <MessageCircle size={20} color={palette.textSecondary} style={{ marginLeft: spacing.unit }} />
+          </div>
         </div>
       ) : (
         <div style={{
@@ -363,7 +370,6 @@ export default function ChatView({
           height: spacing.headerHeight,
           borderBottom: `1px solid ${palette.border}`,
           display: "flex",
-          position: "relative",
           alignItems: "center",
           gap: spacing.unit * 3,
           boxSizing: "border-box",
@@ -379,33 +385,39 @@ export default function ChatView({
             overflow: "hidden",
             textOverflow: "ellipsis",
             whiteSpace: "nowrap",
-            paddingRight: spacing.unit * 8,
           }}>
             {activeRoom.name}
           </span>
-          <button
-            onClick={() => setShowUsers((prev) => !prev)}
-            title="Toggle member list"
-            style={{
-              background: "none",
-              border: "none",
-              cursor: "pointer",
-              padding: spacing.unit,
-              borderRadius: spacing.unit,
-              display: "flex",
-              alignItems: "center",
-              justifyContent: "center",
-              flexShrink: 0,
-              position: "absolute",
-              right: spacing.unit * 2,
-            }}
-          >
-            <Users
-              size={20}
-              color={showUsers ? palette.textHeading : palette.textSecondary}
-              fontWeight={showUsers ? typography.fontWeightBold : typography.fontWeightNormal}
-            />
-          </button>
+          <div style={{
+            display: "flex",
+            alignItems: "center",
+            gap: spacing.unit * 0.5,
+            flexShrink: 0,
+          }}>
+            <RoomDownloadsButton roomId={activeRoom.id} />
+            <button
+              type="button"
+              onClick={() => setShowUsers((prev) => !prev)}
+              title="Toggle member list"
+              style={{
+                background: "none",
+                border: "none",
+                cursor: "pointer",
+                padding: spacing.unit,
+                borderRadius: spacing.unit,
+                display: "flex",
+                alignItems: "center",
+                justifyContent: "center",
+                flexShrink: 0,
+              }}
+            >
+              <Users
+                size={20}
+                color={showUsers ? palette.textHeading : palette.textSecondary}
+                strokeWidth={showUsers ? 2.5 : 2}
+              />
+            </button>
+          </div>
         </div>
       )}
 

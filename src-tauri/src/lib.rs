@@ -394,6 +394,7 @@ pub fn run() {
             commands::embed::proxy_media,
             commands::embed::cleanup_proxy_media,
             commands::embed::cleanup_all_proxy_media,
+            commands::downloads::start_room_download,
             commands::unread::get_room_unread_state,
             commands::unread::get_all_unread_states,
             commands::unread::send_room_read_receipt,

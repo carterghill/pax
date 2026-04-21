@@ -467,14 +467,23 @@ export default function MessageList({
   );
 
   /* ---- Stable callbacks ---- */
-  const openDirectImage = useCallback((url: string, title: string) => {
-    setMediaViewer({
-      kind: "image",
-      directUrl: url,
-      fileName: title || fileNameFromImageUrl(url),
-      mimeType: /\.gif([?#]|$)/i.test(url) ? "image/gif" : null,
-    });
-  }, []);
+  const openDirectImage = useCallback(
+    (url: string, title: string) => {
+      setMediaViewer({
+        kind: "image",
+        directUrl: url,
+        fileName: title || fileNameFromImageUrl(url),
+        mimeType: /\.gif([?#]|$)/i.test(url) ? "image/gif" : null,
+        roomId,
+      });
+    },
+    [roomId],
+  );
+
+  const openMediaViewer = useCallback(
+    (p: MediaViewerOpenPayload) => setMediaViewer({ ...p, roomId }),
+    [roomId],
+  );
 
   const handleOpenMenu = useCallback((eventId: string) => {
     setOpenMenuEventId((id) => (id === eventId ? null : eventId));
@@ -982,7 +991,7 @@ export default function MessageList({
             showMessageActions={showMessageActions}
             isMenuOpen={openMenuEventId === msg.eventId}
             onOpenMenu={handleOpenMenu}
-            onOpenMediaViewer={setMediaViewer}
+            onOpenMediaViewer={openMediaViewer}
             onOpenDirectImage={openDirectImage}
             menuAnchorRef={menuAnchorRef}
             rowHighlight={rowHighlight}

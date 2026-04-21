@@ -3,6 +3,7 @@ import { useState, useEffect, useRef, useMemo } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import MainLayout from "./layouts/MainLayout";
 import { UserAvatarStoreProvider } from "./context/UserAvatarStore";
+import { RoomDownloadsProvider } from "./context/RoomDownloadsContext";
 import { useTheme } from "./theme/ThemeContext";
 import { useRooms } from "./hooks/useRooms";
 import { clearMessageCache } from "./hooks/useMessages";
@@ -367,11 +368,13 @@ function App() {
     return (
       <>
         <UserAvatarStoreProvider>
-          <AuthedApp
-            userId={userId}
-            onSignOut={handleSignOut}
-            loadingStyles={authStyles}
-          />
+          <RoomDownloadsProvider>
+            <AuthedApp
+              userId={userId}
+              onSignOut={handleSignOut}
+              loadingStyles={authStyles}
+            />
+          </RoomDownloadsProvider>
         </UserAvatarStoreProvider>
         {quitOverlay}
       </>

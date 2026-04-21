@@ -10,11 +10,8 @@ import {
   X,
 } from "lucide-react";
 import { useTheme } from "../theme/ThemeContext";
-import {
-  downloadFromUrl,
-  inferMediaViewerKind,
-  type MediaViewerKind,
-} from "../utils/mediaViewer";
+import { useRoomDownloads } from "../context/RoomDownloadsContext";
+import { inferMediaViewerKind, type MediaViewerKind } from "../utils/mediaViewer";
 import {
   bufferLooksBinary,
   inferPrismLanguage,
@@ -42,6 +39,8 @@ export interface MediaViewerOpenPayload {
   directUrl?: string;
   fileName: string;
   mimeType: string | null;
+  /** Room this media was opened from (for download tracking). */
+  roomId?: string;
 }
 
 interface MediaViewerModalProps {
@@ -56,7 +55,10 @@ export default function MediaViewerModal({
   payload,
 }: MediaViewerModalProps) {
   const { palette, typography, spacing, resolvedColorScheme } = useTheme();
+  const { startDownload } = useRoomDownloads();
   const [fileUrl, setFileUrl] = useState<string | null>(null);
+  /** Local temp path from `get_matrix_image_path` — used for saving to Downloads (asset URLs are not fetchable). */
+  const [sourceDiskPath, setSourceDiskPath] = useState<string | null>(null);
   const [loadError, setLoadError] = useState<string | null>(null);
   const [loadingPath, setLoadingPath] = useState(false);
 
@@ -81,6 +83,7 @@ export default function MediaViewerModal({
 
   const resetState = useCallback(() => {
     setFileUrl(null);
+    setSourceDiskPath(null);
     setLoadError(null);
     setLoadingPath(false);
     setTextContent(null);
@@ -105,6 +108,7 @@ export default function MediaViewerModal({
 
     if (payload.directUrl) {
       setFileUrl(payload.directUrl);
+      setSourceDiskPath(null);
       setLoadingPath(false);
       setLoadError(null);
       return () => {
@@ -130,6 +134,7 @@ export default function MediaViewerModal({
     invoke<string>("get_matrix_image_path", { request: parsed })
       .then((path) => {
         if (!cancelled) {
+          setSourceDiskPath(path);
           setFileUrl(convertFileSrc(path));
           setLoadingPath(false);
         }
@@ -275,15 +280,39 @@ export default function MediaViewerModal({
   }, [open, effectiveKind, fileUrl, pdfPage, pdfNumPages, zoom]);
 
   const handleDownload = useCallback(async () => {
-    if (!fileUrl || !payload) return;
+    if (!payload) return;
+    const roomId = payload.roomId ?? "";
     try {
-      await downloadFromUrl(fileUrl, payload.fileName);
+      if (payload.directUrl) {
+        await startDownload({
+          roomId,
+          fileName: payload.fileName,
+          source: { kind: "http", url: payload.directUrl },
+        });
+        onClose();
+      } else if (sourceDiskPath) {
+        await startDownload({
+          roomId,
+          fileName: payload.fileName,
+          source: { kind: "copy", sourcePath: sourceDiskPath },
+        });
+        onClose();
+      }
     } catch (e) {
       console.error(e);
     }
-  }, [fileUrl, payload]);
+  }, [payload, sourceDiskPath, startDownload, onClose]);
 
   if (!open || !payload) return null;
+
+  const fileStillLoading =
+    loadingPath ||
+    (effectiveKind === "pdf" && pdfLoading && pdfNumPages === 0) ||
+    (effectiveKind === "text" && textLoading);
+
+  const canSaveToDownloads =
+    !fileStillLoading &&
+    (Boolean(payload.directUrl) || Boolean(sourceDiskPath && !loadError));
 
   const overlayBg =
     resolvedColorScheme === "light"
@@ -387,8 +416,11 @@ export default function MediaViewerModal({
           type="button"
           aria-label="Download"
           onClick={handleDownload}
-          disabled={!fileUrl}
-          style={iconBtnStyle(palette, spacing)}
+          disabled={!canSaveToDownloads}
+          style={{
+            ...iconBtnStyle(palette, spacing),
+            ...(!canSaveToDownloads ? { opacity: 0.45, cursor: "not-allowed" as const } : {}),
+          }}
         >
           <Download size={18} />
         </button>
@@ -533,13 +565,15 @@ export default function MediaViewerModal({
         <button
           type="button"
           onClick={handleDownload}
+          disabled={!canSaveToDownloads}
           style={{
             padding: `${spacing.unit * 1.5}px ${spacing.unit * 3}px`,
             borderRadius: spacing.unit * 1.5,
             border: `1px solid ${palette.border}`,
             backgroundColor: palette.bgTertiary,
             color: palette.textPrimary,
-            cursor: "pointer",
+            cursor: canSaveToDownloads ? "pointer" : "not-allowed",
+            opacity: canSaveToDownloads ? 1 : 0.45,
             fontSize: typography.fontSizeBase,
             fontFamily: typography.fontFamily,
           }}

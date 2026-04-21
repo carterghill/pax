@@ -916,7 +916,10 @@ export default function MessageInput({
             minHeight: spacing.unit * 11,
             minWidth: 0,
             flexWrap: "nowrap",
+            // `overflow-x` other than visible forces `overflow-y` to `auto` unless set explicitly,
+            // which shows a bogus vertical scrollbar on the composer row.
             overflowX: "auto",
+            overflowY: "hidden",
           }}
         >
         {/* File upload button (left of editor) */}

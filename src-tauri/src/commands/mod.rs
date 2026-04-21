@@ -2,6 +2,7 @@ pub mod auth;
 pub mod avatar_cache;
 pub mod codec;
 pub mod config;
+pub mod downloads;
 pub mod embed;
 pub mod lifecycle;
 pub mod members;

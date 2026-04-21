@@ -66,15 +66,3 @@ export function fileTypeIconMeta(
   }
   return { Icon: FileIcon, label: "File" };
 }
-
-export async function downloadFromUrl(url: string, fileName: string): Promise<void> {
-  const res = await fetch(url);
-  if (!res.ok) throw new Error(`Download failed (${res.status})`);
-  const blob = await res.blob();
-  const a = document.createElement("a");
-  const objectUrl = URL.createObjectURL(blob);
-  a.href = objectUrl;
-  a.download = fileName;
-  a.click();
-  URL.revokeObjectURL(objectUrl);
-}
