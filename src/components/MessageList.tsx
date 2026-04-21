@@ -1,14 +1,17 @@
 import {
   useEffect,
   useLayoutEffect,
+  useMemo,
   useRef,
   useState,
   useCallback,
   memo,
+  forwardRef,
+  useImperativeHandle,
 } from "react";
 import { createPortal } from "react-dom";
 import { invoke } from "@tauri-apps/api/core";
-import { MoreVertical, Pencil, Trash2, ArrowDown } from "lucide-react";
+import { MoreVertical, Pencil, Pin, Trash2, ArrowDown } from "lucide-react";
 import { Message, RoomRedactionPolicy } from "../types/matrix";
 import { useTheme } from "../theme/ThemeContext";
 import type { ResolvedColorScheme } from "../theme/types";
@@ -28,6 +31,10 @@ import { useReadReceiptSender } from "../hooks/useReadReceiptSender";
 /*  Props                                                              */
 /* ------------------------------------------------------------------ */
 
+export type MessageListHandle = {
+  scrollToEventId: (eventId: string) => void;
+};
+
 interface MessageListProps {
   messages: Message[];
   loadingOlder: boolean;
@@ -45,6 +52,10 @@ interface MessageListProps {
   onRequestEdit: (msg: Message) => void;
   onMessagesMutated: () => void;
   onMessageRemoved: (eventId: string) => void;
+  /** When set, show Pin / Unpin in the message menu for users with pin power. */
+  canPinMessages?: boolean;
+  pinnedEventIds?: string[];
+  onPinnedStateChanged?: () => void;
 }
 
 /* ------------------------------------------------------------------ */
@@ -420,31 +431,53 @@ const MessageRow = memo(function MessageRow({
 /*  MessageList                                                        */
 /* ------------------------------------------------------------------ */
 
-export default function MessageList({
-  messages,
-  loadingOlder,
-  initialLoading,
-  hasOlder,
-  isAtLatest,
-  onLoadOlder,
-  onLoadNewer,
-  pendingRecentCount,
-  showJumpToRecent,
-  onJumpToRecent,
-  roomId,
-  userId,
-  redactionPolicy,
-  onRequestEdit,
-  onMessagesMutated,
-  onMessageRemoved,
-}: MessageListProps) {
+const MessageList = forwardRef<MessageListHandle, MessageListProps>(function MessageList(
+  {
+    messages,
+    loadingOlder,
+    initialLoading,
+    hasOlder,
+    isAtLatest,
+    onLoadOlder,
+    onLoadNewer,
+    pendingRecentCount,
+    showJumpToRecent,
+    onJumpToRecent,
+    roomId,
+    userId,
+    redactionPolicy,
+    onRequestEdit,
+    onMessagesMutated,
+    onMessageRemoved,
+    canPinMessages = false,
+    pinnedEventIds = [],
+    onPinnedStateChanged,
+  },
+  ref,
+) {
   const { palette, typography, spacing, resolvedColorScheme } = useTheme();
+  const pinnedSet = useMemo(
+    () => new Set(pinnedEventIds),
+    [pinnedEventIds],
+  );
 
   /* ---- Refs ---- */
   const scrollContainerRef = useRef<HTMLDivElement>(null);
   /** Grows with message rows / media; observed so we can pin scroll when content height changes. */
   const scrollContentRef = useRef<HTMLDivElement>(null);
   const bottomRef = useRef<HTMLDivElement>(null);
+
+  useImperativeHandle(ref, () => ({
+    scrollToEventId: (eventId: string) => {
+      const root = scrollContainerRef.current;
+      if (!root) return;
+      const el = root.querySelector(
+        `[data-message-event-id="${CSS.escape(eventId)}"]`,
+      ) as HTMLElement | null;
+      if (!el) return;
+      el.scrollIntoView({ block: "center", behavior: "smooth" });
+    },
+  }));
   const shouldAutoScrollRef = useRef(true);
   const menuAnchorRef = useRef<HTMLButtonElement>(null);
 
@@ -1141,6 +1174,102 @@ export default function MessageList({
                 Edit
               </button>
             )}
+            {canPinMessages &&
+              openMenuMsg &&
+              !pinnedSet.has(openMenuMsg.eventId) && (
+                <button
+                  type="button"
+                  role="menuitem"
+                  onMouseDown={(e) => e.preventDefault()}
+                  onClick={async () => {
+                    setOpenMenuEventId(null);
+                    try {
+                      await invoke("pin_room_message", {
+                        roomId,
+                        eventId: openMenuMsg.eventId,
+                      });
+                      onPinnedStateChanged?.();
+                    } catch (e) {
+                      console.error("Failed to pin message:", e);
+                    }
+                  }}
+                  style={{
+                    display: "flex",
+                    alignItems: "center",
+                    gap: spacing.unit * 2.5,
+                    width: "100%",
+                    padding: `${spacing.unit * 2.25}px ${spacing.unit * 3}px`,
+                    border: "none",
+                    borderRadius: spacing.unit * 1.25,
+                    backgroundColor: "transparent",
+                    color: palette.textPrimary,
+                    fontSize: typography.fontSizeBase,
+                    fontFamily: typography.fontFamily,
+                    fontWeight: typography.fontWeightNormal,
+                    cursor: "pointer",
+                    textAlign: "left",
+                  }}
+                  onMouseEnter={(e) => {
+                    e.currentTarget.style.backgroundColor = palette.bgHover;
+                    e.currentTarget.style.color = palette.textHeading;
+                  }}
+                  onMouseLeave={(e) => {
+                    e.currentTarget.style.backgroundColor = "transparent";
+                    e.currentTarget.style.color = palette.textPrimary;
+                  }}
+                >
+                  <Pin size={20} strokeWidth={2} color="currentColor" />
+                  Pin message
+                </button>
+              )}
+            {canPinMessages &&
+              openMenuMsg &&
+              pinnedSet.has(openMenuMsg.eventId) && (
+                <button
+                  type="button"
+                  role="menuitem"
+                  onMouseDown={(e) => e.preventDefault()}
+                  onClick={async () => {
+                    setOpenMenuEventId(null);
+                    try {
+                      await invoke("unpin_room_message", {
+                        roomId,
+                        eventId: openMenuMsg.eventId,
+                      });
+                      onPinnedStateChanged?.();
+                    } catch (e) {
+                      console.error("Failed to unpin message:", e);
+                    }
+                  }}
+                  style={{
+                    display: "flex",
+                    alignItems: "center",
+                    gap: spacing.unit * 2.5,
+                    width: "100%",
+                    padding: `${spacing.unit * 2.25}px ${spacing.unit * 3}px`,
+                    border: "none",
+                    borderRadius: spacing.unit * 1.25,
+                    backgroundColor: "transparent",
+                    color: palette.textPrimary,
+                    fontSize: typography.fontSizeBase,
+                    fontFamily: typography.fontFamily,
+                    fontWeight: typography.fontWeightNormal,
+                    cursor: "pointer",
+                    textAlign: "left",
+                  }}
+                  onMouseEnter={(e) => {
+                    e.currentTarget.style.backgroundColor = palette.bgHover;
+                    e.currentTarget.style.color = palette.textHeading;
+                  }}
+                  onMouseLeave={(e) => {
+                    e.currentTarget.style.backgroundColor = "transparent";
+                    e.currentTarget.style.color = palette.textPrimary;
+                  }}
+                >
+                  <Pin size={20} strokeWidth={2} color="currentColor" />
+                  Unpin message
+                </button>
+              )}
             {messageAllowsDelete(openMenuMsg, userId, redactionPolicy) && (
               <button
                 type="button"
@@ -1201,4 +1330,6 @@ export default function MessageList({
       />
     </div>
   );
-}
+});
+
+export default MessageList;

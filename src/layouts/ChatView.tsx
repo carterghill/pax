@@ -1,10 +1,13 @@
 import { useState, useEffect, useRef, useCallback, type CSSProperties } from "react";
 import { useRoomRedactionPolicy } from "../hooks/useRoomRedactionPolicy";
 import { useRoomCanSendMessages } from "../hooks/useRoomCanSendMessages";
+import { useRoomCanPinMessages } from "../hooks/useRoomCanPinMessages";
+import { useRoomPinnedEventIds } from "../hooks/useRoomPinnedEventIds";
 import { listen } from "@tauri-apps/api/event";
 import { ArrowLeft, Hash, MessageCircle, Users } from "lucide-react";
 import UserAvatar from "../components/UserAvatar";
-import MessageList from "../components/MessageList";
+import MessageList, { type MessageListHandle } from "../components/MessageList";
+import PinnedMessagesMenu from "../components/PinnedMessagesMenu";
 import MessageInput, { type EditingMessageRef } from "../components/MessageInput";
 import UserMenu from "../components/UserMenu";
 import RoomDownloadsButton from "../components/RoomDownloadsButton";
@@ -153,16 +156,23 @@ export default function ChatView({
     jumpToRecent,
     refresh,
     removeMessageById,
+    loadMessagesAroundEvent,
   } = useMessages(isDraft ? null : activeRoom!.id);
   const redactionPolicy = useRoomRedactionPolicy(isDraft ? null : activeRoom!.id);
   const canSendMessages = useRoomCanSendMessages(isDraft ? null : activeRoom!.id);
+  const canPinMessages = useRoomCanPinMessages(isDraft ? null : activeRoom!.id);
+  const { pinnedEventIds, refreshPinned } = useRoomPinnedEventIds(
+    isDraft ? null : activeRoom!.id,
+  );
   const { palette, typography, spacing } = useTheme();
   const [typingNames, setTypingNames] = useState<string[]>([]);
   const [localTyping, setLocalTyping] = useState(false);
   const [showUsers, setShowUsers] = useState(true);
   const [editingMessage, setEditingMessage] = useState<EditingMessageRef | null>(null);
+  const [pinnedMenuOpen, setPinnedMenuOpen] = useState(false);
 
   const containerRef = useRef<HTMLDivElement>(null);
+  const messageListRef = useRef<MessageListHandle>(null);
   const userMenuResize = useResizeHandle({
     width: userMenuWidth,
     onWidthChange: onUserMenuWidthChange,
@@ -199,6 +209,29 @@ export default function ChatView({
   const handleCancelEdit = useCallback(() => {
     setEditingMessage(null);
   }, []);
+
+  const handleSelectPinnedMessage = useCallback(
+    async (eventId: string) => {
+      if (isDraft || !activeRoom) return;
+      const inWindow = messages.some((m) => m.eventId === eventId);
+      if (inWindow) {
+        messageListRef.current?.scrollToEventId(eventId);
+        return;
+      }
+      await loadMessagesAroundEvent(eventId);
+      requestAnimationFrame(() => {
+        requestAnimationFrame(() => {
+          messageListRef.current?.scrollToEventId(eventId);
+        });
+      });
+    },
+    [isDraft, activeRoom, messages, loadMessagesAroundEvent],
+  );
+
+  const handlePinnedStateChanged = useCallback(() => {
+    void refreshPinned();
+    void refresh();
+  }, [refreshPinned, refresh]);
 
   const handleDraftDmFirstMessage = useCallback(
     async (newRoomId: string) => {
@@ -360,6 +393,12 @@ export default function ChatView({
             </div>
           </div>
           <div style={{ display: "flex", alignItems: "center", gap: spacing.unit * 0.5, flexShrink: 0 }}>
+            <PinnedMessagesMenu
+              roomId={activeRoom.id}
+              open={pinnedMenuOpen}
+              onOpenChange={setPinnedMenuOpen}
+              onSelectEventId={handleSelectPinnedMessage}
+            />
             <RoomDownloadsButton roomId={activeRoom.id} />
             <MessageCircle size={20} color={palette.textSecondary} style={{ marginLeft: spacing.unit }} />
           </div>
@@ -394,6 +433,12 @@ export default function ChatView({
             gap: spacing.unit * 0.5,
             flexShrink: 0,
           }}>
+            <PinnedMessagesMenu
+              roomId={activeRoom.id}
+              open={pinnedMenuOpen}
+              onOpenChange={setPinnedMenuOpen}
+              onSelectEventId={handleSelectPinnedMessage}
+            />
             <RoomDownloadsButton roomId={activeRoom.id} />
             <button
               type="button"
@@ -438,6 +483,7 @@ export default function ChatView({
           backgroundColor: palette.bgPrimary,
         }}>
           <MessageList
+            ref={messageListRef}
             messages={messages}
             loadingOlder={loadingOlder}
             initialLoading={initialLoading}
@@ -454,6 +500,9 @@ export default function ChatView({
             onRequestEdit={handleRequestEdit}
             onMessagesMutated={refresh}
             onMessageRemoved={removeMessageById}
+            canPinMessages={canPinMessages === true}
+            pinnedEventIds={pinnedEventIds}
+            onPinnedStateChanged={handlePinnedStateChanged}
           />
 
           <div style={{ position: "relative", flexShrink: 0, zIndex: 1 }}>

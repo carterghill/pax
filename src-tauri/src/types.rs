@@ -214,6 +214,20 @@ pub struct RoomSendPermission {
 
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
+pub struct RoomPinPermission {
+    pub can_pin: bool,
+}
+
+#[derive(Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PinnedMessagePreview {
+    pub event_id: String,
+    pub sender: String,
+    pub preview: String,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
 pub struct SpaceChildInfo {
     pub id: String,
     pub name: String,

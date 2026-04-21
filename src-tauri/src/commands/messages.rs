@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
@@ -16,19 +16,26 @@ use matrix_sdk::ruma::events::room::redaction::OriginalSyncRoomRedactionEvent;
 use matrix_sdk::ruma::events::space::child::SpaceChildEventContent;
 use matrix_sdk::ruma::events::typing::SyncTypingEvent;
 use matrix_sdk::ruma::events::AnyMessageLikeEventContent;
+use matrix_sdk::ruma::events::AnySyncMessageLikeEvent;
+use matrix_sdk::ruma::events::AnySyncTimelineEvent;
 use matrix_sdk::ruma::events::GlobalAccountDataEvent;
 use matrix_sdk::ruma::events::MessageLikeEventType;
 use matrix_sdk::ruma::events::OriginalSyncStateEvent;
+use matrix_sdk::ruma::events::SyncMessageLikeEvent;
+use matrix_sdk::ruma::events::room::pinned_events::RoomPinnedEventsEventContent;
 use matrix_sdk::media::{MediaFormat, MediaRequestParameters, MediaThumbnailSettings, UniqueKey};
+use matrix_sdk::deserialized_responses::TimelineEvent;
 use matrix_sdk::ruma::EventId;
+use matrix_sdk::ruma::OwnedEventId;
+use matrix_sdk::ruma::UserId;
 use matrix_sdk::ruma::UInt;
 use matrix_sdk::Room;
 use tauri::{AppHandle, Emitter, Manager, State};
 
 use crate::types::{
-    MessageBatch, MessageEditPayload, MessageInfo, MessageRedactedPayload, PresencePayload,
-    RoomMessagePayload, RoomRedactionPolicy, RoomSendPermission, TypingPayload,
-    VoiceParticipantsChangedPayload,
+    MessageBatch, MessageEditPayload, MessageInfo, MessageRedactedPayload, PinnedMessagePreview,
+    PresencePayload, RoomMessagePayload, RoomPinPermission, RoomRedactionPolicy, RoomSendPermission,
+    TypingPayload, VoiceParticipantsChangedPayload,
 };
 use crate::AppState;
 
@@ -446,6 +453,371 @@ pub async fn get_room_can_send_messages(
         .unwrap_or(false);
 
     Ok(RoomSendPermission { can_send })
+}
+
+async fn current_pinned_event_ids(room: &Room) -> Result<Vec<OwnedEventId>, String> {
+    match room.load_pinned_events().await {
+        Ok(Some(v)) => Ok(v),
+        Ok(None) => Ok(room.pinned_event_ids().unwrap_or_default()),
+        Err(e) => {
+            log::warn!("load_pinned_events failed: {}; using cache", fmt_error_chain(&e));
+            Ok(room.pinned_event_ids().unwrap_or_default())
+        }
+    }
+}
+
+/// Build [`MessageInfo`] rows from decrypted timeline events (chronological order in, any order out).
+async fn build_message_infos_from_timeline_events(
+    room: &Room,
+    timeline_events: Vec<TimelineEvent>,
+    avatar_cache: &std::sync::Arc<crate::commands::avatar_cache::AvatarDiskCache>,
+) -> Result<Vec<MessageInfo>, String> {
+    struct RawMsg {
+        event_id: String,
+        sender: String,
+        body: String,
+        timestamp: u64,
+        image_media_request: Option<serde_json::Value>,
+        video_media_request: Option<serde_json::Value>,
+        file_media_request: Option<serde_json::Value>,
+        file_mime: Option<String>,
+        file_display_name: Option<String>,
+    }
+
+    let mut raw_msgs = Vec::new();
+    let mut latest_replacement: HashMap<
+        String,
+        (
+            String,
+            Option<serde_json::Value>,
+            Option<serde_json::Value>,
+            Option<serde_json::Value>,
+            Option<String>,
+            Option<String>,
+            u64,
+        ),
+    > = HashMap::new();
+    let mut unique_senders = Vec::new();
+    let mut seen_senders = HashSet::new();
+
+    for event in timeline_events {
+        let raw = match event.kind.raw().deserialize() {
+            Ok(e) => e,
+            Err(_) => continue,
+        };
+
+        if let AnySyncTimelineEvent::MessageLike(AnySyncMessageLikeEvent::RoomMessage(msg)) = raw {
+            match msg {
+                SyncMessageLikeEvent::Original(original) => {
+                    if let Some(Relation::Replacement(repl)) = &original.content.relates_to {
+                        let target = repl.event_id.to_string();
+                        let ext = extract_message_display(&RoomMessageEventContent::from(
+                            repl.new_content.clone(),
+                        ));
+                        let ts: u64 = original.origin_server_ts.0.into();
+                        let replace = match latest_replacement.get(&target) {
+                            None => true,
+                            Some((_, _, _, _, _, _, prev_ts)) => ts >= *prev_ts,
+                        };
+                        if replace {
+                            latest_replacement.insert(
+                                target,
+                                (
+                                    ext.body.clone(),
+                                    ext.image_media_request.clone(),
+                                    ext.video_media_request.clone(),
+                                    ext.file_media_request.clone(),
+                                    ext.file_mime.clone(),
+                                    ext.file_display_name.clone(),
+                                    ts,
+                                ),
+                            );
+                        }
+                        continue;
+                    }
+
+                    let sender_str = original.sender.to_string();
+                    if seen_senders.insert(sender_str.clone()) {
+                        unique_senders.push(original.sender.clone());
+                    }
+
+                    let ext = extract_message_display(&original.content);
+                    raw_msgs.push(RawMsg {
+                        event_id: original.event_id.to_string(),
+                        sender: sender_str,
+                        body: ext.body,
+                        timestamp: original.origin_server_ts.0.into(),
+                        image_media_request: ext.image_media_request,
+                        video_media_request: ext.video_media_request,
+                        file_media_request: ext.file_media_request,
+                        file_mime: ext.file_mime,
+                        file_display_name: ext.file_display_name,
+                    });
+                }
+                _ => {}
+            }
+        }
+    }
+
+    let mut sender_meta: HashMap<String, (Option<String>, Option<String>)> = HashMap::new();
+    for uid in &unique_senders {
+        let meta = match room.get_member_no_sync(uid).await {
+            Ok(Some(member)) => {
+                let name = member.display_name().map(|n| n.to_string());
+                let avatar = get_or_fetch_avatar(
+                    member.avatar_url(),
+                    member.avatar(matrix_sdk::media::MediaFormat::File),
+                    avatar_cache,
+                )
+                .await;
+                (name, avatar)
+            }
+            _ => (None, None),
+        };
+        sender_meta.insert(uid.to_string(), meta);
+    }
+
+    let messages: Vec<_> = raw_msgs
+        .into_iter()
+        .map(|m| {
+            let (sender_name, avatar_url) =
+                sender_meta.get(&m.sender).cloned().unwrap_or((None, None));
+            let edited = latest_replacement.contains_key(&m.event_id);
+            let (
+                body,
+                image_media_request,
+                video_media_request,
+                file_media_request,
+                file_mime,
+                file_display_name,
+            ) = latest_replacement
+                .get(&m.event_id)
+                .map(|(b, img, vid, file, fm, fd, _)| {
+                    (
+                        b.clone(),
+                        img.clone(),
+                        vid.clone(),
+                        file.clone(),
+                        fm.clone(),
+                        fd.clone(),
+                    )
+                })
+                .unwrap_or_else(|| {
+                    (
+                        m.body.clone(),
+                        m.image_media_request.clone(),
+                        m.video_media_request.clone(),
+                        m.file_media_request.clone(),
+                        m.file_mime.clone(),
+                        m.file_display_name.clone(),
+                    )
+                });
+            MessageInfo {
+                event_id: m.event_id,
+                sender: m.sender,
+                sender_name,
+                body,
+                timestamp: m.timestamp,
+                avatar_url,
+                edited,
+                image_media_request,
+                video_media_request,
+                file_media_request,
+                file_mime,
+                file_display_name,
+            }
+        })
+        .collect();
+
+    Ok(messages)
+}
+
+#[tauri::command]
+pub async fn get_room_can_pin_messages(
+    state: State<'_, Arc<AppState>>,
+    room_id: String,
+) -> Result<RoomPinPermission, String> {
+    let client = get_client(&state).await?;
+    let room = resolve_room(&client, &room_id)?;
+    let own = client.user_id().ok_or("Not logged in")?;
+
+    let member = room
+        .get_member(own)
+        .await
+        .map_err(|e| format!("Failed to load membership: {}", fmt_error_chain(&e)))?;
+
+    let can_pin = member.map(|m| m.can_pin_or_unpin_event()).unwrap_or(false);
+
+    Ok(RoomPinPermission { can_pin })
+}
+
+#[tauri::command]
+pub async fn get_room_pinned_event_ids(
+    state: State<'_, Arc<AppState>>,
+    room_id: String,
+) -> Result<Vec<String>, String> {
+    let client = get_client(&state).await?;
+    let room = resolve_room(&client, &room_id)?;
+    let ids = current_pinned_event_ids(&room).await?;
+    Ok(ids.into_iter().map(|id| id.to_string()).collect())
+}
+
+#[tauri::command]
+pub async fn get_pinned_message_previews(
+    state: State<'_, Arc<AppState>>,
+    room_id: String,
+) -> Result<Vec<PinnedMessagePreview>, String> {
+    let client = get_client(&state).await?;
+    let room = resolve_room(&client, &room_id)?;
+    let ids = current_pinned_event_ids(&room).await?;
+
+    let mut out = Vec::new();
+    for id in ids {
+        let eid = match EventId::parse(&id) {
+            Ok(e) => e,
+            Err(_) => continue,
+        };
+        let ev = match room.load_or_fetch_event(&eid, None).await {
+            Ok(e) => e,
+            Err(_) => {
+                out.push(PinnedMessagePreview {
+                    event_id: id.to_string(),
+                    sender: String::new(),
+                    preview: "Could not load message".to_string(),
+                });
+                continue;
+            }
+        };
+
+        let raw: AnySyncTimelineEvent = match ev.kind.raw().deserialize() {
+            Ok(r) => r,
+            Err(_) => {
+                out.push(PinnedMessagePreview {
+                    event_id: id.to_string(),
+                    sender: String::new(),
+                    preview: "Unsupported event".to_string(),
+                });
+                continue;
+            }
+        };
+
+        let (sender, preview) = match raw {
+            AnySyncTimelineEvent::MessageLike(AnySyncMessageLikeEvent::RoomMessage(msg)) => {
+                match msg {
+                    SyncMessageLikeEvent::Redacted(_) => (String::new(), "Deleted message".to_string()),
+                    SyncMessageLikeEvent::Original(o) => {
+                        let sender = o.sender.to_string();
+                        let body = extract_message_display(&o.content).body;
+                        let preview = if body.chars().count() > 120 {
+                            format!("{}…", body.chars().take(120).collect::<String>())
+                        } else {
+                            body
+                        };
+                        (sender, preview)
+                    }
+                }
+            }
+            _ => (String::new(), "Unsupported message".to_string()),
+        };
+
+        let display_sender = if !sender.is_empty() {
+            if let Ok(uid) = UserId::parse(&sender) {
+                match room.get_member_no_sync(&uid).await {
+                    Ok(Some(m)) => m
+                        .display_name()
+                        .map(|n| n.to_string())
+                        .unwrap_or_else(|| sender.clone()),
+                    _ => sender.clone(),
+                }
+            } else {
+                sender.clone()
+            }
+        } else {
+            String::new()
+        };
+
+        out.push(PinnedMessagePreview {
+            event_id: id.to_string(),
+            sender: display_sender,
+            preview,
+        });
+    }
+
+    Ok(out)
+}
+
+#[tauri::command]
+pub async fn pin_room_message(
+    state: State<'_, Arc<AppState>>,
+    room_id: String,
+    event_id: String,
+) -> Result<(), String> {
+    let client = get_client(&state).await?;
+    let room = resolve_room(&client, &room_id)?;
+    let eid = EventId::parse(&event_id).map_err(|e| format!("Invalid event ID: {e}"))?;
+
+    let mut pinned = current_pinned_event_ids(&room).await?;
+    if pinned.iter().any(|e| e == &eid) {
+        return Ok(());
+    }
+    pinned.push(eid);
+    room.send_state_event(RoomPinnedEventsEventContent::new(pinned))
+        .await
+        .map_err(|e| format!("Failed to pin message: {}", fmt_error_chain(&e)))?;
+    Ok(())
+}
+
+#[tauri::command]
+pub async fn unpin_room_message(
+    state: State<'_, Arc<AppState>>,
+    room_id: String,
+    event_id: String,
+) -> Result<(), String> {
+    let client = get_client(&state).await?;
+    let room = resolve_room(&client, &room_id)?;
+    let eid = EventId::parse(&event_id).map_err(|e| format!("Invalid event ID: {e}"))?;
+
+    let mut pinned = current_pinned_event_ids(&room).await?;
+    let before = pinned.len();
+    pinned.retain(|e| e != &eid);
+    if pinned.len() == before {
+        return Ok(());
+    }
+    room.send_state_event(RoomPinnedEventsEventContent::new(pinned))
+        .await
+        .map_err(|e| format!("Failed to unpin message: {}", fmt_error_chain(&e)))?;
+    Ok(())
+}
+
+#[tauri::command]
+pub async fn get_messages_around_event(
+    state: State<'_, Arc<AppState>>,
+    room_id: String,
+    event_id: String,
+) -> Result<MessageBatch, String> {
+    let client = get_client(&state).await?;
+    let room = resolve_room(&client, &room_id)?;
+    let eid = EventId::parse(&event_id).map_err(|e| format!("Invalid event ID: {e}"))?;
+
+    let response = room
+        .event_with_context(&eid, false, UInt::from(15u32), None)
+        .await
+        .map_err(|e| format!("Failed to load message context: {}", fmt_error_chain(&e)))?;
+
+    let mut ordered: Vec<TimelineEvent> = response.events_before.into_iter().rev().collect();
+    if let Some(ev) = response.event {
+        ordered.push(ev);
+    }
+    ordered.extend(response.events_after);
+
+    let avatar_cache = state.avatar_cache.clone();
+    let mut messages = build_message_infos_from_timeline_events(&room, ordered, &avatar_cache).await?;
+    messages.sort_by(|a, b| b.timestamp.cmp(&a.timestamp));
+
+    Ok(MessageBatch {
+        messages,
+        prev_batch: response.prev_batch_token,
+    })
 }
 
 #[tauri::command]

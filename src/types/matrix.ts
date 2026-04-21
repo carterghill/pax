@@ -50,6 +50,16 @@ export interface RoomSendPermission {
   canSend: boolean;
 }
 
+export interface RoomPinPermission {
+  canPin: boolean;
+}
+
+export interface PinnedMessagePreview {
+  eventId: string;
+  sender: string;
+  preview: string;
+}
+
 export interface RoomMember {
   userId: string;
   displayName: string | null;

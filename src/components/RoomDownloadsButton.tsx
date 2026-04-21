@@ -122,6 +122,8 @@ export default function RoomDownloadsButton({ roomId }: { roomId: string }) {
     });
   };
 
+  if (items.length === 0) return null;
+
   return (
     <div
       ref={rootRef}
@@ -214,19 +216,7 @@ export default function RoomDownloadsButton({ roomId }: { roomId: string }) {
             padding: `${spacing.unit * 2}px 0`,
           }}
         >
-          {items.length === 0 ? (
-            <div
-              style={{
-                padding: `${spacing.unit * 3}px ${spacing.unit * 4}px`,
-                fontSize: typography.fontSizeSmall,
-                color: palette.textSecondary,
-                fontFamily: typography.fontFamily,
-              }}
-            >
-              No downloads from this room yet.
-            </div>
-          ) : (
-            items.map((item, i) => {
+          {items.map((item, i) => {
               const pct = progressPercent(item);
               const indeterminate =
                 item.status === "running" &&
@@ -408,8 +398,7 @@ export default function RoomDownloadsButton({ roomId }: { roomId: string }) {
                   </div>
                 </div>
               );
-            })
-          )}
+            })}
           <style>{`
             @keyframes paxDlPulse {
               0%, 100% { opacity: 0.25; }

@@ -455,6 +455,38 @@ export function useMessages(roomId: string | null) {
   }, []);
 
   /* ================================================================ */
+  /*  Load a window around a specific event (e.g. jump to pinned)      */
+  /* ================================================================ */
+
+  const loadMessagesAroundEvent = useCallback(
+    async (eventId: string) => {
+      if (!roomId) return;
+      const target = roomId;
+      loadingLockRef.current = true;
+      setLoadingOlder(true);
+      try {
+        const batch = await invoke<MessageBatch>("get_messages_around_event", {
+          roomId: target,
+          eventId,
+        });
+        if (activeRoomIdRef.current !== target) return;
+        const msgs = batch.messages.slice().reverse();
+        commit(msgs, batch.prevBatch, false);
+        primeAvatarsFromMessages(msgs);
+        setPendingRecentCount(0);
+      } catch (e) {
+        console.error("[useMessages] loadMessagesAroundEvent error:", e);
+      } finally {
+        if (activeRoomIdRef.current === target) {
+          setLoadingOlder(false);
+        }
+        loadingLockRef.current = false;
+      }
+    },
+    [roomId, commit],
+  );
+
+  /* ================================================================ */
   /*  Return                                                           */
   /* ================================================================ */
 
@@ -474,5 +506,6 @@ export function useMessages(roomId: string | null) {
     jumpToRecent,
     refresh,
     removeMessageById,
+    loadMessagesAroundEvent,
   };
 }
