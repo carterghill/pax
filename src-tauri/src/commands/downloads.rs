@@ -388,3 +388,30 @@ pub async fn start_room_download(
         other => Err(format!("Unknown source kind: {other}")),
     }
 }
+
+/// Open a file manager and **select** `file_path` when the OS supports it (`SHOpenFolderAndSelectItems`
+/// on Windows, `NSWorkspace` on macOS, `FileManager1.ShowItems` / XDG portal on Linux), then fall back
+/// to opening only the parent folder (`xdg-open` etc.) if reveal is unavailable.
+#[tauri::command]
+pub fn open_containing_folder(app: AppHandle, file_path: String) -> Result<(), String> {
+    use std::path::Path;
+    use tauri_plugin_opener::OpenerExt;
+
+    let path = Path::new(file_path.trim());
+    if !path.is_absolute() {
+        return Err("Path must be absolute".to_string());
+    }
+    std::fs::metadata(path).map_err(|e| format!("File not accessible: {e}"))?;
+    let parent = path
+        .parent()
+        .filter(|p| !p.as_os_str().is_empty())
+        .ok_or_else(|| "Could not resolve parent directory".to_string())?;
+
+    if app.opener().reveal_item_in_dir(path).is_ok() {
+        return Ok(());
+    }
+    app
+        .opener()
+        .open_path(parent.to_string_lossy(), None::<&str>)
+        .map_err(|e| e.to_string())
+}

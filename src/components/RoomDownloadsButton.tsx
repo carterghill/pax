@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { Download, FolderOpen, X } from "lucide-react";
-import { revealItemInDir } from "@tauri-apps/plugin-opener";
+import { invoke } from "@tauri-apps/api/core";
 import { useTheme } from "../theme/ThemeContext";
 import { useRoomDownloads, type RoomDownloadItem } from "../context/RoomDownloadsContext";
 
@@ -9,6 +9,11 @@ function basenameFromFsPath(p: string): string {
   const s = p.replace(/[/\\]+$/, "");
   const i = Math.max(s.lastIndexOf("/"), s.lastIndexOf("\\"));
   return i >= 0 ? s.slice(i + 1) : s;
+}
+
+/** Opens the folder containing the saved file (Rust; avoids opener IPC scope + fixes Linux DBus). */
+async function revealInFolderOrOpenParent(savedPath: string): Promise<void> {
+  await invoke("open_containing_folder", { filePath: savedPath });
 }
 
 function listTitle(item: RoomDownloadItem): string {
@@ -289,8 +294,9 @@ export default function RoomDownloadsButton({ roomId }: { roomId: string }) {
                           aria-label="Show in folder"
                           onClick={(e) => {
                             e.stopPropagation();
-                            revealItemInDir(item.savedPath!).catch((err) =>
-                              console.error("[downloads] revealItemInDir:", err),
+                            void revealInFolderOrOpenParent(item.savedPath!).catch(
+                              (err) =>
+                                console.error("[downloads] show in folder:", err),
                             );
                           }}
                           style={{
