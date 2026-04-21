@@ -5,7 +5,7 @@
   "type": "module",
   "scripts": {
     "dev": "vite",
-    "start": "cross-env concurrently \"vite\" \"tauri dev\"",
+    "start": "concurrently \"vite\" \"tauri dev\"",
     "build": "tsc && vite build",
     "preview": "vite preview",
     "tauri": "tauri"

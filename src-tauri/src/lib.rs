@@ -155,6 +155,36 @@ fn ensure_system_certs() {
 #[cfg(not(target_os = "linux"))]
 fn ensure_system_certs() {}
 
+/// Returns true if the process is running under a KDE Plasma session on
+/// native Wayland. Used to decide whether to force GTK/GDK onto the
+/// XWayland backend at startup — see the comment in `run()` for context.
+///
+/// Detection is permissive: any credible signal of KDE combined with any
+/// credible signal of Wayland counts. The checks mirror what Qt, Electron,
+/// and xdg-utils use, because KDE sets several overlapping env vars.
+#[cfg(target_os = "linux")]
+fn is_kde_wayland_session() -> bool {
+    let is_wayland = std::env::var_os("WAYLAND_DISPLAY").is_some()
+        || std::env::var("XDG_SESSION_TYPE")
+            .map(|v| v.eq_ignore_ascii_case("wayland"))
+            .unwrap_or(false);
+
+    let is_kde = std::env::var("KDE_FULL_SESSION")
+        .map(|v| !v.is_empty())
+        .unwrap_or(false)
+        || std::env::var("XDG_CURRENT_DESKTOP")
+            .map(|v| v.to_ascii_lowercase().split(':').any(|s| s == "kde"))
+            .unwrap_or(false)
+        || std::env::var("DESKTOP_SESSION")
+            .map(|v| {
+                let v = v.to_ascii_lowercase();
+                v.contains("plasma") || v == "kde"
+            })
+            .unwrap_or(false);
+
+    is_wayland && is_kde
+}
+
 fn panic_payload_string(payload: &dyn std::any::Any) -> String {
     if let Some(s) = payload.downcast_ref::<&str>() {
         return (*s).to_string();
@@ -191,6 +221,46 @@ fn install_panic_hook() {
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
+    // On KDE Plasma running a native Wayland session, force GTK/GDK to use
+    // the XWayland backend.
+    //
+    // Why: Pax hides the main window to the system tray on close (when the
+    // user's close-preference is "minimize_tray"). On KDE's Wayland session
+    // this path is broken by a combination of upstream bugs:
+    //   - `set_skip_taskbar(true)` is a no-op on Wayland (tauri#9829): the
+    //     Wayland protocol has no equivalent of `_NET_WM_STATE_SKIP_TASKBAR`,
+    //     so the taskbar icon stays even when we want tray-only presence.
+    //   - Calling `win.hide()` destroys the xdg-toplevel surface. When
+    //     `win.show()` recreates it, KWin's server-side titlebar region
+    //     stops routing pointer events — every button on the titlebar is
+    //     dead, `CloseRequested` never fires, and the only way out is to
+    //     kill the app. Fully reproducible on KDE+Wayland; does not happen
+    //     on KDE+X11 or GNOME+Wayland.
+    //
+    // XWayland doesn't have either problem: `_NET_WM_STATE_SKIP_TASKBAR`
+    // works, and hide/show go through the X11 MapNotify/UnmapNotify path
+    // which KWin's X11 window-management handles cleanly. The cost is
+    // losing native Wayland niceties (fractional scaling precision,
+    // Wayland-only input protocols) for KDE-Wayland users specifically.
+    //
+    // We override unconditionally when KDE+Wayland is detected: the bug
+    // this works around is severe enough (titlebar becomes unclickable
+    // after hide-to-tray) that respecting a pre-set GDK_BACKEND=wayland
+    // would just ship the broken experience. Tauri's dev CLI and some
+    // distro launchers pre-set GDK_BACKEND=wayland incidentally; that's
+    // not an "intentional" choice by the user, so there's nothing to
+    // respect. If someone needs to force Wayland for debugging, they
+    // can set PAX_FORCE_WAYLAND=1 in their environment.
+    #[cfg(target_os = "linux")]
+    {
+        let force_wayland = std::env::var("PAX_FORCE_WAYLAND")
+            .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
+            .unwrap_or(false);
+        if !force_wayland && is_kde_wayland_session() {
+            std::env::set_var("GDK_BACKEND", "x11");
+        }
+    }
+
     // GTK/Wayland use the program name for the xdg-shell app id when no explicit GTK
     // application id is set. Match `productName` / `pax.desktop` so the taskbar can
     // resolve the icon (see StartupWMClass / icon theme name `pax`).
@@ -260,8 +330,34 @@ pub fn run() {
             #[cfg(desktop)]
             if let WindowEvent::CloseRequested { api, .. } = event {
                 if window.label() == "main" {
-                    api.prevent_close();
-                    let _ = window.app_handle().emit("app-close-request", ());
+                    // Decide hide-vs-quit-vs-dialog synchronously on the Rust
+                    // side, rather than round-tripping through the frontend.
+                    // The frontend listener still exists for the dialog case
+                    // (it needs UI), but for the minimize_tray and quit
+                    // branches we don't need a round-trip — deciding here
+                    // keeps the close event cycle atomic from GTK's POV.
+                    let app = window.app_handle().clone();
+                    let pref =
+                        commands::lifecycle::get_close_window_preference(app.clone())
+                            .ok()
+                            .flatten();
+                    match pref.as_deref() {
+                        Some("minimize_tray") => {
+                            api.prevent_close();
+                            let _ = window.hide();
+                        }
+                        Some("quit") => {
+                            // Let the close proceed; app.exit(0) matches
+                            // exit_app semantics and ensures background tasks
+                            // (sync loop, heartbeat) get torn down via Exit.
+                            app.exit(0);
+                        }
+                        _ => {
+                            // No saved preference — show the confirm dialog.
+                            api.prevent_close();
+                            let _ = app.emit("app-close-request", ());
+                        }
+                    }
                 }
             }
         })
