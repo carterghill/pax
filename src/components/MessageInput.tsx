@@ -31,6 +31,7 @@ import {
   Send,
   Smile,
   Paperclip,
+  File,
   X,
 } from "lucide-react";
 import {
@@ -97,6 +98,10 @@ interface MessageInputProps {
 
 /** Below `MODAL_LAYER_Z` so emoji/GIF popovers stay under full-screen modals. */
 const COMPOSER_POPOVER_Z = MODAL_LAYER_Z - 1000;
+
+/** Single combined progress scale: staging 0..END, HTTP upload END..HTTP_END, then send/sync. */
+const UPLOAD_STAGING_END = 0.15;
+const UPLOAD_HTTP_END = 0.9;
 
 type PendingAttachment = {
   uploadId: string;
@@ -350,7 +355,10 @@ export default function MessageInput({
         const { uploadId, roomId: rid, sent, total } = ev.payload;
         if (rid !== roomId) return;
         const denom = total > 0 ? total : 1;
-        const prog = Math.min(1, 0.12 + (sent / denom) * 0.88);
+        const prog = Math.min(
+          UPLOAD_HTTP_END,
+          UPLOAD_STAGING_END + (sent / denom) * (UPLOAD_HTTP_END - UPLOAD_STAGING_END),
+        );
         setPendingFile((p) =>
           p?.uploadId === uploadId ? { ...p, phase: "uploading", progress01: prog } : p,
         );
@@ -572,7 +580,7 @@ export default function MessageInput({
 
         await streamFileToStaging(cur.sourceFile, uploadId, (f) => {
           if (pendingFileRef.current?.uploadId !== uploadId) return;
-          const prog = f * 0.12;
+          const prog = f * UPLOAD_STAGING_END;
           setPendingFile((p) =>
             p?.uploadId === uploadId ? { ...p, phase: "reading", progress01: prog } : p,
           );
@@ -581,7 +589,11 @@ export default function MessageInput({
         cur = pendingFileRef.current;
         if (!cur || cur.uploadId !== uploadId) return;
 
-        const uploading: PendingAttachment = { ...cur, phase: "uploading", progress01: 0.12 };
+        const uploading: PendingAttachment = {
+          ...cur,
+          phase: "uploading",
+          progress01: UPLOAD_STAGING_END,
+        };
         pendingFileRef.current = uploading;
         setPendingFile(uploading);
 
@@ -631,18 +643,18 @@ export default function MessageInput({
         if (!contentUri) {
           const ok = await stagingByteLenMatchesFile(snapshot.uploadId, snapshot.sourceFile.size);
           if (!ok) {
-            bridge.patchMessage(localEventId, {
-              localFileUpload: { phase: "encoding", progress: 0.02 },
-            });
             await streamFileToStaging(snapshot.sourceFile, snapshot.uploadId, (f) => {
               bridge.patchMessage(localEventId, {
-                localFileUpload: { phase: "encoding", progress: 0.02 + f * 0.12 },
+                localFileUpload: {
+                  phase: "encoding",
+                  progress: f * UPLOAD_STAGING_END,
+                },
               });
             });
           }
 
           bridge.patchMessage(localEventId, {
-            localFileUpload: { phase: "uploading", progress: 0.14 },
+            localFileUpload: { phase: "uploading", progress: UPLOAD_STAGING_END },
           });
           const res = await invoke<[string, number]>("upload_room_file", {
             roomId,
@@ -758,7 +770,7 @@ export default function MessageInput({
         }
         const localEventId = `local:${crypto.randomUUID()}`;
         const cap = trimmed;
-        const body = cap.trim().length > 0 ? cap.trim() : snap.name;
+        const body = cap.trim().length > 0 ? cap.trim() : "";
 
         const optimPhase =
           snap.phase === "ready"
@@ -1196,135 +1208,138 @@ export default function MessageInput({
           >
             <div
               style={{
-                position: "relative",
-                display: "inline-flex",
+                display: "flex",
                 flexDirection: "column",
-                alignItems: "center",
+                gap: spacing.unit,
                 backgroundColor: palette.bgTertiary,
-                borderRadius: spacing.unit,
+                borderRadius: spacing.unit * 1.25,
                 border: `1px solid ${palette.border}`,
-                overflow: "hidden",
-                maxWidth: 200,
-                padding: spacing.unit,
+                padding: `${spacing.unit * 1.25}px ${spacing.unit * 1.5}px`,
+                maxWidth: "100%",
+                minWidth: 0,
               }}
             >
-              {/* Delete button */}
-              <button
-                type="button"
-                title="Remove attachment"
-                aria-label="Remove attachment"
-                onMouseDown={(e) => e.preventDefault()}
-                onClick={clearPendingFile}
+              <div
                 style={{
-                  position: "absolute",
-                  top: spacing.unit * 0.5,
-                  right: spacing.unit * 0.5,
-                  width: 24,
-                  height: 24,
                   display: "flex",
+                  flexDirection: "row",
                   alignItems: "center",
-                  justifyContent: "center",
-                  padding: 0,
-                  border: "none",
-                  borderRadius: "50%",
-                  backgroundColor: palette.bgPrimary,
-                  color: palette.textSecondary,
-                  cursor: "pointer",
-                  zIndex: 1,
-                  boxShadow: "0 1px 4px rgba(0,0,0,0.3)",
-                }}
-                onMouseEnter={(e) => {
-                  e.currentTarget.style.color = palette.textPrimary;
-                }}
-                onMouseLeave={(e) => {
-                  e.currentTarget.style.color = palette.textSecondary;
+                  gap: spacing.unit * 2,
+                  minWidth: 0,
                 }}
               >
-                <X size={14} strokeWidth={2.5} />
-              </button>
-
-              {pendingFile.previewUrl ? (
                 <div
                   style={{
-                    position: "relative",
-                    margin: spacing.unit,
+                    flex: 1,
+                    minWidth: 0,
+                    display: "flex",
+                    flexDirection: "row",
+                    alignItems: "center",
+                    gap: spacing.unit * 1.5,
                   }}
                 >
-                  <img
-                    src={pendingFile.previewUrl}
-                    alt={pendingFile.name}
-                    style={{
-                      display: "block",
-                      maxWidth: 200 - spacing.unit * 2,
-                      maxHeight: 150,
-                      objectFit: "contain",
-                      borderRadius: spacing.unit,
-                    }}
-                  />
-                  {pendingFile.phase !== "error" ? (
-                    <div
+                  {pendingFile.previewUrl ? (
+                    <img
+                      src={pendingFile.previewUrl}
+                      alt=""
+                      draggable={false}
                       style={{
-                        position: "absolute",
-                        inset: 0,
-                        display: "flex",
-                        alignItems: "center",
-                        justifyContent: "center",
-                        backgroundColor: "rgba(0,0,0,0.2)",
+                        display: "block",
+                        width: 56,
+                        height: 56,
+                        objectFit: "cover",
                         borderRadius: spacing.unit,
-                        pointerEvents: "none",
+                        flexShrink: 0,
                       }}
-                    >
-                      <CircularUploadRing
-                        progress={pendingFile.progress01}
-                        size={44}
-                        strokeWidth={3}
-                      />
-                    </div>
-                  ) : null}
+                    />
+                  ) : (
+                    <File
+                      size={20}
+                      strokeWidth={2}
+                      style={{
+                        flexShrink: 0,
+                        color: palette.textSecondary,
+                      }}
+                      aria-hidden
+                    />
+                  )}
+                  <span
+                    style={{
+                      fontSize: typography.fontSizeSmall,
+                      fontFamily: typography.fontFamily,
+                      color: palette.textPrimary,
+                      whiteSpace: "nowrap",
+                      overflow: "hidden",
+                      textOverflow: "ellipsis",
+                      minWidth: 0,
+                    }}
+                    title={pendingFile.name}
+                  >
+                    {pendingFile.name}
+                  </span>
                 </div>
-              ) : (
+
                 <div
                   style={{
                     position: "relative",
-                    minHeight: 72,
-                    display: "flex",
-                    alignItems: "center",
-                    justifyContent: "center",
-                    padding: spacing.unit * 2,
+                    width: 30,
+                    height: 30,
+                    flexShrink: 0,
                   }}
                 >
                   {pendingFile.phase !== "error" ? (
                     <CircularUploadRing
                       progress={pendingFile.progress01}
-                      size={44}
-                      strokeWidth={3}
+                      size={30}
+                      strokeWidth={2.5}
+                      style={{
+                        position: "absolute",
+                        left: 0,
+                        top: 0,
+                      }}
                     />
                   ) : null}
+                  <button
+                    type="button"
+                    title="Remove attachment"
+                    aria-label="Remove attachment"
+                    onMouseDown={(e) => e.preventDefault()}
+                    onClick={clearPendingFile}
+                    style={{
+                      position: "absolute",
+                      left: "50%",
+                      top: "50%",
+                      transform: "translate(-50%, -50%)",
+                      width: 22,
+                      height: 22,
+                      display: "flex",
+                      alignItems: "center",
+                      justifyContent: "center",
+                      padding: 0,
+                      border: "none",
+                      borderRadius: "50%",
+                      backgroundColor: palette.bgPrimary,
+                      color: palette.textSecondary,
+                      cursor: "pointer",
+                      zIndex: 1,
+                      boxShadow: "0 1px 4px rgba(0,0,0,0.3)",
+                    }}
+                    onMouseEnter={(e) => {
+                      e.currentTarget.style.color = palette.textPrimary;
+                    }}
+                    onMouseLeave={(e) => {
+                      e.currentTarget.style.color = palette.textSecondary;
+                    }}
+                  >
+                    <X size={12} strokeWidth={2.5} />
+                  </button>
                 </div>
-              )}
-
-              <div
-                style={{
-                  padding: `${spacing.unit * 0.5}px ${spacing.unit}px`,
-                  fontSize: typography.fontSizeSmall,
-                  color: palette.textSecondary,
-                  whiteSpace: "nowrap",
-                  overflow: "hidden",
-                  textOverflow: "ellipsis",
-                  maxWidth: "100%",
-                  boxSizing: "border-box",
-                }}
-              >
-                {pendingFile.name}
               </div>
               {pendingFile.phase === "error" && pendingFile.errorMessage ? (
                 <div
                   style={{
-                    padding: `0 ${spacing.unit}px ${spacing.unit}px`,
                     fontSize: typography.fontSizeSmall * 0.95,
                     color: palette.textSecondary,
-                    textAlign: "center",
-                    maxWidth: 180,
                   }}
                 >
                   {pendingFile.errorMessage}

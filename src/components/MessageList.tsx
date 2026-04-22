@@ -119,6 +119,26 @@ function LocalUploadFailedNote({
   );
 }
 
+/** Hide redundant caption when Matrix body duplicates the attachment filename we already show on the chip. */
+function shouldShowCaptionBelowMedia(msg: Message): boolean {
+  const body = msg.body.trim();
+  if (!body) return false;
+  const fname = (msg.fileDisplayName ?? "").trim();
+  if (fname && body === fname) {
+    const hasAttachmentUi =
+      msg.localImagePreviewObjectUrl != null ||
+      msg.imageMediaRequest != null ||
+      msg.videoMediaRequest != null ||
+      msg.fileMediaRequest != null ||
+      msg.localFileUpload != null;
+    if (hasAttachmentUi) return false;
+  }
+  return true;
+}
+
+const INLINE_UPLOAD_RING_SIZE = 16;
+const INLINE_UPLOAD_RING_STROKE = 2;
+
 function shouldShowHeader(msg: Message, prevMsg: Message | null): boolean {
   if (!prevMsg) return true;
   if (prevMsg.sender !== msg.sender) return true;
@@ -336,9 +356,12 @@ const MessageRow = memo(function MessageRow({
           <>
             <div
               style={{
-                position: "relative",
-                display: "inline-block",
+                display: "inline-flex",
+                alignItems: "center",
+                gap: spacingUnit * 1.5,
                 maxWidth: "100%",
+                marginTop: spacingUnit,
+                marginBottom: spacingUnit,
               }}
             >
               <img
@@ -352,34 +375,17 @@ const MessageRow = memo(function MessageRow({
                   objectFit: "contain",
                   borderRadius: spacingUnit,
                   display: "block",
-                  marginTop: spacingUnit,
-                  marginBottom: spacingUnit,
                 }}
               />
               {msg.localFileUpload && msg.localFileUpload.phase !== "failed" ? (
-                <div
-                  style={{
-                    position: "absolute",
-                    inset: 0,
-                    marginTop: spacingUnit,
-                    marginBottom: spacingUnit,
-                    display: "flex",
-                    alignItems: "center",
-                    justifyContent: "center",
-                    backgroundColor: "rgba(0,0,0,0.2)",
-                    borderRadius: spacingUnit,
-                    pointerEvents: "none",
-                  }}
-                >
-                  <CircularUploadRing
-                    progress={msg.localFileUpload.progress}
-                    size={Math.round(40 + spacingUnit * 2)}
-                    strokeWidth={3}
-                  />
-                </div>
+                <CircularUploadRing
+                  progress={msg.localFileUpload.progress}
+                  size={INLINE_UPLOAD_RING_SIZE}
+                  strokeWidth={INLINE_UPLOAD_RING_STROKE}
+                />
               ) : null}
             </div>
-            {msg.body.trim().length > 0 ? (
+            {shouldShowCaptionBelowMedia(msg) ? (
               <MessageMarkdown
                 edited={Boolean(msg.edited)}
                 onOpenDirectImage={onOpenDirectImage}
@@ -422,9 +428,12 @@ const MessageRow = memo(function MessageRow({
           <>
             <div
               style={{
-                position: "relative",
-                display: "inline-block",
+                display: "inline-flex",
+                alignItems: "center",
+                gap: spacingUnit * 1.5,
                 maxWidth: "100%",
+                marginTop: spacingUnit,
+                marginBottom: spacingUnit * 0.5,
               }}
             >
               <div
@@ -432,8 +441,7 @@ const MessageRow = memo(function MessageRow({
                   display: "inline-flex",
                   alignItems: "center",
                   gap: spacingUnit * 1.5,
-                  marginTop: spacingUnit,
-                  marginBottom: spacingUnit * 0.5,
+                  minWidth: 0,
                   padding: `${spacingUnit * 1.25}px ${spacingUnit * 2}px`,
                   borderRadius: spacingUnit * 1.5,
                   border: `1px solid ${palette.border}`,
@@ -461,26 +469,14 @@ const MessageRow = memo(function MessageRow({
                 </span>
               </div>
               {msg.localFileUpload.phase !== "failed" ? (
-                <div
-                  style={{
-                    position: "absolute",
-                    inset: 0,
-                    marginTop: spacingUnit,
-                    display: "flex",
-                    alignItems: "center",
-                    justifyContent: "center",
-                    pointerEvents: "none",
-                  }}
-                >
-                  <CircularUploadRing
-                    progress={msg.localFileUpload.progress}
-                    size={44}
-                    strokeWidth={3}
-                  />
-                </div>
+                <CircularUploadRing
+                  progress={msg.localFileUpload.progress}
+                  size={INLINE_UPLOAD_RING_SIZE}
+                  strokeWidth={INLINE_UPLOAD_RING_STROKE}
+                />
               ) : null}
             </div>
-            {msg.body.trim().length > 0 ? (
+            {shouldShowCaptionBelowMedia(msg) ? (
               <MessageMarkdown
                 edited={Boolean(msg.edited)}
                 onOpenDirectImage={onOpenDirectImage}
@@ -498,7 +494,7 @@ const MessageRow = memo(function MessageRow({
         ) : msg.videoMediaRequest != null ? (
           <>
             <MessageMatrixVideo request={msg.videoMediaRequest} />
-            {msg.body.trim().length > 0 ? (
+            {shouldShowCaptionBelowMedia(msg) ? (
               <MessageMarkdown
                 edited={Boolean(msg.edited)}
                 onOpenDirectImage={onOpenDirectImage}
@@ -509,7 +505,14 @@ const MessageRow = memo(function MessageRow({
           </>
         ) : msg.fileMediaRequest != null ? (
           <>
-            <div style={{ position: "relative", display: "inline-block", maxWidth: "100%" }}>
+            <div
+              style={{
+                display: "inline-flex",
+                alignItems: "center",
+                gap: spacingUnit * 1.5,
+                maxWidth: "100%",
+              }}
+            >
               <MessageFileAttachment
                 fileName={msg.fileDisplayName ?? "Attachment"}
                 mimeType={msg.fileMime}
@@ -529,25 +532,14 @@ const MessageRow = memo(function MessageRow({
                 }
               />
               {msg.localFileUpload && msg.localFileUpload.phase !== "failed" ? (
-                <div
-                  style={{
-                    position: "absolute",
-                    inset: 0,
-                    display: "flex",
-                    alignItems: "center",
-                    justifyContent: "center",
-                    pointerEvents: "none",
-                  }}
-                >
-                  <CircularUploadRing
-                    progress={msg.localFileUpload.progress}
-                    size={40}
-                    strokeWidth={3}
-                  />
-                </div>
+                <CircularUploadRing
+                  progress={msg.localFileUpload.progress}
+                  size={INLINE_UPLOAD_RING_SIZE}
+                  strokeWidth={INLINE_UPLOAD_RING_STROKE}
+                />
               ) : null}
             </div>
-            {msg.body.trim().length > 0 ? (
+            {shouldShowCaptionBelowMedia(msg) ? (
               <MessageMarkdown
                 edited={Boolean(msg.edited)}
                 onOpenDirectImage={onOpenDirectImage}
@@ -568,7 +560,14 @@ const MessageRow = memo(function MessageRow({
           !msg.localImagePreviewObjectUrl &&
           !msg.fileMime?.startsWith("video/") ? (
           <>
-            <div style={{ position: "relative", display: "inline-block", maxWidth: "100%" }}>
+            <div
+              style={{
+                display: "inline-flex",
+                alignItems: "center",
+                gap: spacingUnit * 1.5,
+                maxWidth: "100%",
+              }}
+            >
               <MessageFileAttachment
                 fileName={msg.fileDisplayName}
                 mimeType={msg.fileMime}
@@ -576,25 +575,14 @@ const MessageRow = memo(function MessageRow({
                 onOpen={() => {}}
               />
               {msg.localFileUpload.phase !== "failed" ? (
-                <div
-                  style={{
-                    position: "absolute",
-                    inset: 0,
-                    display: "flex",
-                    alignItems: "center",
-                    justifyContent: "center",
-                    pointerEvents: "none",
-                  }}
-                >
-                  <CircularUploadRing
-                    progress={msg.localFileUpload.progress}
-                    size={40}
-                    strokeWidth={3}
-                  />
-                </div>
+                <CircularUploadRing
+                  progress={msg.localFileUpload.progress}
+                  size={INLINE_UPLOAD_RING_SIZE}
+                  strokeWidth={INLINE_UPLOAD_RING_STROKE}
+                />
               ) : null}
             </div>
-            {msg.body.trim().length > 0 ? (
+            {shouldShowCaptionBelowMedia(msg) ? (
               <MessageMarkdown
                 edited={Boolean(msg.edited)}
                 onOpenDirectImage={onOpenDirectImage}

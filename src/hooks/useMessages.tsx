@@ -530,7 +530,22 @@ export function useMessages(roomId: string | null, currentUserId: string | null 
       if (patch.imageMediaRequest != null && old.localImagePreviewObjectUrl) {
         revokeLocalPreviewIfNeeded(old);
       }
-      next[idx] = { ...old, ...patch };
+      let merged = patch;
+      if (
+        patch.localFileUpload &&
+        patch.localFileUpload.phase !== "failed"
+      ) {
+        const prevProg = old.localFileUpload?.progress ?? 0;
+        const nextProg = patch.localFileUpload.progress ?? prevProg;
+        merged = {
+          ...patch,
+          localFileUpload: {
+            ...patch.localFileUpload,
+            progress: Math.max(prevProg, nextProg),
+          },
+        };
+      }
+      next[idx] = { ...old, ...merged };
       messagesRef.current = next;
       return next;
     });
@@ -559,7 +574,22 @@ export function useMessages(roomId: string | null, currentUserId: string | null 
       if (patch.imageMediaRequest != null && old.localImagePreviewObjectUrl) {
         revokeLocalPreviewIfNeeded(old);
       }
-      next[idx] = { ...old, ...patch };
+      let merged = patch;
+      if (
+        patch.localFileUpload &&
+        patch.localFileUpload.phase !== "failed"
+      ) {
+        const prevProg = old.localFileUpload?.progress ?? 0;
+        const nextProg = patch.localFileUpload.progress ?? prevProg;
+        merged = {
+          ...patch,
+          localFileUpload: {
+            ...patch.localFileUpload,
+            progress: Math.max(prevProg, nextProg),
+          },
+        };
+      }
+      next[idx] = { ...old, ...merged };
       messagesRef.current = next;
       return next;
     });

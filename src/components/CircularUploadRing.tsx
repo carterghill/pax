@@ -1,14 +1,17 @@
+import type { CSSProperties } from "react";
 import { useTheme } from "../theme/ThemeContext";
 
 export default function CircularUploadRing({
   progress,
   size = 40,
   strokeWidth = 3,
+  style,
 }: {
   /** 0–1 */
   progress: number;
   size?: number;
   strokeWidth?: number;
+  style?: CSSProperties;
 }) {
   const { palette } = useTheme();
   const track = palette.border;
@@ -23,7 +26,7 @@ export default function CircularUploadRing({
       width={size}
       height={size}
       viewBox={`0 0 ${size} ${size}`}
-      style={{ display: "block" }}
+      style={{ display: "block", ...style }}
       aria-hidden
     >
       <circle
