@@ -5563,6 +5563,8 @@ name = "pax"
 version = "0.1.0"
 dependencies = [
  "ashpd",
+ "base64 0.22.1",
+ "bytes",
  "cpal",
  "data-encoding",
  "dotenvy",
@@ -5597,6 +5599,7 @@ dependencies = [
  "tauri-plugin-notification",
  "tauri-plugin-opener",
  "tokio",
+ "tokio-util",
  "urlencoding",
  "user-idle",
  "uuid",

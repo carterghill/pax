@@ -34,6 +34,19 @@ export interface Message {
   fileMime?: string | null;
   /** Filename shown on the attachment chip. */
   fileDisplayName?: string | null;
+  /**
+   * Client-only: in-flight file send (local echo). Cleared when the timeline event is synced.
+   */
+  localFileUpload?: {
+    phase: "encoding" | "uploading" | "sending" | "syncing" | "failed";
+    /** Combined progress 0–1 for encoding + upload + send. */
+    progress: number;
+    errorMessage?: string;
+  };
+  /** `blob:` URL for image preview before `imageMediaRequest` exists. */
+  localImagePreviewObjectUrl?: string | null;
+  /** Client-only: correlates Matrix upload progress events with this row. */
+  localPipelineUploadId?: string;
 }
 
 export interface MessageBatch {

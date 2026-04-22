@@ -11,6 +11,9 @@ import {
 } from "react";
 import { createPortal } from "react-dom";
 import { invoke } from "@tauri-apps/api/core";
+import { listen } from "@tauri-apps/api/event";
+import type { Message } from "../types/matrix";
+import CircularUploadRing from "./CircularUploadRing";
 import {
   Type,
   Bold,
@@ -64,6 +67,14 @@ export interface EditingMessageRef {
 
 export type ComposerPermission = "loading" | "allowed" | "forbidden";
 
+export type MessageFileSendBridge = {
+  addOptimistic: (msg: Message) => void;
+  patchMessage: (eventId: string, patch: Partial<Message>) => void;
+  patchMessageByUploadId: (uploadId: string, patch: Partial<Message>) => void;
+  replaceMessageEventId: (oldId: string, newId: string, patch?: Partial<Message>) => void;
+  removeMessage: (eventId: string) => void;
+};
+
 interface MessageInputProps {
   roomId: string;
   roomName: string;
@@ -77,10 +88,99 @@ interface MessageInputProps {
   onDraftDmFirstMessage?: (roomId: string) => void | Promise<void>;
   /** Read-only channel / power levels: disables the composer until allowed. */
   composerPermission?: ComposerPermission;
+  /** Local Matrix user id (for optimistic file message rows). */
+  selfUserId?: string;
+  selfDisplayName?: string | null;
+  selfAvatarUrl?: string | null;
+  fileSendBridge?: MessageFileSendBridge | null;
 }
 
 /** Below `MODAL_LAYER_Z` so emoji/GIF popovers stay under full-screen modals. */
 const COMPOSER_POPOVER_Z = MODAL_LAYER_Z - 1000;
+
+type PendingAttachment = {
+  uploadId: string;
+  name: string;
+  mimeType: string;
+  sourceFile: File;
+  contentUri: string | null;
+  byteSize: number | null;
+  previewUrl: string | null;
+  phase: "reading" | "uploading" | "ready" | "error";
+  progress01: number;
+  errorMessage?: string;
+};
+
+function formatInvokeErr(err: unknown): string {
+  if (typeof err === "string") return err;
+  if (err instanceof Error) return err.message;
+  try {
+    return JSON.stringify(err);
+  } catch {
+    return String(err);
+  }
+}
+
+/** Human-readable size (binary units) for upload limit messaging. */
+function formatBinaryBytes(n: number): string {
+  if (!Number.isFinite(n) || n <= 0) return "0 B";
+  const units = ["B", "KiB", "MiB", "GiB", "TiB"];
+  let v = n;
+  let i = 0;
+  while (v >= 1024 && i < units.length - 1) {
+    v /= 1024;
+    i++;
+  }
+  return i === 0 ? `${Math.round(v)} ${units[i]}` : `${v >= 10 ? v.toFixed(1) : v.toFixed(2)} ${units[i]}`;
+}
+
+const STAGING_CHUNK = 512 * 1024;
+
+function uint8ToBase64Chunk(u8: Uint8Array): string {
+  const CH = 8192;
+  const parts: string[] = [];
+  for (let i = 0; i < u8.length; i += CH) {
+    parts.push(String.fromCharCode(...u8.subarray(i, i + CH)));
+  }
+  return btoa(parts.join(""));
+}
+
+/** Writes the file to a Rust-side staging file in small base64 IPC chunks (bounded memory). */
+async function streamFileToStaging(
+  file: File,
+  uploadId: string,
+  onFraction: (f: number) => void,
+): Promise<void> {
+  const size = file.size;
+  if (size === 0) {
+    await invoke("room_file_staging_reset", { uploadId });
+    onFraction(1);
+    return;
+  }
+  await invoke("room_file_staging_reset", { uploadId });
+  let offset = 0;
+  while (offset < size) {
+    const end = Math.min(offset + STAGING_CHUNK, size);
+    const buf = await file.slice(offset, end).arrayBuffer();
+    const u8 = new Uint8Array(buf);
+    await invoke("room_file_staging_append_b64", {
+      uploadId,
+      chunkB64: uint8ToBase64Chunk(u8),
+    });
+    offset = end;
+    onFraction(offset / size);
+  }
+}
+
+async function stagingByteLenMatchesFile(uploadId: string, fileSize: number): Promise<boolean> {
+  let len = 0;
+  try {
+    len = await invoke<number>("room_file_staging_byte_len", { uploadId });
+  } catch {
+    len = 0;
+  }
+  return len === fileSize;
+}
 
 function fixedPopoverStyle(bottom: number, right: number): CSSProperties {
   return {
@@ -101,6 +201,10 @@ export default function MessageInput({
   draftDmPeerUserId = null,
   onDraftDmFirstMessage,
   composerPermission = "allowed",
+  selfUserId = "",
+  selfDisplayName = null,
+  selfAvatarUrl = null,
+  fileSendBridge = null,
 }: MessageInputProps) {
   const interactionLocked =
     !draftDmPeerUserId &&
@@ -133,12 +237,8 @@ export default function MessageInput({
   const { palette, typography, spacing, resolvedColorScheme } = useTheme();
   const [giphyApiKey, setGiphyApiKey] = useState("");
   const fileInputRef = useRef<HTMLInputElement>(null);
-  const [pendingFile, setPendingFile] = useState<{
-    name: string;
-    mimeType: string;
-    base64: string;
-    previewUrl: string | null;
-  } | null>(null);
+  const [pendingFile, setPendingFile] = useState<PendingAttachment | null>(null);
+  const pendingFileRef = useRef<PendingAttachment | null>(null);
 
   useEffect(() => {
     invoke<string>("get_giphy_api_key").then(setGiphyApiKey).catch(() => {});
@@ -230,12 +330,41 @@ export default function MessageInput({
     };
   }, [roomId, onLocalTypingActive, draftDmPeerUserId]);
 
-  // Clean up pending file preview URL on unmount
+  useEffect(() => {
+    pendingFileRef.current = pendingFile;
+  }, [pendingFile]);
+
   useEffect(() => {
     return () => {
-      if (pendingFile?.previewUrl) URL.revokeObjectURL(pendingFile.previewUrl);
+      const p = pendingFileRef.current;
+      if (p?.previewUrl) URL.revokeObjectURL(p.previewUrl);
     };
-  }, [pendingFile]);
+  }, []);
+
+  useEffect(() => {
+    if (!roomId) return;
+    let unlisten: (() => void) | undefined;
+    void listen<{ uploadId: string; roomId: string; sent: number; total: number }>(
+      "room-file-upload-progress",
+      (ev) => {
+        const { uploadId, roomId: rid, sent, total } = ev.payload;
+        if (rid !== roomId) return;
+        const denom = total > 0 ? total : 1;
+        const prog = Math.min(1, 0.12 + (sent / denom) * 0.88);
+        setPendingFile((p) =>
+          p?.uploadId === uploadId ? { ...p, phase: "uploading", progress01: prog } : p,
+        );
+        fileSendBridge?.patchMessageByUploadId(uploadId, {
+          localFileUpload: { phase: "uploading", progress: prog },
+        });
+      },
+    ).then((fn) => {
+      unlisten = fn;
+    });
+    return () => {
+      unlisten?.();
+    };
+  }, [roomId, fileSendBridge]);
 
   useEffect(() => {
     if (!editingMessage) return;
@@ -428,6 +557,138 @@ export default function MessageInput({
     [{ icon: Minus, label: "Horizontal rule", run: () => execFormat("insertHorizontalRule") }],
   ];
 
+  const prepareAttachment = useCallback(
+    async (uploadId: string) => {
+      try {
+        let cur = pendingFileRef.current;
+        if (!cur || cur.uploadId !== uploadId) return;
+
+        if (cur.contentUri) {
+          const ready: PendingAttachment = { ...cur, phase: "ready", progress01: 1 };
+          pendingFileRef.current = ready;
+          setPendingFile(ready);
+          return;
+        }
+
+        await streamFileToStaging(cur.sourceFile, uploadId, (f) => {
+          if (pendingFileRef.current?.uploadId !== uploadId) return;
+          const prog = f * 0.12;
+          setPendingFile((p) =>
+            p?.uploadId === uploadId ? { ...p, phase: "reading", progress01: prog } : p,
+          );
+        });
+
+        cur = pendingFileRef.current;
+        if (!cur || cur.uploadId !== uploadId) return;
+
+        const uploading: PendingAttachment = { ...cur, phase: "uploading", progress01: 0.12 };
+        pendingFileRef.current = uploading;
+        setPendingFile(uploading);
+
+        const [contentUri, byteSize] = await invoke<[string, number]>("upload_room_file", {
+          roomId,
+          uploadId: cur.uploadId,
+          fileName: cur.name,
+          mimeType: cur.mimeType,
+        });
+
+        cur = pendingFileRef.current;
+        if (!cur || cur.uploadId !== uploadId) return;
+
+        const done: PendingAttachment = {
+          ...cur,
+          contentUri,
+          byteSize,
+          phase: "ready",
+          progress01: 1,
+        };
+        pendingFileRef.current = done;
+        setPendingFile(done);
+      } catch (e) {
+        const msg = formatInvokeErr(e);
+        console.error("Attachment prepare failed:", e);
+        void invoke("room_file_staging_remove", { uploadId }).catch(() => {});
+        setPendingFile((p) =>
+          p?.uploadId === uploadId
+            ? { ...p, phase: "error", errorMessage: msg, progress01: 0 }
+            : p,
+        );
+      }
+    },
+    [roomId],
+  );
+
+  const runFileSendPipeline = useCallback(
+    async (
+      localEventId: string,
+      snapshot: PendingAttachment,
+      caption: string,
+      bridge: MessageFileSendBridge,
+    ) => {
+      try {
+        let contentUri = snapshot.contentUri;
+        let byteSize = snapshot.byteSize;
+        if (!contentUri) {
+          const ok = await stagingByteLenMatchesFile(snapshot.uploadId, snapshot.sourceFile.size);
+          if (!ok) {
+            bridge.patchMessage(localEventId, {
+              localFileUpload: { phase: "encoding", progress: 0.02 },
+            });
+            await streamFileToStaging(snapshot.sourceFile, snapshot.uploadId, (f) => {
+              bridge.patchMessage(localEventId, {
+                localFileUpload: { phase: "encoding", progress: 0.02 + f * 0.12 },
+              });
+            });
+          }
+
+          bridge.patchMessage(localEventId, {
+            localFileUpload: { phase: "uploading", progress: 0.14 },
+          });
+          const res = await invoke<[string, number]>("upload_room_file", {
+            roomId,
+            uploadId: snapshot.uploadId,
+            fileName: snapshot.name,
+            mimeType: snapshot.mimeType,
+          });
+          contentUri = res[0];
+          byteSize = res[1];
+        }
+
+        bridge.patchMessage(localEventId, {
+          localFileUpload: { phase: "sending", progress: 0.92 },
+        });
+
+        const cap = caption.trim();
+        const serverEventId = await invoke<string>("send_file_message", {
+          roomId,
+          contentUri,
+          fileName: snapshot.name,
+          mimeType: snapshot.mimeType,
+          fileSize: byteSize ?? null,
+          caption: cap.length > 0 ? cap : null,
+        });
+
+        bridge.replaceMessageEventId(localEventId, serverEventId, {
+          localPipelineUploadId: undefined,
+          localFileUpload: { phase: "syncing", progress: 1 },
+        });
+      } catch (e) {
+        const msg = formatInvokeErr(e);
+        console.error("Failed to send file message:", e);
+        void invoke("room_file_staging_remove", { uploadId: snapshot.uploadId }).catch(() => {});
+        bridge.patchMessage(localEventId, {
+          localFileUpload: { phase: "failed", progress: 0, errorMessage: msg },
+        });
+      }
+    },
+    [roomId],
+  );
+
+  function detachPendingAttachmentForSend() {
+    pendingFileRef.current = null;
+    setPendingFile(null);
+  }
+
   // ─── Send / key handling ──────────────────────────────────────────────────
 
   async function handleSend() {
@@ -482,16 +743,83 @@ export default function MessageInput({
         return;
       }
       if (pendingFile) {
-        // Single message: file with optional caption (typed text)
-        await invoke("upload_and_send_file", {
-          roomId,
-          fileName: pendingFile.name,
-          mimeType: pendingFile.mimeType,
-          data: pendingFile.base64,
-          caption: trimmed || null,
+        if (!fileSendBridge || !selfUserId) {
+          setSending(false);
+          return;
+        }
+        if (editingMessage) {
+          setSending(false);
+          return;
+        }
+        const snap = pendingFileRef.current;
+        if (!snap) {
+          setSending(false);
+          return;
+        }
+        const localEventId = `local:${crypto.randomUUID()}`;
+        const cap = trimmed;
+        const body = cap.trim().length > 0 ? cap.trim() : snap.name;
+
+        const optimPhase =
+          snap.phase === "ready"
+            ? "sending"
+            : snap.phase === "uploading"
+              ? "uploading"
+              : snap.phase === "error"
+                ? "failed"
+                : "encoding";
+
+        fileSendBridge.addOptimistic({
+          eventId: localEventId,
+          sender: selfUserId,
+          senderName: selfDisplayName?.trim() || selfUserId,
+          body,
+          timestamp: Date.now(),
+          avatarUrl: selfAvatarUrl ?? null,
+          fileDisplayName: snap.name,
+          fileMime: snap.mimeType,
+          localPipelineUploadId: snap.uploadId,
+          localFileUpload: {
+            phase: optimPhase,
+            progress: Math.min(1, snap.progress01),
+          },
+          localImagePreviewObjectUrl: snap.previewUrl,
         });
-        clearPendingFile();
-      } else if (trimmed) {
+
+        detachPendingAttachmentForSend();
+
+        const prevFormats = getActiveFormats(el);
+        el.innerHTML = "";
+        setPlainText("");
+        setHasComposerMedia(false);
+        el.focus();
+        if (prevFormats.has("bold") || prevFormats.has("italic") || prevFormats.has("strikethrough")) {
+          document.execCommand("insertText", false, "\u200b");
+          const sel = window.getSelection();
+          if (sel) {
+            sel.selectAllChildren(el);
+          }
+          for (const fmt of prevFormats) {
+            if (fmt === "bold") document.execCommand("bold");
+            else if (fmt === "italic") document.execCommand("italic");
+            else if (fmt === "strikethrough") document.execCommand("strikeThrough");
+          }
+          if (sel) {
+            sel.collapseToEnd();
+          }
+        }
+        refreshFormats();
+        syncHeight();
+
+        void runFileSendPipeline(localEventId, snap, cap, fileSendBridge).finally(() => {
+          onMessageSent();
+        });
+
+        setSending(false);
+        return;
+      }
+
+      if (trimmed) {
         // Text-only message
         if (editingMessage) {
           await invoke("edit_message", {
@@ -513,13 +841,17 @@ export default function MessageInput({
       if (prevFormats.has("bold") || prevFormats.has("italic") || prevFormats.has("strikethrough")) {
         document.execCommand("insertText", false, "\u200b");
         const sel = window.getSelection();
-        if (sel) { sel.selectAllChildren(el); }
+        if (sel) {
+          sel.selectAllChildren(el);
+        }
         for (const fmt of prevFormats) {
           if (fmt === "bold") document.execCommand("bold");
           else if (fmt === "italic") document.execCommand("italic");
           else if (fmt === "strikethrough") document.execCommand("strikeThrough");
         }
-        if (sel) { sel.collapseToEnd(); }
+        if (sel) {
+          sel.collapseToEnd();
+        }
       }
       refreshFormats();
       syncHeight();
@@ -565,27 +897,61 @@ export default function MessageInput({
     e.target.value = "";
 
     try {
-      const arrayBuffer = await file.arrayBuffer();
-      const bytes = new Uint8Array(arrayBuffer);
-      const CHUNK = 8192;
-      const parts: string[] = [];
-      for (let i = 0; i < bytes.length; i += CHUNK) {
-        parts.push(String.fromCharCode(...bytes.subarray(i, i + CHUNK)));
-      }
-      const base64 = btoa(parts.join(""));
+      const uploadId = crypto.randomUUID();
       const mimeType = file.type || "application/octet-stream";
-      const previewUrl = mimeType.startsWith("image/")
-        ? URL.createObjectURL(file)
-        : null;
+      const previewUrl = mimeType.startsWith("image/") ? URL.createObjectURL(file) : null;
 
-      setPendingFile({ name: file.name, mimeType, base64, previewUrl });
+      let maxBytes: number | null = null;
+      try {
+        maxBytes = await invoke<number | null>("get_matrix_max_upload_bytes");
+      } catch {
+        // e.g. not logged in — still allow picking; server will reject if needed
+      }
+
+      if (maxBytes != null && file.size > maxBytes) {
+        const next: PendingAttachment = {
+          uploadId,
+          name: file.name,
+          mimeType,
+          sourceFile: file,
+          contentUri: null,
+          byteSize: null,
+          previewUrl,
+          phase: "error",
+          progress01: 0,
+          errorMessage: `This file is ${formatBinaryBytes(file.size)} but your homeserver only allows ${formatBinaryBytes(maxBytes)} per upload (Matrix media limit).`,
+        };
+        pendingFileRef.current = next;
+        setPendingFile(next);
+        return;
+      }
+
+      const next: PendingAttachment = {
+        uploadId,
+        name: file.name,
+        mimeType,
+        sourceFile: file,
+        contentUri: null,
+        byteSize: null,
+        previewUrl,
+        phase: "reading",
+        progress01: 0,
+      };
+      pendingFileRef.current = next;
+      setPendingFile(next);
+      void prepareAttachment(uploadId);
     } catch (err) {
       console.error("Failed to read file:", err);
     }
   }
 
   function clearPendingFile() {
-    if (pendingFile?.previewUrl) URL.revokeObjectURL(pendingFile.previewUrl);
+    const p = pendingFileRef.current;
+    if (p?.uploadId) {
+      void invoke("room_file_staging_remove", { uploadId: p.uploadId }).catch(() => {});
+    }
+    if (p?.previewUrl) URL.revokeObjectURL(p.previewUrl);
+    pendingFileRef.current = null;
     setPendingFile(null);
   }
 
@@ -640,7 +1006,8 @@ export default function MessageInput({
   const canSend =
     !interactionLocked &&
     (plainText.trim().length > 0 || hasComposerMedia || !!pendingFile) &&
-    !sending;
+    !sending &&
+    pendingFile?.phase !== "error";
 
   const defaultPlaceholder = editingMessage ? "Edit message" : `Message #${roomName}`;
   const placeholderText = interactionLocked
@@ -877,19 +1244,64 @@ export default function MessageInput({
               </button>
 
               {pendingFile.previewUrl ? (
-                <img
-                  src={pendingFile.previewUrl}
-                  alt={pendingFile.name}
+                <div
                   style={{
-                    display: "block",
-                    maxWidth: 200 - spacing.unit * 2,
-                    maxHeight: 150,
-                    objectFit: "contain",
-                    borderRadius: spacing.unit,
+                    position: "relative",
                     margin: spacing.unit,
                   }}
-                />
-              ) : null}
+                >
+                  <img
+                    src={pendingFile.previewUrl}
+                    alt={pendingFile.name}
+                    style={{
+                      display: "block",
+                      maxWidth: 200 - spacing.unit * 2,
+                      maxHeight: 150,
+                      objectFit: "contain",
+                      borderRadius: spacing.unit,
+                    }}
+                  />
+                  {pendingFile.phase !== "error" ? (
+                    <div
+                      style={{
+                        position: "absolute",
+                        inset: 0,
+                        display: "flex",
+                        alignItems: "center",
+                        justifyContent: "center",
+                        backgroundColor: "rgba(0,0,0,0.2)",
+                        borderRadius: spacing.unit,
+                        pointerEvents: "none",
+                      }}
+                    >
+                      <CircularUploadRing
+                        progress={pendingFile.progress01}
+                        size={44}
+                        strokeWidth={3}
+                      />
+                    </div>
+                  ) : null}
+                </div>
+              ) : (
+                <div
+                  style={{
+                    position: "relative",
+                    minHeight: 72,
+                    display: "flex",
+                    alignItems: "center",
+                    justifyContent: "center",
+                    padding: spacing.unit * 2,
+                  }}
+                >
+                  {pendingFile.phase !== "error" ? (
+                    <CircularUploadRing
+                      progress={pendingFile.progress01}
+                      size={44}
+                      strokeWidth={3}
+                    />
+                  ) : null}
+                </div>
+              )}
 
               <div
                 style={{
@@ -905,6 +1317,19 @@ export default function MessageInput({
               >
                 {pendingFile.name}
               </div>
+              {pendingFile.phase === "error" && pendingFile.errorMessage ? (
+                <div
+                  style={{
+                    padding: `0 ${spacing.unit}px ${spacing.unit}px`,
+                    fontSize: typography.fontSizeSmall * 0.95,
+                    color: palette.textSecondary,
+                    textAlign: "center",
+                    maxWidth: 180,
+                  }}
+                >
+                  {pendingFile.errorMessage}
+                </div>
+              ) : null}
             </div>
           </div>
         )}

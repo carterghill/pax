@@ -46,6 +46,49 @@ const INITIAL_LOAD_SIZE = 50;
 /*  Pure helpers                                                       */
 /* ------------------------------------------------------------------ */
 
+function revokeLocalPreviewIfNeeded(m: Message) {
+  const u = m.localImagePreviewObjectUrl;
+  if (u && u.startsWith("blob:")) {
+    try {
+      URL.revokeObjectURL(u);
+    } catch {
+      /* ok */
+    }
+  }
+}
+
+function removeMatchingLocalEchoes(
+  prev: Message[],
+  incoming: Message,
+  currentUserId: string | null | undefined,
+): Message[] {
+  if (!currentUserId || incoming.sender !== currentUserId) return prev;
+
+  const toRemove = prev.filter((m) => {
+    if (!m.eventId.startsWith("local:")) return false;
+    if (m.sender !== incoming.sender) return false;
+    if (m.body !== incoming.body) return false;
+    if (incoming.fileMediaRequest) {
+      return m.fileDisplayName === incoming.fileDisplayName;
+    }
+    if (incoming.imageMediaRequest) {
+      return Boolean(m.localImagePreviewObjectUrl);
+    }
+    if (incoming.videoMediaRequest) {
+      return (
+        m.fileDisplayName === incoming.fileDisplayName &&
+        m.fileMime === incoming.fileMime
+      );
+    }
+    return false;
+  });
+
+  if (toRemove.length === 0) return prev;
+  toRemove.forEach(revokeLocalPreviewIfNeeded);
+  const drop = new Set(toRemove.map((m) => m.eventId));
+  return prev.filter((m) => !drop.has(m.eventId));
+}
+
 function applyMessageEdit(arr: Message[], payload: MessageEditPayload): Message[] {
   const idx = arr.findIndex((m) => m.eventId === payload.targetEventId);
   if (idx === -1) return arr;
@@ -105,7 +148,7 @@ export function clearMessageCache() {
 /*  Hook                                                               */
 /* ------------------------------------------------------------------ */
 
-export function useMessages(roomId: string | null) {
+export function useMessages(roomId: string | null, currentUserId: string | null = null) {
   // Feed the global user-avatar store from every message batch we fetch so
   // sidebars/members/headers can resolve sender avatars without a separate
   // round-trip. Clearing is delegated to the store's own event listeners
@@ -168,11 +211,13 @@ export function useMessages(roomId: string | null) {
     setPendingRecentCount(0);
 
     if (!roomId) {
+      for (const m of messagesRef.current) revokeLocalPreviewIfNeeded(m);
       commit([], null, true);
       setInitialLoading(false);
       return;
     }
 
+    for (const m of messagesRef.current) revokeLocalPreviewIfNeeded(m);
     commit([], null, true);
     setInitialLoading(true);
   }, [roomId, commit]);
@@ -244,12 +289,16 @@ export function useMessages(roomId: string | null) {
         return;
       }
 
-      const prev = messagesRef.current;
+      let prev = messagesRef.current;
+      prev = removeMatchingLocalEchoes(prev, message, currentUserId);
+
       const idx = prev.findIndex((m) => m.eventId === message.eventId);
 
       let next: Message[];
       if (idx !== -1) {
         next = prev.slice();
+        const old = next[idx];
+        revokeLocalPreviewIfNeeded(old);
         next[idx] = message;
       } else {
         next = [...prev, message];
@@ -295,7 +344,7 @@ export function useMessages(roomId: string | null) {
       unEdit.then((fn) => fn());
       unRedact.then((fn) => fn());
     };
-  }, [roomId]);
+  }, [roomId, currentUserId]);
 
   /* ================================================================ */
   /*  loadOlder                                                        */
@@ -447,11 +496,73 @@ export function useMessages(roomId: string | null) {
 
   const removeMessageById = useCallback((eventId: string) => {
     const prev = messagesRef.current;
+    const victim = prev.find((m) => m.eventId === eventId);
+    if (victim) revokeLocalPreviewIfNeeded(victim);
     const next = prev.filter((m) => m.eventId !== eventId);
     if (next.length !== prev.length) {
       messagesRef.current = next;
       setMessages(next);
     }
+  }, []);
+
+  const addOptimisticMessage = useCallback((msg: Message) => {
+    setMessages((prev) => {
+      let next = [...prev, msg];
+      if (next.length >= 2 && next[next.length - 2].timestamp > msg.timestamp) {
+        next = next.slice().sort((a, b) => a.timestamp - b.timestamp);
+      }
+      if (next.length > WINDOW_SIZE) {
+        const dropped = next.slice(0, next.length - WINDOW_SIZE);
+        dropped.forEach(revokeLocalPreviewIfNeeded);
+        next = next.slice(next.length - WINDOW_SIZE);
+      }
+      messagesRef.current = next;
+      return next;
+    });
+  }, []);
+
+  const patchMessage = useCallback((eventId: string, patch: Partial<Message>) => {
+    setMessages((prev) => {
+      const idx = prev.findIndex((m) => m.eventId === eventId);
+      if (idx === -1) return prev;
+      const next = prev.slice();
+      const old = next[idx];
+      if (patch.imageMediaRequest != null && old.localImagePreviewObjectUrl) {
+        revokeLocalPreviewIfNeeded(old);
+      }
+      next[idx] = { ...old, ...patch };
+      messagesRef.current = next;
+      return next;
+    });
+  }, []);
+
+  const replaceMessageEventId = useCallback(
+    (oldId: string, newId: string, patch?: Partial<Message>) => {
+      setMessages((prev) => {
+        const idx = prev.findIndex((m) => m.eventId === oldId);
+        if (idx === -1) return prev;
+        const next = prev.slice();
+        next[idx] = { ...next[idx], ...patch, eventId: newId };
+        messagesRef.current = next;
+        return next;
+      });
+    },
+    [],
+  );
+
+  const patchMessageByUploadId = useCallback((uploadId: string, patch: Partial<Message>) => {
+    setMessages((prev) => {
+      const idx = prev.findIndex((m) => m.localPipelineUploadId === uploadId);
+      if (idx === -1) return prev;
+      const next = prev.slice();
+      const old = next[idx];
+      if (patch.imageMediaRequest != null && old.localImagePreviewObjectUrl) {
+        revokeLocalPreviewIfNeeded(old);
+      }
+      next[idx] = { ...old, ...patch };
+      messagesRef.current = next;
+      return next;
+    });
   }, []);
 
   /* ================================================================ */
@@ -506,6 +617,10 @@ export function useMessages(roomId: string | null) {
     jumpToRecent,
     refresh,
     removeMessageById,
+    addOptimisticMessage,
+    patchMessage,
+    replaceMessageEventId,
+    patchMessageByUploadId,
     loadMessagesAroundEvent,
   };
 }

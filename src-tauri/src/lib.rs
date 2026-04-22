@@ -14,6 +14,7 @@ use std::collections::HashMap;
 use std::io::Write;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex as StdMutex};
+use std::time::Duration;
 
 use matrix_sdk::Client;
 use tauri::Emitter;
@@ -302,7 +303,10 @@ pub fn run() {
 
     let state = Arc::new(AppState {
         client: Mutex::new(None),
-        http_client: reqwest::Client::new(),
+        http_client: reqwest::Client::builder()
+            .tcp_keepalive(Duration::from_secs(30))
+            .build()
+            .unwrap_or_else(|_| reqwest::Client::new()),
         presence_map: Arc::new(Mutex::new(HashMap::new())),
         status_msg_map: Arc::new(Mutex::new(HashMap::new())),
         avatar_cache: Arc::new(commands::avatar_cache::AvatarDiskCache::new()),
@@ -473,6 +477,13 @@ pub fn run() {
             commands::messages::get_messages_around_event,
             commands::messages::start_sync,
             commands::messages::send_typing_notice,
+            commands::messages::room_file_staging_reset,
+            commands::messages::room_file_staging_append_b64,
+            commands::messages::room_file_staging_byte_len,
+            commands::messages::room_file_staging_remove,
+            commands::messages::get_matrix_max_upload_bytes,
+            commands::messages::upload_room_file,
+            commands::messages::send_file_message,
             commands::messages::upload_and_send_file,
             commands::presence::set_presence,
             commands::presence::sync_presence,

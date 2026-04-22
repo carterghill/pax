@@ -11,7 +11,7 @@ import {
 } from "react";
 import { createPortal } from "react-dom";
 import { invoke } from "@tauri-apps/api/core";
-import { MoreVertical, Pencil, Pin, Trash2, ArrowDown } from "lucide-react";
+import { MoreVertical, Pencil, Pin, Trash2, ArrowDown, Video } from "lucide-react";
 import { Message, RoomRedactionPolicy } from "../types/matrix";
 import { useTheme } from "../theme/ThemeContext";
 import type { ResolvedColorScheme } from "../theme/types";
@@ -20,6 +20,7 @@ import MessageMarkdown from "./MessageMarkdown";
 import MessageMatrixImage from "./MessageMatrixImage";
 import MessageMatrixVideo from "./MessageMatrixVideo";
 import MessageFileAttachment from "./MessageFileAttachment";
+import CircularUploadRing from "./CircularUploadRing";
 import MediaViewerModal, {
   type MediaViewerOpenPayload,
 } from "./MediaViewerModal";
@@ -93,6 +94,31 @@ function formatTime(timestamp: number): string {
   return `${date.toLocaleDateString()} ${time}`;
 }
 
+function LocalUploadFailedNote({
+  msg,
+  palette,
+  typography,
+  spacingUnit,
+}: {
+  msg: Message;
+  palette: ReturnType<typeof useTheme>["palette"];
+  typography: ReturnType<typeof useTheme>["typography"];
+  spacingUnit: number;
+}) {
+  if (msg.localFileUpload?.phase !== "failed") return null;
+  return (
+    <p
+      style={{
+        margin: `${spacingUnit}px 0 0`,
+        color: palette.textSecondary,
+        fontSize: typography.fontSizeSmall,
+      }}
+    >
+      {msg.localFileUpload.errorMessage ?? "Could not send file."}
+    </p>
+  );
+}
+
 function shouldShowHeader(msg: Message, prevMsg: Message | null): boolean {
   if (!prevMsg) return true;
   if (prevMsg.sender !== msg.sender) return true;
@@ -101,6 +127,7 @@ function shouldShowHeader(msg: Message, prevMsg: Message | null): boolean {
 }
 
 function messageAllowsEdit(msg: Message, userId: string): boolean {
+  if (msg.eventId.startsWith("local:")) return false;
   if (msg.sender !== userId) return false;
   if (msg.imageMediaRequest != null) return false;
   if (msg.videoMediaRequest != null) return false;
@@ -305,7 +332,69 @@ const MessageRow = memo(function MessageRow({
           </div>
         )}
 
-        {msg.imageMediaRequest != null ? (
+        {msg.localImagePreviewObjectUrl && msg.imageMediaRequest == null ? (
+          <>
+            <div
+              style={{
+                position: "relative",
+                display: "inline-block",
+                maxWidth: "100%",
+              }}
+            >
+              <img
+                src={msg.localImagePreviewObjectUrl}
+                alt=""
+                draggable={false}
+                style={{
+                  maxWidth: "100%",
+                  maxHeight: 400,
+                  height: "auto",
+                  objectFit: "contain",
+                  borderRadius: spacingUnit,
+                  display: "block",
+                  marginTop: spacingUnit,
+                  marginBottom: spacingUnit,
+                }}
+              />
+              {msg.localFileUpload && msg.localFileUpload.phase !== "failed" ? (
+                <div
+                  style={{
+                    position: "absolute",
+                    inset: 0,
+                    marginTop: spacingUnit,
+                    marginBottom: spacingUnit,
+                    display: "flex",
+                    alignItems: "center",
+                    justifyContent: "center",
+                    backgroundColor: "rgba(0,0,0,0.2)",
+                    borderRadius: spacingUnit,
+                    pointerEvents: "none",
+                  }}
+                >
+                  <CircularUploadRing
+                    progress={msg.localFileUpload.progress}
+                    size={Math.round(40 + spacingUnit * 2)}
+                    strokeWidth={3}
+                  />
+                </div>
+              ) : null}
+            </div>
+            {msg.body.trim().length > 0 ? (
+              <MessageMarkdown
+                edited={Boolean(msg.edited)}
+                onOpenDirectImage={onOpenDirectImage}
+              >
+                {msg.body}
+              </MessageMarkdown>
+            ) : null}
+            <LocalUploadFailedNote
+              msg={msg}
+              palette={palette}
+              typography={typography}
+              spacingUnit={spacingUnit}
+            />
+          </>
+        ) : msg.imageMediaRequest != null ? (
           <>
             <MessageMatrixImage
               request={msg.imageMediaRequest}
@@ -327,6 +416,85 @@ const MessageRow = memo(function MessageRow({
               </MessageMarkdown>
             ) : null}
           </>
+        ) : msg.fileMime?.startsWith("video/") &&
+          msg.localFileUpload &&
+          msg.videoMediaRequest == null ? (
+          <>
+            <div
+              style={{
+                position: "relative",
+                display: "inline-block",
+                maxWidth: "100%",
+              }}
+            >
+              <div
+                style={{
+                  display: "inline-flex",
+                  alignItems: "center",
+                  gap: spacingUnit * 1.5,
+                  marginTop: spacingUnit,
+                  marginBottom: spacingUnit * 0.5,
+                  padding: `${spacingUnit * 1.25}px ${spacingUnit * 2}px`,
+                  borderRadius: spacingUnit * 1.5,
+                  border: `1px solid ${palette.border}`,
+                  backgroundColor: palette.bgTertiary,
+                  color: palette.textPrimary,
+                  fontFamily: typography.fontFamily,
+                  fontSize: typography.fontSizeSmall,
+                }}
+              >
+                <Video
+                  size={18}
+                  strokeWidth={2}
+                  style={{ flexShrink: 0, color: palette.textSecondary }}
+                  aria-hidden
+                />
+                <span
+                  style={{
+                    overflow: "hidden",
+                    textOverflow: "ellipsis",
+                    whiteSpace: "nowrap",
+                    minWidth: 0,
+                  }}
+                >
+                  {msg.fileDisplayName ?? "Video"}
+                </span>
+              </div>
+              {msg.localFileUpload.phase !== "failed" ? (
+                <div
+                  style={{
+                    position: "absolute",
+                    inset: 0,
+                    marginTop: spacingUnit,
+                    display: "flex",
+                    alignItems: "center",
+                    justifyContent: "center",
+                    pointerEvents: "none",
+                  }}
+                >
+                  <CircularUploadRing
+                    progress={msg.localFileUpload.progress}
+                    size={44}
+                    strokeWidth={3}
+                  />
+                </div>
+              ) : null}
+            </div>
+            {msg.body.trim().length > 0 ? (
+              <MessageMarkdown
+                edited={Boolean(msg.edited)}
+                onOpenDirectImage={onOpenDirectImage}
+              >
+                {msg.body}
+              </MessageMarkdown>
+            ) : null}
+            <LocalUploadFailedNote
+              msg={msg}
+              palette={palette}
+              typography={typography}
+              spacingUnit={spacingUnit}
+            />
+          </>
         ) : msg.videoMediaRequest != null ? (
           <>
             <MessageMatrixVideo request={msg.videoMediaRequest} />
@@ -341,21 +509,44 @@ const MessageRow = memo(function MessageRow({
           </>
         ) : msg.fileMediaRequest != null ? (
           <>
-            <MessageFileAttachment
-              fileName={msg.fileDisplayName ?? "Attachment"}
-              mimeType={msg.fileMime}
-              onOpen={() =>
-                onOpenMediaViewer({
-                  kind: inferMediaViewerKind(
-                    msg.fileMime,
-                    msg.fileDisplayName ?? "",
-                  ),
-                  request: msg.fileMediaRequest,
-                  fileName: msg.fileDisplayName ?? "Attachment",
-                  mimeType: msg.fileMime ?? null,
-                })
-              }
-            />
+            <div style={{ position: "relative", display: "inline-block", maxWidth: "100%" }}>
+              <MessageFileAttachment
+                fileName={msg.fileDisplayName ?? "Attachment"}
+                mimeType={msg.fileMime}
+                disabled={Boolean(
+                  msg.localFileUpload && msg.localFileUpload.phase !== "failed",
+                )}
+                onOpen={() =>
+                  onOpenMediaViewer({
+                    kind: inferMediaViewerKind(
+                      msg.fileMime,
+                      msg.fileDisplayName ?? "",
+                    ),
+                    request: msg.fileMediaRequest,
+                    fileName: msg.fileDisplayName ?? "Attachment",
+                    mimeType: msg.fileMime ?? null,
+                  })
+                }
+              />
+              {msg.localFileUpload && msg.localFileUpload.phase !== "failed" ? (
+                <div
+                  style={{
+                    position: "absolute",
+                    inset: 0,
+                    display: "flex",
+                    alignItems: "center",
+                    justifyContent: "center",
+                    pointerEvents: "none",
+                  }}
+                >
+                  <CircularUploadRing
+                    progress={msg.localFileUpload.progress}
+                    size={40}
+                    strokeWidth={3}
+                  />
+                </div>
+              ) : null}
+            </div>
             {msg.body.trim().length > 0 ? (
               <MessageMarkdown
                 edited={Boolean(msg.edited)}
@@ -364,6 +555,59 @@ const MessageRow = memo(function MessageRow({
                 {msg.body}
               </MessageMarkdown>
             ) : null}
+            <LocalUploadFailedNote
+              msg={msg}
+              palette={palette}
+              typography={typography}
+              spacingUnit={spacingUnit}
+            />
+          </>
+        ) : msg.localFileUpload &&
+          msg.fileDisplayName &&
+          msg.fileMediaRequest == null &&
+          !msg.localImagePreviewObjectUrl &&
+          !msg.fileMime?.startsWith("video/") ? (
+          <>
+            <div style={{ position: "relative", display: "inline-block", maxWidth: "100%" }}>
+              <MessageFileAttachment
+                fileName={msg.fileDisplayName}
+                mimeType={msg.fileMime}
+                disabled={msg.localFileUpload.phase !== "failed"}
+                onOpen={() => {}}
+              />
+              {msg.localFileUpload.phase !== "failed" ? (
+                <div
+                  style={{
+                    position: "absolute",
+                    inset: 0,
+                    display: "flex",
+                    alignItems: "center",
+                    justifyContent: "center",
+                    pointerEvents: "none",
+                  }}
+                >
+                  <CircularUploadRing
+                    progress={msg.localFileUpload.progress}
+                    size={40}
+                    strokeWidth={3}
+                  />
+                </div>
+              ) : null}
+            </div>
+            {msg.body.trim().length > 0 ? (
+              <MessageMarkdown
+                edited={Boolean(msg.edited)}
+                onOpenDirectImage={onOpenDirectImage}
+              >
+                {msg.body}
+              </MessageMarkdown>
+            ) : null}
+            <LocalUploadFailedNote
+              msg={msg}
+              palette={palette}
+              typography={typography}
+              spacingUnit={spacingUnit}
+            />
           </>
         ) : (
           <MessageMarkdown

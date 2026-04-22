@@ -1,4 +1,4 @@
-import { useState, useEffect, useRef, useCallback, type CSSProperties } from "react";
+import { useState, useEffect, useRef, useCallback, useMemo, type CSSProperties } from "react";
 import { useRoomRedactionPolicy } from "../hooks/useRoomRedactionPolicy";
 import { useRoomCanSendMessages } from "../hooks/useRoomCanSendMessages";
 import { useRoomCanPinMessages } from "../hooks/useRoomCanPinMessages";
@@ -8,7 +8,7 @@ import { ArrowLeft, Hash, MessageCircle, Users } from "lucide-react";
 import UserAvatar from "../components/UserAvatar";
 import MessageList, { type MessageListHandle } from "../components/MessageList";
 import PinnedMessagesMenu from "../components/PinnedMessagesMenu";
-import MessageInput, { type EditingMessageRef } from "../components/MessageInput";
+import MessageInput, { type EditingMessageRef, type MessageFileSendBridge } from "../components/MessageInput";
 import UserMenu from "../components/UserMenu";
 import RoomDownloadsButton from "../components/RoomDownloadsButton";
 import { useMessages } from "../hooks/useMessages";
@@ -156,8 +156,35 @@ export default function ChatView({
     jumpToRecent,
     refresh,
     removeMessageById,
+    addOptimisticMessage,
+    patchMessage,
+    patchMessageByUploadId,
+    replaceMessageEventId,
     loadMessagesAroundEvent,
-  } = useMessages(isDraft ? null : activeRoom!.id);
+  } = useMessages(isDraft ? null : activeRoom!.id, isDraft ? null : userId);
+
+  const selfProfile = useMatrixUserProfile(isDraft ? null : userId);
+
+  const fileSendBridge: MessageFileSendBridge | null = useMemo(
+    () =>
+      isDraft
+        ? null
+        : {
+            addOptimistic: addOptimisticMessage,
+            patchMessage,
+            patchMessageByUploadId,
+            replaceMessageEventId,
+            removeMessage: removeMessageById,
+          },
+    [
+      isDraft,
+      addOptimisticMessage,
+      patchMessage,
+      patchMessageByUploadId,
+      replaceMessageEventId,
+      removeMessageById,
+    ],
+  );
   const redactionPolicy = useRoomRedactionPolicy(isDraft ? null : activeRoom!.id);
   const canSendMessages = useRoomCanSendMessages(isDraft ? null : activeRoom!.id);
   const canPinMessages = useRoomCanPinMessages(isDraft ? null : activeRoom!.id);
@@ -525,6 +552,10 @@ export default function ChatView({
               editingMessage={editingMessage}
               onCancelEdit={handleCancelEdit}
               onLocalTypingActive={setLocalTyping}
+              selfUserId={userId}
+              selfDisplayName={selfProfile.displayName}
+              selfAvatarUrl={selfProfile.avatarUrl}
+              fileSendBridge={fileSendBridge}
             />
           </div>
         </div>
