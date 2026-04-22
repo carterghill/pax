@@ -20,7 +20,11 @@ use matrix_sdk::ruma::events::room::message::OriginalSyncRoomMessageEvent;
 use matrix_sdk::ruma::events::room::message::Relation;
 use matrix_sdk::ruma::events::room::message::RoomMessageEventContent;
 use matrix_sdk::ruma::events::room::message::RoomMessageEventContentWithoutRelation;
+use matrix_sdk::ruma::events::reaction::ReactionEventContent;
 use matrix_sdk::ruma::events::room::redaction::OriginalSyncRoomRedactionEvent;
+use matrix_sdk::ruma::events::room::redaction::SyncRoomRedactionEvent;
+use matrix_sdk::ruma::events::relation::Annotation;
+use matrix_sdk::ruma::events::OriginalSyncMessageLikeEvent;
 use matrix_sdk::ruma::events::space::child::SpaceChildEventContent;
 use matrix_sdk::ruma::events::typing::SyncTypingEvent;
 use matrix_sdk::ruma::events::AnyMessageLikeEventContent;
@@ -44,9 +48,9 @@ use reqwest::Version;
 use tauri::{AppHandle, Emitter, Manager, State};
 
 use crate::types::{
-    MessageBatch, MessageEditPayload, MessageInfo, MessageRedactedPayload, PinnedMessagePreview,
-    PresencePayload, RoomMessagePayload, RoomPinPermission, RoomRedactionPolicy, RoomSendPermission,
-    TypingPayload, VoiceParticipantsChangedPayload,
+    MessageBatch, MessageEditPayload, MessageInfo, MessageReactionDeltaPayload, MessageRedactedPayload,
+    MessageReactionSummary, PinnedMessagePreview, PresencePayload, RoomMessagePayload, RoomPinPermission,
+    RoomRedactionPolicy, RoomSendPermission, TypingPayload, VoiceParticipantsChangedPayload,
 };
 use crate::AppState;
 
@@ -74,6 +78,134 @@ async fn get_matrix_media_bytes_with_timeout(
             timeout.as_secs()
         )),
     }
+}
+
+enum ReactionFoldOp {
+    Add {
+        ts: u64,
+        reaction_event_id: String,
+        target: String,
+        key: String,
+        sender: String,
+    },
+    Redact { ts: u64, redacts: String },
+}
+
+/// Build per-target reaction summaries from timeline events (chronological fold with redactions).
+fn aggregate_reactions_from_timeline(
+    events: &[TimelineEvent],
+    my_user_id: Option<&UserId>,
+) -> HashMap<String, Vec<MessageReactionSummary>> {
+    let mut ops: Vec<ReactionFoldOp> = Vec::new();
+    for ev in events {
+        let raw = match ev.raw().deserialize() {
+            Ok(e) => e,
+            Err(_) => continue,
+        };
+        match raw {
+            AnySyncTimelineEvent::MessageLike(AnySyncMessageLikeEvent::Reaction(r)) => {
+                if let SyncMessageLikeEvent::Original(o) = r {
+                    let ts: u64 = o.origin_server_ts.0.into();
+                    let target = o.content.relates_to.event_id.to_string();
+                    let key = o.content.relates_to.key.clone();
+                    let sender = o.sender.to_string();
+                    let reaction_event_id = o.event_id.to_string();
+                    ops.push(ReactionFoldOp::Add {
+                        ts,
+                        reaction_event_id,
+                        target,
+                        key,
+                        sender,
+                    });
+                }
+            }
+            AnySyncTimelineEvent::MessageLike(AnySyncMessageLikeEvent::RoomRedaction(r)) => {
+                if let SyncRoomRedactionEvent::Original(o) = r {
+                    if let Some(redacts) = o
+                        .redacts
+                        .as_ref()
+                        .or(o.content.redacts.as_ref())
+                        .map(|id| id.to_string())
+                    {
+                        let ts: u64 = o.origin_server_ts.0.into();
+                        ops.push(ReactionFoldOp::Redact { ts, redacts });
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+    ops.sort_by(|a, b| {
+        let ta = match a {
+            ReactionFoldOp::Add { ts, .. } | ReactionFoldOp::Redact { ts, .. } => *ts,
+        };
+        let tb = match b {
+            ReactionFoldOp::Add { ts, .. } | ReactionFoldOp::Redact { ts, .. } => *ts,
+        };
+        ta.cmp(&tb)
+    });
+
+    let mut by_reaction_id: HashMap<String, (String, String, String)> = HashMap::new();
+    let mut agg: HashMap<String, HashMap<String, HashSet<String>>> = HashMap::new();
+
+    for op in ops {
+        match op {
+            ReactionFoldOp::Add {
+                reaction_event_id,
+                target,
+                key,
+                sender,
+                ..
+            } => {
+                by_reaction_id.insert(
+                    reaction_event_id,
+                    (target.clone(), key.clone(), sender.clone()),
+                );
+                agg.entry(target)
+                    .or_default()
+                    .entry(key)
+                    .or_default()
+                    .insert(sender);
+            }
+            ReactionFoldOp::Redact { redacts, .. } => {
+                if let Some((target, key, sender)) = by_reaction_id.remove(&redacts) {
+                    if let Some(keys) = agg.get_mut(&target) {
+                        if let Some(users) = keys.get_mut(&key) {
+                            users.remove(&sender);
+                            if users.is_empty() {
+                                keys.remove(&key);
+                            }
+                        }
+                        if keys.is_empty() {
+                            agg.remove(&target);
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    let mut out: HashMap<String, Vec<MessageReactionSummary>> = HashMap::new();
+    for (target, keys) in agg {
+        let mut summaries: Vec<MessageReactionSummary> = keys
+            .into_iter()
+            .map(|(key, senders)| {
+                let count = senders.len() as u32;
+                let reacted_by_me = my_user_id
+                    .is_some_and(|me| senders.iter().any(|s| s.as_str() == me.as_str()));
+                MessageReactionSummary {
+                    key,
+                    count,
+                    reacted_by_me,
+                }
+            })
+            .collect();
+        summaries.sort_by(|a, b| a.key.cmp(&b.key));
+        if !summaries.is_empty() {
+            out.insert(target, summaries);
+        }
+    }
+    out
 }
 
 #[tauri::command]
@@ -130,6 +262,7 @@ pub async fn get_messages(
     let mut pages_scanned: usize = 0;
     let mut timeline_event_count_total: usize = 0;
     let mut prev_batch: Option<String>;
+    let mut events_for_reactions: Vec<TimelineEvent> = Vec::new();
 
     // Cap on how many pages we'll walk in one `get_messages` call while looking
     // for enough visible messages.  With the end-token-based stop below we can
@@ -169,6 +302,8 @@ pub async fn get_messages(
             end: pagination_end,
             ..
         } = response;
+
+        events_for_reactions.extend(chunk.iter().cloned());
 
         pages_scanned += 1;
 
@@ -281,6 +416,8 @@ pub async fn get_messages(
         current_from = prev_batch.clone();
     }
 
+    let reaction_map = aggregate_reactions_from_timeline(&events_for_reactions, client.user_id());
+
     // Second pass: resolve display name + avatar once per unique sender
     let mut sender_meta: HashMap<String, (Option<String>, Option<String>)> = HashMap::new();
     for uid in &unique_senders {
@@ -336,6 +473,7 @@ pub async fn get_messages(
                         m.file_display_name.clone(),
                     )
                 });
+            let reactions = reaction_map.get(&m.event_id).cloned();
             MessageInfo {
                 event_id: m.event_id,
                 sender: m.sender,
@@ -349,6 +487,7 @@ pub async fn get_messages(
                 file_media_request,
                 file_mime,
                 file_display_name,
+                reactions,
             }
         })
         .collect();
@@ -511,6 +650,10 @@ async fn build_message_infos_from_timeline_events(
     let mut unique_senders = Vec::new();
     let mut seen_senders = HashSet::new();
 
+    let client = room.client();
+    let me = client.user_id();
+    let reaction_map = aggregate_reactions_from_timeline(&timeline_events, me);
+
     for event in timeline_events {
         let raw = match event.kind.raw().deserialize() {
             Ok(e) => e,
@@ -623,6 +766,7 @@ async fn build_message_infos_from_timeline_events(
                         m.file_display_name.clone(),
                     )
                 });
+            let reactions = reaction_map.get(&m.event_id).cloned();
             MessageInfo {
                 event_id: m.event_id,
                 sender: m.sender,
@@ -636,6 +780,7 @@ async fn build_message_infos_from_timeline_events(
                 file_media_request,
                 file_mime,
                 file_display_name,
+                reactions,
             }
         })
         .collect();
@@ -883,6 +1028,30 @@ pub async fn redact_message(
 }
 
 #[tauri::command]
+pub async fn send_room_reaction(
+    state: State<'_, Arc<AppState>>,
+    room_id: String,
+    target_event_id: String,
+    emoji: String,
+) -> Result<(), String> {
+    let client = get_client(&state).await?;
+    let room = resolve_room(&client, &room_id)?;
+
+    let target = EventId::parse(&target_event_id).map_err(|e| format!("Invalid event ID: {e}"))?;
+    let trimmed = emoji.trim();
+    if trimmed.is_empty() {
+        return Err("Empty reaction.".to_string());
+    }
+
+    let content = ReactionEventContent::new(Annotation::new(target.into(), trimmed.to_owned()));
+    room.send(content)
+        .await
+        .map_err(|e| format!("Failed to send reaction: {}", fmt_error_chain(&e)))?;
+
+    Ok(())
+}
+
+#[tauri::command]
 pub async fn start_sync(
     state: State<'_, Arc<AppState>>,
     app: tauri::AppHandle,
@@ -1016,11 +1185,31 @@ pub async fn start_sync(
                     file_media_request: ext.file_media_request,
                     file_mime: ext.file_mime,
                     file_display_name: ext.file_display_name,
+                    reactions: None,
                 },
             };
             let _ = app.emit("room-message", payload);
         }
     });
+
+    // Incoming emoji reactions (m.reaction) — keep message rows in sync.
+    let app_handle = app.clone();
+    client.add_event_handler(
+        move |ev: OriginalSyncMessageLikeEvent<ReactionEventContent>, room: Room| {
+            let app = app_handle.clone();
+            async move {
+                let room_id = room.room_id().to_string();
+                let payload = MessageReactionDeltaPayload {
+                    room_id,
+                    target_event_id: ev.content.relates_to.event_id.to_string(),
+                    key: ev.content.relates_to.key.clone(),
+                    sender: ev.sender.to_string(),
+                    added: true,
+                };
+                let _ = app.emit("room-message-reaction", payload);
+            }
+        },
+    );
 
     // Redactions (e.g. deleted messages): drop the target from the client timeline
     let app_handle = app.clone();
@@ -1038,10 +1227,30 @@ pub async fn start_sync(
                 return;
             };
             let payload = MessageRedactedPayload {
-                room_id,
-                redacted_event_id,
+                room_id: room_id.clone(),
+                redacted_event_id: redacted_event_id.clone(),
             };
             let _ = app.emit("room-message-redacted", payload);
+
+            if let Ok(eid) = EventId::parse(&redacted_event_id) {
+                if let Ok(timeline_ev) = room.load_or_fetch_event(&eid, None).await {
+                    if let Ok(AnySyncTimelineEvent::MessageLike(AnySyncMessageLikeEvent::Reaction(
+                        r,
+                    ))) = timeline_ev.raw().deserialize()
+                    {
+                        if let SyncMessageLikeEvent::Original(o) = r {
+                            let p = MessageReactionDeltaPayload {
+                                room_id,
+                                target_event_id: o.content.relates_to.event_id.to_string(),
+                                key: o.content.relates_to.key.clone(),
+                                sender: o.sender.to_string(),
+                                added: false,
+                            };
+                            let _ = app.emit("room-message-reaction", p);
+                        }
+                    }
+                }
+            }
         }
     });
 

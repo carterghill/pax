@@ -26,6 +26,14 @@ pub struct RoomInfo {
 
 #[derive(Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
+pub struct MessageReactionSummary {
+    pub key: String,
+    pub count: u32,
+    pub reacted_by_me: bool,
+}
+
+#[derive(Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
 pub struct MessageInfo {
     pub event_id: String,
     pub sender: String,
@@ -49,6 +57,20 @@ pub struct MessageInfo {
     /// Filename for the attachment chip (Matrix `filename` or `body` when uncaptioned).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub file_display_name: Option<String>,
+    /// Aggregated `m.reaction` annotations for this event (Matrix annotation key → senders).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub reactions: Option<Vec<MessageReactionSummary>>,
+}
+
+/// Live sync: add or remove one reaction annotation on `target_event_id`.
+#[derive(Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct MessageReactionDeltaPayload {
+    pub room_id: String,
+    pub target_event_id: String,
+    pub key: String,
+    pub sender: String,
+    pub added: bool,
 }
 
 #[derive(Serialize)]

@@ -11,7 +11,17 @@ import {
 } from "react";
 import { createPortal } from "react-dom";
 import { invoke } from "@tauri-apps/api/core";
-import { MoreVertical, Pencil, Pin, Trash2, ArrowDown, Video } from "lucide-react";
+import { Picker } from "emoji-mart";
+import data from "@emoji-mart/data";
+import {
+  MoreVertical,
+  Pencil,
+  Pin,
+  Trash2,
+  ArrowDown,
+  Video,
+  Smile,
+} from "lucide-react";
 import { Message, RoomRedactionPolicy } from "../types/matrix";
 import { useTheme } from "../theme/ThemeContext";
 import type { ResolvedColorScheme } from "../theme/types";
@@ -251,11 +261,16 @@ interface MessageRowProps {
   msg: Message;
   showHeader: boolean;
   showMessageActions: boolean;
+  showHoverActions: boolean;
+  canReact: boolean;
   isMenuOpen: boolean;
+  isReactionPickerOpen: boolean;
   onOpenMenu: (eventId: string) => void;
+  onToggleReactionPicker: (eventId: string) => void;
   onOpenMediaViewer: (payload: MediaViewerOpenPayload) => void;
   onOpenDirectImage: (url: string, title: string) => void;
   menuAnchorRef: React.RefObject<HTMLButtonElement | null>;
+  reactionPickerAnchorRef: React.RefObject<HTMLButtonElement | null>;
   rowHighlight: string;
   spacingUnit: number;
   palette: ReturnType<typeof useTheme>["palette"];
@@ -267,11 +282,16 @@ const MessageRow = memo(function MessageRow({
   msg,
   showHeader,
   showMessageActions,
+  showHoverActions,
+  canReact,
   isMenuOpen,
+  isReactionPickerOpen,
   onOpenMenu,
+  onToggleReactionPicker,
   onOpenMediaViewer,
   onOpenDirectImage,
   menuAnchorRef,
+  reactionPickerAnchorRef,
   rowHighlight,
   spacingUnit,
   palette,
@@ -279,6 +299,7 @@ const MessageRow = memo(function MessageRow({
   resolvedColorScheme,
 }: MessageRowProps) {
   const menuBtn = spacingUnit * 7;
+  const rowActive = isMenuOpen || isReactionPickerOpen;
 
   return (
     <div
@@ -306,7 +327,7 @@ const MessageRow = memo(function MessageRow({
         borderBottomLeftRadius: 0,
         borderTopRightRadius: spacingUnit * 1.5,
         borderBottomRightRadius: spacingUnit * 1.5,
-        backgroundColor: isMenuOpen ? rowHighlight : "transparent",
+        backgroundColor: rowActive ? rowHighlight : "transparent",
         transition: "background-color 0.12s ease",
       }}
     >
@@ -605,10 +626,54 @@ const MessageRow = memo(function MessageRow({
             {msg.body}
           </MessageMarkdown>
         )}
+        {msg.reactions && msg.reactions.length > 0 ? (
+          <div
+            style={{
+              display: "flex",
+              flexWrap: "wrap",
+              alignItems: "center",
+              gap: spacingUnit * 0.75,
+              marginTop: spacingUnit * 0.5,
+            }}
+          >
+            {msg.reactions.map((r) => (
+              <span
+                key={r.key}
+                style={{
+                  display: "inline-flex",
+                  alignItems: "center",
+                  gap: spacingUnit * 0.4,
+                  padding: `2px ${spacingUnit * 1.5}px`,
+                  borderRadius: 9999,
+                  border: `1px solid ${r.reactedByMe ? palette.border : palette.border}`,
+                  backgroundColor: r.reactedByMe
+                    ? `${palette.bgActive}`
+                    : palette.bgTertiary,
+                  color: palette.textPrimary,
+                  fontSize: Math.round(typography.fontSizeSmall * 0.95),
+                  fontFamily: `${typography.fontFamily}, var(--pax-twemoji-font-stack)`,
+                }}
+                title={r.count > 1 ? `${r.count} reactions` : undefined}
+              >
+                <span aria-hidden>{r.key}</span>
+                {r.count > 1 ? (
+                  <span
+                    style={{
+                      color: palette.textSecondary,
+                      fontSize: typography.fontSizeSmall * 0.9,
+                    }}
+                  >
+                    {r.count}
+                  </span>
+                ) : null}
+              </span>
+            ))}
+          </div>
+        ) : null}
       </div>
 
-      {/* Actions button */}
-      {showMessageActions && (
+      {/* React + message actions (hover) */}
+      {showHoverActions && (
         <div
           data-message-actions-root
           className="pax-message-actions"
@@ -618,41 +683,78 @@ const MessageRow = memo(function MessageRow({
             right: spacingUnit * 2,
             transform: "translateY(-50%)",
             zIndex: 2,
-            ...(isMenuOpen
+            display: "flex",
+            flexDirection: "row",
+            alignItems: "center",
+            gap: spacingUnit * 0.5,
+            ...(rowActive
               ? { opacity: 1, pointerEvents: "auto" as const }
               : {}),
           }}
         >
-          <button
-            ref={isMenuOpen ? menuAnchorRef : undefined}
-            type="button"
-            title="Message actions"
-            aria-expanded={isMenuOpen}
-            aria-haspopup="menu"
-            onMouseDown={(e) => e.preventDefault()}
-            onClick={() => onOpenMenu(msg.eventId)}
-            style={{
-              display: "flex",
-              alignItems: "center",
-              justifyContent: "center",
-              width: menuBtn,
-              height: menuBtn,
-              padding: 0,
-              border: `1px solid ${palette.border}`,
-              borderRadius: spacingUnit * 1.25,
-              backgroundColor: isMenuOpen
-                ? palette.bgHover
-                : palette.bgTertiary,
-              color: palette.textSecondary,
-              cursor: "pointer",
-              boxShadow:
-                resolvedColorScheme === "light"
-                  ? "0 1px 3px rgba(0,0,0,0.08)"
-                  : "0 2px 8px rgba(0,0,0,0.35)",
-            }}
-          >
-            <MoreVertical size={18} strokeWidth={2} />
-          </button>
+          {canReact && (
+            <button
+              ref={isReactionPickerOpen ? reactionPickerAnchorRef : undefined}
+              type="button"
+              title="Add reaction"
+              aria-expanded={isReactionPickerOpen}
+              onMouseDown={(e) => e.preventDefault()}
+              onClick={() => onToggleReactionPicker(msg.eventId)}
+              style={{
+                display: "flex",
+                alignItems: "center",
+                justifyContent: "center",
+                width: menuBtn,
+                height: menuBtn,
+                padding: 0,
+                border: `1px solid ${palette.border}`,
+                borderRadius: spacingUnit * 1.25,
+                backgroundColor: isReactionPickerOpen
+                  ? palette.bgHover
+                  : palette.bgTertiary,
+                color: palette.textSecondary,
+                cursor: "pointer",
+                boxShadow:
+                  resolvedColorScheme === "light"
+                    ? "0 1px 3px rgba(0,0,0,0.08)"
+                    : "0 2px 8px rgba(0,0,0,0.35)",
+              }}
+            >
+              <Smile size={18} strokeWidth={2} />
+            </button>
+          )}
+          {showMessageActions && (
+            <button
+              ref={isMenuOpen ? menuAnchorRef : undefined}
+              type="button"
+              title="Message actions"
+              aria-expanded={isMenuOpen}
+              aria-haspopup="menu"
+              onMouseDown={(e) => e.preventDefault()}
+              onClick={() => onOpenMenu(msg.eventId)}
+              style={{
+                display: "flex",
+                alignItems: "center",
+                justifyContent: "center",
+                width: menuBtn,
+                height: menuBtn,
+                padding: 0,
+                border: `1px solid ${palette.border}`,
+                borderRadius: spacingUnit * 1.25,
+                backgroundColor: isMenuOpen
+                  ? palette.bgHover
+                  : palette.bgTertiary,
+                color: palette.textSecondary,
+                cursor: "pointer",
+                boxShadow:
+                  resolvedColorScheme === "light"
+                    ? "0 1px 3px rgba(0,0,0,0.08)"
+                    : "0 2px 8px rgba(0,0,0,0.35)",
+              }}
+            >
+              <MoreVertical size={18} strokeWidth={2} />
+            </button>
+          )}
         </div>
       )}
     </div>
@@ -712,6 +814,8 @@ const MessageList = forwardRef<MessageListHandle, MessageListProps>(function Mes
   }));
   const shouldAutoScrollRef = useRef(true);
   const menuAnchorRef = useRef<HTMLButtonElement>(null);
+  const reactionPickerAnchorRef = useRef<HTMLButtonElement>(null);
+  const reactionPickerMountRef = useRef<HTMLDivElement>(null);
 
   /**
    * React-visible mirror of `shouldAutoScrollRef` so `useReadReceiptSender`'s
@@ -723,7 +827,14 @@ const MessageList = forwardRef<MessageListHandle, MessageListProps>(function Mes
 
   /* ---- UI state ---- */
   const [openMenuEventId, setOpenMenuEventId] = useState<string | null>(null);
+  const [openReactionEventId, setOpenReactionEventId] = useState<string | null>(
+    null,
+  );
   const [menuFixedPos, setMenuFixedPos] = useState<{
+    top: number;
+    right: number;
+  } | null>(null);
+  const [reactionPickerPos, setReactionPickerPos] = useState<{
     top: number;
     right: number;
   } | null>(null);
@@ -751,8 +862,30 @@ const MessageList = forwardRef<MessageListHandle, MessageListProps>(function Mes
   );
 
   const handleOpenMenu = useCallback((eventId: string) => {
+    setOpenReactionEventId(null);
     setOpenMenuEventId((id) => (id === eventId ? null : eventId));
   }, []);
+
+  const handleToggleReactionPicker = useCallback((eventId: string) => {
+    setOpenMenuEventId(null);
+    setOpenReactionEventId((id) => (id === eventId ? null : eventId));
+  }, []);
+
+  const handlePickReaction = useCallback(
+    async (eventId: string, nativeEmoji: string) => {
+      setOpenReactionEventId(null);
+      try {
+        await invoke("send_room_reaction", {
+          roomId,
+          targetEventId: eventId,
+          emoji: nativeEmoji,
+        });
+      } catch (e) {
+        console.error("Failed to send reaction:", e);
+      }
+    },
+    [roomId],
+  );
 
   /* ================================================================ */
   /*  Room change: reset                                               */
@@ -762,6 +895,7 @@ const MessageList = forwardRef<MessageListHandle, MessageListProps>(function Mes
     shouldAutoScrollRef.current = true;
     setAtBottom(true);
     setOpenMenuEventId(null);
+    setOpenReactionEventId(null);
     setMediaViewer(null);
   }, [roomId]);
 
@@ -1117,6 +1251,86 @@ const MessageList = forwardRef<MessageListHandle, MessageListProps>(function Mes
     };
   }, [openMenuEventId, spacing.unit]);
 
+  /* ─── Reaction emoji picker: fixed position (matches message menu) ─── */
+  useLayoutEffect(() => {
+    if (!openReactionEventId) {
+      setReactionPickerPos(null);
+      return;
+    }
+    const update = () => {
+      const btn = reactionPickerAnchorRef.current;
+      if (!btn) return;
+      const r = btn.getBoundingClientRect();
+      setReactionPickerPos({
+        top: r.bottom + spacing.unit,
+        right: window.innerWidth - r.right,
+      });
+    };
+    update();
+
+    const ro = new ResizeObserver(update);
+    if (reactionPickerAnchorRef.current) ro.observe(reactionPickerAnchorRef.current);
+    window.addEventListener("resize", update);
+    window.addEventListener("scroll", update, true);
+    const cont = scrollContainerRef.current;
+    cont?.addEventListener("scroll", update, { passive: true });
+
+    return () => {
+      ro.disconnect();
+      window.removeEventListener("resize", update);
+      window.removeEventListener("scroll", update, true);
+      cont?.removeEventListener("scroll", update);
+    };
+  }, [openReactionEventId, spacing.unit]);
+
+  useLayoutEffect(() => {
+    if (!openReactionEventId || !reactionPickerPos) {
+      if (reactionPickerMountRef.current) {
+        reactionPickerMountRef.current.innerHTML = "";
+      }
+      return;
+    }
+    const targetId = openReactionEventId;
+    const mount = reactionPickerMountRef.current;
+    if (!mount) return;
+    mount.innerHTML = "";
+    const theme = resolvedColorScheme === "light" ? "light" : "dark";
+    new Picker({
+      parent: mount,
+      data,
+      theme,
+      set: "native",
+      maxFrequentRows: 3,
+      previewPosition: "none",
+      searchPosition: "sticky",
+      onEmojiSelect: (emoji: { native: string }) => {
+        void handlePickReaction(targetId, emoji.native);
+      },
+    });
+    return () => {
+      mount.innerHTML = "";
+    };
+  }, [openReactionEventId, reactionPickerPos, resolvedColorScheme, handlePickReaction]);
+
+  useEffect(() => {
+    if (!openReactionEventId) return;
+    const onDocDown = (e: MouseEvent) => {
+      const el = e.target as HTMLElement;
+      if (el.closest?.("[data-message-actions-root]")) return;
+      if (el.closest?.("[data-message-reaction-popover]")) return;
+      setOpenReactionEventId(null);
+    };
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === "Escape") setOpenReactionEventId(null);
+    };
+    document.addEventListener("mousedown", onDocDown);
+    document.addEventListener("keydown", onKey);
+    return () => {
+      document.removeEventListener("mousedown", onDocDown);
+      document.removeEventListener("keydown", onKey);
+    };
+  }, [openReactionEventId]);
+
   const openMenuMsg =
     openMenuEventId === null
       ? undefined
@@ -1247,6 +1461,8 @@ const MessageList = forwardRef<MessageListHandle, MessageListProps>(function Mes
         const canEdit = messageAllowsEdit(msg, userId);
         const canDelete = messageAllowsDelete(msg, userId, redactionPolicy);
         const showMessageActions = canEdit || canDelete;
+        const canReact = !msg.eventId.startsWith("local:");
+        const showHoverActions = showMessageActions || canReact;
 
         return (
           <MessageRow
@@ -1254,11 +1470,16 @@ const MessageList = forwardRef<MessageListHandle, MessageListProps>(function Mes
             msg={msg}
             showHeader={showHeader}
             showMessageActions={showMessageActions}
+            showHoverActions={showHoverActions}
+            canReact={canReact}
             isMenuOpen={openMenuEventId === msg.eventId}
+            isReactionPickerOpen={openReactionEventId === msg.eventId}
             onOpenMenu={handleOpenMenu}
+            onToggleReactionPicker={handleToggleReactionPicker}
             onOpenMediaViewer={openMediaViewer}
             onOpenDirectImage={openDirectImage}
             menuAnchorRef={menuAnchorRef}
+            reactionPickerAnchorRef={reactionPickerAnchorRef}
             rowHighlight={rowHighlight}
             spacingUnit={spacing.unit}
             palette={palette}
@@ -1550,6 +1771,25 @@ const MessageList = forwardRef<MessageListHandle, MessageListProps>(function Mes
                 Delete
               </button>
             )}
+          </div>,
+          document.body,
+        )}
+
+      {/* Reaction emoji picker (portal) */}
+      {openReactionEventId != null &&
+        reactionPickerPos != null &&
+        createPortal(
+          <div
+            data-message-reaction-popover
+            onMouseDown={(e) => e.stopPropagation()}
+            style={{
+              position: "fixed",
+              top: reactionPickerPos.top,
+              right: reactionPickerPos.right,
+              zIndex: MESSAGE_ACTIONS_MENU_Z,
+            }}
+          >
+            <div ref={reactionPickerMountRef} />
           </div>,
           document.body,
         )}

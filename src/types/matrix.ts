@@ -16,6 +16,13 @@ export interface Room {
   dmPeerStatusMsg?: string | null;
 }
 
+export interface MessageReaction {
+  key: string;
+  count: number;
+  /** Whether the logged-in user has this annotation key on the event. */
+  reactedByMe: boolean;
+}
+
 export interface Message {
   eventId: string;
   sender: string;
@@ -23,6 +30,8 @@ export interface Message {
   body: string;
   timestamp: number;
   avatarUrl: string | null;
+  /** Aggregated m.reaction keys for this event (from server / sync). */
+  reactions?: MessageReaction[];
   /** True when the latest content comes from an m.replace edit */
   edited?: boolean;
   /** Matrix `m.image` payload: serialized `MediaRequestParameters` for authenticated download. */

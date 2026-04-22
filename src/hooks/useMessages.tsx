@@ -29,6 +29,14 @@ interface MessageRedactedPayload {
   redactedEventId: string;
 }
 
+interface RoomMessageReactionPayload {
+  roomId: string;
+  targetEventId: string;
+  key: string;
+  sender: string;
+  added: boolean;
+}
+
 /* ------------------------------------------------------------------ */
 /*  Constants                                                          */
 /* ------------------------------------------------------------------ */
@@ -89,6 +97,44 @@ function removeMatchingLocalEchoes(
   return prev.filter((m) => !drop.has(m.eventId));
 }
 
+function applyReactionDelta(
+  arr: Message[],
+  payload: RoomMessageReactionPayload,
+  currentUserId: string | null,
+): Message[] {
+  const me = currentUserId?.trim().toLowerCase() ?? null;
+  const fromMe = me != null && payload.sender.trim().toLowerCase() === me;
+  return arr.map((m) => {
+    if (m.eventId !== payload.targetEventId) return m;
+    const list = m.reactions ? [...m.reactions] : [];
+    const i = list.findIndex((r) => r.key === payload.key);
+    if (payload.added) {
+      if (i === -1) {
+        list.push({
+          key: payload.key,
+          count: 1,
+          reactedByMe: fromMe,
+        });
+      } else {
+        const r = { ...list[i] };
+        r.count += 1;
+        if (fromMe) r.reactedByMe = true;
+        list[i] = r;
+      }
+    } else if (i !== -1) {
+      const r = { ...list[i] };
+      r.count = Math.max(0, r.count - 1);
+      if (fromMe) r.reactedByMe = false;
+      if (r.count === 0) {
+        list.splice(i, 1);
+      } else {
+        list[i] = r;
+      }
+    }
+    return { ...m, reactions: list.length > 0 ? list : undefined };
+  });
+}
+
 function applyMessageEdit(arr: Message[], payload: MessageEditPayload): Message[] {
   const idx = arr.findIndex((m) => m.eventId === payload.targetEventId);
   if (idx === -1) return arr;
@@ -129,6 +175,8 @@ function applyMessageEdit(arr: Message[], payload: MessageEditPayload): Message[
   } else {
     nextMessage = { ...rest, body, edited: true };
   }
+
+  nextMessage = { ...nextMessage, reactions: current.reactions };
 
   const next = arr.slice();
   next[idx] = nextMessage;
@@ -299,7 +347,10 @@ export function useMessages(roomId: string | null, currentUserId: string | null 
         next = prev.slice();
         const old = next[idx];
         revokeLocalPreviewIfNeeded(old);
-        next[idx] = message;
+        next[idx] = {
+          ...message,
+          reactions: message.reactions ?? old.reactions,
+        };
       } else {
         next = [...prev, message];
         if (
@@ -339,10 +390,25 @@ export function useMessages(roomId: string | null, currentUserId: string | null 
       },
     );
 
+    const unReact = listen<RoomMessageReactionPayload>(
+      "room-message-reaction",
+      (event) => {
+        if (event.payload.roomId !== roomId) return;
+        const next = applyReactionDelta(
+          messagesRef.current,
+          event.payload,
+          currentUserId,
+        );
+        messagesRef.current = next;
+        setMessages(next);
+      },
+    );
+
     return () => {
       unMsg.then((fn) => fn());
       unEdit.then((fn) => fn());
       unRedact.then((fn) => fn());
+      unReact.then((fn) => fn());
     };
   }, [roomId, currentUserId]);
 
