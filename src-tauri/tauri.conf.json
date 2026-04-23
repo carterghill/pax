@@ -10,9 +10,10 @@
     "frontendDist": "../dist"
   },
   "app": {
-    "enableGTKAppId": false,
+    "enableGTKAppId": true,
     "windows": [
       {
+        "label": "main",
         "title": "Pax",
         "width": 900,
         "height": 600

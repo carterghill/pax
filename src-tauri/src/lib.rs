@@ -468,6 +468,7 @@ pub fn run() {
             commands::messages::edit_message,
             commands::messages::redact_message,
             commands::messages::send_room_reaction,
+            commands::messages::remove_room_reaction,
             commands::messages::get_room_redaction_policy,
             commands::messages::get_room_can_send_messages,
             commands::messages::get_room_can_pin_messages,

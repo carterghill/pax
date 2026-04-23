@@ -161,6 +161,7 @@ export default function ChatView({
     patchMessageByUploadId,
     replaceMessageEventId,
     loadMessagesAroundEvent,
+    applyLocalReactionFromChip,
   } = useMessages(isDraft ? null : activeRoom!.id, isDraft ? null : userId);
 
   const selfProfile = useMatrixUserProfile(isDraft ? null : userId);
@@ -527,6 +528,7 @@ export default function ChatView({
             onRequestEdit={handleRequestEdit}
             onMessagesMutated={refresh}
             onMessageRemoved={removeMessageById}
+            onLocalReactionFromChip={applyLocalReactionFromChip}
             canPinMessages={canPinMessages === true}
             pinnedEventIds={pinnedEventIds}
             onPinnedStateChanged={handlePinnedStateChanged}

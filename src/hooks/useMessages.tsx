@@ -97,17 +97,43 @@ function removeMatchingLocalEchoes(
   return prev.filter((m) => !drop.has(m.eventId));
 }
 
+/** Match server vs UI keys (Matrix allows variation-selector differences on emoji). */
+function reactionKeysEqual(a: string, b: string): boolean {
+  if (a === b) return true;
+  const strip = (s: string) => s.replace(/[\uFE0E\uFE0F]/g, "");
+  return strip(a) === strip(b);
+}
+
+/** Normalized key for optimistic/sync echo token matching. */
+function reactionKeyForToken(k: string): string {
+  return k.replace(/[\uFE0E\uFE0F]/g, "");
+}
+
 function applyReactionDelta(
   arr: Message[],
   payload: RoomMessageReactionPayload,
   currentUserId: string | null,
+  optimisticEchoTokens: { current: Set<string> } | null,
 ): Message[] {
   const me = currentUserId?.trim().toLowerCase() ?? null;
-  const fromMe = me != null && payload.sender.trim().toLowerCase() === me;
+  const fromMe =
+    me != null && payload.sender.trim().toLowerCase() === me;
   return arr.map((m) => {
     if (m.eventId !== payload.targetEventId) return m;
     const list = m.reactions ? [...m.reactions] : [];
-    const i = list.findIndex((r) => r.key === payload.key);
+    const i = list.findIndex((r) => reactionKeysEqual(r.key, payload.key));
+
+    // Skip the sync echo of a change we already applied in the UI after invoke.
+    if (fromMe && optimisticEchoTokens) {
+      const t =
+        (payload.added ? "add" : "rem") +
+        `|${m.eventId}|${reactionKeyForToken(payload.key)}`;
+      if (optimisticEchoTokens.current.has(t)) {
+        optimisticEchoTokens.current.delete(t);
+        return m;
+      }
+    }
+
     if (payload.added) {
       if (i === -1) {
         list.push({
@@ -233,6 +259,8 @@ export function useMessages(roomId: string | null, currentUserId: string | null 
   activeRoomIdRef.current = roomId;
   const loadingLockRef = useRef(false);
   const initialFetchingRef = useRef(false);
+  /** Dedupes `room-message-reaction` sync when we already updated from a successful chip invoke. */
+  const reactionOptimisticEchoRef = useRef<Set<string>>(new Set());
 
   /* ---- Commit helper ---- */
 
@@ -398,6 +426,7 @@ export function useMessages(roomId: string | null, currentUserId: string | null 
           messagesRef.current,
           event.payload,
           currentUserId,
+          reactionOptimisticEchoRef,
         );
         messagesRef.current = next;
         setMessages(next);
@@ -665,6 +694,59 @@ export function useMessages(roomId: string | null, currentUserId: string | null 
   /*  Load a window around a specific event (e.g. jump to pinned)      */
   /* ================================================================ */
 
+  /**
+   * Apply chip click immediately after `send_room_reaction` / `remove_room_reaction` succeeds.
+   * Registers a token so the follow-up sync does not double-apply.
+   */
+  const applyLocalReactionFromChip = useCallback(
+    (targetEventId: string, key: string, wasReactedByMe: boolean) => {
+      const token =
+        (wasReactedByMe ? "rem" : "add") +
+        `|${targetEventId}|${reactionKeyForToken(key)}`;
+      reactionOptimisticEchoRef.current.add(token);
+      window.setTimeout(() => {
+        reactionOptimisticEchoRef.current.delete(token);
+      }, 8000);
+
+      setMessages((prev) => {
+        const next = prev.map((m) => {
+          if (m.eventId !== targetEventId) return m;
+          const list = m.reactions ? [...m.reactions] : [];
+          const i = list.findIndex((r) => reactionKeysEqual(r.key, key));
+          if (wasReactedByMe) {
+            if (i === -1) return m; // sync may have already removed
+            const r = { ...list[i] };
+            if (!r.reactedByMe) return m;
+            r.count = Math.max(0, r.count - 1);
+            r.reactedByMe = false;
+            if (r.count === 0) {
+              list.splice(i, 1);
+            } else {
+              list[i] = r;
+            }
+            return {
+              ...m,
+              reactions: list.length > 0 ? list : undefined,
+            };
+          }
+          if (i === -1) {
+            list.push({ key, count: 1, reactedByMe: true });
+          } else {
+            const r = { ...list[i] };
+            if (r.reactedByMe) return m; // sync may have already applied
+            r.count += 1;
+            r.reactedByMe = true;
+            list[i] = r;
+          }
+          return { ...m, reactions: list };
+        });
+        messagesRef.current = next;
+        return next;
+      });
+    },
+    [],
+  );
+
   const loadMessagesAroundEvent = useCallback(
     async (eventId: string) => {
       if (!roomId) return;
@@ -718,5 +800,6 @@ export function useMessages(roomId: string | null, currentUserId: string | null 
     replaceMessageEventId,
     patchMessageByUploadId,
     loadMessagesAroundEvent,
+    applyLocalReactionFromChip,
   };
 }

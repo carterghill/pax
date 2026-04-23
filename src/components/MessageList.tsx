@@ -63,6 +63,12 @@ interface MessageListProps {
   onRequestEdit: (msg: Message) => void;
   onMessagesMutated: () => void;
   onMessageRemoved: (eventId: string) => void;
+  /** After successful send/remove; keeps UI in sync and dedupes sync echo. */
+  onLocalReactionFromChip: (
+    targetEventId: string,
+    key: string,
+    wasReactedByMe: boolean,
+  ) => void;
   /** When set, show Pin / Unpin in the message menu for users with pin power. */
   canPinMessages?: boolean;
   pinnedEventIds?: string[];
@@ -271,6 +277,7 @@ interface MessageRowProps {
   onOpenDirectImage: (url: string, title: string) => void;
   menuAnchorRef: React.RefObject<HTMLButtonElement | null>;
   reactionPickerAnchorRef: React.RefObject<HTMLButtonElement | null>;
+  onReactionChipClick: (key: string, reactedByMe: boolean) => void;
   rowHighlight: string;
   spacingUnit: number;
   palette: ReturnType<typeof useTheme>["palette"];
@@ -292,6 +299,7 @@ const MessageRow = memo(function MessageRow({
   onOpenDirectImage,
   menuAnchorRef,
   reactionPickerAnchorRef,
+  onReactionChipClick,
   rowHighlight,
   spacingUnit,
   palette,
@@ -632,41 +640,58 @@ const MessageRow = memo(function MessageRow({
               display: "flex",
               flexWrap: "wrap",
               alignItems: "center",
-              gap: spacingUnit * 0.75,
-              marginTop: spacingUnit * 0.5,
+              gap: spacingUnit * 1.4,
+              marginTop: spacingUnit * 1.5,
             }}
+            role="group"
+            aria-label="Reactions"
           >
             {msg.reactions.map((r) => (
-              <span
+              <button
                 key={r.key}
+                type="button"
+                title={r.reactedByMe ? "Remove your reaction" : "Add reaction"}
+                onClick={() => onReactionChipClick(r.key, r.reactedByMe)}
                 style={{
                   display: "inline-flex",
                   alignItems: "center",
-                  gap: spacingUnit * 0.4,
-                  padding: `2px ${spacingUnit * 1.5}px`,
+                  justifyContent: "center",
+                  gap: spacingUnit * 0.85,
+                  minHeight: spacingUnit * 6.5,
+                  padding: `${spacingUnit * 1.1}px ${spacingUnit * 2.1}px`,
                   borderRadius: 9999,
                   border: `1px solid ${r.reactedByMe ? palette.border : palette.border}`,
                   backgroundColor: r.reactedByMe
                     ? `${palette.bgActive}`
                     : palette.bgTertiary,
                   color: palette.textPrimary,
-                  fontSize: Math.round(typography.fontSizeSmall * 0.95),
+                  fontSize: Math.round(typography.fontSizeBase * 1.2),
+                  lineHeight: 1.1,
                   fontFamily: `${typography.fontFamily}, var(--pax-twemoji-font-stack)`,
+                  cursor: "pointer",
                 }}
-                title={r.count > 1 ? `${r.count} reactions` : undefined}
+                onMouseEnter={(e) => {
+                  e.currentTarget.style.filter = "brightness(1.06)";
+                }}
+                onMouseLeave={(e) => {
+                  e.currentTarget.style.filter = "none";
+                }}
               >
                 <span aria-hidden>{r.key}</span>
-                {r.count > 1 ? (
-                  <span
-                    style={{
-                      color: palette.textSecondary,
-                      fontSize: typography.fontSizeSmall * 0.9,
-                    }}
-                  >
-                    {r.count}
-                  </span>
-                ) : null}
-              </span>
+                <span
+                  style={{
+                    color: palette.textSecondary,
+                    fontSize: Math.round(typography.fontSizeBase * 1.05),
+                    fontWeight: typography.fontWeightMedium,
+                    minWidth: "1.1em",
+                    textAlign: "center",
+                    fontFeatureSettings: '"tnum"',
+                    fontFamily: typography.fontFamily,
+                  }}
+                >
+                  {r.count}
+                </span>
+              </button>
             ))}
           </div>
         ) : null}
@@ -783,6 +808,7 @@ const MessageList = forwardRef<MessageListHandle, MessageListProps>(function Mes
     onRequestEdit,
     onMessagesMutated,
     onMessageRemoved,
+    onLocalReactionFromChip,
     canPinMessages = false,
     pinnedEventIds = [],
     onPinnedStateChanged,
@@ -880,11 +906,36 @@ const MessageList = forwardRef<MessageListHandle, MessageListProps>(function Mes
           targetEventId: eventId,
           emoji: nativeEmoji,
         });
+        onLocalReactionFromChip(eventId, nativeEmoji, false);
       } catch (e) {
         console.error("Failed to send reaction:", e);
       }
     },
-    [roomId],
+    [roomId, onLocalReactionFromChip],
+  );
+
+  const handleReactionChipClick = useCallback(
+    async (targetEventId: string, key: string, reactedByMe: boolean) => {
+      try {
+        if (reactedByMe) {
+          await invoke("remove_room_reaction", {
+            roomId,
+            targetEventId,
+            key,
+          });
+        } else {
+          await invoke("send_room_reaction", {
+            roomId,
+            targetEventId,
+            emoji: key,
+          });
+        }
+        onLocalReactionFromChip(targetEventId, key, reactedByMe);
+      } catch (e) {
+        console.error("Failed to toggle reaction:", e);
+      }
+    },
+    [roomId, onLocalReactionFromChip],
   );
 
   /* ================================================================ */
@@ -1480,6 +1531,9 @@ const MessageList = forwardRef<MessageListHandle, MessageListProps>(function Mes
             onOpenDirectImage={openDirectImage}
             menuAnchorRef={menuAnchorRef}
             reactionPickerAnchorRef={reactionPickerAnchorRef}
+            onReactionChipClick={(key, reactedByMe) => {
+              void handleReactionChipClick(msg.eventId, key, reactedByMe);
+            }}
             rowHighlight={rowHighlight}
             spacingUnit={spacing.unit}
             palette={palette}

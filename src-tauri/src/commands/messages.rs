@@ -12,7 +12,9 @@ use tokio::time::MissedTickBehavior;
 use tokio_util::io::ReaderStream;
 
 use matrix_sdk::room::edit::EditedContent;
+use matrix_sdk::room::IncludeRelations;
 use matrix_sdk::room::MessagesOptions;
+use matrix_sdk::room::RelationsOptions;
 use matrix_sdk::ruma::events::direct::DirectEventContent;
 use matrix_sdk::ruma::events::room::member::MembershipState;
 use matrix_sdk::ruma::events::room::member::OriginalSyncRoomMemberEvent;
@@ -78,6 +80,24 @@ async fn get_matrix_media_bytes_with_timeout(
             timeout.as_secs()
         )),
     }
+}
+
+/// Matrix user IDs are compared case-insensitively; event `sender` and `client.user_id()` can differ in casing.
+fn user_id_strings_equal(a: &str, b: &str) -> bool {
+    a == b || a.to_lowercase() == b.to_lowercase()
+}
+
+/// Emoji keys from the client vs the server can differ by Unicode variation selector (U+FE0E/U+FE0F).
+fn reaction_keys_match(stored: &str, from_request: &str) -> bool {
+    if stored == from_request {
+        return true;
+    }
+    let strip_vs = |s: &str| {
+        s.chars()
+            .filter(|&c| c != '\u{fe0e}' && c != '\u{fe0f}')
+            .collect::<String>()
+    };
+    strip_vs(stored) == strip_vs(from_request)
 }
 
 enum ReactionFoldOp {
@@ -191,8 +211,10 @@ fn aggregate_reactions_from_timeline(
             .into_iter()
             .map(|(key, senders)| {
                 let count = senders.len() as u32;
-                let reacted_by_me = my_user_id
-                    .is_some_and(|me| senders.iter().any(|s| s.as_str() == me.as_str()));
+                let reacted_by_me = my_user_id.is_some_and(|me| {
+                    let m = me.as_str();
+                    senders.iter().any(|s| user_id_strings_equal(s.as_str(), m))
+                });
                 MessageReactionSummary {
                     key,
                     count,
@@ -1049,6 +1071,78 @@ pub async fn send_room_reaction(
         .map_err(|e| format!("Failed to send reaction: {}", fmt_error_chain(&e)))?;
 
     Ok(())
+}
+
+/// Redact the current user's `m.reaction` with a given key on a message, if it exists.
+#[tauri::command]
+pub async fn remove_room_reaction(
+    state: State<'_, Arc<AppState>>,
+    room_id: String,
+    target_event_id: String,
+    key: String,
+) -> Result<(), String> {
+    let client = get_client(&state).await?;
+    let room = resolve_room(&client, &room_id)?;
+    let me = client.user_id().ok_or("Not logged in")?;
+
+    let target: OwnedEventId =
+        EventId::parse(&target_event_id).map_err(|e| format!("Invalid event ID: {e}"))?;
+    let key = key.trim();
+    if key.is_empty() {
+        return Err("Empty reaction key.".to_string());
+    }
+
+    // Use `AllRelations` — some homeservers' annotation-filtered relations endpoint
+    // omits or mis-orders m.reaction; we filter in-process.
+    let mut from_token: Option<String> = None;
+    loop {
+        let mut opts = RelationsOptions {
+            include_relations: IncludeRelations::AllRelations,
+            limit: Some(UInt::from(200u32)),
+            ..Default::default()
+        };
+        opts.from = from_token;
+
+        let rels = room
+            .relations(target.clone(), opts)
+            .await
+            .map_err(|e| format!("Failed to list reactions: {}", fmt_error_chain(&e)))?;
+
+        for ev in rels.chunk {
+            let raw: AnySyncTimelineEvent = match ev.raw().deserialize() {
+                Ok(e) => e,
+                Err(_) => continue,
+            };
+            let AnySyncTimelineEvent::MessageLike(AnySyncMessageLikeEvent::Reaction(re)) = raw
+            else {
+                continue;
+            };
+            let SyncMessageLikeEvent::Original(o) = re else {
+                continue;
+            };
+            if !user_id_strings_equal(o.sender.as_str(), me.as_str()) {
+                continue;
+            }
+            if o.content.relates_to.event_id != target {
+                continue;
+            }
+            if !reaction_keys_match(&o.content.relates_to.key, key) {
+                continue;
+            }
+            let rid = o.event_id;
+            room.redact(&rid, None, None)
+                .await
+                .map_err(|e| format!("Failed to remove reaction: {}", fmt_error_chain(&e)))?;
+            return Ok(());
+        }
+
+        from_token = rels.next_batch_token;
+        if from_token.is_none() {
+            break;
+        }
+    }
+
+    Err("You do not have a matching reaction to remove on this event.".to_string())
 }
 
 #[tauri::command]
