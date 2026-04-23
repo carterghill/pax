@@ -109,6 +109,29 @@ function reactionKeyForToken(k: string): string {
   return k.replace(/[\uFE0E\uFE0F]/g, "");
 }
 
+function userIdLower(s: string): string {
+  return s.trim().toLowerCase();
+}
+
+function addToReactedBy(existing: string[] | undefined, sender: string): string[] {
+  const m = new Map<string, string>();
+  for (const id of existing ?? []) {
+    m.set(userIdLower(id), id);
+  }
+  m.set(userIdLower(sender), sender);
+  return [...m.values()].sort((a, b) => userIdLower(a).localeCompare(userIdLower(b)));
+}
+
+function removeFromReactedBy(
+  existing: string[] | undefined,
+  sender: string,
+): string[] | undefined {
+  if (!existing?.length) return existing;
+  const sl = userIdLower(sender);
+  const next = existing.filter((id) => userIdLower(id) !== sl);
+  return next.length === 0 ? undefined : next;
+}
+
 function applyReactionDelta(
   arr: Message[],
   payload: RoomMessageReactionPayload,
@@ -140,17 +163,24 @@ function applyReactionDelta(
           key: payload.key,
           count: 1,
           reactedByMe: fromMe,
+          reactedBy: [payload.sender],
         });
       } else {
         const r = { ...list[i] };
         r.count += 1;
         if (fromMe) r.reactedByMe = true;
+        if (r.reactedBy != null) {
+          r.reactedBy = addToReactedBy(r.reactedBy, payload.sender);
+        }
         list[i] = r;
       }
     } else if (i !== -1) {
       const r = { ...list[i] };
       r.count = Math.max(0, r.count - 1);
       if (fromMe) r.reactedByMe = false;
+      if (r.reactedBy != null) {
+        r.reactedBy = removeFromReactedBy(r.reactedBy, payload.sender);
+      }
       if (r.count === 0) {
         list.splice(i, 1);
       } else {
@@ -700,6 +730,7 @@ export function useMessages(roomId: string | null, currentUserId: string | null 
    */
   const applyLocalReactionFromChip = useCallback(
     (targetEventId: string, key: string, wasReactedByMe: boolean) => {
+      const me = currentUserId?.trim();
       const token =
         (wasReactedByMe ? "rem" : "add") +
         `|${targetEventId}|${reactionKeyForToken(key)}`;
@@ -719,6 +750,9 @@ export function useMessages(roomId: string | null, currentUserId: string | null 
             if (!r.reactedByMe) return m;
             r.count = Math.max(0, r.count - 1);
             r.reactedByMe = false;
+            if (me && r.reactedBy != null) {
+              r.reactedBy = removeFromReactedBy(r.reactedBy, me);
+            }
             if (r.count === 0) {
               list.splice(i, 1);
             } else {
@@ -729,13 +763,28 @@ export function useMessages(roomId: string | null, currentUserId: string | null 
               reactions: list.length > 0 ? list : undefined,
             };
           }
+          if (!me) {
+            if (i === -1) {
+              list.push({ key, count: 1, reactedByMe: true });
+            } else {
+              const r = { ...list[i] };
+              if (r.reactedByMe) return m;
+              r.count += 1;
+              r.reactedByMe = true;
+              list[i] = r;
+            }
+            return { ...m, reactions: list };
+          }
           if (i === -1) {
-            list.push({ key, count: 1, reactedByMe: true });
+            list.push({ key, count: 1, reactedByMe: true, reactedBy: [me] });
           } else {
             const r = { ...list[i] };
-            if (r.reactedByMe) return m; // sync may have already applied
+            if (r.reactedByMe) return m;
             r.count += 1;
             r.reactedByMe = true;
+            if (r.reactedBy != null) {
+              r.reactedBy = addToReactedBy(r.reactedBy, me);
+            }
             list[i] = r;
           }
           return { ...m, reactions: list };
@@ -744,7 +793,7 @@ export function useMessages(roomId: string | null, currentUserId: string | null 
         return next;
       });
     },
-    [],
+    [currentUserId],
   );
 
   const loadMessagesAroundEvent = useCallback(

@@ -215,10 +215,13 @@ fn aggregate_reactions_from_timeline(
                     let m = me.as_str();
                     senders.iter().any(|s| user_id_strings_equal(s.as_str(), m))
                 });
+                let mut reacted_by: Vec<String> = senders.into_iter().collect();
+                reacted_by.sort();
                 MessageReactionSummary {
                     key,
                     count,
                     reacted_by_me,
+                    reacted_by,
                 }
             })
             .collect();

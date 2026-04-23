@@ -21,6 +21,8 @@ export interface MessageReaction {
   count: number;
   /** Whether the logged-in user has this annotation key on the event. */
   reactedByMe: boolean;
+  /** Matrix user IDs who reacted with this key (sorted). From server aggregates / kept in sync locally. */
+  reactedBy?: string[];
 }
 
 export interface Message {

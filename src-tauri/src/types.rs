@@ -30,6 +30,9 @@ pub struct MessageReactionSummary {
     pub key: String,
     pub count: u32,
     pub reacted_by_me: bool,
+    /// Matrix user IDs who added this reaction key (lexicographically sorted).
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub reacted_by: Vec<String>,
 }
 
 #[derive(Clone, Serialize)]

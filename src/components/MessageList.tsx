@@ -22,7 +22,8 @@ import {
   Video,
   Smile,
 } from "lucide-react";
-import { Message, RoomRedactionPolicy } from "../types/matrix";
+import { Message, MessageReaction, RoomRedactionPolicy } from "../types/matrix";
+import { useRoomMembers } from "../hooks/useRoomMembers";
 import { useTheme } from "../theme/ThemeContext";
 import type { ResolvedColorScheme } from "../theme/types";
 import UserAvatar from "./UserAvatar";
@@ -162,6 +163,26 @@ function shouldShowHeader(msg: Message, prevMsg: Message | null): boolean {
   return false;
 }
 
+function reactionHoverLines(
+  r: MessageReaction,
+  resolveLabel: (userId: string) => string,
+  currentUserId: string,
+): string[] {
+  if (r.reactedBy && r.reactedBy.length > 0) {
+    const labels = r.reactedBy.map((id) => resolveLabel(id));
+    return [...labels].sort((a, b) =>
+      a.localeCompare(b, undefined, { sensitivity: "base" }),
+    );
+  }
+  if (r.count === 1 && r.reactedByMe) {
+    return [resolveLabel(currentUserId)];
+  }
+  if (r.count > 0) {
+    return [`${r.count} reaction${r.count === 1 ? "" : "s"}`];
+  }
+  return [];
+}
+
 function messageAllowsEdit(msg: Message, userId: string): boolean {
   if (msg.eventId.startsWith("local:")) return false;
   if (msg.sender !== userId) return false;
@@ -278,6 +299,11 @@ interface MessageRowProps {
   menuAnchorRef: React.RefObject<HTMLButtonElement | null>;
   reactionPickerAnchorRef: React.RefObject<HTMLButtonElement | null>;
   onReactionChipClick: (key: string, reactedByMe: boolean) => void;
+  onReactionChipHover: (
+    e: React.MouseEvent<HTMLButtonElement>,
+    r: MessageReaction,
+  ) => void;
+  onReactionChipHoverEnd: () => void;
   rowHighlight: string;
   spacingUnit: number;
   palette: ReturnType<typeof useTheme>["palette"];
@@ -300,6 +326,8 @@ const MessageRow = memo(function MessageRow({
   menuAnchorRef,
   reactionPickerAnchorRef,
   onReactionChipClick,
+  onReactionChipHover,
+  onReactionChipHoverEnd,
   rowHighlight,
   spacingUnit,
   palette,
@@ -650,7 +678,11 @@ const MessageRow = memo(function MessageRow({
               <button
                 key={r.key}
                 type="button"
-                title={r.reactedByMe ? "Remove your reaction" : "Add reaction"}
+                aria-label={
+                  r.reactedByMe
+                    ? `Remove your ${r.key} reaction`
+                    : `React with ${r.key}`
+                }
                 onClick={() => onReactionChipClick(r.key, r.reactedByMe)}
                 style={{
                   display: "inline-flex",
@@ -672,9 +704,11 @@ const MessageRow = memo(function MessageRow({
                 }}
                 onMouseEnter={(e) => {
                   e.currentTarget.style.filter = "brightness(1.06)";
+                  onReactionChipHover(e, r);
                 }}
                 onMouseLeave={(e) => {
                   e.currentTarget.style.filter = "none";
+                  onReactionChipHoverEnd();
                 }}
               >
                 <span aria-hidden>{r.key}</span>
@@ -721,7 +755,7 @@ const MessageRow = memo(function MessageRow({
             <button
               ref={isReactionPickerOpen ? reactionPickerAnchorRef : undefined}
               type="button"
-              title="Add reaction"
+              aria-label="Add reaction"
               aria-expanded={isReactionPickerOpen}
               onMouseDown={(e) => e.preventDefault()}
               onClick={() => onToggleReactionPicker(msg.eventId)}
@@ -821,6 +855,25 @@ const MessageList = forwardRef<MessageListHandle, MessageListProps>(function Mes
     [pinnedEventIds],
   );
 
+  const { members } = useRoomMembers(roomId);
+  const memberLabelById = useMemo(() => {
+    const m = new Map<string, string>();
+    for (const mem of members) {
+      const label = (mem.displayName?.trim() || mem.userId).trim();
+      m.set(mem.userId.trim().toLowerCase(), label);
+    }
+    return m;
+  }, [members]);
+
+  const resolveMemberLabel = useCallback(
+    (uid: string) => {
+      const hit = memberLabelById.get(uid.trim().toLowerCase());
+      if (hit) return hit;
+      return uid;
+    },
+    [memberLabelById],
+  );
+
   /* ---- Refs ---- */
   const scrollContainerRef = useRef<HTMLDivElement>(null);
   /** Grows with message rows / media; observed so we can pin scroll when content height changes. */
@@ -867,6 +920,47 @@ const MessageList = forwardRef<MessageListHandle, MessageListProps>(function Mes
   const [mediaViewer, setMediaViewer] = useState<MediaViewerOpenPayload | null>(
     null,
   );
+  const reactionTooltipAnchorRef = useRef<HTMLElement | null>(null);
+  const [reactionTooltip, setReactionTooltip] = useState<{
+    left: number;
+    top: number;
+    lines: string[];
+  } | null>(null);
+
+  const syncReactionTooltipPosition = useCallback(() => {
+    const el = reactionTooltipAnchorRef.current;
+    if (!el) return;
+    const r = el.getBoundingClientRect();
+    const left = r.right + 8;
+    const top = r.top + r.height / 2;
+    setReactionTooltip((prev) => {
+      if (!prev) return null;
+      const eps = 0.5;
+      if (
+        Math.abs(prev.left - left) < eps &&
+        Math.abs(prev.top - top) < eps
+      ) {
+        return prev;
+      }
+      return { ...prev, left, top };
+    });
+  }, []);
+
+  const reactionTooltipActive = reactionTooltip != null;
+
+  useEffect(() => {
+    if (!reactionTooltipActive) return;
+    syncReactionTooltipPosition();
+    const cont = scrollContainerRef.current;
+    cont?.addEventListener("scroll", syncReactionTooltipPosition, {
+      passive: true,
+    });
+    window.addEventListener("resize", syncReactionTooltipPosition);
+    return () => {
+      cont?.removeEventListener("scroll", syncReactionTooltipPosition);
+      window.removeEventListener("resize", syncReactionTooltipPosition);
+    };
+  }, [reactionTooltipActive, syncReactionTooltipPosition]);
 
   /* ---- Stable callbacks ---- */
   const openDirectImage = useCallback(
@@ -938,6 +1032,25 @@ const MessageList = forwardRef<MessageListHandle, MessageListProps>(function Mes
     [roomId, onLocalReactionFromChip],
   );
 
+  const handleReactionChipHover = useCallback(
+    (e: React.MouseEvent<HTMLButtonElement>, r: MessageReaction) => {
+      reactionTooltipAnchorRef.current = e.currentTarget;
+      const rect = e.currentTarget.getBoundingClientRect();
+      const lines = reactionHoverLines(r, resolveMemberLabel, userId);
+      setReactionTooltip({
+        left: rect.right + 8,
+        top: rect.top + rect.height / 2,
+        lines,
+      });
+    },
+    [resolveMemberLabel, userId],
+  );
+
+  const handleReactionChipHoverEnd = useCallback(() => {
+    reactionTooltipAnchorRef.current = null;
+    setReactionTooltip(null);
+  }, []);
+
   /* ================================================================ */
   /*  Room change: reset                                               */
   /* ================================================================ */
@@ -948,6 +1061,8 @@ const MessageList = forwardRef<MessageListHandle, MessageListProps>(function Mes
     setOpenMenuEventId(null);
     setOpenReactionEventId(null);
     setMediaViewer(null);
+    reactionTooltipAnchorRef.current = null;
+    setReactionTooltip(null);
   }, [roomId]);
 
   /* ================================================================ */
@@ -1534,6 +1649,8 @@ const MessageList = forwardRef<MessageListHandle, MessageListProps>(function Mes
             onReactionChipClick={(key, reactedByMe) => {
               void handleReactionChipClick(msg.eventId, key, reactedByMe);
             }}
+            onReactionChipHover={handleReactionChipHover}
+            onReactionChipHoverEnd={handleReactionChipHoverEnd}
             rowHighlight={rowHighlight}
             spacingUnit={spacing.unit}
             palette={palette}
@@ -1844,6 +1961,49 @@ const MessageList = forwardRef<MessageListHandle, MessageListProps>(function Mes
             }}
           >
             <div ref={reactionPickerMountRef} />
+          </div>,
+          document.body,
+        )}
+
+      {reactionTooltip &&
+        reactionTooltip.lines.length > 0 &&
+        createPortal(
+          <div
+            role="tooltip"
+            style={{
+              position: "fixed",
+              left: reactionTooltip.left,
+              top: reactionTooltip.top,
+              transform: "translateY(-50%)",
+              zIndex: 10_000,
+              pointerEvents: "none",
+              padding: "8px 12px",
+              borderRadius: 8,
+              backgroundColor: palette.bgPrimary,
+              color: palette.textPrimary,
+              border: `1px solid ${palette.border}`,
+              boxShadow: "0 4px 16px rgba(0, 0, 0, 0.28)",
+              fontSize: 13,
+              fontWeight: 500,
+              lineHeight: 1.35,
+              maxWidth: 280,
+              display: "flex",
+              flexDirection: "column",
+              gap: 4,
+            }}
+          >
+            {reactionTooltip.lines.map((line, i) => (
+              <div
+                key={`${i}:${line}`}
+                style={{
+                  overflow: "hidden",
+                  textOverflow: "ellipsis",
+                  whiteSpace: "nowrap",
+                }}
+              >
+                {line}
+              </div>
+            ))}
           </div>,
           document.body,
         )}
