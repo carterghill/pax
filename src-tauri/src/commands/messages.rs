@@ -15,6 +15,7 @@ use matrix_sdk::room::edit::EditedContent;
 use matrix_sdk::room::IncludeRelations;
 use matrix_sdk::room::MessagesOptions;
 use matrix_sdk::room::RelationsOptions;
+use matrix_sdk::room::reply::{EnforceThread, Reply};
 use matrix_sdk::ruma::events::direct::DirectEventContent;
 use matrix_sdk::ruma::events::room::member::MembershipState;
 use matrix_sdk::ruma::events::room::member::OriginalSyncRoomMemberEvent;
@@ -51,8 +52,9 @@ use tauri::{AppHandle, Emitter, Manager, State};
 
 use crate::types::{
     MessageBatch, MessageEditPayload, MessageInfo, MessageReactionDeltaPayload, MessageRedactedPayload,
-    MessageReactionSummary, PinnedMessagePreview, PresencePayload, RoomMessagePayload, RoomPinPermission,
-    RoomRedactionPolicy, RoomSendPermission, TypingPayload, VoiceParticipantsChangedPayload,
+    MessageReactionSummary, MessageReplyTo, PinnedMessagePreview, PresencePayload, RoomMessagePayload,
+    RoomPinPermission, RoomRedactionPolicy, RoomSendPermission, TypingPayload,
+    VoiceParticipantsChangedPayload,
 };
 use crate::AppState;
 
@@ -265,6 +267,7 @@ pub async fn get_messages(
         file_media_request: Option<serde_json::Value>,
         file_mime: Option<String>,
         file_display_name: Option<String>,
+        reply_to: Option<MessageReplyTo>,
     }
     let mut raw_msgs = Vec::new();
     let mut unique_senders = Vec::new();
@@ -406,6 +409,7 @@ pub async fn get_messages(
                 }
 
                 let ext = extract_message_display(&original.content);
+                let reply_to = reply_to_from_message_relation(&original.content.relates_to);
                 raw_msgs.push(RawMsg {
                     event_id: original.event_id.to_string(),
                     sender: sender_str,
@@ -416,6 +420,7 @@ pub async fn get_messages(
                     file_media_request: ext.file_media_request,
                     file_mime: ext.file_mime,
                     file_display_name: ext.file_display_name,
+                    reply_to,
                 });
             }
         }
@@ -507,6 +512,7 @@ pub async fn get_messages(
                 timestamp: m.timestamp,
                 avatar_url,
                 edited,
+                reply_to: m.reply_to,
                 image_media_request,
                 video_media_request,
                 file_media_request,
@@ -542,12 +548,31 @@ pub async fn send_message(
     state: State<'_, Arc<AppState>>,
     room_id: String,
     body: String,
+    reply_to_event_id: Option<String>,
 ) -> Result<(), String> {
     let client = get_client(&state).await?;
     let room = resolve_room(&client, &room_id)?;
 
     let content =
-        matrix_sdk::ruma::events::room::message::RoomMessageEventContent::text_plain(&body);
+        if let Some(raw) = reply_to_event_id {
+            let id_str = raw.trim();
+            if id_str.is_empty() {
+                return Err("Invalid reply event id".to_string());
+            }
+            let eid: OwnedEventId = EventId::parse(id_str)
+                .map_err(|e| format!("Invalid event id: {e}"))?
+                .to_owned();
+            let reply = Reply {
+                event_id: eid,
+                enforce_thread: EnforceThread::MaybeThreaded,
+            };
+            let without = RoomMessageEventContentWithoutRelation::text_plain(&body);
+            room.make_reply_event(without, reply)
+                .await
+                .map_err(|e| format!("Failed to build reply: {}", fmt_error_chain(&e)))?
+        } else {
+            RoomMessageEventContent::text_plain(&body)
+        };
 
     room.send(content)
         .await
@@ -657,6 +682,7 @@ async fn build_message_infos_from_timeline_events(
         file_media_request: Option<serde_json::Value>,
         file_mime: Option<String>,
         file_display_name: Option<String>,
+        reply_to: Option<MessageReplyTo>,
     }
 
     let mut raw_msgs = Vec::new();
@@ -721,6 +747,7 @@ async fn build_message_infos_from_timeline_events(
                     }
 
                     let ext = extract_message_display(&original.content);
+                    let reply_to = reply_to_from_message_relation(&original.content.relates_to);
                     raw_msgs.push(RawMsg {
                         event_id: original.event_id.to_string(),
                         sender: sender_str,
@@ -731,6 +758,7 @@ async fn build_message_infos_from_timeline_events(
                         file_media_request: ext.file_media_request,
                         file_mime: ext.file_mime,
                         file_display_name: ext.file_display_name,
+                        reply_to,
                     });
                 }
                 _ => {}
@@ -800,6 +828,7 @@ async fn build_message_infos_from_timeline_events(
                 timestamp: m.timestamp,
                 avatar_url,
                 edited,
+                reply_to: m.reply_to,
                 image_media_request,
                 video_media_request,
                 file_media_request,
@@ -1242,6 +1271,7 @@ pub async fn start_sync(
             }
 
             let ext = extract_message_display(&ev.content);
+            let reply_to = reply_to_from_message_relation(&ev.content.relates_to);
             let sender = ev.sender.to_string();
 
             let (sender_name, avatar_url) = match room.get_member_no_sync(&ev.sender).await {
@@ -1277,6 +1307,7 @@ pub async fn start_sync(
                     timestamp,
                     avatar_url,
                     edited: false,
+                    reply_to,
                     image_media_request: ext.image_media_request,
                     video_media_request: ext.video_media_request,
                     file_media_request: ext.file_media_request,
@@ -1775,6 +1806,47 @@ pub async fn send_typing_notice(
     Ok(())
 }
 
+/// Matrix rich replies and thread replies can prefix `m.room.message` `body` with one or more lines
+/// starting with `> `; we keep only the user’s new text. Caller must set `in_reply` from `relates_to`
+/// so normal blockquotes in unrelated messages are not touched.
+/// Requires at least one newline so a single `> ` line (manual quote) is left unchanged.
+fn strip_rich_reply_plain_text(s: &str) -> String {
+    if !s.contains('\n') {
+        return s.to_string();
+    }
+    let mut s = s;
+    while s.starts_with("> ") {
+        s = s.split_once('\n').map(|(_, rest)| rest).unwrap_or("");
+    }
+    s.trim_start_matches('\n').to_string()
+}
+
+/// `m.in_reply_to` or a thread with `m.in_reply_to` (Matrix SDK `ForwardThread` / thread replies).
+fn reply_to_from_message_relation(
+    rel: &Option<Relation<RoomMessageEventContentWithoutRelation>>,
+) -> Option<MessageReplyTo> {
+    let event_id: String = match rel {
+        Some(Relation::Reply { in_reply_to }) => in_reply_to.event_id.to_string(),
+        Some(Relation::Thread(t)) => t
+            .in_reply_to
+            .as_ref()
+            .map(|i| i.event_id.to_string())?,
+        _ => return None,
+    };
+    Some(MessageReplyTo { event_id })
+}
+
+/// Whether the event is a *reply* that may embed a `> ` plain-text quote block.
+fn is_reply_plain_strip_context(
+    rel: &Option<Relation<RoomMessageEventContentWithoutRelation>>,
+) -> bool {
+    match rel {
+        Some(Relation::Reply { .. }) => true,
+        Some(Relation::Thread(t)) => t.in_reply_to.is_some(),
+        _ => false,
+    }
+}
+
 /// Body text for the timeline plus optional image / video / file download descriptors (`m.room.message`).
 #[derive(Clone)]
 struct MessageDisplayExtract {
@@ -1790,12 +1862,22 @@ fn extract_message_display(
     content: &matrix_sdk::ruma::events::room::message::RoomMessageEventContent,
 ) -> MessageDisplayExtract {
     use matrix_sdk::ruma::events::room::message::MessageType;
-    match &content.msgtype {
+    let strip = is_reply_plain_strip_context(&content.relates_to);
+    let apply_reply_strip = |s: &str| -> String {
+        if strip {
+            strip_rich_reply_plain_text(s)
+        } else {
+            s.to_string()
+        }
+    };
+    let out = match &content.msgtype {
         MessageType::Image(img) => {
-            let body = img
-                .caption()
-                .map(|s| s.to_string())
-                .unwrap_or_default();
+            let body = apply_reply_strip(
+                &img
+                    .caption()
+                    .map(|s| s.to_string())
+                    .unwrap_or_default(),
+            );
             // Thumbnails are often a single static frame for GIFs (and sometimes transcoded to PNG/JPEG).
             // Request the original file for GIFs so the WebView can animate them.
             // Non-GIF: modest thumbnail size — large thumbs stress remote-media federation and some
@@ -1823,10 +1905,12 @@ fn extract_message_display(
             }
         }
         MessageType::Video(vid) => {
-            let body = vid
-                .caption()
-                .map(|s| s.to_string())
-                .unwrap_or_default();
+            let body = apply_reply_strip(
+                &vid
+                    .caption()
+                    .map(|s| s.to_string())
+                    .unwrap_or_default(),
+            );
             let req = MediaRequestParameters {
                 source: vid.source.clone(),
                 format: MediaFormat::File,
@@ -1842,7 +1926,7 @@ fn extract_message_display(
             }
         }
         MessageType::Text(text) => MessageDisplayExtract {
-            body: text.body.clone(),
+            body: apply_reply_strip(&text.body),
             image_media_request: None,
             video_media_request: None,
             file_media_request: None,
@@ -1850,7 +1934,7 @@ fn extract_message_display(
             file_display_name: None,
         },
         MessageType::Notice(notice) => MessageDisplayExtract {
-            body: notice.body.clone(),
+            body: apply_reply_strip(&notice.body),
             image_media_request: None,
             video_media_request: None,
             file_media_request: None,
@@ -1858,7 +1942,7 @@ fn extract_message_display(
             file_display_name: None,
         },
         MessageType::Emote(emote) => MessageDisplayExtract {
-            body: format!("* {}", emote.body),
+            body: format!("* {}", apply_reply_strip(&emote.body)),
             image_media_request: None,
             video_media_request: None,
             file_media_request: None,
@@ -1873,7 +1957,7 @@ fn extract_message_display(
                 .unwrap_or_else(|| f.body.clone());
             // When `filename` is set, `body` is the caption; otherwise `body` is the filename only.
             let body = if f.filename.is_some() {
-                f.body.clone()
+                apply_reply_strip(&f.body)
             } else {
                 String::new()
             };
@@ -1912,7 +1996,8 @@ fn extract_message_display(
             file_mime: None,
             file_display_name: None,
         },
-    }
+    };
+    out
 }
 
 fn matrix_image_is_gif(

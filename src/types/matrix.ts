@@ -25,6 +25,11 @@ export interface MessageReaction {
   reactedBy?: string[];
 }
 
+/** `m.in_reply_to` — parent is resolved in the timeline by `eventId` when loaded. */
+export interface MessageReplyTo {
+  eventId: string;
+}
+
 export interface Message {
   eventId: string;
   sender: string;
@@ -32,6 +37,8 @@ export interface Message {
   body: string;
   timestamp: number;
   avatarUrl: string | null;
+  /** When set, this message is a reply to another timeline event. */
+  replyTo?: MessageReplyTo;
   /** Aggregated m.reaction keys for this event (from server / sync). */
   reactions?: MessageReaction[];
   /** True when the latest content comes from an m.replace edit */

@@ -21,6 +21,7 @@ import {
   ArrowDown,
   Video,
   Smile,
+  Reply,
 } from "lucide-react";
 import { Message, MessageReaction, RoomRedactionPolicy } from "../types/matrix";
 import { useRoomMembers } from "../hooks/useRoomMembers";
@@ -62,6 +63,11 @@ interface MessageListProps {
   userId: string;
   redactionPolicy: RoomRedactionPolicy;
   onRequestEdit: (msg: Message) => void;
+  /** Reply composer target (cleared on send or Escape in composer). */
+  onRequestReply: (msg: Message) => void;
+  onReplyPreviewClick: (eventId: string) => void;
+  /** When false, the reply action is hidden (e.g. read-only room). */
+  allowReply: boolean;
   onMessagesMutated: () => void;
   onMessageRemoved: (eventId: string) => void;
   /** After successful send/remove; keeps UI in sync and dedupes sync echo. */
@@ -83,10 +89,54 @@ interface MessageListProps {
 const AUTO_SCROLL_THRESHOLD_PX = 200;
 const SKELETON_COUNT = 4;
 const MESSAGE_ACTIONS_MENU_Z = 10_000;
+const POPOVER_VIEWPORT_EPS_PX = 1;
 
 /* ------------------------------------------------------------------ */
 /*  Helpers                                                            */
 /* ------------------------------------------------------------------ */
+
+/** Viewport X of the left edge of the leftmost button in the message hover action bar (`anchor` is any button in that bar). */
+function getMessageActionBarLeftEdge(anchor: HTMLElement | null): number | null {
+  if (!anchor) return null;
+  const bar = anchor.closest(".pax-message-actions");
+  if (!bar) return null;
+  const firstBtn = bar.querySelector("button");
+  if (!firstBtn) return null;
+  return firstBtn.getBoundingClientRect().left;
+}
+
+/** Bordered segment row (Reply / react / overflow) in viewport coords; `anchor` is any button in that bar. */
+function getMessageActionGroupRect(anchor: HTMLElement | null): DOMRect | null {
+  if (!anchor) return null;
+  const bar = anchor.closest(".pax-message-actions");
+  if (!bar) return null;
+  const group = bar.firstElementChild;
+  if (!group || !(group instanceof HTMLElement)) return null;
+  return group.getBoundingClientRect();
+}
+
+/** Shift a `position: fixed` popover so it stays inside the viewport (by `margin` from each edge). */
+function clampFixedPopoverToViewport(
+  pop: DOMRect,
+  margin: number,
+): { top: number; right: number } {
+  const vw = window.innerWidth;
+  const vh = window.innerHeight;
+  let left = pop.left;
+  let top = pop.top;
+  if (left < margin) left = margin;
+  if (left + pop.width > vw - margin) {
+    left = Math.max(margin, vw - margin - pop.width);
+  }
+  if (top < margin) top = margin;
+  if (top + pop.height > vh - margin) {
+    top = Math.max(margin, vh - margin - pop.height);
+  }
+  return {
+    top,
+    right: vw - left - pop.width,
+  };
+}
 
 const NON_EDITABLE_BODIES = new Set([
   "[File]",
@@ -137,6 +187,36 @@ function LocalUploadFailedNote({
 }
 
 /** Hide redundant caption when Matrix body duplicates the attachment filename we already show on the chip. */
+function replySnippetForMessage(m: Message): string {
+  if (m.imageMediaRequest || m.localImagePreviewObjectUrl) return "Image";
+  if (m.videoMediaRequest) return "Video";
+  if (m.fileMediaRequest) return m.fileDisplayName?.trim() || "File";
+  const t = m.body.trim();
+  if (t.length > 120) return `${t.slice(0, 120)}…`;
+  return t || "Message";
+}
+
+function getReplyThreadPreview(
+  msg: Message,
+  byId: Map<string, Message>,
+): { targetEventId: string; senderLabel: string; text: string } | null {
+  const id = msg.replyTo?.eventId;
+  if (!id) return null;
+  const parent = byId.get(id);
+  if (parent) {
+    return {
+      targetEventId: id,
+      senderLabel: (parent.senderName?.trim() || parent.sender).trim(),
+      text: replySnippetForMessage(parent),
+    };
+  }
+  return {
+    targetEventId: id,
+    senderLabel: "…",
+    text: "Original message not in view",
+  };
+}
+
 function shouldShowCaptionBelowMedia(msg: Message): boolean {
   const body = msg.body.trim();
   if (!body) return false;
@@ -287,11 +367,15 @@ function LoadingSkeletons({
 interface MessageRowProps {
   msg: Message;
   showHeader: boolean;
-  showMessageActions: boolean;
+  /** Reply control in the hover bar (not the ⋮ menu). */
+  showReplyButton: boolean;
+  /** Edit / delete / pin in the ⋮ menu. */
+  showOverflowMenu: boolean;
   showHoverActions: boolean;
   canReact: boolean;
   isMenuOpen: boolean;
   isReactionPickerOpen: boolean;
+  onRequestReply: () => void;
   onOpenMenu: (eventId: string) => void;
   onToggleReactionPicker: (eventId: string) => void;
   onOpenMediaViewer: (payload: MediaViewerOpenPayload) => void;
@@ -309,16 +393,24 @@ interface MessageRowProps {
   palette: ReturnType<typeof useTheme>["palette"];
   typography: ReturnType<typeof useTheme>["typography"];
   resolvedColorScheme: ResolvedColorScheme;
+  replyThread: {
+    targetEventId: string;
+    senderLabel: string;
+    text: string;
+  } | null;
+  onReplyThreadClick: (eventId: string) => void;
 }
 
 const MessageRow = memo(function MessageRow({
   msg,
   showHeader,
-  showMessageActions,
+  showReplyButton,
+  showOverflowMenu,
   showHoverActions,
   canReact,
   isMenuOpen,
   isReactionPickerOpen,
+  onRequestReply,
   onOpenMenu,
   onToggleReactionPicker,
   onOpenMediaViewer,
@@ -333,9 +425,20 @@ const MessageRow = memo(function MessageRow({
   palette,
   typography,
   resolvedColorScheme,
+  replyThread,
+  onReplyThreadClick,
 }: MessageRowProps) {
   const menuBtn = spacingUnit * 7;
   const rowActive = isMenuOpen || isReactionPickerOpen;
+  const groupShadow =
+    resolvedColorScheme === "light"
+      ? "0 1px 3px rgba(0,0,0,0.08)"
+      : "0 2px 8px rgba(0,0,0,0.35)";
+  type HoverActionKind = "reply" | "react" | "menu";
+  const hoverActionKinds: HoverActionKind[] = [];
+  if (showReplyButton) hoverActionKinds.push("reply");
+  if (canReact) hoverActionKinds.push("react");
+  if (showOverflowMenu) hoverActionKinds.push("menu");
 
   return (
     <div
@@ -408,6 +511,50 @@ const MessageRow = memo(function MessageRow({
             </span>
           </div>
         )}
+
+        {replyThread ? (
+          <button
+            type="button"
+            onClick={() => onReplyThreadClick(replyThread.targetEventId)}
+            title="Jump to original message"
+            style={{
+              display: "block",
+              width: "100%",
+              marginTop: showHeader ? spacingUnit : spacingUnit * 0.5,
+              marginBottom: spacingUnit * 0.5,
+              padding: `${spacingUnit * 0.9}px ${spacingUnit * 1.25}px`,
+              textAlign: "left",
+              border: "none",
+              borderLeft: `3px solid ${palette.textSecondary}`,
+              borderRadius: spacingUnit * 0.75,
+              backgroundColor: palette.bgTertiary,
+              cursor: "pointer",
+              fontFamily: typography.fontFamily,
+            }}
+          >
+            <div
+              style={{
+                fontSize: typography.fontSizeSmall,
+                fontWeight: typography.fontWeightMedium,
+                color: palette.textHeading,
+                marginBottom: 2,
+              }}
+            >
+              {replyThread.senderLabel}
+            </div>
+            <div
+              style={{
+                fontSize: typography.fontSizeSmall,
+                color: palette.textSecondary,
+                overflow: "hidden",
+                textOverflow: "ellipsis",
+                whiteSpace: "nowrap",
+              }}
+            >
+              {replyThread.text}
+            </div>
+          </button>
+        ) : null}
 
         {msg.localImagePreviewObjectUrl && msg.imageMediaRequest == null ? (
           <>
@@ -731,7 +878,7 @@ const MessageRow = memo(function MessageRow({
         ) : null}
       </div>
 
-      {/* React + message actions (hover) */}
+      {/* Reply + react + overflow (hover), single control group */}
       {showHoverActions && (
         <div
           data-message-actions-root
@@ -745,75 +892,129 @@ const MessageRow = memo(function MessageRow({
             display: "flex",
             flexDirection: "row",
             alignItems: "center",
-            gap: spacingUnit * 0.5,
             ...(rowActive
               ? { opacity: 1, pointerEvents: "auto" as const }
               : {}),
           }}
         >
-          {canReact && (
-            <button
-              ref={isReactionPickerOpen ? reactionPickerAnchorRef : undefined}
-              type="button"
-              aria-label="Add reaction"
-              aria-expanded={isReactionPickerOpen}
-              onMouseDown={(e) => e.preventDefault()}
-              onClick={() => onToggleReactionPicker(msg.eventId)}
-              style={{
-                display: "flex",
-                alignItems: "center",
-                justifyContent: "center",
+          <div
+            style={{
+              display: "flex",
+              flexDirection: "row",
+              alignItems: "stretch",
+              border: `1px solid ${palette.border}`,
+              borderRadius: spacingUnit * 1.25,
+              overflow: "hidden",
+              backgroundColor: palette.bgTertiary,
+              boxShadow: groupShadow,
+            }}
+          >
+            {hoverActionKinds.map((kind, i) => {
+              const isFirst = i === 0;
+              const segBtn = {
+                display: "flex" as const,
+                alignItems: "center" as const,
+                justifyContent: "center" as const,
                 width: menuBtn,
-                height: menuBtn,
+                minHeight: menuBtn,
                 padding: 0,
-                border: `1px solid ${palette.border}`,
-                borderRadius: spacingUnit * 1.25,
-                backgroundColor: isReactionPickerOpen
-                  ? palette.bgHover
-                  : palette.bgTertiary,
+                border: "none" as const,
+                borderLeft: isFirst
+                  ? "none"
+                  : (`1px solid ${palette.border}` as const),
+                borderRadius: 0,
                 color: palette.textSecondary,
-                cursor: "pointer",
-                boxShadow:
-                  resolvedColorScheme === "light"
-                    ? "0 1px 3px rgba(0,0,0,0.08)"
-                    : "0 2px 8px rgba(0,0,0,0.35)",
-              }}
-            >
-              <Smile size={18} strokeWidth={2} />
-            </button>
-          )}
-          {showMessageActions && (
-            <button
-              ref={isMenuOpen ? menuAnchorRef : undefined}
-              type="button"
-              title="Message actions"
-              aria-expanded={isMenuOpen}
-              aria-haspopup="menu"
-              onMouseDown={(e) => e.preventDefault()}
-              onClick={() => onOpenMenu(msg.eventId)}
-              style={{
-                display: "flex",
-                alignItems: "center",
-                justifyContent: "center",
-                width: menuBtn,
-                height: menuBtn,
-                padding: 0,
-                border: `1px solid ${palette.border}`,
-                borderRadius: spacingUnit * 1.25,
-                backgroundColor: isMenuOpen
-                  ? palette.bgHover
-                  : palette.bgTertiary,
-                color: palette.textSecondary,
-                cursor: "pointer",
-                boxShadow:
-                  resolvedColorScheme === "light"
-                    ? "0 1px 3px rgba(0,0,0,0.08)"
-                    : "0 2px 8px rgba(0,0,0,0.35)",
-              }}
-            >
-              <MoreVertical size={18} strokeWidth={2} />
-            </button>
-          )}
+                cursor: "pointer" as const,
+              };
+              if (kind === "reply") {
+                return (
+                  <button
+                    key="reply"
+                    type="button"
+                    title="Reply"
+                    aria-label="Reply"
+                    onMouseDown={(e) => e.preventDefault()}
+                    onClick={onRequestReply}
+                    style={{
+                      ...segBtn,
+                      backgroundColor: palette.bgTertiary,
+                    }}
+                    onMouseEnter={(e) => {
+                      e.currentTarget.style.backgroundColor = palette.bgHover;
+                    }}
+                    onMouseLeave={(e) => {
+                      e.currentTarget.style.backgroundColor = palette.bgTertiary;
+                    }}
+                  >
+                    <Reply size={18} strokeWidth={2} />
+                  </button>
+                );
+              }
+              if (kind === "react") {
+                return (
+                  <button
+                    key="react"
+                    ref={
+                      isReactionPickerOpen ? reactionPickerAnchorRef : undefined
+                    }
+                    type="button"
+                    aria-label="Add reaction"
+                    aria-expanded={isReactionPickerOpen}
+                    onMouseDown={(e) => e.preventDefault()}
+                    onClick={() => onToggleReactionPicker(msg.eventId)}
+                    style={{
+                      ...segBtn,
+                      backgroundColor: isReactionPickerOpen
+                        ? palette.bgHover
+                        : palette.bgTertiary,
+                    }}
+                    onMouseEnter={(e) => {
+                      if (!isReactionPickerOpen) {
+                        e.currentTarget.style.backgroundColor = palette.bgHover;
+                      }
+                    }}
+                    onMouseLeave={(e) => {
+                      e.currentTarget.style.backgroundColor = isReactionPickerOpen
+                        ? palette.bgHover
+                        : palette.bgTertiary;
+                    }}
+                  >
+                    <Smile size={18} strokeWidth={2} />
+                  </button>
+                );
+              }
+              return (
+                <button
+                  key="menu"
+                  ref={isMenuOpen ? menuAnchorRef : undefined}
+                  type="button"
+                  title="Message actions"
+                  aria-expanded={isMenuOpen}
+                  aria-haspopup="menu"
+                  onMouseDown={(e) => e.preventDefault()}
+                  onClick={() => onOpenMenu(msg.eventId)}
+                  style={{
+                    ...segBtn,
+                    backgroundColor: isMenuOpen
+                      ? palette.bgHover
+                      : palette.bgTertiary,
+                  }}
+                  onMouseEnter={(e) => {
+                    if (!isMenuOpen) {
+                      e.currentTarget.style.backgroundColor = palette.bgHover;
+                    }
+                  }}
+                  onMouseLeave={(e) => {
+                    e.currentTarget.style.backgroundColor = isMenuOpen
+                      ? palette.bgHover
+                      : palette.bgTertiary;
+                  }}
+                >
+                  <MoreVertical size={18} strokeWidth={2} />
+                </button>
+              );
+            })}
+          </div>
         </div>
       )}
     </div>
@@ -840,6 +1041,9 @@ const MessageList = forwardRef<MessageListHandle, MessageListProps>(function Mes
     userId,
     redactionPolicy,
     onRequestEdit,
+    onRequestReply,
+    onReplyPreviewClick,
+    allowReply,
     onMessagesMutated,
     onMessageRemoved,
     onLocalReactionFromChip,
@@ -893,8 +1097,12 @@ const MessageList = forwardRef<MessageListHandle, MessageListProps>(function Mes
   }));
   const shouldAutoScrollRef = useRef(true);
   const menuAnchorRef = useRef<HTMLButtonElement>(null);
+  const menuPortalRef = useRef<HTMLDivElement>(null);
   const reactionPickerAnchorRef = useRef<HTMLButtonElement>(null);
+  const reactionPickerPortalRef = useRef<HTMLDivElement>(null);
   const reactionPickerMountRef = useRef<HTMLDivElement>(null);
+  /** Avoid tearing down emoji-mart when only the clamped position changes. */
+  const reactionPickerMountKeyRef = useRef<string | null>(null);
 
   /**
    * React-visible mirror of `shouldAutoScrollRef` so `useReadReceiptSender`'s
@@ -910,12 +1118,14 @@ const MessageList = forwardRef<MessageListHandle, MessageListProps>(function Mes
     null,
   );
   const [menuFixedPos, setMenuFixedPos] = useState<{
-    top: number;
     right: number;
+    top: number | null;
+    bottom: number | null;
   } | null>(null);
   const [reactionPickerPos, setReactionPickerPos] = useState<{
-    top: number;
     right: number;
+    top: number | null;
+    bottom: number | null;
   } | null>(null);
   const [mediaViewer, setMediaViewer] = useState<MediaViewerOpenPayload | null>(
     null,
@@ -1391,31 +1601,83 @@ const MessageList = forwardRef<MessageListHandle, MessageListProps>(function Mes
       setMenuFixedPos(null);
       return;
     }
-    const update = () => {
+    const placeFromAnchor = () => {
       const btn = menuAnchorRef.current;
       if (!btn) return;
       const r = btn.getBoundingClientRect();
+      const gap = spacing.unit;
+      /** Breathing room between the popover and the action strip (horizontal when side-by-side). */
+      const menuEdgeGap = spacing.unit;
+      const g = getMessageActionGroupRect(btn);
+      const vh = window.innerHeight;
+      const openAbove = g
+        ? g.top + g.height / 2 > vh / 2
+        : r.top + r.height / 2 > vh / 2;
+      const alignLeft = getMessageActionBarLeftEdge(btn);
+      const right =
+        alignLeft != null
+          ? window.innerWidth - alignLeft + menuEdgeGap
+          : window.innerWidth - r.right + menuEdgeGap;
+      const topWhenBelow = g ? g.top : r.bottom + gap;
+      const bottomWhenAbove = g
+        ? vh - g.bottom
+        : vh - r.top + gap;
       setMenuFixedPos({
-        top: r.bottom + spacing.unit,
-        right: window.innerWidth - r.right,
+        right,
+        top: openAbove ? null : topWhenBelow,
+        bottom: openAbove ? bottomWhenAbove : null,
       });
     };
-    update();
+    placeFromAnchor();
 
-    const ro = new ResizeObserver(update);
-    if (menuAnchorRef.current) ro.observe(menuAnchorRef.current);
-    window.addEventListener("resize", update);
-    window.addEventListener("scroll", update, true);
+    const ro = new ResizeObserver(placeFromAnchor);
+    const menuBar =
+      menuAnchorRef.current?.closest(".pax-message-actions") ?? null;
+    if (menuBar) ro.observe(menuBar);
+    else if (menuAnchorRef.current) ro.observe(menuAnchorRef.current);
+    window.addEventListener("resize", placeFromAnchor);
+    window.addEventListener("scroll", placeFromAnchor, true);
     const cont = scrollContainerRef.current;
-    cont?.addEventListener("scroll", update, { passive: true });
+    cont?.addEventListener("scroll", placeFromAnchor, { passive: true });
 
     return () => {
       ro.disconnect();
-      window.removeEventListener("resize", update);
-      window.removeEventListener("scroll", update, true);
-      cont?.removeEventListener("scroll", update);
+      window.removeEventListener("resize", placeFromAnchor);
+      window.removeEventListener("scroll", placeFromAnchor, true);
+      cont?.removeEventListener("scroll", placeFromAnchor);
     };
   }, [openMenuEventId, spacing.unit]);
+
+  useLayoutEffect(() => {
+    if (!openMenuEventId || !menuFixedPos) return;
+    const el = menuPortalRef.current;
+    if (!el) return;
+    const margin = Math.max(8, spacing.unit * 2);
+
+    const applyClamp = () => {
+      const { top, right } = clampFixedPopoverToViewport(
+        el.getBoundingClientRect(),
+        margin,
+      );
+      setMenuFixedPos((prev) => {
+        if (!prev) return prev;
+        if (
+          prev.bottom == null &&
+          prev.top != null &&
+          Math.abs(prev.top - top) < POPOVER_VIEWPORT_EPS_PX &&
+          Math.abs(prev.right - right) < POPOVER_VIEWPORT_EPS_PX
+        ) {
+          return prev;
+        }
+        return { top, right, bottom: null };
+      });
+    };
+
+    applyClamp();
+    const ro = new ResizeObserver(applyClamp);
+    ro.observe(el);
+    return () => ro.disconnect();
+  }, [openMenuEventId, menuFixedPos, spacing.unit]);
 
   /* ─── Reaction emoji picker: fixed position (matches message menu) ─── */
   useLayoutEffect(() => {
@@ -1423,43 +1685,102 @@ const MessageList = forwardRef<MessageListHandle, MessageListProps>(function Mes
       setReactionPickerPos(null);
       return;
     }
-    const update = () => {
+    const placeFromAnchor = () => {
       const btn = reactionPickerAnchorRef.current;
       if (!btn) return;
       const r = btn.getBoundingClientRect();
+      const gap = spacing.unit;
+      const menuEdgeGap = spacing.unit;
+      const g = getMessageActionGroupRect(btn);
+      const vh = window.innerHeight;
+      const openAbove = g
+        ? g.top + g.height / 2 > vh / 2
+        : r.top + r.height / 2 > vh / 2;
+      const alignLeft = getMessageActionBarLeftEdge(btn);
+      const right =
+        alignLeft != null
+          ? window.innerWidth - alignLeft + menuEdgeGap
+          : window.innerWidth - r.right + menuEdgeGap;
+      const topWhenBelow = g ? g.top : r.bottom + gap;
+      const bottomWhenAbove = g
+        ? vh - g.bottom
+        : vh - r.top + gap;
       setReactionPickerPos({
-        top: r.bottom + spacing.unit,
-        right: window.innerWidth - r.right,
+        right,
+        top: openAbove ? null : topWhenBelow,
+        bottom: openAbove ? bottomWhenAbove : null,
       });
     };
-    update();
+    placeFromAnchor();
 
-    const ro = new ResizeObserver(update);
-    if (reactionPickerAnchorRef.current) ro.observe(reactionPickerAnchorRef.current);
-    window.addEventListener("resize", update);
-    window.addEventListener("scroll", update, true);
+    const ro = new ResizeObserver(placeFromAnchor);
+    const reactBar =
+      reactionPickerAnchorRef.current?.closest(".pax-message-actions") ?? null;
+    if (reactBar) ro.observe(reactBar);
+    else if (reactionPickerAnchorRef.current)
+      ro.observe(reactionPickerAnchorRef.current);
+    window.addEventListener("resize", placeFromAnchor);
+    window.addEventListener("scroll", placeFromAnchor, true);
     const cont = scrollContainerRef.current;
-    cont?.addEventListener("scroll", update, { passive: true });
+    cont?.addEventListener("scroll", placeFromAnchor, { passive: true });
 
     return () => {
       ro.disconnect();
-      window.removeEventListener("resize", update);
-      window.removeEventListener("scroll", update, true);
-      cont?.removeEventListener("scroll", update);
+      window.removeEventListener("resize", placeFromAnchor);
+      window.removeEventListener("scroll", placeFromAnchor, true);
+      cont?.removeEventListener("scroll", placeFromAnchor);
     };
   }, [openReactionEventId, spacing.unit]);
 
   useLayoutEffect(() => {
-    if (!openReactionEventId || !reactionPickerPos) {
+    if (!openReactionEventId || !reactionPickerPos) return;
+    const el = reactionPickerPortalRef.current;
+    if (!el) return;
+    const margin = Math.max(8, spacing.unit * 2);
+
+    const applyClamp = () => {
+      const { top, right } = clampFixedPopoverToViewport(
+        el.getBoundingClientRect(),
+        margin,
+      );
+      setReactionPickerPos((prev) => {
+        if (!prev) return prev;
+        if (
+          prev.bottom == null &&
+          prev.top != null &&
+          Math.abs(prev.top - top) < POPOVER_VIEWPORT_EPS_PX &&
+          Math.abs(prev.right - right) < POPOVER_VIEWPORT_EPS_PX
+        ) {
+          return prev;
+        }
+        return { top, right, bottom: null };
+      });
+    };
+
+    applyClamp();
+    const ro = new ResizeObserver(applyClamp);
+    ro.observe(el);
+    return () => ro.disconnect();
+  }, [openReactionEventId, reactionPickerPos, spacing.unit]);
+
+  useLayoutEffect(() => {
+    if (!openReactionEventId) {
+      reactionPickerMountKeyRef.current = null;
       if (reactionPickerMountRef.current) {
         reactionPickerMountRef.current.innerHTML = "";
       }
       return;
     }
-    const targetId = openReactionEventId;
+    if (!reactionPickerPos) return;
     const mount = reactionPickerMountRef.current;
     if (!mount) return;
+    const mountKey = `${openReactionEventId}\0${resolvedColorScheme}`;
+    if (reactionPickerMountKeyRef.current === mountKey) {
+      return;
+    }
+    reactionPickerMountKeyRef.current = mountKey;
     mount.innerHTML = "";
+    const targetId = openReactionEventId;
     const theme = resolvedColorScheme === "light" ? "light" : "dark";
     new Picker({
       parent: mount,
@@ -1473,9 +1794,6 @@ const MessageList = forwardRef<MessageListHandle, MessageListProps>(function Mes
         void handlePickReaction(targetId, emoji.native);
       },
     });
-    return () => {
-      mount.innerHTML = "";
-    };
   }, [openReactionEventId, reactionPickerPos, resolvedColorScheme, handlePickReaction]);
 
   useEffect(() => {
@@ -1501,6 +1819,12 @@ const MessageList = forwardRef<MessageListHandle, MessageListProps>(function Mes
     openMenuEventId === null
       ? undefined
       : messages.find((m) => m.eventId === openMenuEventId);
+
+  const messageByEventId = useMemo(() => {
+    const map = new Map<string, Message>();
+    for (const m of messages) map.set(m.eventId, m);
+    return map;
+  }, [messages]);
 
   /* ================================================================ */
   /*  Derived values                                                   */
@@ -1550,16 +1874,9 @@ const MessageList = forwardRef<MessageListHandle, MessageListProps>(function Mes
         flex: 1,
         minHeight: 0,
         overflowY: "auto",
-        // Let the browser keep the reading position stable when content is
-        // inserted above the viewport (older messages prepending). The
-        // non-content elements below (top indicator, skeletons, bottom ref,
-        // jump-to-recent) set `overflow-anchor: none` so the anchor lands on
-        // a real MessageRow. Bottom-append auto-scroll is still handled
-        // manually via `shouldAutoScrollRef`, which isn't affected by
-        // anchoring because appended content doesn't shift the anchor.
         overflowAnchor: "auto",
         paddingTop: spacing.unit * 2,
-        paddingBottom: spacing.unit * 4,
+        paddingBottom: spacing.unit * 6,
       }}
     >
       {/* CSS hover — no React state on mousemove */}
@@ -1626,20 +1943,25 @@ const MessageList = forwardRef<MessageListHandle, MessageListProps>(function Mes
         const showHeader = shouldShowHeader(msg, prevMsg);
         const canEdit = messageAllowsEdit(msg, userId);
         const canDelete = messageAllowsDelete(msg, userId, redactionPolicy);
-        const showMessageActions = canEdit || canDelete;
+        const showReplyButton =
+          allowReply && !msg.eventId.startsWith("local:");
+        const showOverflowMenu = canEdit || canDelete || canPinMessages;
         const canReact = !msg.eventId.startsWith("local:");
-        const showHoverActions = showMessageActions || canReact;
+        const showHoverActions =
+          showReplyButton || canReact || showOverflowMenu;
 
         return (
           <MessageRow
             key={msg.eventId}
             msg={msg}
             showHeader={showHeader}
-            showMessageActions={showMessageActions}
+            showReplyButton={showReplyButton}
+            showOverflowMenu={showOverflowMenu}
             showHoverActions={showHoverActions}
             canReact={canReact}
             isMenuOpen={openMenuEventId === msg.eventId}
             isReactionPickerOpen={openReactionEventId === msg.eventId}
+            onRequestReply={() => onRequestReply(msg)}
             onOpenMenu={handleOpenMenu}
             onToggleReactionPicker={handleToggleReactionPicker}
             onOpenMediaViewer={openMediaViewer}
@@ -1656,6 +1978,8 @@ const MessageList = forwardRef<MessageListHandle, MessageListProps>(function Mes
             palette={palette}
             typography={typography}
             resolvedColorScheme={resolvedColorScheme}
+            replyThread={getReplyThreadPreview(msg, messageByEventId)}
+            onReplyThreadClick={onReplyPreviewClick}
           />
         );
       })}
@@ -1738,20 +2062,25 @@ const MessageList = forwardRef<MessageListHandle, MessageListProps>(function Mes
         menuFixedPos &&
         createPortal(
           <div
+            ref={menuPortalRef}
             data-message-actions-root
             role="menu"
             aria-label="Message actions"
             style={{
               position: "fixed",
-              top: menuFixedPos.top,
+              top: menuFixedPos.top ?? undefined,
+              bottom: menuFixedPos.bottom ?? undefined,
               right: menuFixedPos.right,
               zIndex: MESSAGE_ACTIONS_MENU_Z,
               minWidth: spacing.unit * 40,
+              maxHeight: `calc(100vh - ${Math.max(8, spacing.unit * 2) * 2}px)`,
+              overflowX: "hidden",
+              overflowY: "auto",
               padding: spacing.unit * 1.5,
               display: "flex",
               flexDirection: "column",
               gap: spacing.unit * 0.5,
-              backgroundColor: palette.bgSecondary,
+              backgroundColor: palette.bgTertiary,
               border: `1px solid ${palette.border}`,
               borderRadius: spacing.unit * 2,
               boxShadow:
@@ -1951,13 +2280,18 @@ const MessageList = forwardRef<MessageListHandle, MessageListProps>(function Mes
         reactionPickerPos != null &&
         createPortal(
           <div
+            ref={reactionPickerPortalRef}
             data-message-reaction-popover
             onMouseDown={(e) => e.stopPropagation()}
             style={{
               position: "fixed",
-              top: reactionPickerPos.top,
+              top: reactionPickerPos.top ?? undefined,
+              bottom: reactionPickerPos.bottom ?? undefined,
               right: reactionPickerPos.right,
               zIndex: MESSAGE_ACTIONS_MENU_Z,
+              maxHeight: `calc(100vh - ${Math.max(8, spacing.unit * 2) * 2}px)`,
+              overflowX: "hidden",
+              overflowY: "auto",
             }}
           >
             <div ref={reactionPickerMountRef} />

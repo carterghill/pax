@@ -80,6 +80,9 @@ interface MessageInputProps {
   roomId: string;
   roomName: string;
   onMessageSent: () => void;
+  /** When set, the next text send is a Matrix rich reply to this message. */
+  replyDraft?: Message | null;
+  onCancelReply?: () => void;
   editingMessage?: EditingMessageRef | null;
   onCancelEdit?: () => void;
   /** Fires when this client starts/stops sending typing notices (Matrix sync usually omits self). */
@@ -124,6 +127,20 @@ function formatInvokeErr(err: unknown): string {
   } catch {
     return String(err);
   }
+}
+
+function replyTargetSummary(msg: Message): string {
+  const who = (msg.senderName?.trim() || msg.sender).trim() || "Message";
+  if (msg.imageMediaRequest) return `${who} · Image`;
+  if (msg.localImagePreviewObjectUrl) return `${who} · Image`;
+  if (msg.videoMediaRequest) return `${who} · Video`;
+  if (msg.fileMediaRequest) {
+    const fn = msg.fileDisplayName?.trim();
+    return fn ? `${who} · ${fn}` : `${who} · File`;
+  }
+  const t = msg.body.trim();
+  if (!t) return who;
+  return t.length > 100 ? `${who} · ${t.slice(0, 100)}…` : `${who} · ${t}`;
 }
 
 /** Human-readable size (binary units) for upload limit messaging. */
@@ -200,6 +217,8 @@ export default function MessageInput({
   roomId,
   roomName,
   onMessageSent,
+  replyDraft = null,
+  onCancelReply,
   editingMessage = null,
   onCancelEdit,
   onLocalTypingActive,
@@ -221,6 +240,10 @@ export default function MessageInput({
   const onCancelEditRef = useRef(onCancelEdit);
   editingMessageRef.current = editingMessage;
   onCancelEditRef.current = onCancelEdit;
+
+  useEffect(() => {
+    if (editingMessage) onCancelReply?.();
+  }, [editingMessage, onCancelReply]);
 
   const [plainText, setPlainText] = useState("");
   /** True when the editor contains an embedded image (GIF, pasted image). Plain text alone is tracked in `plainText`. */
@@ -841,7 +864,12 @@ export default function MessageInput({
           });
           onCancelEdit?.();
         } else {
-          await invoke("send_message", { roomId, body: trimmed });
+          await invoke("send_message", {
+            roomId,
+            body: trimmed,
+            replyToEventId: replyDraft?.eventId ?? null,
+          });
+          onCancelReply?.();
         }
       }
       const prevFormats = getActiveFormats(el);
@@ -887,6 +915,11 @@ export default function MessageInput({
       }
       if (formatOpen) {
         setFormatOpen(false);
+        return;
+      }
+      if (replyDraft && onCancelReply) {
+        e.preventDefault();
+        onCancelReply();
         return;
       }
       if (editingMessage && onCancelEdit) {
@@ -1199,6 +1232,53 @@ export default function MessageInput({
           ...(composerOuterBorder ? { border: composerOuterBorder } : {}),
         }}
       >
+        {replyDraft && onCancelReply && !editingMessage ? (
+          <div
+            style={{
+              display: "flex",
+              alignItems: "center",
+              gap: spacing.unit * 1.5,
+              padding: `${spacing.unit * 1.5}px ${spacing.unit * 3}px`,
+              borderBottom: `1px solid ${palette.border}`,
+              minWidth: 0,
+            }}
+          >
+            <span
+              style={{
+                flex: 1,
+                minWidth: 0,
+                fontSize: typography.fontSizeSmall,
+                color: palette.textSecondary,
+                overflow: "hidden",
+                textOverflow: "ellipsis",
+                whiteSpace: "nowrap",
+              }}
+              title={replyTargetSummary(replyDraft)}
+            >
+              Replying to {replyTargetSummary(replyDraft)}
+            </span>
+            <button
+              type="button"
+              onClick={() => onCancelReply()}
+              title="Cancel reply"
+              style={{
+                flexShrink: 0,
+                display: "flex",
+                alignItems: "center",
+                justifyContent: "center",
+                width: 28,
+                height: 28,
+                border: "none",
+                borderRadius: spacing.unit,
+                background: "transparent",
+                color: palette.textSecondary,
+                cursor: "pointer",
+              }}
+            >
+              <X size={16} />
+            </button>
+          </div>
+        ) : null}
         {/* Attachment preview */}
         {pendingFile && (
           <div

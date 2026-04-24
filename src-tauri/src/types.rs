@@ -35,6 +35,13 @@ pub struct MessageReactionSummary {
     pub reacted_by: Vec<String>,
 }
 
+/// `m.in_reply_to` for an [`m.room.message`]; the UI resolves the parent row by `event_id` when present in the window.
+#[derive(Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct MessageReplyTo {
+    pub event_id: String,
+}
+
 #[derive(Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct MessageInfo {
@@ -45,6 +52,8 @@ pub struct MessageInfo {
     pub timestamp: u64,
     pub avatar_url: Option<String>,
     pub edited: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub reply_to: Option<MessageReplyTo>,
     /// When set, the message is an image; the frontend fetches a temp path via `get_matrix_image_path`.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub image_media_request: Option<serde_json::Value>,

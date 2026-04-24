@@ -23,6 +23,14 @@ const MIN_USER_MENU_WIDTH = 180;
 const MAX_USER_MENU_WIDTH = 400;
 const USER_MENU_RESIZE_HANDLE = 6;
 
+/** `#rrggbb` → RGB. Used so fade uses same-color alpha (plain `transparent` gradients tint gray). */
+function hexRgb(hex: string): [number, number, number] | null {
+  const m = /^#([0-9a-f]{6})$/i.exec(hex.trim());
+  if (!m) return null;
+  const n = parseInt(m[1], 16);
+  return [(n >> 16) & 255, (n >> 8) & 255, n & 255];
+}
+
 interface ChatViewProps {
   userId: string;
   userMenuWidth: number;
@@ -64,10 +72,19 @@ function TypingIndicator({
   }
 
   const bg = palette.bgPrimary;
-  const fadeHeight = spacing.unit * 4;
-  const rowPadY = spacing.unit * 1;
+  const rowPadY = spacing.unit * 0.5;
   const rowPadX = spacing.unit * 3;
-  const fadeMask = "linear-gradient(to bottom, transparent, black)";
+  /** Pull the strip up so the top can composite over the thread. */
+  const overThreadPx = spacing.unit * 3;
+  const rgb = hexRgb(bg);
+  /**
+   * Balance: a clear top over the thread, then a visible scrim (not ghosted), and the text row
+   * sits in the lower third where alpha is already near-opaque. Stops are % of total strip height.
+   */
+  const fadeBackground =
+    rgb != null
+      ? `linear-gradient(to bottom, rgba(${rgb[0]}, ${rgb[1]}, ${rgb[2]}, 0) 0%, rgba(${rgb[0]}, ${rgb[1]}, ${rgb[2]}, 0) 8%, rgba(${rgb[0]}, ${rgb[1]}, ${rgb[2]}, 0.38) 32%, rgba(${rgb[0]}, ${rgb[1]}, ${rgb[2]}, 0.78) 55%, rgba(${rgb[0]}, ${rgb[1]}, ${rgb[2]}, 0.95) 72%, rgba(${rgb[0]}, ${rgb[1]}, ${rgb[2]}, 1) 100%)`
+      : `linear-gradient(to bottom, transparent 0%, transparent 8%, ${bg} 100%)`;
 
   return (
     <div
@@ -78,28 +95,21 @@ function TypingIndicator({
         bottom: "100%",
         zIndex: 2,
         pointerEvents: "none",
+        paddingTop: overThreadPx,
+        paddingLeft: rowPadX,
+        paddingRight: rowPadX,
+        paddingBottom: rowPadY,
+        boxSizing: "border-box",
+        backgroundColor: "transparent",
+        backgroundImage: fadeBackground,
+        backgroundRepeat: "no-repeat",
+        backgroundSize: "100% 100%",
+        fontSize: typography.fontSizeSmall,
+        color: palette.textSecondary,
+        lineHeight: 1.25,
       }}
     >
-      <div
-        style={{
-          height: fadeHeight,
-          backgroundColor: bg,
-          maskImage: fadeMask,
-          WebkitMaskImage: fadeMask,
-        }}
-      />
-      <div
-        style={{
-          padding: `${0}px ${rowPadX}px ${rowPadY}px`,
-          backgroundColor: bg,
-          fontSize: typography.fontSizeSmall,
-          color: palette.textSecondary,
-          display: "flex",
-          alignItems: "center",
-          gap: spacing.unit,
-          minHeight: spacing.unit * 5,
-        }}
-      >
+      <div style={{ display: "flex", alignItems: "center", gap: spacing.unit }}>
         <span style={{ display: "inline-flex", gap: 2 }}>
           {[0, 1, 2].map((i) => (
             <span
@@ -116,13 +126,13 @@ function TypingIndicator({
           ))}
         </span>
         <span>{text}</span>
-        <style>{`
-          @keyframes typingDot {
-            0%, 60%, 100% { opacity: 0.3; transform: translateY(0); }
-            30% { opacity: 1; transform: translateY(-2px); }
-          }
-        `}</style>
       </div>
+      <style>{`
+        @keyframes typingDot {
+          0%, 60%, 100% { opacity: 0.3; transform: translateY(0); }
+          30% { opacity: 1; transform: translateY(-2px); }
+        }
+      `}</style>
     </div>
   );
 }
@@ -197,6 +207,7 @@ export default function ChatView({
   const [localTyping, setLocalTyping] = useState(false);
   const [showUsers, setShowUsers] = useState(true);
   const [editingMessage, setEditingMessage] = useState<EditingMessageRef | null>(null);
+  const [replyDraft, setReplyDraft] = useState<Message | null>(null);
   const [pinnedMenuOpen, setPinnedMenuOpen] = useState(false);
 
   const containerRef = useRef<HTMLDivElement>(null);
@@ -228,15 +239,47 @@ export default function ChatView({
 
   useEffect(() => {
     setEditingMessage(null);
+    setReplyDraft(null);
   }, [activeRoom?.id, isDraft]);
 
   const handleRequestEdit = useCallback((msg: Message) => {
+    setReplyDraft(null);
     setEditingMessage({ eventId: msg.eventId, body: msg.body });
   }, []);
+
+  const handleRequestReply = useCallback((msg: Message) => {
+    setEditingMessage(null);
+    setReplyDraft(msg);
+  }, []);
+
+  const handleReplyPreviewClick = useCallback(
+    (eventId: string) => {
+      if (isDraft || !activeRoom) return;
+      const inWindow = messages.some((m) => m.eventId === eventId);
+      if (inWindow) {
+        messageListRef.current?.scrollToEventId(eventId);
+        return;
+      }
+      void (async () => {
+        try {
+          await loadMessagesAroundEvent(eventId);
+        } finally {
+          requestAnimationFrame(() => {
+            requestAnimationFrame(() => {
+              messageListRef.current?.scrollToEventId(eventId);
+            });
+          });
+        }
+      })();
+    },
+    [isDraft, activeRoom, messages, loadMessagesAroundEvent],
+  );
 
   const handleCancelEdit = useCallback(() => {
     setEditingMessage(null);
   }, []);
+
+  const clearReplyDraft = useCallback(() => setReplyDraft(null), []);
 
   const handleSelectPinnedMessage = useCallback(
     async (eventId: string) => {
@@ -526,6 +569,9 @@ export default function ChatView({
             userId={userId}
             redactionPolicy={redactionPolicy}
             onRequestEdit={handleRequestEdit}
+            onRequestReply={handleRequestReply}
+            onReplyPreviewClick={handleReplyPreviewClick}
+            allowReply={canSendMessages === true}
             onMessagesMutated={refresh}
             onMessageRemoved={removeMessageById}
             onLocalReactionFromChip={applyLocalReactionFromChip}
@@ -534,7 +580,14 @@ export default function ChatView({
             onPinnedStateChanged={handlePinnedStateChanged}
           />
 
-          <div style={{ position: "relative", flexShrink: 0, zIndex: 1 }}>
+          <div
+            style={{
+              position: "relative",
+              flexShrink: 0,
+              zIndex: 1,
+              minWidth: 0,
+            }}
+          >
             <TypingIndicator
               names={typingNames}
               localTyping={localTyping}
@@ -551,6 +604,8 @@ export default function ChatView({
                     : "forbidden"
               }
               onMessageSent={refresh}
+              replyDraft={replyDraft}
+              onCancelReply={clearReplyDraft}
               editingMessage={editingMessage}
               onCancelEdit={handleCancelEdit}
               onLocalTypingActive={setLocalTyping}
