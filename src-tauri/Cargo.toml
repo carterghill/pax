@@ -53,6 +53,9 @@ screenshots = "0.8"
 mime = "0.3"
 uuid = { version = "1", features = ["v4", "v5"] }
 
+[target.'cfg(not(any(target_os = "android", target_os = "ios")))'.dependencies]
+tauri-plugin-autostart = "2"
+
 # Native GPU overlay rendering (zero-IPC video)
 wgpu = "25"
 raw-window-handle = "0.6"

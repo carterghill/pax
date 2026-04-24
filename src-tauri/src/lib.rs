@@ -327,7 +327,7 @@ pub fn run() {
         raw_unread_messages: Arc::new(Mutex::new(HashMap::new())),
     });
 
-    tauri::Builder::default()
+    let app_builder = tauri::Builder::default()
         .on_window_event(|window, event| {
             #[cfg(not(desktop))]
             let _ = (window, event);
@@ -388,7 +388,16 @@ pub fn run() {
                 .build(),
         )
         .plugin(tauri_plugin_opener::init())
-        .plugin(tauri_plugin_notification::init())
+        .plugin(tauri_plugin_notification::init());
+    let app_builder = {
+        #[cfg(desktop)]
+        {
+            app_builder.plugin(tauri_plugin_autostart::Builder::new().build())
+        }
+        #[cfg(not(desktop))]
+        { app_builder }
+    };
+    app_builder
         .manage(state)
         .manage(voice::VoiceManager::new())
         .register_uri_scheme_protocol("paxvideo", |_app, request| {

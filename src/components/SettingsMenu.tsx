@@ -14,6 +14,7 @@ import {
   Volume2,
   Bell,
   LogOut,
+  Monitor,
 } from "lucide-react";
 import type { LucideIcon } from "lucide-react";
 import type { VoiceCall } from "../hooks/useVoiceCall";
@@ -38,6 +39,7 @@ type SettingsSection =
   | "appearance"
   | "audio"
   | "notifications"
+  | "system"
   | "account";
 
 interface SettingsNavItem {
@@ -119,6 +121,36 @@ export default function SettingsMenu({
     },
     [],
   );
+
+  /** Desktop autostart; null when unavailable (e.g. non-Tauri build). */
+  const [launchOnStartup, setLaunchOnStartup] = useState<boolean | null>(null);
+
+  useEffect(() => {
+    let cancelled = false;
+    (async () => {
+      try {
+        const { isEnabled } = await import("@tauri-apps/plugin-autostart");
+        const v = await isEnabled();
+        if (!cancelled) setLaunchOnStartup(v);
+      } catch {
+        if (!cancelled) setLaunchOnStartup(null);
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
+  const handleLaunchOnStartupChange = useCallback(async (next: boolean) => {
+    try {
+      const { enable, disable } = await import("@tauri-apps/plugin-autostart");
+      if (next) await enable();
+      else await disable();
+      setLaunchOnStartup(next);
+    } catch (e) {
+      console.error(e);
+    }
+  }, []);
 
   const reconnectVoiceAfterDeviceChange = useCallback(async () => {
     const rid = voiceCall.connectedRoomId;
@@ -255,6 +287,14 @@ export default function SettingsMenu({
       icon: Bell,
     },
     {
+      id: "system",
+      label: "System",
+      description: "Startup and window close",
+      title: "System",
+      blurb: "Choose whether Pax starts with your device and what happens when you close the window.",
+      icon: Monitor,
+    },
+    {
       id: "account",
       label: "Account",
       description: "Session and sign out",
@@ -381,7 +421,7 @@ export default function SettingsMenu({
               lineHeight: 1.5,
             }}
           >
-            Manage your profile, appearance, audio, and account from one place.
+            Manage your profile, appearance, audio, system options, and account from one place.
           </div>
         </div>
 
@@ -826,7 +866,23 @@ export default function SettingsMenu({
                   </div>
                   <ThemeSelector />
                 </div>
+              </div>
+            </section>
+          )}
 
+          {activeSection === "system" && (
+            <section style={panelStyle}>
+              <h3 style={sectionHeadingStyle}>System</h3>
+              <p style={{ ...sectionDescriptionStyle, marginBottom: spacing.unit * 4 }}>
+                Control startup behavior and what happens when you close the main window.
+              </p>
+              <div
+                style={{
+                  display: "flex",
+                  flexDirection: "column",
+                  gap: spacing.unit * 3,
+                }}
+              >
                 <div
                   style={{
                     display: "flex",
@@ -878,6 +934,56 @@ export default function SettingsMenu({
                     <option value="quit">Quit completely</option>
                   </select>
                 </div>
+
+                {launchOnStartup !== null && (
+                  <label
+                    style={{
+                      display: "flex",
+                      alignItems: "flex-start",
+                      gap: spacing.unit * 2,
+                      padding: `${spacing.unit * 2.5}px ${spacing.unit * 3}px`,
+                      borderRadius: 8,
+                      border: `1px solid ${palette.border}`,
+                      backgroundColor: palette.bgTertiary,
+                      cursor: "pointer",
+                    }}
+                  >
+                    <input
+                      type="checkbox"
+                      checked={launchOnStartup}
+                      onChange={(e) => handleLaunchOnStartupChange(e.target.checked)}
+                      style={{
+                        accentColor: palette.accent,
+                        width: 16,
+                        height: 16,
+                        marginTop: 2,
+                        cursor: "pointer",
+                      }}
+                    />
+                    <div style={{ flex: 1, minWidth: 0 }}>
+                      <div
+                        style={{
+                          fontSize: typography.fontSizeSmall,
+                          fontWeight: typography.fontWeightMedium,
+                          color: palette.textHeading,
+                        }}
+                      >
+                        Open Pax at login
+                      </div>
+                      <div
+                        style={{
+                          fontSize: 12,
+                          color: palette.textSecondary,
+                          marginTop: spacing.unit,
+                          lineHeight: 1.4,
+                        }}
+                      >
+                        When enabled, the app starts automatically when you sign in to this device.
+                        You can still quit from the tray or taskbar.
+                      </div>
+                    </div>
+                  </label>
+                )}
               </div>
             </section>
           )}
