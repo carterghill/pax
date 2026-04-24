@@ -267,6 +267,10 @@ pub async fn get_messages(
         file_media_request: Option<serde_json::Value>,
         file_mime: Option<String>,
         file_display_name: Option<String>,
+        image_width: Option<u32>,
+        image_height: Option<u32>,
+        video_width: Option<u32>,
+        video_height: Option<u32>,
         reply_to: Option<MessageReplyTo>,
     }
     let mut raw_msgs = Vec::new();
@@ -282,6 +286,10 @@ pub async fn get_messages(
             Option<serde_json::Value>,
             Option<String>,
             Option<String>,
+            Option<u32>,
+            Option<u32>,
+            Option<u32>,
+            Option<u32>,
             u64,
         ),
     > = HashMap::new();
@@ -384,7 +392,7 @@ pub async fn get_messages(
                     let ts: u64 = original.origin_server_ts.0.into();
                     let replace = match latest_replacement.get(&target) {
                         None => true,
-                        Some((_, _, _, _, _, _, prev_ts)) => ts >= *prev_ts,
+                        Some((_, _, _, _, _, _, _, _, _, _, prev_ts)) => ts >= *prev_ts,
                     };
                     if replace {
                         latest_replacement.insert(
@@ -396,6 +404,10 @@ pub async fn get_messages(
                                 ext.file_media_request.clone(),
                                 ext.file_mime.clone(),
                                 ext.file_display_name.clone(),
+                                ext.image_width,
+                                ext.image_height,
+                                ext.video_width,
+                                ext.video_height,
                                 ts,
                             ),
                         );
@@ -420,6 +432,10 @@ pub async fn get_messages(
                     file_media_request: ext.file_media_request,
                     file_mime: ext.file_mime,
                     file_display_name: ext.file_display_name,
+                    image_width: ext.image_width,
+                    image_height: ext.image_height,
+                    video_width: ext.video_width,
+                    video_height: ext.video_height,
                     reply_to,
                 });
             }
@@ -481,18 +497,28 @@ pub async fn get_messages(
                 file_media_request,
                 file_mime,
                 file_display_name,
+                image_width,
+                image_height,
+                video_width,
+                video_height,
             ) = latest_replacement
                 .get(&m.event_id)
-                .map(|(b, img, vid, file, fm, fd, _)| {
-                    (
-                        b.clone(),
-                        img.clone(),
-                        vid.clone(),
-                        file.clone(),
-                        fm.clone(),
-                        fd.clone(),
-                    )
-                })
+                .map(
+                    |(b, img, vid, file, fm, fd, iw, ih, vw, vh, _)| {
+                        (
+                            b.clone(),
+                            img.clone(),
+                            vid.clone(),
+                            file.clone(),
+                            fm.clone(),
+                            fd.clone(),
+                            *iw,
+                            *ih,
+                            *vw,
+                            *vh,
+                        )
+                    },
+                )
                 .unwrap_or_else(|| {
                     (
                         m.body.clone(),
@@ -501,6 +527,10 @@ pub async fn get_messages(
                         m.file_media_request.clone(),
                         m.file_mime.clone(),
                         m.file_display_name.clone(),
+                        m.image_width,
+                        m.image_height,
+                        m.video_width,
+                        m.video_height,
                     )
                 });
             let reactions = reaction_map.get(&m.event_id).cloned();
@@ -514,7 +544,11 @@ pub async fn get_messages(
                 edited,
                 reply_to: m.reply_to,
                 image_media_request,
+                image_width,
+                image_height,
                 video_media_request,
+                video_width,
+                video_height,
                 file_media_request,
                 file_mime,
                 file_display_name,
@@ -682,6 +716,10 @@ async fn build_message_infos_from_timeline_events(
         file_media_request: Option<serde_json::Value>,
         file_mime: Option<String>,
         file_display_name: Option<String>,
+        image_width: Option<u32>,
+        image_height: Option<u32>,
+        video_width: Option<u32>,
+        video_height: Option<u32>,
         reply_to: Option<MessageReplyTo>,
     }
 
@@ -695,6 +733,10 @@ async fn build_message_infos_from_timeline_events(
             Option<serde_json::Value>,
             Option<String>,
             Option<String>,
+            Option<u32>,
+            Option<u32>,
+            Option<u32>,
+            Option<u32>,
             u64,
         ),
     > = HashMap::new();
@@ -722,7 +764,7 @@ async fn build_message_infos_from_timeline_events(
                         let ts: u64 = original.origin_server_ts.0.into();
                         let replace = match latest_replacement.get(&target) {
                             None => true,
-                            Some((_, _, _, _, _, _, prev_ts)) => ts >= *prev_ts,
+                            Some((_, _, _, _, _, _, _, _, _, _, prev_ts)) => ts >= *prev_ts,
                         };
                         if replace {
                             latest_replacement.insert(
@@ -734,6 +776,10 @@ async fn build_message_infos_from_timeline_events(
                                     ext.file_media_request.clone(),
                                     ext.file_mime.clone(),
                                     ext.file_display_name.clone(),
+                                    ext.image_width,
+                                    ext.image_height,
+                                    ext.video_width,
+                                    ext.video_height,
                                     ts,
                                 ),
                             );
@@ -758,6 +804,10 @@ async fn build_message_infos_from_timeline_events(
                         file_media_request: ext.file_media_request,
                         file_mime: ext.file_mime,
                         file_display_name: ext.file_display_name,
+                        image_width: ext.image_width,
+                        image_height: ext.image_height,
+                        video_width: ext.video_width,
+                        video_height: ext.video_height,
                         reply_to,
                     });
                 }
@@ -797,18 +847,28 @@ async fn build_message_infos_from_timeline_events(
                 file_media_request,
                 file_mime,
                 file_display_name,
+                image_width,
+                image_height,
+                video_width,
+                video_height,
             ) = latest_replacement
                 .get(&m.event_id)
-                .map(|(b, img, vid, file, fm, fd, _)| {
-                    (
-                        b.clone(),
-                        img.clone(),
-                        vid.clone(),
-                        file.clone(),
-                        fm.clone(),
-                        fd.clone(),
-                    )
-                })
+                .map(
+                    |(b, img, vid, file, fm, fd, iw, ih, vw, vh, _)| {
+                        (
+                            b.clone(),
+                            img.clone(),
+                            vid.clone(),
+                            file.clone(),
+                            fm.clone(),
+                            fd.clone(),
+                            *iw,
+                            *ih,
+                            *vw,
+                            *vh,
+                        )
+                    },
+                )
                 .unwrap_or_else(|| {
                     (
                         m.body.clone(),
@@ -817,6 +877,10 @@ async fn build_message_infos_from_timeline_events(
                         m.file_media_request.clone(),
                         m.file_mime.clone(),
                         m.file_display_name.clone(),
+                        m.image_width,
+                        m.image_height,
+                        m.video_width,
+                        m.video_height,
                     )
                 });
             let reactions = reaction_map.get(&m.event_id).cloned();
@@ -830,7 +894,11 @@ async fn build_message_infos_from_timeline_events(
                 edited,
                 reply_to: m.reply_to,
                 image_media_request,
+                image_width,
+                image_height,
                 video_media_request,
+                video_width,
+                video_height,
                 file_media_request,
                 file_mime,
                 file_display_name,
@@ -1256,6 +1324,10 @@ pub async fn start_sync(
                     .clone()
                     .map(serde_json::Value::String)
                     .unwrap_or(serde_json::Value::Null);
+                let json_u32 = |v: Option<u32>| {
+                    v.map(|n| serde_json::Value::Number(serde_json::Number::from(n)))
+                        .unwrap_or(serde_json::Value::Null)
+                };
                 let payload = MessageEditPayload {
                     room_id,
                     target_event_id: repl.event_id.to_string(),
@@ -1265,6 +1337,10 @@ pub async fn start_sync(
                     file_media_request,
                     file_mime,
                     file_display_name,
+                    image_width: json_u32(ext.image_width),
+                    image_height: json_u32(ext.image_height),
+                    video_width: json_u32(ext.video_width),
+                    video_height: json_u32(ext.video_height),
                 };
                 let _ = app.emit("room-message-edit", payload);
                 return;
@@ -1309,7 +1385,11 @@ pub async fn start_sync(
                     edited: false,
                     reply_to,
                     image_media_request: ext.image_media_request,
+                    image_width: ext.image_width,
+                    image_height: ext.image_height,
                     video_media_request: ext.video_media_request,
+                    video_width: ext.video_width,
+                    video_height: ext.video_height,
                     file_media_request: ext.file_media_request,
                     file_mime: ext.file_mime,
                     file_display_name: ext.file_display_name,
@@ -1856,6 +1936,46 @@ struct MessageDisplayExtract {
     file_media_request: Option<serde_json::Value>,
     file_mime: Option<String>,
     file_display_name: Option<String>,
+    image_width: Option<u32>,
+    image_height: Option<u32>,
+    video_width: Option<u32>,
+    video_height: Option<u32>,
+}
+
+/// Matrix `info.w` / `info.h` when present and non-zero (for inline layout / loading placeholder).
+fn matrix_media_width_height(width: Option<UInt>, height: Option<UInt>) -> (Option<u32>, Option<u32>) {
+    match (width, height) {
+        (Some(w), Some(h)) => {
+            let w64 = u64::from(w);
+            let h64 = u64::from(h);
+            if w64 == 0 || h64 == 0 || w64 > u32::MAX as u64 || h64 > u32::MAX as u64 {
+                (None, None)
+            } else {
+                (Some(w64 as u32), Some(h64 as u32))
+            }
+        }
+        _ => (None, None),
+    }
+}
+
+/// `m.image` / `m.file` image: prefer full `info.w`/`h`, else thumbnail (many clients only publish one).
+fn image_event_display_dimensions(
+    img: &matrix_sdk::ruma::events::room::message::ImageMessageEventContent,
+) -> (Option<u32>, Option<u32>) {
+    let Some(info) = img.info.as_deref() else {
+        return (None, None);
+    };
+    let main = matrix_media_width_height(info.width, info.height);
+    if main.0.is_some() && main.1.is_some() {
+        return main;
+    }
+    if let Some(th) = info.thumbnail_info.as_deref() {
+        let t = matrix_media_width_height(th.width, th.height);
+        if t.0.is_some() && t.1.is_some() {
+            return t;
+        }
+    }
+    (None, None)
 }
 
 fn extract_message_display(
@@ -1895,6 +2015,7 @@ fn extract_message_display(
                 format,
             };
             let json = serde_json::to_value(&req).ok();
+            let (image_width, image_height) = image_event_display_dimensions(img);
             MessageDisplayExtract {
                 body,
                 image_media_request: json,
@@ -1902,6 +2023,10 @@ fn extract_message_display(
                 file_media_request: None,
                 file_mime: None,
                 file_display_name: None,
+                image_width,
+                image_height,
+                video_width: None,
+                video_height: None,
             }
         }
         MessageType::Video(vid) => {
@@ -1916,6 +2041,11 @@ fn extract_message_display(
                 format: MediaFormat::File,
             };
             let json = serde_json::to_value(&req).ok();
+            let (video_width, video_height) = vid
+                .info
+                .as_deref()
+                .map(|info| matrix_media_width_height(info.width, info.height))
+                .unwrap_or((None, None));
             MessageDisplayExtract {
                 body,
                 image_media_request: None,
@@ -1923,6 +2053,10 @@ fn extract_message_display(
                 file_media_request: None,
                 file_mime: None,
                 file_display_name: None,
+                image_width: None,
+                image_height: None,
+                video_width,
+                video_height,
             }
         }
         MessageType::Text(text) => MessageDisplayExtract {
@@ -1932,6 +2066,10 @@ fn extract_message_display(
             file_media_request: None,
             file_mime: None,
             file_display_name: None,
+            image_width: None,
+            image_height: None,
+            video_width: None,
+            video_height: None,
         },
         MessageType::Notice(notice) => MessageDisplayExtract {
             body: apply_reply_strip(&notice.body),
@@ -1940,6 +2078,10 @@ fn extract_message_display(
             file_media_request: None,
             file_mime: None,
             file_display_name: None,
+            image_width: None,
+            image_height: None,
+            video_width: None,
+            video_height: None,
         },
         MessageType::Emote(emote) => MessageDisplayExtract {
             body: format!("* {}", apply_reply_strip(&emote.body)),
@@ -1948,6 +2090,10 @@ fn extract_message_display(
             file_media_request: None,
             file_mime: None,
             file_display_name: None,
+            image_width: None,
+            image_height: None,
+            video_width: None,
+            video_height: None,
         },
         MessageType::File(f) => {
             let display_name = f
@@ -1978,6 +2124,10 @@ fn extract_message_display(
                 file_media_request: json,
                 file_mime: mime,
                 file_display_name: Some(display_name),
+                image_width: None,
+                image_height: None,
+                video_width: None,
+                video_height: None,
             }
         }
         MessageType::Audio(_) => MessageDisplayExtract {
@@ -1987,6 +2137,10 @@ fn extract_message_display(
             file_media_request: None,
             file_mime: None,
             file_display_name: None,
+            image_width: None,
+            image_height: None,
+            video_width: None,
+            video_height: None,
         },
         _ => MessageDisplayExtract {
             body: "[Unsupported message]".to_string(),
@@ -1995,6 +2149,10 @@ fn extract_message_display(
             file_media_request: None,
             file_mime: None,
             file_display_name: None,
+            image_width: None,
+            image_height: None,
+            video_width: None,
+            video_height: None,
         },
     };
     out

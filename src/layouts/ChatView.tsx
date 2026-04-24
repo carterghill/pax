@@ -10,6 +10,7 @@ import MessageList, { type MessageListHandle } from "../components/MessageList";
 import PinnedMessagesMenu from "../components/PinnedMessagesMenu";
 import MessageInput, { type EditingMessageRef, type MessageFileSendBridge } from "../components/MessageInput";
 import UserMenu from "../components/UserMenu";
+import UserProfileDialog from "../components/UserProfileDialog";
 import RoomDownloadsButton from "../components/RoomDownloadsButton";
 import { useMessages } from "../hooks/useMessages";
 import { useMatrixUserProfile } from "../hooks/useMatrixUserProfile";
@@ -22,6 +23,8 @@ const USER_MENU_DEFAULT_WIDTH = 240;
 const MIN_USER_MENU_WIDTH = 180;
 const MAX_USER_MENU_WIDTH = 400;
 const USER_MENU_RESIZE_HANDLE = 6;
+/** Typing strip inset: paint doesn’t cover the vertical scrollbar (no z-index for the thumb alone). */
+const TYPING_STRIP_SCROLLBAR_RESERVE_PX = 16;
 
 /** `#rrggbb` → RGB. Used so fade uses same-color alpha (plain `transparent` gradients tint gray). */
 function hexRgb(hex: string): [number, number, number] | null {
@@ -91,7 +94,7 @@ function TypingIndicator({
       style={{
         position: "absolute",
         left: 0,
-        right: 0,
+        right: TYPING_STRIP_SCROLLBAR_RESERVE_PX,
         bottom: "100%",
         zIndex: 2,
         pointerEvents: "none",
@@ -209,6 +212,7 @@ export default function ChatView({
   const [editingMessage, setEditingMessage] = useState<EditingMessageRef | null>(null);
   const [replyDraft, setReplyDraft] = useState<Message | null>(null);
   const [pinnedMenuOpen, setPinnedMenuOpen] = useState(false);
+  const [messageSenderProfileUserId, setMessageSenderProfileUserId] = useState<string | null>(null);
 
   const containerRef = useRef<HTMLDivElement>(null);
   const messageListRef = useRef<MessageListHandle>(null);
@@ -240,6 +244,10 @@ export default function ChatView({
   useEffect(() => {
     setEditingMessage(null);
     setReplyDraft(null);
+  }, [activeRoom?.id, isDraft]);
+
+  useEffect(() => {
+    setMessageSenderProfileUserId(null);
   }, [activeRoom?.id, isDraft]);
 
   const handleRequestEdit = useCallback((msg: Message) => {
@@ -578,6 +586,7 @@ export default function ChatView({
             canPinMessages={canPinMessages === true}
             pinnedEventIds={pinnedEventIds}
             onPinnedStateChanged={handlePinnedStateChanged}
+            onOpenSenderProfile={setMessageSenderProfileUserId}
           />
 
           <div
@@ -657,6 +666,16 @@ export default function ChatView({
           </div>
         )}
       </div>
+
+      {messageSenderProfileUserId && (
+        <UserProfileDialog
+          roomId={activeRoom.id}
+          userId={messageSenderProfileUserId}
+          currentUserId={userId}
+          onClose={() => setMessageSenderProfileUserId(null)}
+          onStartDirectMessage={onStartDirectMessage}
+        />
+      )}
     </div>
   );
 }

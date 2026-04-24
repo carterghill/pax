@@ -1,6 +1,10 @@
 import { useEffect, useRef, useState } from "react";
+import { Loader2 } from "lucide-react";
 import { convertFileSrc, invoke } from "@tauri-apps/api/core";
 import { useTheme } from "../theme/ThemeContext";
+import { inlineMediaAspectBoxStyle } from "../utils/inlineMediaLayout";
+
+const INLINE_IMAGE_MAX_HEIGHT = 400;
 
 function formatInvokeError(err: unknown): string {
   if (typeof err === "string") return err;
@@ -14,11 +18,19 @@ function formatInvokeError(err: unknown): string {
 
 interface MessageMatrixImageProps {
   request: unknown;
+  /** Matrix `m.image` `info` dimensions when known (layout / placeholder). */
+  metaWidth?: number;
+  metaHeight?: number;
   /** Opens the full-screen media viewer (Discord-style lightbox). */
   onExpand?: () => void;
 }
 
-export default function MessageMatrixImage({ request, onExpand }: MessageMatrixImageProps) {
+export default function MessageMatrixImage({
+  request,
+  metaWidth,
+  metaHeight,
+  onExpand,
+}: MessageMatrixImageProps) {
   const { palette, typography, spacing } = useTheme();
   const [src, setSrc] = useState<string | null>(null);
   const [failed, setFailed] = useState(false);
@@ -26,6 +38,11 @@ export default function MessageMatrixImage({ request, onExpand }: MessageMatrixI
   const imgRef = useRef<HTMLImageElement>(null);
 
   const requestKey = JSON.stringify(request);
+
+  const reserve =
+    metaWidth != null && metaHeight != null
+      ? inlineMediaAspectBoxStyle(metaWidth, metaHeight, INLINE_IMAGE_MAX_HEIGHT)
+      : null;
 
   useEffect(() => {
     let cancelled = false;
@@ -74,7 +91,7 @@ export default function MessageMatrixImage({ request, onExpand }: MessageMatrixI
 
   const imgStyle: React.CSSProperties = {
     maxWidth: "100%",
-    maxHeight: 400,
+    maxHeight: INLINE_IMAGE_MAX_HEIGHT,
     height: "auto" as const,
     objectFit: "contain" as const,
     borderRadius: spacing.unit,
@@ -115,16 +132,34 @@ export default function MessageMatrixImage({ request, onExpand }: MessageMatrixI
 
   if (!src) {
     return (
-      <p
+      <div
         style={{
-          margin: 0,
           marginTop: spacing.unit,
-          color: palette.textSecondary,
-          fontSize: typography.fontSizeSmall,
+          marginBottom: spacing.unit,
         }}
       >
-        Loading image…
-      </p>
+        <div
+          style={{
+            ...reserve,
+            minHeight: reserve ? undefined : spacing.unit * 10,
+            borderRadius: spacing.unit,
+            backgroundColor: palette.bgTertiary,
+            display: "flex",
+            alignItems: "center",
+            justifyContent: "center",
+            color: palette.textSecondary,
+          }}
+          aria-busy
+          aria-label="Loading image"
+        >
+          <Loader2
+            size={22}
+            strokeWidth={2}
+            style={{ animation: "spin 0.9s linear infinite" }}
+            aria-hidden
+          />
+        </div>
+      </div>
     );
   }
 
@@ -134,12 +169,20 @@ export default function MessageMatrixImage({ request, onExpand }: MessageMatrixI
     setSrc(null);
   };
 
+  const hasMeta =
+    metaWidth != null &&
+    metaHeight != null &&
+    metaWidth > 0 &&
+    metaHeight > 0;
+
   if (!onExpand) {
     return (
       <img
         ref={imgRef}
         src={src}
         alt=""
+        width={hasMeta ? metaWidth : undefined}
+        height={hasMeta ? metaHeight : undefined}
         loading="lazy"
         decoding="async"
         draggable={false}
@@ -173,12 +216,14 @@ export default function MessageMatrixImage({ request, onExpand }: MessageMatrixI
         ref={imgRef}
         src={src}
         alt=""
+        width={hasMeta ? metaWidth : undefined}
+        height={hasMeta ? metaHeight : undefined}
         loading="lazy"
         decoding="async"
         draggable={false}
         style={{
           maxWidth: "100%",
-          maxHeight: 400,
+          maxHeight: INLINE_IMAGE_MAX_HEIGHT,
           height: "auto",
           objectFit: "contain",
           borderRadius: spacing.unit,

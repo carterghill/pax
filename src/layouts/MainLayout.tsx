@@ -24,6 +24,7 @@ import SettingsDialog from "../components/SettingsDialog";
 import {
   VOICE_ROOM_TYPE,
   compareByDisplayThenKey,
+  normalizeUserId,
   pendingDmRoomId,
   voiceStateLookupKeysForLiveKitIdentity,
 } from "../utils/matrix";
@@ -543,14 +544,52 @@ export default function MainLayout({
     }
   }, [setActiveRoomId, getRoom, connectedVoiceRoomId, connectVoiceCall]);
 
-  const handleStartDirectMessage = useCallback((peerUserId: string, displayNameHint: string) => {
-    const draftId = pendingDmRoomId(peerUserId);
-    startTransition(() => {
-      setPendingDm({ peerUserId, displayNameHint });
-      setActiveSpaceId(null);
-      setActiveRoomBySpace((prev) => ({ ...prev, "": draftId }));
-    });
-  }, []);
+  const handleStartDirectMessage = useCallback(
+    (peerUserId: string, displayNameHint: string) => {
+      const peerNorm = normalizeUserId(peerUserId);
+      const collected: Room[] = [];
+      const seen = new Set<string>();
+      const addRooms = (arr: Room[]) => {
+        for (const r of arr) {
+          if (seen.has(r.id)) continue;
+          seen.add(r.id);
+          collected.push(r);
+        }
+      };
+      addRooms(roomsBySpace(null));
+      for (const s of spaces) {
+        if (s.membership === "joined") addRooms(roomsBySpace(s.id));
+      }
+      const existingDm = collected.find(
+        (r) =>
+          r.isDirect &&
+          r.membership === "joined" &&
+          r.dmPeerUserId != null &&
+          normalizeUserId(r.dmPeerUserId) === peerNorm,
+      );
+      if (existingDm) {
+        const room = getRoom(existingDm.id) ?? existingDm;
+        const parentSpaceId =
+          room.parentSpaceIds.find((pid) => joinedSpaceIdSet.has(pid)) ?? null;
+        startTransition(() => {
+          setPendingDm(null);
+          setActiveSpaceId(parentSpaceId);
+          setActiveRoomBySpace((prev) => ({
+            ...prev,
+            [parentSpaceId ?? ""]: room.id,
+          }));
+        });
+        return;
+      }
+      const draftId = pendingDmRoomId(peerUserId);
+      startTransition(() => {
+        setPendingDm({ peerUserId, displayNameHint });
+        setActiveSpaceId(null);
+        setActiveRoomBySpace((prev) => ({ ...prev, "": draftId }));
+      });
+    },
+    [spaces, roomsBySpace, getRoom, joinedSpaceIdSet],
+  );
 
   const handleDraftDmResolved = useCallback(
     async (dmRoomId: string) => {

@@ -1,6 +1,10 @@
 import { useEffect, useRef, useState } from "react";
+import { Loader2 } from "lucide-react";
 import { convertFileSrc, invoke } from "@tauri-apps/api/core";
 import { useTheme } from "../theme/ThemeContext";
+import { inlineMediaAspectBoxStyle } from "../utils/inlineMediaLayout";
+
+const INLINE_VIDEO_MAX_HEIGHT = 480;
 
 function formatInvokeError(err: unknown): string {
   if (typeof err === "string") return err;
@@ -14,9 +18,16 @@ function formatInvokeError(err: unknown): string {
 
 interface MessageMatrixVideoProps {
   request: unknown;
+  /** Matrix `m.video` `info` dimensions when known (loading placeholder only). */
+  metaWidth?: number;
+  metaHeight?: number;
 }
 
-export default function MessageMatrixVideo({ request }: MessageMatrixVideoProps) {
+export default function MessageMatrixVideo({
+  request,
+  metaWidth,
+  metaHeight,
+}: MessageMatrixVideoProps) {
   const { palette, typography, spacing } = useTheme();
   const [src, setSrc] = useState<string | null>(null);
   const [failed, setFailed] = useState(false);
@@ -24,6 +35,14 @@ export default function MessageMatrixVideo({ request }: MessageMatrixVideoProps)
   const videoRef = useRef<HTMLVideoElement>(null);
 
   const requestKey = JSON.stringify(request);
+
+  const loadingReserve =
+    metaWidth != null &&
+    metaHeight != null &&
+    metaWidth > 0 &&
+    metaHeight > 0
+      ? inlineMediaAspectBoxStyle(metaWidth, metaHeight, INLINE_VIDEO_MAX_HEIGHT)
+      : null;
 
   useEffect(() => {
     let cancelled = false;
@@ -76,7 +95,7 @@ export default function MessageMatrixVideo({ request }: MessageMatrixVideoProps)
 
   const videoStyle = {
     maxWidth: "100%" as const,
-    maxHeight: 480,
+    maxHeight: INLINE_VIDEO_MAX_HEIGHT,
     borderRadius: spacing.unit,
     display: "block" as const,
     marginTop: spacing.unit,
@@ -116,16 +135,34 @@ export default function MessageMatrixVideo({ request }: MessageMatrixVideoProps)
 
   if (!src) {
     return (
-      <p
+      <div
         style={{
-          margin: 0,
           marginTop: spacing.unit,
-          color: palette.textSecondary,
-          fontSize: typography.fontSizeSmall,
+          marginBottom: spacing.unit,
         }}
       >
-        Loading video…
-      </p>
+        <div
+          style={{
+            ...loadingReserve,
+            minHeight: loadingReserve ? undefined : spacing.unit * 10,
+            borderRadius: spacing.unit,
+            backgroundColor: "#000",
+            display: "flex",
+            alignItems: "center",
+            justifyContent: "center",
+            color: palette.textSecondary,
+          }}
+          aria-busy
+          aria-label="Loading video"
+        >
+          <Loader2
+            size={22}
+            strokeWidth={2}
+            style={{ animation: "spin 0.9s linear infinite" }}
+            aria-hidden
+          />
+        </div>
+      </div>
     );
   }
 

@@ -80,6 +80,8 @@ interface MessageListProps {
   canPinMessages?: boolean;
   pinnedEventIds?: string[];
   onPinnedStateChanged?: () => void;
+  /** Opens the room member profile for the message sender (avatar + name). */
+  onOpenSenderProfile?: (senderUserId: string) => void;
 }
 
 /* ------------------------------------------------------------------ */
@@ -399,6 +401,7 @@ interface MessageRowProps {
     text: string;
   } | null;
   onReplyThreadClick: (eventId: string) => void;
+  onOpenSenderProfile?: (senderUserId: string) => void;
 }
 
 const MessageRow = memo(function MessageRow({
@@ -427,6 +430,7 @@ const MessageRow = memo(function MessageRow({
   resolvedColorScheme,
   replyThread,
   onReplyThreadClick,
+  onOpenSenderProfile,
 }: MessageRowProps) {
   const menuBtn = spacingUnit * 7;
   const rowActive = isMenuOpen || isReactionPickerOpen;
@@ -472,14 +476,38 @@ const MessageRow = memo(function MessageRow({
     >
       {/* Avatar column */}
       <div style={{ width: 40, flexShrink: 0 }}>
-        {showHeader && (
-          <UserAvatar
-            userId={msg.sender}
-            displayName={msg.senderName ?? msg.sender}
-            avatarUrlHint={msg.avatarUrl}
-            size={40}
-          />
-        )}
+        {showHeader &&
+          (onOpenSenderProfile ? (
+            <button
+              type="button"
+              title="View profile"
+              onClick={() => onOpenSenderProfile(msg.sender)}
+              style={{
+                display: "block",
+                margin: 0,
+                padding: 0,
+                border: "none",
+                background: "none",
+                cursor: "pointer",
+                borderRadius: "50%",
+                lineHeight: 0,
+              }}
+            >
+              <UserAvatar
+                userId={msg.sender}
+                displayName={msg.senderName ?? msg.sender}
+                avatarUrlHint={msg.avatarUrl}
+                size={40}
+              />
+            </button>
+          ) : (
+            <UserAvatar
+              userId={msg.sender}
+              displayName={msg.senderName ?? msg.sender}
+              avatarUrlHint={msg.avatarUrl}
+              size={40}
+            />
+          ))}
       </div>
 
       {/* Content column */}
@@ -492,15 +520,37 @@ const MessageRow = memo(function MessageRow({
               gap: spacingUnit * 2,
             }}
           >
-            <span
-              style={{
-                fontWeight: typography.fontWeightMedium,
-                color: palette.textHeading,
-                fontSize: typography.fontSizeBase,
-              }}
-            >
-              {msg.senderName ?? msg.sender}
-            </span>
+            {onOpenSenderProfile ? (
+              <button
+                type="button"
+                title="View profile"
+                onClick={() => onOpenSenderProfile(msg.sender)}
+                style={{
+                  margin: 0,
+                  padding: 0,
+                  border: "none",
+                  background: "none",
+                  cursor: "pointer",
+                  font: "inherit",
+                  fontWeight: typography.fontWeightMedium,
+                  color: palette.textHeading,
+                  fontSize: typography.fontSizeBase,
+                  textAlign: "left",
+                }}
+              >
+                {msg.senderName ?? msg.sender}
+              </button>
+            ) : (
+              <span
+                style={{
+                  fontWeight: typography.fontWeightMedium,
+                  color: palette.textHeading,
+                  fontSize: typography.fontSizeBase,
+                }}
+              >
+                {msg.senderName ?? msg.sender}
+              </span>
+            )}
             <span
               style={{
                 fontSize: typography.fontSizeSmall,
@@ -608,6 +658,8 @@ const MessageRow = memo(function MessageRow({
           <>
             <MessageMatrixImage
               request={msg.imageMediaRequest}
+              metaWidth={msg.imageWidth}
+              metaHeight={msg.imageHeight}
               onExpand={() =>
                 onOpenMediaViewer({
                   kind: "image",
@@ -697,7 +749,11 @@ const MessageRow = memo(function MessageRow({
           </>
         ) : msg.videoMediaRequest != null ? (
           <>
-            <MessageMatrixVideo request={msg.videoMediaRequest} />
+            <MessageMatrixVideo
+              request={msg.videoMediaRequest}
+              metaWidth={msg.videoWidth}
+              metaHeight={msg.videoHeight}
+            />
             {shouldShowCaptionBelowMedia(msg) ? (
               <MessageMarkdown
                 edited={Boolean(msg.edited)}
@@ -1050,6 +1106,7 @@ const MessageList = forwardRef<MessageListHandle, MessageListProps>(function Mes
     canPinMessages = false,
     pinnedEventIds = [],
     onPinnedStateChanged,
+    onOpenSenderProfile,
   },
   ref,
 ) {
@@ -1980,6 +2037,7 @@ const MessageList = forwardRef<MessageListHandle, MessageListProps>(function Mes
             resolvedColorScheme={resolvedColorScheme}
             replyThread={getReplyThreadPreview(msg, messageByEventId)}
             onReplyThreadClick={onReplyPreviewClick}
+            onOpenSenderProfile={onOpenSenderProfile}
           />
         );
       })}

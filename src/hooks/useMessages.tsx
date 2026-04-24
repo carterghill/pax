@@ -22,6 +22,10 @@ interface MessageEditPayload {
   fileMediaRequest: unknown | null;
   fileMime: unknown | null;
   fileDisplayName: unknown | null;
+  imageWidth: unknown | null;
+  imageHeight: unknown | null;
+  videoWidth: unknown | null;
+  videoHeight: unknown | null;
 }
 
 interface MessageRedactedPayload {
@@ -191,6 +195,10 @@ function applyReactionDelta(
   });
 }
 
+function editPayloadDimension(v: unknown): number | undefined {
+  return typeof v === "number" && Number.isFinite(v) && v > 0 ? v : undefined;
+}
+
 function applyMessageEdit(arr: Message[], payload: MessageEditPayload): Message[] {
   const idx = arr.findIndex((m) => m.eventId === payload.targetEventId);
   if (idx === -1) return arr;
@@ -211,14 +219,32 @@ function applyMessageEdit(arr: Message[], payload: MessageEditPayload): Message[
     fileMediaRequest: _of,
     fileMime: _ofm,
     fileDisplayName: _ofd,
+    imageWidth: _oiw,
+    imageHeight: _oih,
+    videoWidth: _ovw,
+    videoHeight: _ovh,
     ...rest
   } = current;
 
   let nextMessage: Message;
   if (imageMediaRequest != null) {
-    nextMessage = { ...rest, body, edited: true, imageMediaRequest };
+    nextMessage = {
+      ...rest,
+      body,
+      edited: true,
+      imageMediaRequest,
+      imageWidth: editPayloadDimension(payload.imageWidth),
+      imageHeight: editPayloadDimension(payload.imageHeight),
+    };
   } else if (videoMediaRequest != null) {
-    nextMessage = { ...rest, body, edited: true, videoMediaRequest };
+    nextMessage = {
+      ...rest,
+      body,
+      edited: true,
+      videoMediaRequest,
+      videoWidth: editPayloadDimension(payload.videoWidth),
+      videoHeight: editPayloadDimension(payload.videoHeight),
+    };
   } else if (fileMediaRequest != null) {
     nextMessage = {
       ...rest,

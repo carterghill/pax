@@ -631,8 +631,11 @@ export default function UserMenu({
       )}
       {profileUserId && (
         <UserProfileDialog
-          roomId={roomId} userId={profileUserId}
-          currentUserId={userId} onClose={() => setProfileUserId(null)}
+          roomId={roomId}
+          userId={profileUserId}
+          currentUserId={userId}
+          onClose={() => setProfileUserId(null)}
+          onStartDirectMessage={onStartDirectMessage}
         />
       )}
     </>

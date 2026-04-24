@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState, useCallback, useMemo } from "react";
 import { invoke } from "@tauri-apps/api/core";
-import { X, Loader2, Copy, Shield, Crown, User, Calendar, Hash } from "lucide-react";
+import { X, Loader2, MessageCircle, Copy, Shield, Crown, User, Calendar, Hash } from "lucide-react";
 import { useTheme } from "../theme/ThemeContext";
 import { paletteDialogOuterBorderStyle } from "../theme/paletteBorder";
 import { useOverlayObstruction } from "../hooks/useOverlayObstruction";
@@ -74,6 +74,8 @@ interface UserProfileDialogProps {
   /** When set and equal to `userId`, presence is taken from local status (matches the user menu). */
   currentUserId?: string;
   onClose: () => void;
+  /** Opens DM with this member (Element-style: room created on first send). Hidden for own profile. */
+  onStartDirectMessage?: (peerUserId: string, displayNameHint: string) => void;
 }
 
 function sameMatrixUser(a: string, b: string): boolean {
@@ -85,6 +87,7 @@ export default function UserProfileDialog({
   userId,
   currentUserId,
   onClose,
+  onStartDirectMessage,
 }: UserProfileDialogProps) {
   const { palette, typography, spacing, resolvedColorScheme } = useTheme();
   const { effectivePresence, statusMessage } = usePresenceContext();
@@ -136,13 +139,6 @@ export default function UserProfileDialog({
     [onClose],
   );
 
-  const copyId = useCallback(() => {
-    if (!profile) return;
-    void navigator.clipboard.writeText(profile.userId);
-    setCopied(true);
-    window.setTimeout(() => setCopied(false), 2000);
-  }, [profile]);
-
   const displayName = profile?.displayName ?? null;
   const { localpart, server } = profile ? parseMxid(profile.userId) : parseMxid(userId);
   const titleId = "user-profile-display-name";
@@ -159,6 +155,21 @@ export default function UserProfileDialog({
     currentUserId != null &&
     currentUserId.length > 0 &&
     sameMatrixUser(currentUserId, userId);
+
+  const handleMessageUser = useCallback(() => {
+    if (!profile || isSelf || !onStartDirectMessage) return;
+    const hint = profile.displayName?.trim() || profile.userId;
+    onStartDirectMessage(profile.userId, hint);
+    onClose();
+  }, [profile, isSelf, onStartDirectMessage, onClose]);
+
+  const copyId = useCallback(() => {
+    if (!profile) return;
+    void navigator.clipboard.writeText(profile.userId);
+    setCopied(true);
+    window.setTimeout(() => setCopied(false), 2000);
+  }, [profile]);
+
   const presenceToShow =
     profile && isSelf ? effectivePresence : resolvePresenceWithDnd(profile?.presence ?? "offline", profile?.statusMsg);
 
@@ -602,11 +613,44 @@ export default function UserProfileDialog({
                   </div>
                 )}
 
+                {!isSelf && onStartDirectMessage ? (
+                  <button
+                    type="button"
+                    onClick={handleMessageUser}
+                    style={{
+                      marginTop: spacing.unit * 4,
+                      display: "flex",
+                      alignItems: "center",
+                      justifyContent: "center",
+                      gap: spacing.unit * 2,
+                      width: "100%",
+                      padding: `${11}px ${spacing.unit * 3}px`,
+                      borderRadius: 4,
+                      border: "none",
+                      backgroundColor: resolvedColorScheme === "dark" ? "#248046" : "#2d7a4d",
+                      color: "#fff",
+                      fontSize: typography.fontSizeSmall,
+                      fontWeight: typography.fontWeightBold,
+                      cursor: "pointer",
+                      transition: "filter 0.12s ease, transform 0.08s ease",
+                    }}
+                    onMouseEnter={(e) => {
+                      (e.currentTarget as HTMLButtonElement).style.filter = "brightness(1.08)";
+                    }}
+                    onMouseLeave={(e) => {
+                      (e.currentTarget as HTMLButtonElement).style.filter = "none";
+                    }}
+                  >
+                    <MessageCircle size={15} />
+                    Message user
+                  </button>
+                ) : null}
+
                 <button
                   type="button"
                   onClick={copyId}
                   style={{
-                    marginTop: spacing.unit * 4,
+                    marginTop: !isSelf && onStartDirectMessage ? spacing.unit * 2 : spacing.unit * 4,
                     display: "flex",
                     alignItems: "center",
                     justifyContent: "center",
@@ -614,19 +658,19 @@ export default function UserProfileDialog({
                     width: "100%",
                     padding: `${11}px ${spacing.unit * 3}px`,
                     borderRadius: 4,
-                    border: "none",
-                    backgroundColor: resolvedColorScheme === "dark" ? "#248046" : "#2d7a4d",
-                    color: "#fff",
+                    border: `1px solid ${palette.border}`,
+                    backgroundColor: palette.bgTertiary,
+                    color: palette.textSecondary,
                     fontSize: typography.fontSizeSmall,
                     fontWeight: typography.fontWeightBold,
                     cursor: "pointer",
-                    transition: "filter 0.12s ease, transform 0.08s ease",
+                    transition: "background-color 0.12s ease, filter 0.12s ease",
                   }}
                   onMouseEnter={(e) => {
-                    (e.currentTarget as HTMLButtonElement).style.filter = "brightness(1.08)";
+                    (e.currentTarget as HTMLButtonElement).style.backgroundColor = palette.bgHover;
                   }}
                   onMouseLeave={(e) => {
-                    (e.currentTarget as HTMLButtonElement).style.filter = "none";
+                    (e.currentTarget as HTMLButtonElement).style.backgroundColor = palette.bgTertiary;
                   }}
                 >
                   <Copy size={15} />

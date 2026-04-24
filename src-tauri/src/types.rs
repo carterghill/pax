@@ -57,9 +57,18 @@ pub struct MessageInfo {
     /// When set, the message is an image; the frontend fetches a temp path via `get_matrix_image_path`.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub image_media_request: Option<serde_json::Value>,
+    /// Matrix `m.image` `info.w` / `info.h` when known (inline layout / loading placeholder).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub image_width: Option<u32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub image_height: Option<u32>,
     /// When set, the message is a video; same download path as images (`get_matrix_image_path`).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub video_media_request: Option<serde_json::Value>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub video_width: Option<u32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub video_height: Option<u32>,
     /// Matrix `m.file`: serialized `MediaRequestParameters` for `get_matrix_image_path`.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub file_media_request: Option<serde_json::Value>,
@@ -184,6 +193,10 @@ pub struct MessageEditPayload {
     pub file_media_request: serde_json::Value,
     pub file_mime: serde_json::Value,
     pub file_display_name: serde_json::Value,
+    pub image_width: serde_json::Value,
+    pub image_height: serde_json::Value,
+    pub video_width: serde_json::Value,
+    pub video_height: serde_json::Value,
 }
 
 /// Remove a timeline row when an event is redacted (e.g. message deleted).

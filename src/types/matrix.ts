@@ -45,8 +45,13 @@ export interface Message {
   edited?: boolean;
   /** Matrix `m.image` payload: serialized `MediaRequestParameters` for authenticated download. */
   imageMediaRequest?: unknown;
+  /** From Matrix `m.image` `info` when present (inline layout / loading placeholder). */
+  imageWidth?: number;
+  imageHeight?: number;
   /** Matrix `m.video` payload: serialized `MediaRequestParameters` for authenticated download. */
   videoMediaRequest?: unknown;
+  videoWidth?: number;
+  videoHeight?: number;
   /** Matrix `m.file`: serialized `MediaRequestParameters` for authenticated download. */
   fileMediaRequest?: unknown;
   fileMime?: string | null;
