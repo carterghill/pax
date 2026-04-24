@@ -78,6 +78,9 @@ pub struct MessageInfo {
     /// Filename for the attachment chip (Matrix `filename` or `body` when uncaptioned).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub file_display_name: Option<String>,
+    /// Matrix `msgtype` when [`Self::body`] is the unsupported placeholder (e.g. `m.location`).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub unsupported_matrix_msgtype: Option<String>,
     /// Aggregated `m.reaction` annotations for this event (Matrix annotation key → senders).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub reactions: Option<Vec<MessageReactionSummary>>,
@@ -197,6 +200,8 @@ pub struct MessageEditPayload {
     pub image_height: serde_json::Value,
     pub video_width: serde_json::Value,
     pub video_height: serde_json::Value,
+    /// `null` when the edited event is not an unsupported `msgtype` row.
+    pub unsupported_matrix_msgtype: serde_json::Value,
 }
 
 /// Remove a timeline row when an event is redacted (e.g. message deleted).

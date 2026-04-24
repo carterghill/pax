@@ -26,6 +26,7 @@ interface MessageEditPayload {
   imageHeight: unknown | null;
   videoWidth: unknown | null;
   videoHeight: unknown | null;
+  unsupportedMatrixMsgtype: unknown | null;
 }
 
 interface MessageRedactedPayload {
@@ -199,6 +200,12 @@ function editPayloadDimension(v: unknown): number | undefined {
   return typeof v === "number" && Number.isFinite(v) && v > 0 ? v : undefined;
 }
 
+function editPayloadUnsupportedMatrixMsgtype(v: unknown): string | null {
+  if (v == null) return null;
+  if (typeof v === "string" && v.length > 0) return v;
+  return null;
+}
+
 function applyMessageEdit(arr: Message[], payload: MessageEditPayload): Message[] {
   const idx = arr.findIndex((m) => m.eventId === payload.targetEventId);
   if (idx === -1) return arr;
@@ -223,8 +230,14 @@ function applyMessageEdit(arr: Message[], payload: MessageEditPayload): Message[
     imageHeight: _oih,
     videoWidth: _ovw,
     videoHeight: _ovh,
+    unsupportedMatrixMsgtype: _ou,
     ...rest
   } = current;
+
+  const unsupportedMatrixMsgtype =
+    payload.unsupportedMatrixMsgtype !== undefined
+      ? editPayloadUnsupportedMatrixMsgtype(payload.unsupportedMatrixMsgtype)
+      : current.unsupportedMatrixMsgtype ?? null;
 
   let nextMessage: Message;
   if (imageMediaRequest != null) {
@@ -232,6 +245,7 @@ function applyMessageEdit(arr: Message[], payload: MessageEditPayload): Message[
       ...rest,
       body,
       edited: true,
+      unsupportedMatrixMsgtype,
       imageMediaRequest,
       imageWidth: editPayloadDimension(payload.imageWidth),
       imageHeight: editPayloadDimension(payload.imageHeight),
@@ -241,6 +255,7 @@ function applyMessageEdit(arr: Message[], payload: MessageEditPayload): Message[
       ...rest,
       body,
       edited: true,
+      unsupportedMatrixMsgtype,
       videoMediaRequest,
       videoWidth: editPayloadDimension(payload.videoWidth),
       videoHeight: editPayloadDimension(payload.videoHeight),
@@ -250,12 +265,13 @@ function applyMessageEdit(arr: Message[], payload: MessageEditPayload): Message[
       ...rest,
       body,
       edited: true,
+      unsupportedMatrixMsgtype,
       fileMediaRequest,
       fileMime: typeof fileMime === "string" ? fileMime : null,
       fileDisplayName: typeof fileDisplayName === "string" ? fileDisplayName : null,
     };
   } else {
-    nextMessage = { ...rest, body, edited: true };
+    nextMessage = { ...rest, body, edited: true, unsupportedMatrixMsgtype };
   }
 
   nextMessage = { ...nextMessage, reactions: current.reactions };

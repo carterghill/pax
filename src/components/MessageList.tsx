@@ -147,6 +147,19 @@ const NON_EDITABLE_BODIES = new Set([
   "[Unsupported message]",
 ]);
 
+/** Matrix `msgtype` rows we show as `[Label] …` (must stay in sync with `bracket_label_for_unhandled_matrix_msgtype` in messages.rs). */
+const NON_EDITABLE_BRACKET_PREFIXES = [
+  "[Confetti]",
+  "[Fireworks]",
+  "[Rainfall]",
+  "[Snowfall]",
+  "[Space invaders]",
+  "[Hearts]",
+  "[Location]",
+  "[Server notice]",
+  "[Verification]",
+] as const;
+
 function formatTime(timestamp: number): string {
   const date = new Date(timestamp);
   const now = new Date();
@@ -193,6 +206,12 @@ function replySnippetForMessage(m: Message): string {
   if (m.imageMediaRequest || m.localImagePreviewObjectUrl) return "Image";
   if (m.videoMediaRequest) return "Video";
   if (m.fileMediaRequest) return m.fileDisplayName?.trim() || "File";
+  const ty = m.unsupportedMatrixMsgtype?.trim();
+  if (ty) {
+    const t = m.body.trim();
+    const base = t || "Unsupported message";
+    return `${base} · ${ty}`;
+  }
   const t = m.body.trim();
   if (t.length > 120) return `${t.slice(0, 120)}…`;
   return t || "Message";
@@ -271,7 +290,13 @@ function messageAllowsEdit(msg: Message, userId: string): boolean {
   if (msg.imageMediaRequest != null) return false;
   if (msg.videoMediaRequest != null) return false;
   if (msg.fileMediaRequest != null) return false;
-  return !NON_EDITABLE_BODIES.has(msg.body.trim());
+  const t = msg.body.trim();
+  if (NON_EDITABLE_BODIES.has(t)) return false;
+  if (
+    NON_EDITABLE_BRACKET_PREFIXES.some((p) => t === p || t.startsWith(`${p} `))
+  )
+    return false;
+  return true;
 }
 
 function messageAllowsDelete(
@@ -862,7 +887,9 @@ const MessageRow = memo(function MessageRow({
             edited={Boolean(msg.edited)}
             onOpenDirectImage={onOpenDirectImage}
           >
-            {msg.body}
+            {msg.unsupportedMatrixMsgtype?.trim()
+              ? `${msg.body} · ${msg.unsupportedMatrixMsgtype.trim()}`
+              : msg.body}
           </MessageMarkdown>
         )}
         {msg.reactions && msg.reactions.length > 0 ? (

@@ -271,6 +271,7 @@ pub async fn get_messages(
         image_height: Option<u32>,
         video_width: Option<u32>,
         video_height: Option<u32>,
+        unsupported_matrix_msgtype: Option<String>,
         reply_to: Option<MessageReplyTo>,
     }
     let mut raw_msgs = Vec::new();
@@ -290,6 +291,7 @@ pub async fn get_messages(
             Option<u32>,
             Option<u32>,
             Option<u32>,
+            Option<String>,
             u64,
         ),
     > = HashMap::new();
@@ -392,7 +394,7 @@ pub async fn get_messages(
                     let ts: u64 = original.origin_server_ts.0.into();
                     let replace = match latest_replacement.get(&target) {
                         None => true,
-                        Some((_, _, _, _, _, _, _, _, _, _, prev_ts)) => ts >= *prev_ts,
+                        Some((_, _, _, _, _, _, _, _, _, _, _, prev_ts)) => ts >= *prev_ts,
                     };
                     if replace {
                         latest_replacement.insert(
@@ -408,6 +410,7 @@ pub async fn get_messages(
                                 ext.image_height,
                                 ext.video_width,
                                 ext.video_height,
+                                ext.unsupported_matrix_msgtype.clone(),
                                 ts,
                             ),
                         );
@@ -436,6 +439,7 @@ pub async fn get_messages(
                     image_height: ext.image_height,
                     video_width: ext.video_width,
                     video_height: ext.video_height,
+                    unsupported_matrix_msgtype: ext.unsupported_matrix_msgtype,
                     reply_to,
                 });
             }
@@ -501,10 +505,11 @@ pub async fn get_messages(
                 image_height,
                 video_width,
                 video_height,
+                unsupported_matrix_msgtype,
             ) = latest_replacement
                 .get(&m.event_id)
                 .map(
-                    |(b, img, vid, file, fm, fd, iw, ih, vw, vh, _)| {
+                    |(b, img, vid, file, fm, fd, iw, ih, vw, vh, unsup, _ts)| {
                         (
                             b.clone(),
                             img.clone(),
@@ -516,6 +521,7 @@ pub async fn get_messages(
                             *ih,
                             *vw,
                             *vh,
+                            unsup.clone(),
                         )
                     },
                 )
@@ -531,6 +537,7 @@ pub async fn get_messages(
                         m.image_height,
                         m.video_width,
                         m.video_height,
+                        m.unsupported_matrix_msgtype.clone(),
                     )
                 });
             let reactions = reaction_map.get(&m.event_id).cloned();
@@ -552,6 +559,7 @@ pub async fn get_messages(
                 file_media_request,
                 file_mime,
                 file_display_name,
+                unsupported_matrix_msgtype,
                 reactions,
             }
         })
@@ -720,6 +728,7 @@ async fn build_message_infos_from_timeline_events(
         image_height: Option<u32>,
         video_width: Option<u32>,
         video_height: Option<u32>,
+        unsupported_matrix_msgtype: Option<String>,
         reply_to: Option<MessageReplyTo>,
     }
 
@@ -737,6 +746,7 @@ async fn build_message_infos_from_timeline_events(
             Option<u32>,
             Option<u32>,
             Option<u32>,
+            Option<String>,
             u64,
         ),
     > = HashMap::new();
@@ -764,7 +774,7 @@ async fn build_message_infos_from_timeline_events(
                         let ts: u64 = original.origin_server_ts.0.into();
                         let replace = match latest_replacement.get(&target) {
                             None => true,
-                            Some((_, _, _, _, _, _, _, _, _, _, prev_ts)) => ts >= *prev_ts,
+                            Some((_, _, _, _, _, _, _, _, _, _, _, prev_ts)) => ts >= *prev_ts,
                         };
                         if replace {
                             latest_replacement.insert(
@@ -780,6 +790,7 @@ async fn build_message_infos_from_timeline_events(
                                     ext.image_height,
                                     ext.video_width,
                                     ext.video_height,
+                                    ext.unsupported_matrix_msgtype.clone(),
                                     ts,
                                 ),
                             );
@@ -808,6 +819,7 @@ async fn build_message_infos_from_timeline_events(
                         image_height: ext.image_height,
                         video_width: ext.video_width,
                         video_height: ext.video_height,
+                        unsupported_matrix_msgtype: ext.unsupported_matrix_msgtype,
                         reply_to,
                     });
                 }
@@ -851,10 +863,11 @@ async fn build_message_infos_from_timeline_events(
                 image_height,
                 video_width,
                 video_height,
+                unsupported_matrix_msgtype,
             ) = latest_replacement
                 .get(&m.event_id)
                 .map(
-                    |(b, img, vid, file, fm, fd, iw, ih, vw, vh, _)| {
+                    |(b, img, vid, file, fm, fd, iw, ih, vw, vh, unsup, _ts)| {
                         (
                             b.clone(),
                             img.clone(),
@@ -866,6 +879,7 @@ async fn build_message_infos_from_timeline_events(
                             *ih,
                             *vw,
                             *vh,
+                            unsup.clone(),
                         )
                     },
                 )
@@ -881,6 +895,7 @@ async fn build_message_infos_from_timeline_events(
                         m.image_height,
                         m.video_width,
                         m.video_height,
+                        m.unsupported_matrix_msgtype.clone(),
                     )
                 });
             let reactions = reaction_map.get(&m.event_id).cloned();
@@ -902,6 +917,7 @@ async fn build_message_infos_from_timeline_events(
                 file_media_request,
                 file_mime,
                 file_display_name,
+                unsupported_matrix_msgtype,
                 reactions,
             }
         })
@@ -985,11 +1001,15 @@ pub async fn get_pinned_message_previews(
                     SyncMessageLikeEvent::Redacted(_) => (String::new(), "Deleted message".to_string()),
                     SyncMessageLikeEvent::Original(o) => {
                         let sender = o.sender.to_string();
-                        let body = extract_message_display(&o.content).body;
-                        let preview = if body.chars().count() > 120 {
-                            format!("{}…", body.chars().take(120).collect::<String>())
+                        let ext = extract_message_display(&o.content);
+                        let mut preview_base = ext.body.clone();
+                        if let Some(t) = &ext.unsupported_matrix_msgtype {
+                            preview_base = format!("{preview_base} · {t}");
+                        }
+                        let preview = if preview_base.chars().count() > 120 {
+                            format!("{}…", preview_base.chars().take(120).collect::<String>())
                         } else {
-                            body
+                            preview_base
                         };
                         (sender, preview)
                     }
@@ -1328,6 +1348,11 @@ pub async fn start_sync(
                     v.map(|n| serde_json::Value::Number(serde_json::Number::from(n)))
                         .unwrap_or(serde_json::Value::Null)
                 };
+                let unsupported_matrix_msgtype = ext
+                    .unsupported_matrix_msgtype
+                    .clone()
+                    .map(serde_json::Value::String)
+                    .unwrap_or(serde_json::Value::Null);
                 let payload = MessageEditPayload {
                     room_id,
                     target_event_id: repl.event_id.to_string(),
@@ -1341,6 +1366,7 @@ pub async fn start_sync(
                     image_height: json_u32(ext.image_height),
                     video_width: json_u32(ext.video_width),
                     video_height: json_u32(ext.video_height),
+                    unsupported_matrix_msgtype,
                 };
                 let _ = app.emit("room-message-edit", payload);
                 return;
@@ -1393,6 +1419,7 @@ pub async fn start_sync(
                     file_media_request: ext.file_media_request,
                     file_mime: ext.file_mime,
                     file_display_name: ext.file_display_name,
+                    unsupported_matrix_msgtype: ext.unsupported_matrix_msgtype,
                     reactions: None,
                 },
             };
@@ -1940,6 +1967,7 @@ struct MessageDisplayExtract {
     image_height: Option<u32>,
     video_width: Option<u32>,
     video_height: Option<u32>,
+    unsupported_matrix_msgtype: Option<String>,
 }
 
 /// Matrix `info.w` / `info.h` when present and non-zero (for inline layout / loading placeholder).
@@ -1976,6 +2004,43 @@ fn image_event_display_dimensions(
         }
     }
     (None, None)
+}
+
+/// Human-readable `[]` tag for `m.room.message` kinds Pax does not render natively (Element effects, …).
+fn bracket_label_for_unhandled_matrix_msgtype(msgtype: &str) -> Option<&'static str> {
+    match msgtype {
+        "nic.custom.confetti" => Some("Confetti"),
+        "nic.custom.fireworks" => Some("Fireworks"),
+        "io.element.effect.rainfall" => Some("Rainfall"),
+        "io.element.effect.snowfall" => Some("Snowfall"),
+        "io.element.effects.space_invaders" => Some("Space invaders"),
+        "io.element.effect.hearts" => Some("Hearts"),
+        "m.location" => Some("Location"),
+        "m.server_notice" => Some("Server notice"),
+        "m.key.verification.request" => Some("Verification"),
+        _ => None,
+    }
+}
+
+/// Fallback timeline text for [`MessageType`] variants Pax does not specialize: prefer Matrix `body`,
+/// with a short tag for known Element chat effects and similar types.
+fn body_for_unhandled_room_message(msgtype: &str, stripped_body: String) -> (String, Option<String>) {
+    let stripped_trim = stripped_body.trim();
+    if let Some(label) = bracket_label_for_unhandled_matrix_msgtype(msgtype) {
+        let body = if stripped_trim.is_empty() {
+            format!("[{label}]")
+        } else {
+            format!("[{label}] {stripped_trim}")
+        };
+        return (body, None);
+    }
+    if !stripped_trim.is_empty() {
+        return (stripped_trim.to_owned(), None);
+    }
+    (
+        "[Unsupported message]".to_string(),
+        Some(msgtype.to_owned()),
+    )
 }
 
 fn extract_message_display(
@@ -2027,6 +2092,7 @@ fn extract_message_display(
                 image_height,
                 video_width: None,
                 video_height: None,
+                unsupported_matrix_msgtype: None,
             }
         }
         MessageType::Video(vid) => {
@@ -2057,6 +2123,7 @@ fn extract_message_display(
                 image_height: None,
                 video_width,
                 video_height,
+                unsupported_matrix_msgtype: None,
             }
         }
         MessageType::Text(text) => MessageDisplayExtract {
@@ -2070,6 +2137,7 @@ fn extract_message_display(
             image_height: None,
             video_width: None,
             video_height: None,
+            unsupported_matrix_msgtype: None,
         },
         MessageType::Notice(notice) => MessageDisplayExtract {
             body: apply_reply_strip(&notice.body),
@@ -2082,6 +2150,7 @@ fn extract_message_display(
             image_height: None,
             video_width: None,
             video_height: None,
+            unsupported_matrix_msgtype: None,
         },
         MessageType::Emote(emote) => MessageDisplayExtract {
             body: format!("* {}", apply_reply_strip(&emote.body)),
@@ -2094,6 +2163,7 @@ fn extract_message_display(
             image_height: None,
             video_width: None,
             video_height: None,
+            unsupported_matrix_msgtype: None,
         },
         MessageType::File(f) => {
             let display_name = f
@@ -2128,6 +2198,7 @@ fn extract_message_display(
                 image_height: None,
                 video_width: None,
                 video_height: None,
+                unsupported_matrix_msgtype: None,
             }
         }
         MessageType::Audio(_) => MessageDisplayExtract {
@@ -2141,19 +2212,26 @@ fn extract_message_display(
             image_height: None,
             video_width: None,
             video_height: None,
+            unsupported_matrix_msgtype: None,
         },
-        _ => MessageDisplayExtract {
-            body: "[Unsupported message]".to_string(),
-            image_media_request: None,
-            video_media_request: None,
-            file_media_request: None,
-            file_mime: None,
-            file_display_name: None,
-            image_width: None,
-            image_height: None,
-            video_width: None,
-            video_height: None,
-        },
+        _ => {
+            let stripped = apply_reply_strip(content.body());
+            let (body, unsupported_matrix_msgtype) =
+                body_for_unhandled_room_message(content.msgtype(), stripped);
+            MessageDisplayExtract {
+                body,
+                image_media_request: None,
+                video_media_request: None,
+                file_media_request: None,
+                file_mime: None,
+                file_display_name: None,
+                image_width: None,
+                image_height: None,
+                video_width: None,
+                video_height: None,
+                unsupported_matrix_msgtype,
+            }
+        }
     };
     out
 }

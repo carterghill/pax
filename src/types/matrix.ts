@@ -58,6 +58,10 @@ export interface Message {
   /** Filename shown on the attachment chip. */
   fileDisplayName?: string | null;
   /**
+   * Matrix `msgtype` when {@link body} is `[Unsupported message]` (e.g. `m.location`, bridge types).
+   */
+  unsupportedMatrixMsgtype?: string | null;
+  /**
    * Client-only: in-flight file send (local echo). Cleared when the timeline event is synced.
    */
   localFileUpload?: {
