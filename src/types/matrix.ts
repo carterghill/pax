@@ -1,9 +1,29 @@
+/**
+ * Per-parent-space `m.space.child` ordering metadata.  Carried in
+ * {@link Room.spaceChildOrders} keyed by parent space id so the sidebar can
+ * sort children of a given space using the MSC1772/MSC2946 algorithm:
+ * `order` lex → `originServerTs` → room id.
+ */
+export interface SpaceChildOrder {
+  /** Optional `order` string from the `m.space.child` event's content. */
+  order: string | null;
+  /** Event `origin_server_ts` — used as the first tiebreaker. */
+  originServerTs: number;
+}
+
 export interface Room {
   id: string;
   name: string;
   avatarUrl: string | null;
   isSpace: boolean;
   parentSpaceIds: string[];
+  /**
+   * For every parent space that lists this room/sub-space as a child, the
+   * `m.space.child` ordering metadata from that parent's state.  Keyed by
+   * parent space id (a subset of {@link parentSpaceIds}).  Absent when the
+   * room has no parent space (e.g. Home-bucket rooms).
+   */
+  spaceChildOrders?: Record<string, SpaceChildOrder>;
   roomType: string | null;
   /** `m.room.topic` when the homeserver includes it (e.g. after sync). */
   topic?: string | null;

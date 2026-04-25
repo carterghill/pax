@@ -432,6 +432,7 @@ pub fn run() {
             commands::rooms::create_room_in_space,
             commands::rooms::create_standalone_room,
             commands::rooms::link_room_to_space,
+            commands::rooms::set_space_child_order,
             commands::rooms::search_public_spaces,
             commands::rooms::search_public_rooms,
             commands::rooms::resolve_room_alias,
@@ -541,6 +542,9 @@ pub fn run() {
             commands::pax_settings::set_tray_unread_indicator_mode,
             commands::pax_settings::set_global_default_notification_level,
             commands::pax_settings::set_space_notification_level,
+            // --- User-level space sidebar order (custom account data) ---
+            commands::space_order::get_space_order,
+            commands::space_order::set_space_order,
             // --- Notification levels (synthesised onto push rules) ---
             commands::notification_levels::set_room_notification_level,
             commands::notification_levels::clear_room_notification_level,

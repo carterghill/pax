@@ -29,10 +29,12 @@ import {
   voiceStateLookupKeysForLiveKitIdentity,
 } from "../utils/matrix";
 import { collectRoomIdsInSpaceTree } from "../utils/spaceModeration";
+import { sortBySpaceChildOrder } from "../utils/spaceChildOrdering";
 import { useLivekitVoiceSnapshots } from "../hooks/useLivekitVoiceSnapshots";
 import { useMatrixUserProfile } from "../hooks/useMatrixUserProfile";
 import { useUserAvatar } from "../hooks/useUserAvatar";
 import { useResizeHandle } from "../hooks/useResizeHandle";
+import { useSpaceOrder, applyStoredSpaceOrder } from "../hooks/useSpaceOrder";
 
 const ROOM_SIDEBAR_WIDTH_KEY = "pax-room-sidebar-width";
 const USER_MENU_WIDTH_KEY = "pax-user-menu-width";
@@ -105,11 +107,21 @@ export default function MainLayout({
     return ids;
   }, [spaces]);
 
-  const topLevelSpaces = useMemo(
-    () =>
-      spaces.filter((s) => !s.parentSpaceIds.some((pid) => joinedSpaceIdSet.has(pid))),
-    [spaces, joinedSpaceIdSet]
-  );
+  const { storedOrder: storedSpaceOrder, setOrder: setStoredSpaceOrder } =
+    useSpaceOrder();
+
+  const topLevelSpaces = useMemo(() => {
+    const filtered = spaces.filter(
+      (s) => !s.parentSpaceIds.some((pid) => joinedSpaceIdSet.has(pid))
+    );
+    // Alphabetise the "unknown" bucket so spaces the user has never
+    // manually ordered have a stable fallback position; `applyStoredSpaceOrder`
+    // preserves this tail order.
+    const alphaSorted = [...filtered].sort((a, b) =>
+      compareByDisplayThenKey(a.name, a.id, b.name, b.id)
+    );
+    return applyStoredSpaceOrder(alphaSorted, storedSpaceOrder);
+  }, [spaces, joinedSpaceIdSet, storedSpaceOrder]);
 
   const { manualStatus, setManualStatus, effectivePresence, statusMessage, setStatusMessage } = usePresence();
   const voiceCall = useVoiceCall();
@@ -333,14 +345,17 @@ export default function MainLayout({
 
   const childJoinedSubspaces = useMemo(() => {
     if (!activeSpaceId) return [];
-    return spaces
-      .filter(
-        (s) =>
-          s.isSpace &&
-          s.membership === "joined" &&
-          s.parentSpaceIds.includes(activeSpaceId)
-      )
-      .sort((a, b) => compareByDisplayThenKey(a.name, a.id, b.name, b.id));
+    const children = spaces.filter(
+      (s) =>
+        s.isSpace &&
+        s.membership === "joined" &&
+        s.parentSpaceIds.includes(activeSpaceId)
+    );
+    // Sort by the parent's `m.space.child` `order` (admin-set) rather than
+    // alphabetical — falls through to origin_server_ts and room id per
+    // MSC2946, then finally to display name for children with no ordering
+    // metadata at all.
+    return sortBySpaceChildOrder(children, activeSpaceId);
   }, [spaces, activeSpaceId]);
 
   const subSpaceRoomIdSet = useMemo(() => {
@@ -356,9 +371,18 @@ export default function MainLayout({
   const visibleRooms = useMemo(() => {
     let base: Room[];
     if (!activeSpaceId) {
+      // Home (no active space): rooms come in whatever order the backend
+      // provided.  Home ordering is user-preference territory that Matrix
+      // itself doesn't spec for non-spaced rooms; punting for now.
       base = roomsBySpace(activeSpaceId);
     } else {
-      base = roomsBySpace(activeSpaceId).filter((r) => !subSpaceRoomIdSet.has(r.id));
+      // Active space: filter out rooms that belong to a child sub-space
+      // (those render in their own section), then sort the remainder by
+      // the space's `m.space.child` order — admin-set, per MSC2946.
+      const raw = roomsBySpace(activeSpaceId).filter(
+        (r) => !subSpaceRoomIdSet.has(r.id)
+      );
+      base = sortBySpaceChildOrder(raw, activeSpaceId);
     }
     if (!activeSpaceId && pendingDm) {
       const fakeId = pendingDmRoomId(pendingDm.peerUserId);
@@ -408,9 +432,7 @@ export default function MainLayout({
     () =>
       childJoinedSubspaces.map((subSpace) => ({
         subSpace,
-        rooms: roomsBySpace(subSpace.id).sort((a, b) =>
-          compareByDisplayThenKey(a.name, a.id, b.name, b.id)
-        ),
+        rooms: sortBySpaceChildOrder(roomsBySpace(subSpace.id), subSpace.id),
       })),
     [childJoinedSubspaces, roomsBySpace]
   );
@@ -685,6 +707,88 @@ export default function MainLayout({
     [fetchRooms, activeSpaceId]
   );
 
+  /**
+   * Persist a new user-level top-level space order after a drag-and-drop
+   * in the space sidebar.  The sidebar passes in the full post-drop order
+   * of currently-rendered top-level spaces (already `spaceHighlightId`-
+   * neutral); we forward it directly to the account-data writer.
+   */
+  const handleReorderSpaces = useCallback(
+    async (nextOrder: string[]) => {
+      try {
+        await setStoredSpaceOrder(nextOrder);
+      } catch (e) {
+        // `setStoredSpaceOrder` already logs and rolls back; surface to
+        // help diagnose if persistent.
+        // eslint-disable-next-line no-console
+        console.error("Failed to persist space order:", e);
+      }
+    },
+    [setStoredSpaceOrder]
+  );
+
+  /**
+   * Whether the current user may rewrite `m.space.child` events in the
+   * active space (same permission that gates "Create room in space").  We
+   * fetch this once per active space; `RoomSidebar` uses it to show/hide
+   * drag affordances for sub-spaces and direct rooms.  Sub-space interior
+   * reorders (rooms inside a sub-space) are gated separately by the
+   * sidebar using a lazily-fetched check per sub-space.
+   */
+  const [canManageActiveSpace, setCanManageActiveSpace] = useState(false);
+  useEffect(() => {
+    if (!activeSpaceId) {
+      setCanManageActiveSpace(false);
+      return;
+    }
+    let cancelled = false;
+    invoke<boolean>("can_manage_space_children", { spaceId: activeSpaceId })
+      .then((v) => {
+        if (!cancelled) setCanManageActiveSpace(v);
+      })
+      .catch(() => {
+        if (!cancelled) setCanManageActiveSpace(false);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [activeSpaceId]);
+
+  /**
+   * Apply a batch of `m.space.child` order updates for a given parent
+   * space.  The `RoomSidebar` computes the plan (using
+   * `buildReorderPlan`) and hands us the list of writes; we fire them
+   * sequentially so that a mid-plan failure doesn't leave the space in an
+   * obviously broken state.  `fetchRooms()` after all writes land pulls
+   * the new ordering metadata back through `get_rooms` → `useRooms`.
+   */
+  const handleReorderSpaceChildren = useCallback(
+    async (parentSpaceId: string, writes: { childRoomId: string; order: string }[]) => {
+      if (writes.length === 0) return;
+      for (const w of writes) {
+        try {
+          await invoke("set_space_child_order", {
+            spaceId: parentSpaceId,
+            childRoomId: w.childRoomId,
+            order: w.order,
+          });
+        } catch (e) {
+          // eslint-disable-next-line no-console
+          console.error(
+            `[reorder] set_space_child_order failed for ${w.childRoomId} in ${parentSpaceId}:`,
+            e
+          );
+          break;
+        }
+      }
+      // Pull the new order back through the sync path; the m.space.child
+      // event handler in messages.rs will also emit rooms-changed, but
+      // doing it explicitly here keeps the sidebar snappy.
+      void fetchRooms();
+    },
+    [fetchRooms]
+  );
+
   return (
     <PresenceContext.Provider value={{ manualStatus, setManualStatus, effectivePresence, statusMessage, setStatusMessage }}>
       <div style={{
@@ -703,6 +807,7 @@ export default function MainLayout({
           onSelectSpace={handleSelectSpace}
           onSpacesChanged={handleSpacesChanged}
           onOpenSettings={handleOpenSettings}
+          onReorderSpaces={handleReorderSpaces}
           userId={userId}
           onLeftSpace={handleLeftSpace}
           isSpaceUnread={isSpaceUnread}
@@ -746,6 +851,8 @@ export default function MainLayout({
             onRoomsChanged={handleSpacesChanged}
             parentSpace={parentSpaceNav}
             onNavigateToParentSpace={handleNavigateToParentSpace}
+            canManageActiveSpaceChildren={canManageActiveSpace}
+            onReorderSpaceChildren={handleReorderSpaceChildren}
             isUnread={isUnread}
             mentionCount={effectiveMentionCount}
           />

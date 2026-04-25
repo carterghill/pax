@@ -1,4 +1,4 @@
-import { useState, useCallback, useEffect, useMemo } from "react";
+import { useState, useCallback, useEffect, useMemo, useRef } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import UserAvatar from "./UserAvatar";
@@ -39,6 +39,10 @@ import {
   parsePendingDmPeerUserId,
   voiceStateLookupKeysForParticipant,
 } from "../utils/matrix";
+import {
+  buildReorderPlan,
+  type SpaceChildOrderWrite,
+} from "../utils/spaceChildOrdering";
 
 /** DM peer circle in the channel list (slightly larger than default 16px icons). */
 const DM_SIDEBAR_AVATAR_PX = 28;
@@ -55,6 +59,91 @@ function resolveVoiceStateForRoom(
     if (state) return state;
   }
   return undefined;
+}
+
+/**
+ * Wrapper that adds drag + drop-indicator visuals to any row (room or
+ * sub-space header).  The row's own click handlers still work through the
+ * wrapper; we only intercept drag events.  Insertion indicator is drawn
+ * above the wrapper when `showIndicatorAbove` is true, and immediately
+ * below when `showIndicatorBelowLast` is true (last-in-list + drop-at-end
+ * case).
+ */
+function DraggableRow({
+  draggable,
+  onDragStart,
+  onDragEnd,
+  onDragOver,
+  onDrop,
+  isBeingDragged,
+  showIndicatorAbove,
+  showIndicatorBelowLast,
+  indicatorColor,
+  children,
+  style,
+}: {
+  draggable: boolean;
+  onDragStart?: (e: React.DragEvent) => void;
+  onDragEnd?: () => void;
+  onDragOver?: (e: React.DragEvent) => void;
+  onDrop?: (e: React.DragEvent) => void;
+  isBeingDragged: boolean;
+  showIndicatorAbove: boolean;
+  showIndicatorBelowLast: boolean;
+  indicatorColor: string;
+  children: React.ReactNode;
+  style?: React.CSSProperties;
+}) {
+  return (
+    <div
+      draggable={draggable || undefined}
+      onDragStart={onDragStart}
+      onDragEnd={onDragEnd}
+      onDragOver={onDragOver}
+      onDrop={onDrop}
+      style={{
+        position: "relative",
+        opacity: isBeingDragged ? 0.4 : 1,
+        transition: "opacity 0.08s linear",
+        cursor: draggable ? "grab" : undefined,
+        ...style,
+      }}
+    >
+      {showIndicatorAbove && (
+        <div
+          aria-hidden
+          style={{
+            position: "absolute",
+            left: 0,
+            right: 0,
+            top: -2,
+            height: 2,
+            borderRadius: 1,
+            backgroundColor: indicatorColor,
+            pointerEvents: "none",
+            zIndex: 1,
+          }}
+        />
+      )}
+      {children}
+      {showIndicatorBelowLast && (
+        <div
+          aria-hidden
+          style={{
+            position: "absolute",
+            left: 0,
+            right: 0,
+            bottom: -2,
+            height: 2,
+            borderRadius: 1,
+            backgroundColor: indicatorColor,
+            pointerEvents: "none",
+            zIndex: 1,
+          }}
+        />
+      )}
+    </div>
+  );
 }
 
 export type RoomSidebarSubSpaceSection = { subSpace: Room; rooms: Room[] };
@@ -111,6 +200,24 @@ interface RoomSidebarProps {
    * pill next to the room name (Discord-style).
    */
   mentionCount: (roomId: string) => number;
+  /**
+   * Whether the current user may rewrite `m.space.child` state events in the
+   * currently-active space (pre-resolved in `MainLayout`).  Used to gate
+   * drag-to-reorder for top-level rooms and sub-space headers.  Interior
+   * reorders (rooms inside a sub-space) use a lazily-resolved per-sub-space
+   * permission check, since they target a different parent.
+   */
+  canManageActiveSpaceChildren?: boolean;
+  /**
+   * Apply a batch of `m.space.child` `order` updates for a given parent
+   * space, in the order produced by `buildReorderPlan`.  Parent passes this
+   * so failures can be logged/retried at the layout level and so a single
+   * `fetchRooms()` pulls the new order back consistently.
+   */
+  onReorderSpaceChildren?: (
+    parentSpaceId: string,
+    writes: SpaceChildOrderWrite[]
+  ) => void | Promise<void>;
 }
 
 function VoiceParticipantRow({
@@ -481,6 +588,8 @@ export default function RoomSidebar({
   onNavigateToParentSpace,
   isUnread,
   mentionCount,
+  canManageActiveSpaceChildren = false,
+  onReorderSpaceChildren,
 }: RoomSidebarProps) {
   const { palette, spacing, typography } = useTheme();
   /** Sub-space id → expanded; absence means expanded (default open). */
@@ -559,6 +668,283 @@ export default function RoomSidebar({
       return { ...prev, [spaceId]: !cur };
     });
   }, []);
+
+  // ------ Drag-and-drop state (room / sub-space reordering) ------
+  //
+  // Unlike the space sidebar (user-level, account data), reordering rooms
+  // and sub-spaces inside a space writes `m.space.child` events — the
+  // admin-set, federated Matrix standard.  Only users with sufficient
+  // power level in the relevant space may drag.
+  //
+  // There are three drag scopes, each with its own parent space:
+  //   1. Sub-space headers in the active space      → parent = activeSpaceId
+  //   2. Direct rooms in the active space           → parent = activeSpaceId
+  //   3. Rooms inside a specific sub-space          → parent = that sub-space
+  //
+  // A drag is always constrained to its original bucket: you cannot drag a
+  // room out of a sub-space into the top-level list, and you cannot drag a
+  // sub-space header into a sub-space's room list — those would imply
+  // reparenting and that's a different Matrix operation.  We enforce this
+  // by embedding the parent id into the drag state.
+  interface ActiveDrag {
+    /** Matrix room id of the dragged child (room or sub-space). */
+    childId: string;
+    /** Parent space whose `m.space.child` event we'd write on drop. */
+    parentSpaceId: string;
+    /** Scope — used to only show drop indicators in matching rows. */
+    scope: "topLevelRoom" | "subSpaceHeader" | "subSpaceRoom";
+    /** When scope === "subSpaceRoom", which sub-space's room list. */
+    subSpaceId?: string;
+  }
+
+  const [activeDrag, setActiveDrag] = useState<ActiveDrag | null>(null);
+  /**
+   * Drop-indicator position: "before this child id" / sentinel "end".
+   * Paired with the drag scope so sub-space-room indicators don't leak into
+   * the top-level list or vice versa.
+   */
+  const [dropIndicator, setDropIndicator] = useState<{
+    beforeId: string | "end";
+    scope: ActiveDrag["scope"];
+    subSpaceId?: string;
+  } | null>(null);
+
+  /**
+   * Permission cache for dragging inside each sub-space's room list.
+   * Top-level drag permission comes from `canManageActiveSpaceChildren`
+   * (resolved once in MainLayout).  Sub-space interiors require a per-
+   * sub-space check because each is its own Matrix room with its own
+   * power-level state.  We resolve lazily on first interaction and cache
+   * for the session; stale cache on power-level changes is not a critical
+   * issue (the homeserver will still reject unauthorised writes and we
+   * show the error via the existing toast path in `handleReorderSpaceChildren`).
+   */
+  const [subSpaceCanManage, setSubSpaceCanManage] = useState<Record<string, boolean>>({});
+  const subSpaceCanManageRef = useRef(subSpaceCanManage);
+  subSpaceCanManageRef.current = subSpaceCanManage;
+
+  const ensureSubSpacePermission = useCallback((subSpaceId: string) => {
+    if (subSpaceCanManageRef.current[subSpaceId] !== undefined) return;
+    invoke<boolean>("can_manage_space_children", { spaceId: subSpaceId })
+      .then((v) => {
+        setSubSpaceCanManage((prev) => ({ ...prev, [subSpaceId]: v }));
+      })
+      .catch(() => {
+        setSubSpaceCanManage((prev) => ({ ...prev, [subSpaceId]: false }));
+      });
+  }, []);
+
+  /**
+   * Compute insertion position for a drag-over on a row.  Returns either
+   * the child id immediately after the insertion (so the indicator renders
+   * above that row) or "end" when dropping past the last row.  Returns
+   * `null` when the insertion would be a no-op (dropping on itself or
+   * immediately next to itself).
+   */
+  const computeInsertBeforeId = useCallback(
+    (
+      e: React.DragEvent,
+      rowChildId: string,
+      siblingsOrdered: string[],
+      draggedChildId: string
+    ): string | "end" | null => {
+      const rect = e.currentTarget.getBoundingClientRect();
+      const midpoint = rect.top + rect.height / 2;
+      const insertBefore = e.clientY < midpoint;
+      const idx = siblingsOrdered.indexOf(rowChildId);
+      if (idx < 0) return null;
+      let target: string | "end";
+      if (insertBefore) {
+        target = rowChildId;
+      } else if (idx === siblingsOrdered.length - 1) {
+        target = "end";
+      } else {
+        target = siblingsOrdered[idx + 1];
+      }
+      // Filter no-ops: dropping on self or immediately next to self
+      // (the slot the dragged item already occupies).
+      if (target === draggedChildId) return null;
+      if (target !== "end") {
+        const targetIdx = siblingsOrdered.indexOf(target);
+        if (targetIdx > 0 && siblingsOrdered[targetIdx - 1] === draggedChildId) {
+          return null;
+        }
+      } else {
+        if (siblingsOrdered[siblingsOrdered.length - 1] === draggedChildId) {
+          return null;
+        }
+      }
+      return target;
+    },
+    []
+  );
+
+  /**
+   * Kick off a drag for a child row.  `scope` and `subSpaceId` together
+   * identify which Matrix parent the drop would write to.
+   */
+  const handleChildDragStart = useCallback(
+    (
+      e: React.DragEvent,
+      childId: string,
+      scope: ActiveDrag["scope"],
+      subSpaceId?: string
+    ) => {
+      // Work out the parent space for the drop.
+      let parentSpaceId: string | null;
+      if (scope === "subSpaceRoom") {
+        parentSpaceId = subSpaceId ?? null;
+      } else {
+        parentSpaceId = activeSpaceId;
+      }
+      if (!parentSpaceId) return;
+
+      // Gate on permission — for top-level scopes we use the layout-level
+      // resolved flag; for sub-space interiors we lazy-resolve and fall
+      // back to optimistic `true` (the homeserver is the final authority).
+      let allowed = false;
+      if (scope === "subSpaceRoom") {
+        const cached = subSpaceCanManageRef.current[parentSpaceId];
+        if (cached === undefined) {
+          // Fire the fetch and cancel the drag; a subsequent attempt will
+          // see the resolved value.  This is rare because we prefetch on
+          // hover over sub-space sections (see `ensureSubSpacePermission`
+          // calls below).
+          ensureSubSpacePermission(parentSpaceId);
+          e.preventDefault();
+          return;
+        }
+        allowed = cached;
+      } else {
+        allowed = canManageActiveSpaceChildren;
+      }
+      if (!allowed) {
+        e.preventDefault();
+        return;
+      }
+
+      e.dataTransfer.effectAllowed = "move";
+      try {
+        e.dataTransfer.setData("text/plain", childId);
+      } catch {
+        /* ignore */
+      }
+      setActiveDrag({ childId, parentSpaceId, scope, subSpaceId });
+      setDropIndicator(null);
+    },
+    [activeSpaceId, canManageActiveSpaceChildren, ensureSubSpacePermission]
+  );
+
+  const handleChildDragEnd = useCallback(() => {
+    setActiveDrag(null);
+    setDropIndicator(null);
+  }, []);
+
+  /**
+   * Drag-over on a row: figure out where the drop indicator should render
+   * and update state.  Scope-matched: a top-level room drag hovering over
+   * a sub-space room row is a no-op (indicator stays null).
+   */
+  const handleRowDragOver = useCallback(
+    (
+      e: React.DragEvent,
+      rowChildId: string,
+      rowScope: ActiveDrag["scope"],
+      rowSubSpaceId: string | undefined,
+      siblingsOrdered: string[]
+    ) => {
+      if (!activeDrag) return;
+      if (activeDrag.scope !== rowScope) return;
+      if (rowScope === "subSpaceRoom" && activeDrag.subSpaceId !== rowSubSpaceId) {
+        return;
+      }
+      e.preventDefault();
+      e.dataTransfer.dropEffect = "move";
+      const target = computeInsertBeforeId(
+        e,
+        rowChildId,
+        siblingsOrdered,
+        activeDrag.childId
+      );
+      if (target === null) {
+        setDropIndicator(null);
+        return;
+      }
+      setDropIndicator((prev) => {
+        if (
+          prev &&
+          prev.beforeId === target &&
+          prev.scope === rowScope &&
+          prev.subSpaceId === rowSubSpaceId
+        ) {
+          return prev;
+        }
+        return { beforeId: target, scope: rowScope, subSpaceId: rowSubSpaceId };
+      });
+    },
+    [activeDrag, computeInsertBeforeId]
+  );
+
+  /**
+   * Drop on a row: build the reorder plan and hand it to the parent.  We
+   * always target the parent space embedded in the drag state (so a bad
+   * target-row computation can never silently write to the wrong space).
+   */
+  const handleRowDrop = useCallback(
+    (
+      e: React.DragEvent,
+      siblingsOrderedRooms: Room[]
+    ) => {
+      e.preventDefault();
+      const drag = activeDrag;
+      const indicator = dropIndicator;
+      setActiveDrag(null);
+      setDropIndicator(null);
+      if (!drag || !indicator || !onReorderSpaceChildren) return;
+      if (drag.scope !== indicator.scope) return;
+      if (drag.scope === "subSpaceRoom" && drag.subSpaceId !== indicator.subSpaceId) {
+        return;
+      }
+
+      // `buildReorderPlan` takes the drop target directly — the row the
+      // user is hovering immediately above, or `null` to mean "append to
+      // the end".
+      const beforeChildId =
+        indicator.beforeId === "end" ? null : indicator.beforeId;
+
+      const plan = buildReorderPlan(
+        siblingsOrderedRooms,
+        drag.childId,
+        beforeChildId,
+        drag.parentSpaceId
+      );
+      if (plan.writes.length === 0) return;
+      void onReorderSpaceChildren(drag.parentSpaceId, plan.writes);
+    },
+    [activeDrag, dropIndicator, onReorderSpaceChildren]
+  );
+
+  /**
+   * Prefetch permission for every visible sub-space's interior drag once
+   * we know the sub-space sections.  A single `can_manage_space_children`
+   * call each is cheap and prevents the first-drag-is-lost problem in
+   * `handleChildDragStart`.
+   */
+  useEffect(() => {
+    for (const section of subSpaceSections) {
+      ensureSubSpacePermission(section.subSpace.id);
+    }
+  }, [subSpaceSections, ensureSubSpacePermission]);
+
+  // Sibling lists per drag scope.  We keep these as arrays of ids for
+  // cheap equality comparisons in drag-over handlers; the ordered room
+  // arrays themselves are available via `rooms` / `subSpaceSections` when
+  // we need `Room` objects for `buildReorderPlan`.
+  const subSpaceHeaderIds = useMemo(
+    () => subSpaceSections.map((s) => s.subSpace.id),
+    [subSpaceSections]
+  );
+  const topLevelRoomIds = useMemo(() => rooms.map((r) => r.id), [rooms]);
 
   const hasChannelList =
     rooms.length > 0 || subSpaceSections.some((s) => s.rooms.length > 0);
@@ -782,146 +1168,282 @@ export default function RoomSidebar({
             </div>
           </div>
         )}
-        {subSpaceSections.map(({ subSpace, rooms: subRooms }) => {
+        {subSpaceSections.map(({ subSpace, rooms: subRooms }, sectionIdx) => {
           const expanded = isSubSpaceExpanded(subSpace.id);
           const ChevronIcon = expanded ? ChevronDown : ChevronRight;
+          const subRoomIds = subRooms.map((r) => r.id);
+
+          // Drop-indicator state that applies to THIS sub-space's scopes.
+          const headerIsDragged =
+            activeDrag?.scope === "subSpaceHeader" &&
+            activeDrag.childId === subSpace.id;
+          const headerIndicatorAbove =
+            dropIndicator?.scope === "subSpaceHeader" &&
+            dropIndicator.beforeId === subSpace.id;
+          const headerIndicatorBelowLast =
+            dropIndicator?.scope === "subSpaceHeader" &&
+            dropIndicator.beforeId === "end" &&
+            sectionIdx === subSpaceSections.length - 1;
+
+          // Drag behaviour: reorder sub-space HEADERS inside the active
+          // space.  Uses `activeSpaceId` as the parent.
+          const headerDraggable =
+            !!onReorderSpaceChildren &&
+            !!activeSpaceId &&
+            canManageActiveSpaceChildren;
+
           return (
             <div key={subSpace.id} style={{ marginBottom: spacing.unit }}>
-              <div
-                role="button"
-                tabIndex={0}
-                aria-expanded={expanded}
-                onClick={() => toggleSubSpace(subSpace.id)}
-                onKeyDown={(e) => {
-                  if (e.key === "Enter" || e.key === " ") {
-                    e.preventDefault();
-                    toggleSubSpace(subSpace.id);
-                  }
-                }}
-                style={{
-                  display: "flex",
-                  alignItems: "center",
-                  gap: spacing.unit,
-                  padding: `${spacing.unit}px ${spacing.unit * 2}px`,
-                  borderRadius: spacing.unit,
-                  userSelect: "none",
-                  cursor: "pointer",
-                }}
+              <DraggableRow
+                draggable={headerDraggable}
+                onDragStart={(e) =>
+                  handleChildDragStart(e, subSpace.id, "subSpaceHeader")
+                }
+                onDragEnd={handleChildDragEnd}
+                onDragOver={(e) =>
+                  handleRowDragOver(
+                    e,
+                    subSpace.id,
+                    "subSpaceHeader",
+                    undefined,
+                    subSpaceHeaderIds
+                  )
+                }
+                onDrop={(e) =>
+                  handleRowDrop(e, subSpaceSections.map((s) => s.subSpace))
+                }
+                isBeingDragged={headerIsDragged}
+                showIndicatorAbove={headerIndicatorAbove}
+                showIndicatorBelowLast={headerIndicatorBelowLast}
+                indicatorColor={palette.accent}
               >
-                <ChevronIcon
-                  size={16}
-                  strokeWidth={2}
-                  aria-hidden
-                  style={{ flexShrink: 0, color: palette.textSecondary }}
-                />
-                <span
+                <div
+                  role="button"
+                  tabIndex={0}
+                  aria-expanded={expanded}
+                  onClick={() => toggleSubSpace(subSpace.id)}
+                  onKeyDown={(e) => {
+                    if (e.key === "Enter" || e.key === " ") {
+                      e.preventDefault();
+                      toggleSubSpace(subSpace.id);
+                    }
+                  }}
                   style={{
-                    flex: 1,
-                    minWidth: 0,
-                    fontSize: typography.fontSizeSmall,
-                    fontWeight: typography.fontWeightBold,
-                    color: palette.textSecondary,
-                    textTransform: "uppercase" as const,
-                    letterSpacing: "0.02em",
-                    overflow: "hidden",
-                    textOverflow: "ellipsis",
-                    whiteSpace: "nowrap",
+                    display: "flex",
+                    alignItems: "center",
+                    gap: spacing.unit,
+                    padding: `${spacing.unit}px ${spacing.unit * 2}px`,
+                    borderRadius: spacing.unit,
+                    userSelect: "none",
+                    cursor: headerDraggable ? "grab" : "pointer",
                   }}
                 >
-                  {subSpace.name}
-                </span>
-                {onOpenSubSpace ? (
-                  <button
-                    type="button"
-                    title="Open sub-space home"
-                    aria-label={`Open ${subSpace.name} home`}
-                    onClick={(e) => {
-                      e.stopPropagation();
-                      onOpenSubSpace(subSpace.id);
-                    }}
-                    onMouseDown={(e) => e.stopPropagation()}
+                  <ChevronIcon
+                    size={16}
+                    strokeWidth={2}
+                    aria-hidden
+                    style={{ flexShrink: 0, color: palette.textSecondary }}
+                  />
+                  <span
                     style={{
-                      flexShrink: 0,
-                      display: "flex",
-                      alignItems: "center",
-                      justifyContent: "center",
-                      width: 28,
-                      height: 28,
-                      padding: 0,
-                      border: "none",
-                      borderRadius: spacing.unit * 0.75,
-                      backgroundColor: "transparent",
+                      flex: 1,
+                      minWidth: 0,
+                      fontSize: typography.fontSizeSmall,
+                      fontWeight: typography.fontWeightBold,
                       color: palette.textSecondary,
-                      cursor: "pointer",
+                      textTransform: "uppercase" as const,
+                      letterSpacing: "0.02em",
+                      overflow: "hidden",
+                      textOverflow: "ellipsis",
+                      whiteSpace: "nowrap",
                     }}
                   >
-                    <ExternalLink size={14} strokeWidth={2} aria-hidden />
-                  </button>
-                ) : null}
-              </div>
+                    {subSpace.name}
+                  </span>
+                  {onOpenSubSpace ? (
+                    <button
+                      type="button"
+                      title="Open sub-space home"
+                      aria-label={`Open ${subSpace.name} home`}
+                      onClick={(e) => {
+                        e.stopPropagation();
+                        onOpenSubSpace(subSpace.id);
+                      }}
+                      onMouseDown={(e) => e.stopPropagation()}
+                      style={{
+                        flexShrink: 0,
+                        display: "flex",
+                        alignItems: "center",
+                        justifyContent: "center",
+                        width: 28,
+                        height: 28,
+                        padding: 0,
+                        border: "none",
+                        borderRadius: spacing.unit * 0.75,
+                        backgroundColor: "transparent",
+                        color: palette.textSecondary,
+                        cursor: "pointer",
+                      }}
+                    >
+                      <ExternalLink size={14} strokeWidth={2} aria-hidden />
+                    </button>
+                  ) : null}
+                </div>
+              </DraggableRow>
               {expanded &&
-                subRooms.map((room) => (
-                  <ChannelBlock
-                    key={room.id}
-                    room={room}
-                    activeRoomId={activeRoomId}
-                    userId={userId}
-                    onSelectRoom={onSelectRoom}
-                    onRoomContextMenu={(rid, rname, e) => {
-                      e.preventDefault();
-                      setRoomContextMenu({ x: e.clientX, y: e.clientY, roomId: rid, roomName: rname });
-                    }}
-                    voiceParticipants={voiceParticipants}
-                    connectedVoiceRoomId={connectedVoiceRoomId}
-                    isVoiceConnecting={isVoiceConnecting}
-                    disconnectingFromRoomId={disconnectingFromRoomId}
-                    screenSharingOwners={screenSharingOwners}
-                    voiceParticipantStatesByRoom={voiceParticipantStatesByRoom}
-                    onParticipantContextMenu={(e, identity, displayName) => {
-                      setContextMenu({ x: e.clientX, y: e.clientY, identity, displayName });
-                    }}
-                    peerPresenceByUserId={peerPresenceByUserId}
-                    peerStatusMsgByUserId={peerStatusMsgByUserId}
-                    palette={palette}
-                    spacing={spacing}
-                    typography={typography}
-                    isUnread={isUnread}
-                    mentionCount={mentionCount}
-                    indent
-                  />
-                ))}
+                subRooms.map((room, roomIdx) => {
+                  const isDragged =
+                    activeDrag?.scope === "subSpaceRoom" &&
+                    activeDrag.subSpaceId === subSpace.id &&
+                    activeDrag.childId === room.id;
+                  const indicatorAbove =
+                    dropIndicator?.scope === "subSpaceRoom" &&
+                    dropIndicator.subSpaceId === subSpace.id &&
+                    dropIndicator.beforeId === room.id;
+                  const indicatorBelowLast =
+                    dropIndicator?.scope === "subSpaceRoom" &&
+                    dropIndicator.subSpaceId === subSpace.id &&
+                    dropIndicator.beforeId === "end" &&
+                    roomIdx === subRooms.length - 1;
+                  const subRoomDraggable =
+                    !!onReorderSpaceChildren &&
+                    !!subSpaceCanManage[subSpace.id];
+
+                  return (
+                    <DraggableRow
+                      key={room.id}
+                      draggable={subRoomDraggable}
+                      onDragStart={(e) =>
+                        handleChildDragStart(e, room.id, "subSpaceRoom", subSpace.id)
+                      }
+                      onDragEnd={handleChildDragEnd}
+                      onDragOver={(e) =>
+                        handleRowDragOver(
+                          e,
+                          room.id,
+                          "subSpaceRoom",
+                          subSpace.id,
+                          subRoomIds
+                        )
+                      }
+                      onDrop={(e) => handleRowDrop(e, subRooms)}
+                      isBeingDragged={isDragged}
+                      showIndicatorAbove={indicatorAbove}
+                      showIndicatorBelowLast={indicatorBelowLast}
+                      indicatorColor={palette.accent}
+                    >
+                      <ChannelBlock
+                        room={room}
+                        activeRoomId={activeRoomId}
+                        userId={userId}
+                        onSelectRoom={onSelectRoom}
+                        onRoomContextMenu={(rid, rname, e) => {
+                          e.preventDefault();
+                          setRoomContextMenu({
+                            x: e.clientX,
+                            y: e.clientY,
+                            roomId: rid,
+                            roomName: rname,
+                          });
+                        }}
+                        voiceParticipants={voiceParticipants}
+                        connectedVoiceRoomId={connectedVoiceRoomId}
+                        isVoiceConnecting={isVoiceConnecting}
+                        disconnectingFromRoomId={disconnectingFromRoomId}
+                        screenSharingOwners={screenSharingOwners}
+                        voiceParticipantStatesByRoom={voiceParticipantStatesByRoom}
+                        onParticipantContextMenu={(e, identity, displayName) => {
+                          setContextMenu({
+                            x: e.clientX,
+                            y: e.clientY,
+                            identity,
+                            displayName,
+                          });
+                        }}
+                        peerPresenceByUserId={peerPresenceByUserId}
+                        peerStatusMsgByUserId={peerStatusMsgByUserId}
+                        palette={palette}
+                        spacing={spacing}
+                        typography={typography}
+                        isUnread={isUnread}
+                        mentionCount={mentionCount}
+                        indent
+                      />
+                    </DraggableRow>
+                  );
+                })}
             </div>
           );
         })}
-        {rooms.map((room) => (
-          <ChannelBlock
-            key={room.id}
-            room={room}
-            activeRoomId={activeRoomId}
-            userId={userId}
-            onSelectRoom={onSelectRoom}
-            onRoomContextMenu={(rid, rname, e) => {
-              e.preventDefault();
-              setRoomContextMenu({ x: e.clientX, y: e.clientY, roomId: rid, roomName: rname });
-            }}
-            voiceParticipants={voiceParticipants}
-            connectedVoiceRoomId={connectedVoiceRoomId}
-            isVoiceConnecting={isVoiceConnecting}
-            disconnectingFromRoomId={disconnectingFromRoomId}
-            screenSharingOwners={screenSharingOwners}
-            voiceParticipantStatesByRoom={voiceParticipantStatesByRoom}
-            onParticipantContextMenu={(e, identity, displayName) => {
-              setContextMenu({ x: e.clientX, y: e.clientY, identity, displayName });
-            }}
-            peerPresenceByUserId={peerPresenceByUserId}
-            peerStatusMsgByUserId={peerStatusMsgByUserId}
-            palette={palette}
-            spacing={spacing}
-            typography={typography}
-            isUnread={isUnread}
-            mentionCount={mentionCount}
-          />
-        ))}
+        {rooms.map((room, roomIdx) => {
+          const isDragged =
+            activeDrag?.scope === "topLevelRoom" && activeDrag.childId === room.id;
+          const indicatorAbove =
+            dropIndicator?.scope === "topLevelRoom" &&
+            dropIndicator.beforeId === room.id;
+          const indicatorBelowLast =
+            dropIndicator?.scope === "topLevelRoom" &&
+            dropIndicator.beforeId === "end" &&
+            roomIdx === rooms.length - 1;
+          const topLevelDraggable =
+            !!onReorderSpaceChildren &&
+            !!activeSpaceId &&
+            canManageActiveSpaceChildren;
+
+          return (
+            <DraggableRow
+              key={room.id}
+              draggable={topLevelDraggable}
+              onDragStart={(e) => handleChildDragStart(e, room.id, "topLevelRoom")}
+              onDragEnd={handleChildDragEnd}
+              onDragOver={(e) =>
+                handleRowDragOver(e, room.id, "topLevelRoom", undefined, topLevelRoomIds)
+              }
+              onDrop={(e) => handleRowDrop(e, rooms)}
+              isBeingDragged={isDragged}
+              showIndicatorAbove={indicatorAbove}
+              showIndicatorBelowLast={indicatorBelowLast}
+              indicatorColor={palette.accent}
+            >
+              <ChannelBlock
+                room={room}
+                activeRoomId={activeRoomId}
+                userId={userId}
+                onSelectRoom={onSelectRoom}
+                onRoomContextMenu={(rid, rname, e) => {
+                  e.preventDefault();
+                  setRoomContextMenu({
+                    x: e.clientX,
+                    y: e.clientY,
+                    roomId: rid,
+                    roomName: rname,
+                  });
+                }}
+                voiceParticipants={voiceParticipants}
+                connectedVoiceRoomId={connectedVoiceRoomId}
+                isVoiceConnecting={isVoiceConnecting}
+                disconnectingFromRoomId={disconnectingFromRoomId}
+                screenSharingOwners={screenSharingOwners}
+                voiceParticipantStatesByRoom={voiceParticipantStatesByRoom}
+                onParticipantContextMenu={(e, identity, displayName) => {
+                  setContextMenu({
+                    x: e.clientX,
+                    y: e.clientY,
+                    identity,
+                    displayName,
+                  });
+                }}
+                peerPresenceByUserId={peerPresenceByUserId}
+                peerStatusMsgByUserId={peerStatusMsgByUserId}
+                palette={palette}
+                spacing={spacing}
+                typography={typography}
+                isUnread={isUnread}
+                mentionCount={mentionCount}
+              />
+            </DraggableRow>
+          );
+        })}
         {!hasChannelList && (
           <div style={{
             color: palette.textSecondary,

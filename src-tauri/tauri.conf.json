@@ -16,7 +16,8 @@
         "label": "main",
         "title": "Pax",
         "width": 900,
-        "height": 600
+        "height": 600,
+        "dragDropEnabled": false
       }
     ],
     "security": {

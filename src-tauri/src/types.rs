@@ -1,6 +1,20 @@
 use serde::Serialize;
 use std::collections::HashMap;
 
+/// Per-parent `m.space.child` ordering metadata for a room or sub-space.
+///
+/// Carried on each child `RoomInfo` keyed by parent space id so the client can
+/// sort children of a given space using the MSC1772 / MSC2946 algorithm
+/// (`order` lex → `origin_server_ts` → room id).  `order` is `None` when the
+/// `m.space.child` event has no `order` field; `origin_server_ts` falls back
+/// to `0` for stripped state events (where it isn't present).
+#[derive(Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SpaceChildOrder {
+    pub order: Option<String>,
+    pub origin_server_ts: u64,
+}
+
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct RoomInfo {
@@ -9,6 +23,13 @@ pub struct RoomInfo {
     pub avatar_url: Option<String>,
     pub is_space: bool,
     pub parent_space_ids: Vec<String>,
+    /// For every parent space this room/sub-space is a child of: the
+    /// `m.space.child` event's `order` string (when present) and its
+    /// `origin_server_ts` — used client-side to sort children of a given
+    /// space per the MSC1772 / MSC2946 rules.  Keys are parent space ids
+    /// and will be a subset of `parent_space_ids`.
+    #[serde(default)]
+    pub space_child_orders: HashMap<String, SpaceChildOrder>,
     pub room_type: Option<String>,
     /// `m.room.topic` when known (spaces and rooms).
     pub topic: Option<String>,

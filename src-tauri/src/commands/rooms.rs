@@ -10,7 +10,7 @@ use matrix_sdk::ruma::events::StateEventType;
 use matrix_sdk::{config::SyncSettings, Client, RoomMemberships, SessionMeta};
 use tauri::{Manager, State};
 
-use crate::types::{RoomInfo, SpaceChildInfo, SpaceInfo};
+use crate::types::{RoomInfo, SpaceChildInfo, SpaceChildOrder, SpaceInfo};
 use crate::AppState;
 
 use super::auth::{
@@ -497,11 +497,22 @@ pub async fn restore_session(
     Ok(user_id.to_string())
 }
 
+/// One child entry from a space's `m.space.child` state: the child room id
+/// plus the `order` string (when present) and `origin_server_ts` of the
+/// `m.space.child` event.  Used by `get_rooms` to propagate per-parent
+/// ordering metadata into each `RoomInfo`.
+#[derive(Clone)]
+struct SpaceChildMeta {
+    child_id: String,
+    order: Option<String>,
+    origin_server_ts: u64,
+}
+
 async fn fetch_space_children_for_room(
     room: matrix_sdk::Room,
-) -> (String, Vec<String>) {
+) -> (String, Vec<SpaceChildMeta>) {
     let room_id = room.room_id().to_string();
-    let mut children = Vec::new();
+    let mut children: Vec<SpaceChildMeta> = Vec::new();
     match tokio::time::timeout(
         Duration::from_secs(10),
         room.get_state_events(StateEventType::SpaceChild),
@@ -510,16 +521,60 @@ async fn fetch_space_children_for_room(
     {
         Ok(Ok(events)) => {
             for event in events {
-                if let Ok(raw) = event.deserialize() {
-                    match raw {
-                        matrix_sdk::deserialized_responses::AnySyncOrStrippedState::Sync(e) => {
-                            children.push(e.state_key().to_string());
-                        }
-                        matrix_sdk::deserialized_responses::AnySyncOrStrippedState::Stripped(e) => {
-                            children.push(e.state_key().to_string());
+                // `RawAnySyncOrStrippedState` is an enum wrapping a `Raw<T>` —
+                // the lazy-deserialization wrapper.  The enum itself doesn't
+                // expose `.json()`; that lives on the inner `Raw<T>`.  We
+                // match on the variant and deserialize the inner JSON as a
+                // `serde_json::Value` so we can read `content.order` and
+                // `origin_server_ts` directly without going through a typed
+                // event struct (which would require keeping up with
+                // matrix-sdk enum variant churn).
+                let value: serde_json::Value = match &event {
+                    matrix_sdk::deserialized_responses::RawAnySyncOrStrippedState::Sync(raw) => {
+                        match raw.deserialize_as::<serde_json::Value>() {
+                            Ok(v) => v,
+                            Err(_) => continue,
                         }
                     }
+                    matrix_sdk::deserialized_responses::RawAnySyncOrStrippedState::Stripped(raw) => {
+                        match raw.deserialize_as::<serde_json::Value>() {
+                            Ok(v) => v,
+                            Err(_) => continue,
+                        }
+                    }
+                };
+                let Some(child_id) = value.get("state_key").and_then(|v| v.as_str()) else {
+                    continue;
+                };
+                // Per MSC1772, a missing / empty `via` on `m.space.child` means
+                // the parent/child relationship is tombstoned and the child
+                // must not be displayed.
+                let has_via = value
+                    .get("content")
+                    .and_then(|c| c.get("via"))
+                    .and_then(|v| v.as_array())
+                    .map(|arr| !arr.is_empty())
+                    .unwrap_or(false);
+                if !has_via {
+                    continue;
                 }
+                let order = value
+                    .get("content")
+                    .and_then(|c| c.get("order"))
+                    .and_then(|v| v.as_str())
+                    .map(String::from);
+                // Stripped state events (invited rooms) don't carry
+                // origin_server_ts; fall back to 0 so they still participate
+                // in the sort with a stable tiebreaker.
+                let origin_server_ts = value
+                    .get("origin_server_ts")
+                    .and_then(|v| v.as_u64())
+                    .unwrap_or(0);
+                children.push(SpaceChildMeta {
+                    child_id: child_id.to_string(),
+                    order,
+                    origin_server_ts,
+                });
             }
         }
         Ok(Err(e)) => {
@@ -653,8 +708,10 @@ pub async fn get_rooms(state: State<'_, Arc<AppState>>) -> Result<Vec<RoomInfo>,
         .cloned()
         .collect();
 
-    // Space → child room ids (parallel; was one 10s timeout per space in series).
-    let space_child_pairs: Vec<(String, Vec<String>)> = stream::iter(
+    // Space → child rooms (parallel; was one 10s timeout per space in series).
+    // Each child entry carries its `m.space.child` `order` and
+    // `origin_server_ts` so the frontend can sort children within a space.
+    let space_child_pairs: Vec<(String, Vec<SpaceChildMeta>)> = stream::iter(
         space_rooms
             .into_iter()
             .map(|room| async move { fetch_space_children_for_room(room).await }),
@@ -663,7 +720,8 @@ pub async fn get_rooms(state: State<'_, Arc<AppState>>) -> Result<Vec<RoomInfo>,
     .collect()
     .await;
 
-    let space_children: HashMap<String, Vec<String>> = space_child_pairs.into_iter().collect();
+    let space_children: HashMap<String, Vec<SpaceChildMeta>> =
+        space_child_pairs.into_iter().collect();
     let space_children = Arc::new(space_children);
 
     // Joined rooms: parallel avatars, preserve sidebar order via index sort.
@@ -675,11 +733,23 @@ pub async fn get_rooms(state: State<'_, Arc<AppState>>) -> Result<Vec<RoomInfo>,
             let sm = status_msg_map_rooms.clone();
             async move {
                 let room_id_str = room.room_id().to_string();
-                let parent_space_ids: Vec<String> = sc
-                    .iter()
-                    .filter(|(_, children)| children.contains(&room_id_str))
-                    .map(|(space_id, _)| space_id.clone())
-                    .collect();
+                // Walk each joined space's child list; for every parent that
+                // lists this room, record both the parent id and the ordering
+                // metadata from that parent's `m.space.child` event.
+                let mut parent_space_ids: Vec<String> = Vec::new();
+                let mut space_child_orders: HashMap<String, SpaceChildOrder> = HashMap::new();
+                for (space_id, children) in sc.iter() {
+                    if let Some(meta) = children.iter().find(|c| c.child_id == room_id_str) {
+                        parent_space_ids.push(space_id.clone());
+                        space_child_orders.insert(
+                            space_id.clone(),
+                            SpaceChildOrder {
+                                order: meta.order.clone(),
+                                origin_server_ts: meta.origin_server_ts,
+                            },
+                        );
+                    }
+                }
                 let room_type_str = room.room_type().map(|rt| rt.to_string());
                 let topic = room.topic();
 
@@ -712,6 +782,7 @@ pub async fn get_rooms(state: State<'_, Arc<AppState>>) -> Result<Vec<RoomInfo>,
                     avatar_url,
                     is_space: room.is_space(),
                     parent_space_ids,
+                    space_child_orders,
                     room_type: room_type_str,
                     topic,
                     membership: "joined".to_string(),
@@ -740,11 +811,20 @@ pub async fn get_rooms(state: State<'_, Arc<AppState>>) -> Result<Vec<RoomInfo>,
             let sm = status_msg_map_rooms.clone();
             async move {
                 let room_id_str = room.room_id().to_string();
-                let parent_space_ids: Vec<String> = sc
-                    .iter()
-                    .filter(|(_, children)| children.contains(&room_id_str))
-                    .map(|(space_id, _)| space_id.clone())
-                    .collect();
+                let mut parent_space_ids: Vec<String> = Vec::new();
+                let mut space_child_orders: HashMap<String, SpaceChildOrder> = HashMap::new();
+                for (space_id, children) in sc.iter() {
+                    if let Some(meta) = children.iter().find(|c| c.child_id == room_id_str) {
+                        parent_space_ids.push(space_id.clone());
+                        space_child_orders.insert(
+                            space_id.clone(),
+                            SpaceChildOrder {
+                                order: meta.order.clone(),
+                                origin_server_ts: meta.origin_server_ts,
+                            },
+                        );
+                    }
+                }
                 let room_type_str = room.room_type().map(|rt| rt.to_string());
                 let topic = room.topic();
 
@@ -777,6 +857,7 @@ pub async fn get_rooms(state: State<'_, Arc<AppState>>) -> Result<Vec<RoomInfo>,
                     avatar_url,
                     is_space: room.is_space(),
                     parent_space_ids,
+                    space_child_orders,
                     room_type: room_type_str,
                     topic,
                     membership: "invited".to_string(),
@@ -3214,6 +3295,173 @@ pub async fn link_room_to_space(
         "link_room_to_space: linked {} as child of {}",
         child_room_id,
         parent_space_id
+    );
+
+    Ok(())
+}
+
+/// Update the `order` field on a space's `m.space.child` state event for a
+/// given child room or sub-space.
+///
+/// Reads the existing event content, preserves `via` and `suggested`, and
+/// replaces only the `order` field.  Passing `order: None` clears the field
+/// (so the child falls back to `origin_server_ts` / room id sort order per
+/// MSC2946).
+///
+/// Permission is gated on `can_manage_space_children_for_user` — i.e. the
+/// caller's power level must be >= the required level for `m.space.child`
+/// state events in this space.  The homeserver will enforce this too, but we
+/// check up front so we can return a clear error without a round-trip.
+///
+/// `order` must contain only ASCII characters in the 0x20..=0x7e range per
+/// MSC1772 and be <= 50 codepoints.  The frontend's order-string generator
+/// satisfies both constraints.
+#[tauri::command]
+pub async fn set_space_child_order(
+    state: State<'_, Arc<AppState>>,
+    space_id: String,
+    child_room_id: String,
+    order: Option<String>,
+) -> Result<(), String> {
+    if space_id == child_room_id {
+        return Err("A space cannot be its own child.".to_string());
+    }
+
+    // Validate the order string before hitting the homeserver so we can
+    // return a helpful error.  MSC1772: printable ASCII (0x20..=0x7e) only,
+    // length <= 50.
+    if let Some(ref s) = order {
+        if s.len() > 50 {
+            return Err("Order string must be 50 characters or fewer.".to_string());
+        }
+        if !s.bytes().all(|b| (0x20..=0x7e).contains(&b)) {
+            return Err(
+                "Order string must only contain printable ASCII (0x20–0x7e).".to_string(),
+            );
+        }
+    }
+
+    if !can_manage_space_children_for_user(&state, &space_id).await? {
+        return Err(
+            "You don't have permission to reorder rooms in this space (insufficient power level)."
+                .to_string(),
+        );
+    }
+
+    let client = super::get_client(&state).await?;
+    let homeserver = client.homeserver().to_string();
+    let access_token = client.access_token().ok_or("No access token")?;
+
+    // Read the existing `m.space.child` event so we preserve `via` and
+    // `suggested` — both are load-bearing and not ours to clobber.  A 404
+    // here means the child isn't actually linked to this space, so there's
+    // nothing to reorder.
+    let read_url = format!(
+        "{}/_matrix/client/v3/rooms/{}/state/m.space.child/{}",
+        homeserver.trim_end_matches('/'),
+        urlencoding::encode(&space_id),
+        urlencoding::encode(&child_room_id),
+    );
+
+    let read_resp = state
+        .http_client
+        .get(&read_url)
+        .timeout(Duration::from_secs(15))
+        .bearer_auth(access_token.to_string())
+        .send()
+        .await
+        .map_err(|e| {
+            format!(
+                "Failed to read existing m.space.child event: {}",
+                super::fmt_error_chain(&e)
+            )
+        })?;
+
+    if read_resp.status() == reqwest::StatusCode::NOT_FOUND {
+        return Err(
+            "This room isn't listed as a child of the space — nothing to reorder.".to_string(),
+        );
+    }
+    if !read_resp.status().is_success() {
+        let status = read_resp.status();
+        let text = read_resp.text().await.unwrap_or_default();
+        return Err(format!(
+            "Failed to read m.space.child ({}): {}",
+            status, text
+        ));
+    }
+
+    let existing: serde_json::Value = read_resp.json().await.map_err(|e| {
+        format!(
+            "Malformed m.space.child response: {}",
+            super::fmt_error_chain(&e)
+        )
+    })?;
+
+    // Preserve `via` (required) and `suggested` (optional).  If `via` is
+    // missing or empty per some odd server state, fail rather than write an
+    // event that would tombstone the relationship.
+    let via = existing
+        .get("via")
+        .and_then(|v| v.as_array())
+        .cloned()
+        .unwrap_or_default();
+    if via.is_empty() {
+        return Err(
+            "Existing m.space.child event has no `via`; refusing to rewrite \
+and tombstone the child relationship."
+                .to_string(),
+        );
+    }
+
+    let suggested = existing.get("suggested").cloned();
+
+    // Build the new content.  Only include `order` when the caller supplied
+    // one; leaving it out is a valid "no order" state per MSC1772.
+    let mut new_content = serde_json::json!({ "via": via });
+    if let Some(s) = suggested {
+        new_content["suggested"] = s;
+    }
+    if let Some(order_val) = order {
+        new_content["order"] = serde_json::Value::String(order_val);
+    }
+
+    let write_url = format!(
+        "{}/_matrix/client/v3/rooms/{}/state/m.space.child/{}",
+        homeserver.trim_end_matches('/'),
+        urlencoding::encode(&space_id),
+        urlencoding::encode(&child_room_id),
+    );
+
+    let write_resp = state
+        .http_client
+        .put(&write_url)
+        .timeout(Duration::from_secs(15))
+        .bearer_auth(access_token.to_string())
+        .json(&new_content)
+        .send()
+        .await
+        .map_err(|e| {
+            format!(
+                "Failed to update m.space.child event: {}",
+                super::fmt_error_chain(&e)
+            )
+        })?;
+
+    if !write_resp.status().is_success() {
+        let status = write_resp.status();
+        let text = write_resp.text().await.unwrap_or_default();
+        return Err(format!(
+            "Failed to update m.space.child order ({}): {}",
+            status, text
+        ));
+    }
+
+    log::info!(
+        "set_space_child_order: space={} child={} order={:?}",
+        space_id,
+        child_room_id,
+        new_content.get("order")
     );
 
     Ok(())

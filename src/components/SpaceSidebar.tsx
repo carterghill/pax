@@ -30,6 +30,13 @@ interface SpaceSidebarProps {
   onSelectSpace: (spaceId: string) => void;
   onSpacesChanged: (payload?: RoomsChangedPayload) => void | Promise<void>;
   onOpenSettings: () => void;
+  /**
+   * Persist a new top-level space order after a drag-and-drop.  Receives
+   * the full post-drop list of space ids in the user's chosen order.
+   * Wrapped in a Promise so the sidebar can await and log on failure, but
+   * callers are free to resolve before the network round-trip lands.
+   */
+  onReorderSpaces?: (nextOrder: string[]) => void | Promise<void>;
   userId: string;
   /** Called after successfully leaving a space from the context menu */
   onLeftSpace?: (spaceId: string) => void;
@@ -270,6 +277,7 @@ export default function SpaceSidebar({
   onSelectSpace,
   onSpacesChanged,
   onOpenSettings,
+  onReorderSpaces,
   userId,
   onLeftSpace,
   isSpaceUnread,
@@ -349,6 +357,140 @@ export default function SpaceSidebar({
     name: string;
   } | null>(null);
   const checkedRef = useRef(false);
+
+  // ------ Drag-and-drop state ------
+  //
+  // Matrix has no standard for top-level space sidebar order; we persist
+  // the user's chosen order under the `app.pax.space_order` account-data
+  // event (see `useSpaceOrder`).  The interaction pattern here mirrors
+  // Discord: grab any space avatar and drag to insert between two other
+  // avatars.  Home, the "add space" plus button, and the settings cog are
+  // not draggable (Home always pins to the top; the others are actions).
+  //
+  // We use native HTML5 drag-and-drop because it integrates with Tauri's
+  // WebView for free and needs no extra dependency.  `draggedSpaceId`
+  // tracks the currently-dragged space id; `dropBeforeId` tracks where an
+  // insertion-line indicator should render.  A null `dropBeforeId` with
+  // an active drag means "drop at the bottom of the list".
+  const [draggedSpaceId, setDraggedSpaceId] = useState<string | null>(null);
+  const [dropBeforeId, setDropBeforeId] = useState<string | null | "end">(null);
+
+  const handleSpaceDragStart = useCallback(
+    (e: React.DragEvent, spaceId: string) => {
+      // Use the move effect; copy would imply the original stays put,
+      // which isn't the mental model for sidebar reordering.
+      e.dataTransfer.effectAllowed = "move";
+      // Setting a payload is required on Firefox for the drag to fire at
+      // all; the value itself doesn't matter to us since we read
+      // `draggedSpaceId` from state.
+      try {
+        e.dataTransfer.setData("text/plain", spaceId);
+      } catch {
+        /* some browsers reject setData on synthetic events */
+      }
+      setDraggedSpaceId(spaceId);
+      setDropBeforeId(null);
+    },
+    []
+  );
+
+  const handleSpaceDragEnd = useCallback(() => {
+    setDraggedSpaceId(null);
+    setDropBeforeId(null);
+  }, []);
+
+  /**
+   * Update the insertion indicator while hovering over a space avatar.
+   * We show the indicator above or below the hovered target based on
+   * which vertical half of the avatar the pointer is in — the same
+   * pattern Element/Discord use.
+   */
+  const handleSpaceDragOver = useCallback(
+    (e: React.DragEvent, targetSpaceId: string) => {
+      if (!draggedSpaceId) return;
+      // preventDefault is required or the drop event never fires.
+      e.preventDefault();
+      e.dataTransfer.dropEffect = "move";
+      const rect = e.currentTarget.getBoundingClientRect();
+      const midpoint = rect.top + rect.height / 2;
+      const insertBefore = e.clientY < midpoint;
+      // Find the target's position in the current list to compute the
+      // "insert before" reference.  When dropping on the bottom half of
+      // the last item, `dropBeforeId` becomes the sentinel "end".
+      const idx = spaces.findIndex((s) => s.id === targetSpaceId);
+      if (idx < 0) return;
+      let nextDropBeforeId: string | "end";
+      if (insertBefore) {
+        nextDropBeforeId = targetSpaceId;
+      } else if (idx === spaces.length - 1) {
+        nextDropBeforeId = "end";
+      } else {
+        nextDropBeforeId = spaces[idx + 1].id;
+      }
+      // Suppress indicator when the drop wouldn't move the item:
+      //   - dropping immediately before yourself
+      //   - dropping immediately after yourself (i.e. your next neighbour is
+      //     the drop target)
+      //   - dropping at the very end when you're already the last item
+      if (
+        nextDropBeforeId === draggedSpaceId ||
+        (nextDropBeforeId === "end" &&
+          spaces[spaces.length - 1]?.id === draggedSpaceId) ||
+        (nextDropBeforeId !== "end" &&
+          spaces[spaces.findIndex((s) => s.id === nextDropBeforeId) - 1]?.id ===
+            draggedSpaceId)
+      ) {
+        setDropBeforeId(null);
+        return;
+      }
+      setDropBeforeId((prev) =>
+        prev === nextDropBeforeId ? prev : nextDropBeforeId
+      );
+    },
+    [draggedSpaceId, spaces]
+  );
+
+  const handleSpaceDrop = useCallback(
+    (e: React.DragEvent) => {
+      e.preventDefault();
+      const dragged = draggedSpaceId;
+      const before = dropBeforeId;
+      setDraggedSpaceId(null);
+      setDropBeforeId(null);
+      if (!dragged || !onReorderSpaces) return;
+      if (before === null) return;
+
+      // Rebuild the post-drop order.  `before` is either a space id
+      // (meaning "insert immediately before this one") or the sentinel
+      // "end" (meaning "append to the bottom").
+      const without = spaces.filter((s) => s.id !== dragged);
+      const nextOrder: string[] = [];
+      if (before === "end") {
+        for (const s of without) nextOrder.push(s.id);
+        nextOrder.push(dragged);
+      } else {
+        let inserted = false;
+        for (const s of without) {
+          if (!inserted && s.id === before) {
+            nextOrder.push(dragged);
+            inserted = true;
+          }
+          nextOrder.push(s.id);
+        }
+        if (!inserted) {
+          // `before` is no longer in the list (shouldn't happen because
+          // React state for `spaces` is the same we computed against).
+          nextOrder.push(dragged);
+        }
+      }
+      if (nextOrder.length === spaces.length) {
+        const unchanged = nextOrder.every((id, i) => spaces[i].id === id);
+        if (unchanged) return;
+      }
+      void onReorderSpaces(nextOrder);
+    },
+    [draggedSpaceId, dropBeforeId, onReorderSpaces, spaces]
+  );
 
   // Check room creation permission once on mount
   useEffect(() => {
@@ -529,15 +671,32 @@ export default function SpaceSidebar({
         />
 
         {/* Space avatars */}
-        {spaces.map((space) => {
+        {spaces.map((space, idx) => {
           const selected = spaceHighlightId === space.id;
           const unread = !selected && isSpaceUnread(space.id);
           const mentions = spaceMentionCount(space.id);
+          const isBeingDragged = draggedSpaceId === space.id;
+          const showInsertBefore = dropBeforeId === space.id;
+          const showInsertAfterLast =
+            idx === spaces.length - 1 && dropBeforeId === "end";
           return (
             <div
               key={space.id}
               aria-label={space.name}
-              onClick={() => onSelectSpace(space.id)}
+              draggable={!!onReorderSpaces}
+              onDragStart={(e) => handleSpaceDragStart(e, space.id)}
+              onDragEnd={handleSpaceDragEnd}
+              onDragOver={(e) => handleSpaceDragOver(e, space.id)}
+              onDrop={handleSpaceDrop}
+              onClick={(e) => {
+                // Suppress clicks that are really the tail end of a drag:
+                // if we've just reordered, `draggedSpaceId` will have been
+                // cleared by onDragEnd before this fires, but defensively
+                // ignore when the client coordinates indicate a drag was
+                // in progress.
+                if (e.defaultPrevented) return;
+                onSelectSpace(space.id);
+              }}
               onMouseEnter={(e) => {
                 sidebarTooltipAnchorRef.current = e.currentTarget;
                 const r = e.currentTarget.getBoundingClientRect();
@@ -560,8 +719,32 @@ export default function SpaceSidebar({
                   spaceName: space.name,
                 });
               }}
-              style={{ position: "relative", cursor: "pointer" }}
+              style={{
+                position: "relative",
+                cursor: onReorderSpaces ? "grab" : "pointer",
+                // While dragging this avatar, fade it so the source
+                // position is visually distinct from the insertion line.
+                opacity: isBeingDragged ? 0.35 : 1,
+                transition: "opacity 0.08s linear",
+              }}
             >
+              {/* Insertion indicator drawn above the avatar when this is
+                  the drop target with "insert before" semantics. */}
+              {showInsertBefore && (
+                <div
+                  aria-hidden
+                  style={{
+                    position: "absolute",
+                    left: (SIDEBAR_WIDTH - ICON_SIZE) / 2 - 2,
+                    right: (SIDEBAR_WIDTH - ICON_SIZE) / 2 - 2,
+                    top: -5,
+                    height: 3,
+                    borderRadius: 2,
+                    backgroundColor: palette.accent,
+                    pointerEvents: "none",
+                  }}
+                />
+              )}
               <SpaceIconRow
                 selected={selected}
                 unread={unread}
@@ -570,6 +753,23 @@ export default function SpaceSidebar({
               >
                 <SpaceAvatar space={space} />
               </SpaceIconRow>
+              {/* Insertion indicator at the very bottom of the list when
+                  dropping past the last avatar. */}
+              {showInsertAfterLast && (
+                <div
+                  aria-hidden
+                  style={{
+                    position: "absolute",
+                    left: (SIDEBAR_WIDTH - ICON_SIZE) / 2 - 2,
+                    right: (SIDEBAR_WIDTH - ICON_SIZE) / 2 - 2,
+                    bottom: -5,
+                    height: 3,
+                    borderRadius: 2,
+                    backgroundColor: palette.accent,
+                    pointerEvents: "none",
+                  }}
+                />
+              )}
             </div>
           );
         })}
