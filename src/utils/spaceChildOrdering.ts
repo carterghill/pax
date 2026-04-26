@@ -43,6 +43,36 @@ const ORDER_MAX = 0x7e;
 const ORDER_MAX_LEN = 50;
 
 /**
+ * Optimistic override of `m.space.child` order strings, used by the sidebar
+ * while a `set_space_child_order` write is in flight.  Outer key is the
+ * child room/sub-space id; inner key is the parent space id; value is the
+ * pending order string.
+ *
+ * The sort/compare functions consult these BEFORE falling back to the
+ * order carried on `room.spaceChildOrders` so the visual position updates
+ * instantly on drop, well before the homeserver round-trip completes.
+ */
+export type OptimisticChildOrders = ReadonlyMap<
+  string,
+  ReadonlyMap<string, string>
+>;
+
+/**
+ * Resolve the effective `order` for a child within a given parent — the
+ * optimistic override when one exists for that pair, otherwise the value
+ * carried on the room's metadata.
+ */
+function effectiveOrder(
+  room: Room,
+  parentSpaceId: string,
+  optimistic?: OptimisticChildOrders
+): string | null {
+  const opt = optimistic?.get(room.id)?.get(parentSpaceId);
+  if (opt !== undefined) return opt;
+  return room.spaceChildOrders?.[parentSpaceId]?.order ?? null;
+}
+
+/**
  * Get a room's ordering metadata for a given parent space.  Returns a
  * zero-stamp blank when the room isn't a child of that space or when no
  * metadata was carried through from the backend.  Callers should typically
@@ -60,44 +90,67 @@ export function getChildOrderInSpace(
 /**
  * Compare two children of the same parent space per the MSC2946 rules.
  * Stable: equal entries fall back to room id as the final tiebreaker.
+ *
+ * `optimisticOrders`, when supplied, takes precedence over each room's
+ * persisted `spaceChildOrders` value — used during optimistic drag-drop
+ * updates so the visual order matches the user's drop the instant they
+ * release the mouse, regardless of the homeserver write latency.
  */
 export function compareSpaceChildren(
   a: Room,
   b: Room,
-  parentSpaceId: string
+  parentSpaceId: string,
+  optimisticOrders?: OptimisticChildOrders
 ): number {
+  const aOrder = effectiveOrder(a, parentSpaceId, optimisticOrders);
+  const bOrder = effectiveOrder(b, parentSpaceId, optimisticOrders);
   const aMeta = getChildOrderInSpace(a, parentSpaceId);
   const bMeta = getChildOrderInSpace(b, parentSpaceId);
 
   // 1. Bucket by presence of `order`: have-order sorts before no-order.
-  const aHas = aMeta.order != null && aMeta.order !== "";
-  const bHas = bMeta.order != null && bMeta.order !== "";
+  const aHas = aOrder != null && aOrder !== "";
+  const bHas = bOrder != null && bOrder !== "";
   if (aHas && !bHas) return -1;
   if (!aHas && bHas) return 1;
 
-  // 2. Both have `order`: lex-compare.
+  // 2. Both have `order`: compare by raw code-point order (NOT
+  //    localeCompare — the MSC2946 spec requires lexicographic byte-
+  //    level comparison of the printable-ASCII order strings, and
+  //    localeCompare uses ICU locale rules that can disagree with code-
+  //    point order for punctuation like ">" vs "?").
   if (aHas && bHas) {
-    const cmp = (aMeta.order as string).localeCompare(bMeta.order as string);
-    if (cmp !== 0) return cmp;
+    if (aOrder! < bOrder!) return -1;
+    if (aOrder! > bOrder!) return 1;
   }
 
   // 3. Fall through (neither has `order`, or their `order`s are equal):
-  //    origin_server_ts asc.
+  //    origin_server_ts asc.  We use the persisted metadata here, not the
+  //    optimistic override, since optimistic updates only touch `order`.
   if (aMeta.originServerTs !== bMeta.originServerTs) {
     return aMeta.originServerTs - bMeta.originServerTs;
   }
 
-  // 4. Final deterministic tiebreaker: room id.
-  return a.id.localeCompare(b.id);
+  // 4. Final deterministic tiebreaker: room id (raw code-point order).
+  if (a.id < b.id) return -1;
+  if (a.id > b.id) return 1;
+  return 0;
 }
 
 /**
  * Sort an array of rooms by their `m.space.child` ordering within a given
- * parent space (pure, returns a new array).  Use this instead of
- * alphabetical sort when the rooms are the direct children of a space.
+ * parent space (pure, returns a new array).
+ *
+ * `optimisticOrders` is an optional override map used while a reorder
+ * write is in flight — see {@link OptimisticChildOrders}.
  */
-export function sortBySpaceChildOrder(rooms: Room[], parentSpaceId: string): Room[] {
-  return [...rooms].sort((a, b) => compareSpaceChildren(a, b, parentSpaceId));
+export function sortBySpaceChildOrder(
+  rooms: Room[],
+  parentSpaceId: string,
+  optimisticOrders?: OptimisticChildOrders
+): Room[] {
+  return [...rooms].sort((a, b) =>
+    compareSpaceChildren(a, b, parentSpaceId, optimisticOrders)
+  );
 }
 
 /**
@@ -324,85 +377,100 @@ export interface ReorderPlan {
  * dragged child at its current position and be sorted per
  * {@link compareSpaceChildren} for `parentSpaceId`.
  *
- * This is the primary caller-facing API — it takes a "drop target" that
- * matches what a drag UI naturally knows (the row the user is hovering
- * above) rather than an index, which eliminates pre-drag / post-drag
- * coordinate ambiguity.
+ * `optimisticOrders` is the same override map used by sort/compare —
+ * passed through so that a drag started while a previous reorder is still
+ * in flight uses the in-flight orders for neighbour-string lookup, not
+ * the stale persisted values.
  */
 export function buildReorderPlan(
   siblingsOrdered: Room[],
   draggedChildId: string,
   beforeChildId: string | null,
-  parentSpaceId: string
+  parentSpaceId: string,
+  optimisticOrders?: OptimisticChildOrders
 ): ReorderPlan {
   const currentIndex = siblingsOrdered.findIndex((r) => r.id === draggedChildId);
   if (currentIndex < 0) {
     return { writes: [] };
   }
 
-  // Build the post-drag list (dragged child in its new position) up front —
-  // this is what we reason about for neighbours and rebalances.  The "new
-  // neighbours" of the dragged child are the rows immediately before and
-  // after it in this list.
   const without = siblingsOrdered.filter((_, i) => i !== currentIndex);
   let newIndex: number;
   if (beforeChildId === null) {
-    newIndex = without.length; // append to end
+    newIndex = without.length;
   } else {
     newIndex = without.findIndex((r) => r.id === beforeChildId);
     if (newIndex < 0) {
-      // Target row not in the list (shouldn't happen given the caller just
-      // read it from the sidebar's current render); fall back to end.
       newIndex = without.length;
     }
   }
 
-  // No-op detection: dropping the child exactly where it already sits.
-  // `without` is the list with the dragged removed; `newIndex` points to
-  // where the dragged would be re-inserted.  Re-inserting at position
-  // `currentIndex` in `without` yields the original list IFF the dragged
-  // child already had an `order` string.  When the dragged child has no
-  // `order`, we still want to write one to disambiguate its position
-  // against other no-order siblings.
+  // No-op detection.  `without` has the dragged child removed; `newIndex`
+  // is where it would re-insert.  Re-inserting at `currentIndex` in
+  // `without` reproduces the original list IFF the dragged child already
+  // had an `order` string assigned — otherwise we still want to write one
+  // so its position is unambiguous against other no-order siblings.
   if (newIndex === currentIndex) {
-    const selfMeta = getChildOrderInSpace(
+    const selfOrder = effectiveOrder(
       siblingsOrdered[currentIndex],
-      parentSpaceId
+      parentSpaceId,
+      optimisticOrders
     );
-    if (selfMeta.order != null && selfMeta.order !== "") {
+    if (selfOrder != null && selfOrder !== "") {
       return { writes: [] };
     }
   }
 
-  // Compute neighbour order strings.
   const loNeighbour = newIndex > 0 ? without[newIndex - 1] : null;
   const hiNeighbour = newIndex < without.length ? without[newIndex] : null;
 
   const loOrder = loNeighbour
-    ? getChildOrderInSpace(loNeighbour, parentSpaceId).order
+    ? effectiveOrder(loNeighbour, parentSpaceId, optimisticOrders)
     : null;
   const hiOrder = hiNeighbour
-    ? getChildOrderInSpace(hiNeighbour, parentSpaceId).order
+    ? effectiveOrder(hiNeighbour, parentSpaceId, optimisticOrders)
     : null;
 
-  // Happy path: both neighbours (or the corresponding list edges) have
-  // concrete orders and we can fit a new string between them.
   if (
     (loNeighbour === null || (loOrder != null && loOrder !== "")) &&
     (hiNeighbour === null || (hiOrder != null && hiOrder !== ""))
   ) {
     const between = orderStringBetween(loOrder, hiOrder);
     if (between !== null) {
+      // Guard: if the computed order equals the dragged item's CURRENT
+      // effective order, the write would be idempotent — Synapse accepts
+      // it but nothing changes visually.  This can happen when the gap
+      // between neighbours is tiny (e.g. ">" and "?" are adjacent in
+      // ASCII and moving one past the other computes the same value it
+      // already has).  Fall through to rebalance so every child gets a
+      // fresh, well-spaced order.
+      const currentOrder = effectiveOrder(
+        siblingsOrdered[currentIndex],
+        parentSpaceId,
+        optimisticOrders
+      );
+      if (between === currentOrder) {
+        return buildRebalancePlan(
+          without,
+          draggedChildId,
+          newIndex,
+          parentSpaceId,
+          optimisticOrders
+        );
+      }
       return {
         writes: [{ childRoomId: draggedChildId, order: between }],
       };
     }
   }
 
-  // Rebalance path: a neighbour is missing `order` (ambiguous sort
-  // position), or the printable-ASCII gap is exhausted.  Rewrite all
-  // siblings with fresh, evenly spaced orders.
-  return buildRebalancePlan(without, draggedChildId, newIndex, parentSpaceId);
+  return buildRebalancePlan(
+    without,
+    draggedChildId,
+    newIndex,
+    parentSpaceId,
+    optimisticOrders
+  );
 }
 
 /**
@@ -415,17 +483,9 @@ function buildRebalancePlan(
   withoutDragged: Room[],
   draggedChildId: string,
   newIndex: number,
-  parentSpaceId: string
+  parentSpaceId: string,
+  optimisticOrders?: OptimisticChildOrders
 ): ReorderPlan {
-  // Build the full post-drag list by inserting a placeholder id at newIndex.
-  // We'll then generate an order string for each position.  We use a
-  // simple 2-character sequence: "A ", "A!", "A\"", ... incrementing the
-  // second byte.  With 94 printable chars and 2-char strings we can hold
-  // up to 94 * 94 ≈ 8836 entries before we'd need 3 chars — more than
-  // enough for any single space's children.
-  //
-  // Starting at position 0x41 ("A") leaves room above and below for
-  // future "insert at top / bottom" operations without rebalancing.
   const postDrag: Array<string> = [];
   for (let i = 0; i < withoutDragged.length + 1; i++) {
     if (i < newIndex) postDrag.push(withoutDragged[i].id);
@@ -436,19 +496,14 @@ function buildRebalancePlan(
   const N = postDrag.length;
   const writes: SpaceChildOrderWrite[] = [];
   for (let i = 0; i < N; i++) {
-    // Evenly spaced orders within "A" .. "Z" when N <= 26; otherwise
-    // fall back to two-char orders "A" + printable.
     const order = rebalanceOrderAt(i, N);
     const childId = postDrag[i];
-    // Skip writes where the existing order already equals the target —
-    // reduces HTTP churn when most siblings are already in a good shape
-    // (common after the very first rebalance).
     const existing =
       childId === draggedChildId
         ? null
         : withoutDragged.find((r) => r.id === childId);
     const existingOrder = existing
-      ? getChildOrderInSpace(existing, parentSpaceId).order
+      ? effectiveOrder(existing, parentSpaceId, optimisticOrders)
       : null;
     if (existingOrder === order) continue;
     writes.push({ childRoomId: childId, order });

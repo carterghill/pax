@@ -343,21 +343,61 @@ export default function MainLayout({
     storeUserMenuWidth(userMenuWidth);
   }, [userMenuWidth]);
 
+  /**
+   * Optimistic `m.space.child` order overrides applied to the sidebar
+   * BEFORE the corresponding `set_space_child_order` write completes.
+   *
+   * Outer key: child room/sub-space id.  Inner key: parent space id.
+   * Value: pending order string.
+   *
+   * On drop, `handleReorderSpaceChildren` populates this map immediately
+   * so the visible reorder is instant; once the homeserver write
+   * resolves (success or failure) the corresponding entries are cleared
+   * and the persisted `spaceChildOrders` from the next `fetchRooms()`
+   * takes over as ground truth.
+   *
+   * Stored as a `Map<string, Map<…>>` and replaced by reference on each
+   * change so React can shallow-compare in dependencies.
+   */
+  const [optimisticOrders, setOptimisticOrders] = useState<
+    Map<string, Map<string, string>>
+  >(() => new Map());
+
+  /**
+   * Set of child ids currently mid-reorder.  Used by `RoomSidebar` to
+   * dim the dragged children's text and disable further drags on them
+   * until the homeserver round-trip resolves.  Derived from
+   * `optimisticOrders` keys so the two stay in lock-step.
+   */
+  const pendingReorderIds = useMemo(() => {
+    const s = new Set<string>();
+    for (const id of optimisticOrders.keys()) s.add(id);
+    return s;
+  }, [optimisticOrders]);
+
+  /**
+   * Sub-spaces of the active space (joined membership only), sorted by
+   * the active space's `m.space.child` order with optimistic overrides
+   * applied.  Used both as the source for the unified active-space
+   * children list and to compute `subSpaceRoomIdSet`.
+   */
   const childJoinedSubspaces = useMemo(() => {
-    if (!activeSpaceId) return [];
+    if (!activeSpaceId) return [] as Room[];
     const children = spaces.filter(
       (s) =>
         s.isSpace &&
         s.membership === "joined" &&
         s.parentSpaceIds.includes(activeSpaceId)
     );
-    // Sort by the parent's `m.space.child` `order` (admin-set) rather than
-    // alphabetical — falls through to origin_server_ts and room id per
-    // MSC2946, then finally to display name for children with no ordering
-    // metadata at all.
-    return sortBySpaceChildOrder(children, activeSpaceId);
-  }, [spaces, activeSpaceId]);
+    return sortBySpaceChildOrder(children, activeSpaceId, optimisticOrders);
+  }, [spaces, activeSpaceId, optimisticOrders]);
 
+  /**
+   * Set of rooms that live INSIDE a sub-space of the active space — they
+   * render under their sub-space's expandable section, not under the
+   * active space directly, so we exclude them from the top-level
+   * children list.
+   */
   const subSpaceRoomIdSet = useMemo(() => {
     const set = new Set<string>();
     for (const ss of childJoinedSubspaces) {
@@ -368,23 +408,56 @@ export default function MainLayout({
     return set;
   }, [childJoinedSubspaces, roomsBySpace]);
 
-  const visibleRooms = useMemo(() => {
-    let base: Room[];
-    if (!activeSpaceId) {
-      // Home (no active space): rooms come in whatever order the backend
-      // provided.  Home ordering is user-preference territory that Matrix
-      // itself doesn't spec for non-spaced rooms; punting for now.
-      base = roomsBySpace(activeSpaceId);
-    } else {
-      // Active space: filter out rooms that belong to a child sub-space
-      // (those render in their own section), then sort the remainder by
-      // the space's `m.space.child` order — admin-set, per MSC2946.
-      const raw = roomsBySpace(activeSpaceId).filter(
-        (r) => !subSpaceRoomIdSet.has(r.id)
-      );
-      base = sortBySpaceChildOrder(raw, activeSpaceId);
-    }
-    if (!activeSpaceId && pendingDm) {
+  /**
+   * Unified list of the active space's direct children (sub-space
+   * headers + direct rooms, both sorted together by the active space's
+   * `m.space.child` order).  Replaces the old separate `subSpaceSections`
+   * + `visibleRooms` split: in Matrix, both kinds are children of the
+   * same parent and share a single `order` namespace, so reordering
+   * them together is the only model where the visible position matches
+   * the stored Matrix order in every case.
+   *
+   * `null` when no active space is selected (Home view); in that case
+   * the room list comes from `homeRooms` instead.
+   */
+  const activeSpaceChildren = useMemo(() => {
+    if (!activeSpaceId) return null;
+    const directRooms = roomsBySpace(activeSpaceId).filter(
+      (r) => !subSpaceRoomIdSet.has(r.id)
+    );
+    return sortBySpaceChildOrder(
+      [...childJoinedSubspaces, ...directRooms],
+      activeSpaceId,
+      optimisticOrders
+    );
+  }, [
+    activeSpaceId,
+    childJoinedSubspaces,
+    roomsBySpace,
+    subSpaceRoomIdSet,
+    optimisticOrders,
+  ]);
+
+  /**
+   * Look up the rooms inside a given sub-space, sorted by that
+   * sub-space's own `m.space.child` order with optimistic overrides
+   * applied.  Used by `RoomSidebar` to render an expanded sub-space's
+   * interior.
+   */
+  const getSubSpaceRoomsOrdered = useCallback(
+    (subSpaceId: string) =>
+      sortBySpaceChildOrder(roomsBySpace(subSpaceId), subSpaceId, optimisticOrders),
+    [roomsBySpace, optimisticOrders]
+  );
+
+  /**
+   * Rooms shown in the Home view (no active space).  Includes any
+   * pending DM placeholder so the user has somewhere to type while the
+   * room is being created on the homeserver.
+   */
+  const homeRooms = useMemo(() => {
+    let base: Room[] = roomsBySpace(null);
+    if (pendingDm) {
       const fakeId = pendingDmRoomId(pendingDm.peerUserId);
       if (!base.some((r) => r.id === fakeId)) {
         const fake: Room = {
@@ -400,10 +473,9 @@ export default function MainLayout({
         };
         const merged = [...base, fake];
         merged.sort((a, b) => compareByDisplayThenKey(a.name, a.id, b.name, b.id));
-        return merged;
+        base = merged;
       }
     }
-    // Patch any room that was just created as a DM but hasn't been marked isDirect by sync yet
     if (dmTransitionHint) {
       base = base.map((r) =>
         r.id === dmTransitionHint.roomId && !r.isDirect
@@ -419,23 +491,19 @@ export default function MainLayout({
     }
     return base;
   }, [
-    activeSpaceId,
     pendingDm,
     pendingDmPeerProfile.displayName,
     pendingDmPeerProfile.avatarUrl,
     roomsBySpace,
-    subSpaceRoomIdSet,
     dmTransitionHint,
   ]);
 
-  const subSpaceSections = useMemo(
-    () =>
-      childJoinedSubspaces.map((subSpace) => ({
-        subSpace,
-        rooms: sortBySpaceChildOrder(roomsBySpace(subSpace.id), subSpace.id),
-      })),
-    [childJoinedSubspaces, roomsBySpace]
-  );
+  /**
+   * What `RoomSidebar` actually shows as its room list — Home rooms when
+   * no active space, otherwise the unified active-space children
+   * (sub-space headers + direct rooms interleaved by Matrix order).
+   */
+  const visibleRooms = activeSpaceChildren ?? homeRooms;
 
   const activeRoom = useMemo(() => {
     const raw = activeRoomId ? getRoom(activeRoomId) : null;
@@ -495,18 +563,24 @@ export default function MainLayout({
   const showingDraftDm =
     !!pendingDm && draftRoomId !== null && activeRoomId === draftRoomId;
 
-  // Collect voice room IDs in the current space for participant tracking
+  // Collect voice room IDs in the current space (and any expandable
+  // sub-space interiors below it) for participant tracking.
   const voiceRoomIds = useMemo(() => {
     const ids: string[] = [];
-    const pushVoice = (list: typeof visibleRooms) => {
+    const pushVoice = (list: Room[]) => {
       for (const r of list) {
         if (r.roomType === VOICE_ROOM_TYPE) ids.push(r.id);
       }
     };
     pushVoice(visibleRooms);
-    for (const { rooms } of subSpaceSections) pushVoice(rooms);
+    // Sub-space interiors (always included, regardless of whether the user
+    // has the section currently expanded) so participants are tracked even
+    // for collapsed sections.
+    for (const ss of childJoinedSubspaces) {
+      pushVoice(roomsBySpace(ss.id));
+    }
     return ids;
-  }, [visibleRooms, subSpaceSections]);
+  }, [visibleRooms, childJoinedSubspaces, roomsBySpace]);
   const voiceParticipants = useVoiceParticipants(voiceRoomIds);
   const livekitByRoom = useLivekitVoiceSnapshots(voiceRoomIds);
   const voiceParticipantStatesByRoom = useMemo(() => {
@@ -744,9 +818,15 @@ export default function MainLayout({
     let cancelled = false;
     invoke<boolean>("can_manage_space_children", { spaceId: activeSpaceId })
       .then((v) => {
-        if (!cancelled) setCanManageActiveSpace(v);
+        if (!cancelled) {
+          // eslint-disable-next-line no-console
+          console.log(`[canManage] ${activeSpaceId.slice(0, 12)}… = ${v}`);
+          setCanManageActiveSpace(v);
+        }
       })
-      .catch(() => {
+      .catch((e) => {
+        // eslint-disable-next-line no-console
+        console.warn(`[canManage] ${activeSpaceId.slice(0, 12)}… failed:`, e);
         if (!cancelled) setCanManageActiveSpace(false);
       });
     return () => {
@@ -756,15 +836,54 @@ export default function MainLayout({
 
   /**
    * Apply a batch of `m.space.child` order updates for a given parent
-   * space.  The `RoomSidebar` computes the plan (using
-   * `buildReorderPlan`) and hands us the list of writes; we fire them
-   * sequentially so that a mid-plan failure doesn't leave the space in an
-   * obviously broken state.  `fetchRooms()` after all writes land pulls
-   * the new ordering metadata back through `get_rooms` → `useRooms`.
+   * space.  Lifecycle:
+   *
+   *   1. Apply optimistic overrides synchronously — the sidebar shows
+   *      the new order on the next render, well before any homeserver
+   *      round-trip completes.
+   *   2. Fire each PUT sequentially.
+   *   3. Watch-effect path (fast, normal): the `useEffect` watching
+   *      `spaces` clears each optimistic entry as soon as the room's
+   *      *persisted* `m.space.child` order matches what we wrote.  This
+   *      handles 99% of cases — under normal sync conditions the echo
+   *      arrives within hundreds of ms.
+   *   4. Safety-net timeout (slow): if the watch effect hasn't cleared
+   *      an entry within ~8s of the write completing, force-clear it
+   *      anyway.  This guards against (a) Synapse falling behind under
+   *      load — we've observed sync iterations taking 17+ seconds in
+   *      logs — and (b) hypothetical matrix-sdk state-store
+   *      inconsistencies where `room.get_state_events()` returns the
+   *      pre-write snapshot for longer than expected.  Without this
+   *      timeout the user can end up stuck unable to drag a row for
+   *      arbitrarily long, which we've seen happen in practice.
+   *   5. Failure path: each PUT that returned an error rolls back
+   *      *its specific* optimistic override immediately — succeeded
+   *      writes still go through the watch / safety-net path.
+   *
+   * All state updates use immutable transforms (no mutation of the
+   * previous Map or its inner Maps) so React's StrictMode replay
+   * doesn't double-mutate and leave the structure in an inconsistent
+   * state.
    */
   const handleReorderSpaceChildren = useCallback(
     async (parentSpaceId: string, writes: { childRoomId: string; order: string }[]) => {
       if (writes.length === 0) return;
+
+      // 1. Apply optimistic.
+      setOptimisticOrders((prev) => {
+        const next = new Map(prev);
+        for (const w of writes) {
+          // Always copy the inner Map before mutating — never touch
+          // anything reachable from `prev`.
+          const inner = new Map(next.get(w.childRoomId) ?? new Map());
+          inner.set(parentSpaceId, w.order);
+          next.set(w.childRoomId, inner);
+        }
+        return next;
+      });
+
+      // 2. Fire writes.
+      const failed: typeof writes = [];
       for (const w of writes) {
         try {
           await invoke("set_space_child_order", {
@@ -773,21 +892,128 @@ export default function MainLayout({
             order: w.order,
           });
         } catch (e) {
+          failed.push(w);
           // eslint-disable-next-line no-console
           console.error(
             `[reorder] set_space_child_order failed for ${w.childRoomId} in ${parentSpaceId}:`,
             e
           );
-          break;
         }
       }
-      // Pull the new order back through the sync path; the m.space.child
-      // event handler in messages.rs will also emit rooms-changed, but
-      // doing it explicitly here keeps the sidebar snappy.
-      void fetchRooms();
+
+      // Helper: drop the optimistic override for a single (childId,
+      // parentId) pair only if it currently holds the value we wrote
+      // (a newer drag may have overwritten it; in that case we leave
+      // it alone — the new write owns the slot now).
+      const dropIfStill = (childId: string, parentId: string, expected: string) => {
+        setOptimisticOrders((prev) => {
+          const inner = prev.get(childId);
+          if (!inner) return prev;
+          if (inner.get(parentId) !== expected) return prev;
+          const newInner = new Map(inner);
+          newInner.delete(parentId);
+          const next = new Map(prev);
+          if (newInner.size === 0) next.delete(childId);
+          else next.set(childId, newInner);
+          return next;
+        });
+      };
+
+      // 3. Roll back failed writes immediately — persisted state will
+      //    never reflect them.
+      for (const w of failed) {
+        dropIfStill(w.childRoomId, parentSpaceId, w.order);
+      }
+      if (failed.length > 0) {
+        void fetchRooms().catch(() => {});
+      }
+
+      // 4. Safety-net: schedule a force-clear for each successful
+      //    write.  The watch effect normally handles this much faster
+      //    (typically next render after sync echo), but if Synapse is
+      //    slow / the state store hiccups, this prevents the row from
+      //    staying dimmed forever.  We log when it fires so the
+      //    underlying cause can be diagnosed later.
+      const succeeded = writes.filter(
+        (w) => !failed.some((f) => f.childRoomId === w.childRoomId)
+      );
+      for (const w of succeeded) {
+        setTimeout(() => {
+          setOptimisticOrders((prev) => {
+            const inner = prev.get(w.childRoomId);
+            if (!inner || inner.get(parentSpaceId) !== w.order) {
+              // Already cleared by the watch effect (the normal path)
+              // or overwritten by a newer drag; nothing to do.
+              return prev;
+            }
+            // eslint-disable-next-line no-console
+            console.warn(
+              `[reorder] safety-net force-clearing optimistic order for ` +
+                `${w.childRoomId} in ${parentSpaceId} ` +
+                `(wrote ${JSON.stringify(w.order)}; watch effect never matched). ` +
+                `Sync echo may be delayed or matrix-sdk state-store may be stale.`
+            );
+            const newInner = new Map(inner);
+            newInner.delete(parentSpaceId);
+            const next = new Map(prev);
+            if (newInner.size === 0) next.delete(w.childRoomId);
+            else next.set(w.childRoomId, newInner);
+            return next;
+          });
+          // Pull fresh data when we force-clear so the visible order
+          // reflects whatever the server now has rather than continuing
+          // to display the optimistic value.
+          void fetchRooms().catch(() => {});
+        }, 8000);
+      }
     },
     [fetchRooms]
   );
+
+  /**
+   * Reconcile the optimistic-orders map against the latest persisted
+   * state.  Runs whenever `spaces` updates (i.e. whenever matrix-sdk's
+   * sync delivers a new state event and `useRooms` re-reads).  For each
+   * pending optimistic entry: if the corresponding room's persisted
+   * order in the relevant parent now equals the optimistic value, we
+   * drop the override.  This is what un-dims the row and re-enables
+   * dragging on it.
+   *
+   * The setState updater is fully pure (constructs a new outer Map and
+   * new inner Maps from scratch by iterating prev) so StrictMode's
+   * double-invocation produces identical results without leaving
+   * "ghost" entries with empty inner Maps in the output.
+   */
+  useEffect(() => {
+    if (optimisticOrders.size === 0) return;
+    setOptimisticOrders((prev) => {
+      if (prev.size === 0) return prev;
+      let changed = false;
+      const next = new Map<string, Map<string, string>>();
+      for (const [roomId, parentMap] of prev) {
+        const room = getRoom(roomId);
+        const newInner = new Map<string, string>();
+        for (const [parentId, optOrder] of parentMap) {
+          const persistedOrder =
+            room?.spaceChildOrders?.[parentId]?.order ?? null;
+          if (persistedOrder === optOrder) {
+            // Caught up — drop this override.
+            changed = true;
+          } else {
+            newInner.set(parentId, optOrder);
+          }
+        }
+        if (newInner.size > 0) {
+          next.set(roomId, newInner);
+        } else {
+          // All overrides for this room cleared (room may have been
+          // dropped in its entirety).
+          changed = true;
+        }
+      }
+      return changed ? next : prev;
+    });
+  }, [spaces, getRoom, optimisticOrders]);
 
   return (
     <PresenceContext.Provider value={{ manualStatus, setManualStatus, effectivePresence, statusMessage, setStatusMessage }}>
@@ -819,7 +1045,7 @@ export default function MainLayout({
           <RoomSidebar
             width={roomSidebarWidth}
             rooms={visibleRooms}
-            subSpaceSections={subSpaceSections}
+            getSubSpaceRoomsOrdered={getSubSpaceRoomsOrdered}
             getRoom={getRoom}
             onOpenSubSpace={handleSelectSpace}
             activeRoomId={activeRoomId}
@@ -853,6 +1079,7 @@ export default function MainLayout({
             onNavigateToParentSpace={handleNavigateToParentSpace}
             canManageActiveSpaceChildren={canManageActiveSpace}
             onReorderSpaceChildren={handleReorderSpaceChildren}
+            pendingReorderIds={pendingReorderIds}
             isUnread={isUnread}
             mentionCount={effectiveMentionCount}
           />
