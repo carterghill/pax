@@ -781,6 +781,30 @@ export default function MainLayout({
     [fetchRooms, activeSpaceId]
   );
 
+  const handleRoomsLeft = useCallback(
+    (roomIds: string[]) => {
+      const set = new Set(roomIds);
+      if (voiceCall.connectedRoomId && set.has(voiceCall.connectedRoomId)) {
+        voiceCall.disconnect();
+      }
+      void fetchRooms();
+      if (activeRoomId && set.has(activeRoomId)) {
+        setActiveRoomId(null);
+      }
+      if (activeSpaceId && set.has(activeSpaceId)) {
+        setActiveSpaceId(null);
+      }
+    },
+    [
+      fetchRooms,
+      activeRoomId,
+      setActiveRoomId,
+      activeSpaceId,
+      voiceCall.connectedRoomId,
+      voiceCall.disconnect,
+    ]
+  );
+
   /**
    * Persist a new user-level top-level space order after a drag-and-drop
    * in the space sidebar.  The sidebar passes in the full post-drop order
@@ -1036,6 +1060,7 @@ export default function MainLayout({
           onReorderSpaces={handleReorderSpaces}
           userId={userId}
           onLeftSpace={handleLeftSpace}
+          onRoomsLeft={handleRoomsLeft}
           isSpaceUnread={isSpaceUnread}
           spaceMentionCount={effectiveSpaceMentionCount}
           isHomeUnread={isHomeUnread()}

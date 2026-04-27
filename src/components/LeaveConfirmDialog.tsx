@@ -8,26 +8,27 @@ import ModalLayer from "./ModalLayer";
 
 export type LeaveTargetKind = "room" | "space";
 
-interface LeaveConfirmDialogProps {
-  kind: LeaveTargetKind;
+interface LeaveConfirmDialogPropsBase {
   targetName: string;
   /** When kind is "space", fetched from the server; null while loading */
   onlyAdminWarning: boolean | null;
   leaving: boolean;
   error: string | null;
-  onConfirm: () => void;
   onClose: () => void;
 }
 
-export default function LeaveConfirmDialog({
-  kind,
-  targetName,
-  onlyAdminWarning,
-  leaving,
-  error,
-  onConfirm,
-  onClose,
-}: LeaveConfirmDialogProps) {
+type LeaveConfirmDialogProps =
+  | (LeaveConfirmDialogPropsBase & { kind: "room"; onConfirm: () => void })
+  | (LeaveConfirmDialogPropsBase & {
+      kind: "space";
+      /** Which space action is in flight; drives which button shows the spinner */
+      submittingKind: "only" | "all" | null;
+      onLeaveSpaceOnly: () => void;
+      onLeaveSpaceAndAllRooms: () => void;
+    });
+
+export default function LeaveConfirmDialog(props: LeaveConfirmDialogProps) {
+  const { kind, targetName, onlyAdminWarning, leaving, error, onClose } = props;
   const { palette, typography } = useTheme();
   const modalRef = useRef<HTMLDivElement>(null);
   useOverlayObstruction(modalRef);
@@ -50,6 +51,38 @@ export default function LeaveConfirmDialog({
   const noun = kind === "space" ? "space" : "room";
   const title = kind === "space" ? "Leave space?" : "Leave room?";
   const loadingSpaceCheck = kind === "space" && onlyAdminWarning === null;
+
+  const secondaryButtonStyle = {
+    padding: "10px 14px",
+    borderRadius: 8,
+    border: `1px solid ${palette.border}`,
+    backgroundColor: palette.bgTertiary,
+    color: palette.textPrimary,
+    fontSize: typography.fontSizeSmall,
+    fontWeight: typography.fontWeightMedium,
+    cursor: leaving || loadingSpaceCheck ? ("default" as const) : ("pointer" as const),
+    opacity: leaving || loadingSpaceCheck ? 0.7 : 1,
+    width: "100%",
+    boxSizing: "border-box" as const,
+  };
+
+  const accentButtonStyle = {
+    padding: "10px 14px",
+    borderRadius: 8,
+    border: "none",
+    backgroundColor: palette.accent,
+    color: "#fff",
+    fontSize: typography.fontSizeSmall,
+    fontWeight: typography.fontWeightMedium,
+    cursor: leaving || loadingSpaceCheck ? ("default" as const) : ("pointer" as const),
+    display: "inline-flex" as const,
+    alignItems: "center" as const,
+    justifyContent: "center" as const,
+    gap: 8,
+    opacity: leaving || loadingSpaceCheck ? 0.85 : 1,
+    width: "100%",
+    boxSizing: "border-box" as const,
+  };
 
   return (
     <ModalLayer
@@ -114,20 +147,38 @@ export default function LeaveConfirmDialog({
         </div>
 
         <div style={{ padding: "0 16px 16px 16px" }}>
-          <p
-            style={{
-              margin: "0 0 12px 0",
-              fontSize: typography.fontSizeBase,
-              color: palette.textSecondary,
-              lineHeight: 1.5,
-            }}
-          >
-            Leave{" "}
-            <strong style={{ color: palette.textPrimary, fontWeight: typography.fontWeightMedium }}>
-              {targetName}
-            </strong>
-            ? You will need to be invited again to rejoin this {noun}.
-          </p>
+          {kind === "space" ? (
+            <p
+              style={{
+                margin: "0 0 12px 0",
+                fontSize: typography.fontSizeBase,
+                color: palette.textSecondary,
+                lineHeight: 1.5,
+              }}
+            >
+              Choose how to leave{" "}
+              <strong style={{ color: palette.textPrimary, fontWeight: typography.fontWeightMedium }}>
+                {targetName}
+              </strong>
+              . Leaving only the space keeps you in its rooms; you will need a new invite to rejoin the
+              space. Leaving all rooms removes you from every channel and nested space under it.
+            </p>
+          ) : (
+            <p
+              style={{
+                margin: "0 0 12px 0",
+                fontSize: typography.fontSizeBase,
+                color: palette.textSecondary,
+                lineHeight: 1.5,
+              }}
+            >
+              Leave{" "}
+              <strong style={{ color: palette.textPrimary, fontWeight: typography.fontWeightMedium }}>
+                {targetName}
+              </strong>
+              ? You will need to be invited again to rejoin this {noun}.
+            </p>
+          )}
 
           {loadingSpaceCheck && (
             <div
@@ -186,54 +237,103 @@ export default function LeaveConfirmDialog({
             </p>
           )}
 
-          <div style={{ display: "flex", justifyContent: "flex-end", gap: 8, marginTop: 8 }}>
-            <button
-              type="button"
-              onClick={onClose}
-              disabled={leaving}
-              style={{
-                padding: "8px 14px",
-                borderRadius: 8,
-                border: `1px solid ${palette.border}`,
-                backgroundColor: palette.bgTertiary,
-                color: palette.textPrimary,
-                fontSize: typography.fontSizeSmall,
-                fontWeight: typography.fontWeightMedium,
-                cursor: leaving ? "default" : "pointer",
-                opacity: leaving ? 0.7 : 1,
-              }}
-            >
-              Cancel
-            </button>
-            <button
-              type="button"
-              onClick={onConfirm}
-              disabled={leaving || loadingSpaceCheck}
-              style={{
-                padding: "8px 14px",
-                borderRadius: 8,
-                border: "none",
-                backgroundColor: "#ed4245",
-                color: "#fff",
-                fontSize: typography.fontSizeSmall,
-                fontWeight: typography.fontWeightMedium,
-                cursor: leaving || loadingSpaceCheck ? "default" : "pointer",
-                display: "inline-flex",
-                alignItems: "center",
-                gap: 8,
-                opacity: leaving || loadingSpaceCheck ? 0.85 : 1,
-              }}
-            >
-              {leaving ? (
-                <>
-                  <Loader2 size={16} style={{ animation: "spin 0.8s linear infinite" }} />
-                  Leaving…
-                </>
-              ) : (
-                `Leave ${noun}`
-              )}
-            </button>
-          </div>
+          {kind === "space" ? (
+            <div style={{ display: "flex", flexDirection: "column", gap: 8, marginTop: 8 }}>
+              <button
+                type="button"
+                onClick={onClose}
+                disabled={leaving}
+                style={secondaryButtonStyle}
+              >
+                Cancel
+              </button>
+              <button
+                type="button"
+                onClick={() => props.onLeaveSpaceOnly()}
+                disabled={leaving || loadingSpaceCheck}
+                style={{
+                  ...secondaryButtonStyle,
+                  display: "inline-flex",
+                  alignItems: "center",
+                  justifyContent: "center",
+                  gap: 8,
+                }}
+              >
+                {leaving && props.submittingKind === "only" ? (
+                  <>
+                    <Loader2 size={16} style={{ animation: "spin 0.8s linear infinite" }} />
+                    Leaving…
+                  </>
+                ) : (
+                  "Leave space only"
+                )}
+              </button>
+              <button
+                type="button"
+                onClick={() => props.onLeaveSpaceAndAllRooms()}
+                disabled={leaving || loadingSpaceCheck}
+                style={accentButtonStyle}
+              >
+                {leaving && props.submittingKind === "all" ? (
+                  <>
+                    <Loader2 size={16} style={{ animation: "spin 0.8s linear infinite" }} />
+                    Leaving…
+                  </>
+                ) : (
+                  "Leave space and all rooms"
+                )}
+              </button>
+            </div>
+          ) : (
+            <div style={{ display: "flex", justifyContent: "flex-end", gap: 8, marginTop: 8 }}>
+              <button
+                type="button"
+                onClick={onClose}
+                disabled={leaving}
+                style={{
+                  padding: "8px 14px",
+                  borderRadius: 8,
+                  border: `1px solid ${palette.border}`,
+                  backgroundColor: palette.bgTertiary,
+                  color: palette.textPrimary,
+                  fontSize: typography.fontSizeSmall,
+                  fontWeight: typography.fontWeightMedium,
+                  cursor: leaving ? "default" : "pointer",
+                  opacity: leaving ? 0.7 : 1,
+                }}
+              >
+                Cancel
+              </button>
+              <button
+                type="button"
+                onClick={props.onConfirm}
+                disabled={leaving}
+                style={{
+                  padding: "8px 14px",
+                  borderRadius: 8,
+                  border: "none",
+                  backgroundColor: "#ed4245",
+                  color: "#fff",
+                  fontSize: typography.fontSizeSmall,
+                  fontWeight: typography.fontWeightMedium,
+                  cursor: leaving ? "default" : "pointer",
+                  display: "inline-flex",
+                  alignItems: "center",
+                  gap: 8,
+                  opacity: leaving ? 0.85 : 1,
+                }}
+              >
+                {leaving ? (
+                  <>
+                    <Loader2 size={16} style={{ animation: "spin 0.8s linear infinite" }} />
+                    Leaving…
+                  </>
+                ) : (
+                  `Leave ${noun}`
+                )}
+              </button>
+            </div>
+          )}
           <style>{`@keyframes spin { from { transform: rotate(0deg); } to { transform: rotate(360deg); } }`}</style>
         </div>
       </div>

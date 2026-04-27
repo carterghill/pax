@@ -40,6 +40,11 @@ interface SpaceSidebarProps {
   userId: string;
   /** Called after successfully leaving a space from the context menu */
   onLeftSpace?: (spaceId: string) => void;
+  /**
+   * After leaving multiple rooms at once (e.g. leave space + all rooms), run voice disconnect,
+   * clear selection if needed, and refresh — once for the whole batch.
+   */
+  onRoomsLeft?: (roomIds: string[]) => void;
   /** Rollup predicate: does this space (or a descendant) have unread activity? */
   isSpaceUnread: (spaceId: string) => boolean;
   /** Rollup count: total mentions across the space tree (for the red badge). */
@@ -288,6 +293,7 @@ export default function SpaceSidebar({
   onReorderSpaces,
   userId,
   onLeftSpace,
+  onRoomsLeft,
   isSpaceUnread,
   spaceMentionCount,
   isHomeUnread,
@@ -359,6 +365,7 @@ export default function SpaceSidebar({
   const [leaveSpaceOnlyAdmin, setLeaveSpaceOnlyAdmin] = useState<boolean | null>(null);
   const [leaveSpaceError, setLeaveSpaceError] = useState<string | null>(null);
   const [leaveSpaceSubmitting, setLeaveSpaceSubmitting] = useState(false);
+  const [leaveSpaceSubmitKind, setLeaveSpaceSubmitKind] = useState<"only" | "all" | null>(null);
   const [createRoomSpaceId, setCreateRoomSpaceId] = useState<string | null>(null);
   const [createSubSpaceParent, setCreateSubSpaceParent] = useState<{
     id: string;
@@ -612,9 +619,10 @@ export default function SpaceSidebar({
     return ids.length > 0 ? ids : null;
   }, [spaceSettingsTarget, roomsBySpace]);
 
-  const handleConfirmLeaveSpace = useCallback(async () => {
+  const handleLeaveSpaceOnly = useCallback(async () => {
     if (!leaveSpace) return;
     setLeaveSpaceError(null);
+    setLeaveSpaceSubmitKind("only");
     setLeaveSpaceSubmitting(true);
     try {
       await invoke("leave_room", { roomId: leaveSpace.id });
@@ -625,8 +633,31 @@ export default function SpaceSidebar({
       setLeaveSpaceError(String(e));
     } finally {
       setLeaveSpaceSubmitting(false);
+      setLeaveSpaceSubmitKind(null);
     }
   }, [leaveSpace, onLeftSpace, onSpacesChanged]);
+
+  const handleLeaveSpaceAndAllRooms = useCallback(async () => {
+    if (!leaveSpace) return;
+    setLeaveSpaceError(null);
+    setLeaveSpaceSubmitKind("all");
+    setLeaveSpaceSubmitting(true);
+    try {
+      const ids = collectRoomIdsInSpaceTree(leaveSpace.id, roomsBySpace);
+      const ordered = [...ids].reverse();
+      for (const roomId of ordered) {
+        await invoke("leave_room", { roomId });
+      }
+      onRoomsLeft?.(ordered);
+      await onSpacesChanged();
+      setLeaveSpace(null);
+    } catch (e) {
+      setLeaveSpaceError(String(e));
+    } finally {
+      setLeaveSpaceSubmitting(false);
+      setLeaveSpaceSubmitKind(null);
+    }
+  }, [leaveSpace, roomsBySpace, onRoomsLeft, onSpacesChanged]);
 
   return (
     <>
@@ -1033,8 +1064,10 @@ export default function SpaceSidebar({
           targetName={leaveSpace.name}
           onlyAdminWarning={leaveSpaceOnlyAdmin}
           leaving={leaveSpaceSubmitting}
+          submittingKind={leaveSpaceSubmitKind}
           error={leaveSpaceError}
-          onConfirm={handleConfirmLeaveSpace}
+          onLeaveSpaceOnly={handleLeaveSpaceOnly}
+          onLeaveSpaceAndAllRooms={handleLeaveSpaceAndAllRooms}
           onClose={() => {
             if (!leaveSpaceSubmitting) {
               setLeaveSpace(null);
