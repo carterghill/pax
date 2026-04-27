@@ -114,11 +114,10 @@ export default function UserAvatar({
   // avatars. If a flash shows something other than `image` we want
   // to see which one and for how many frames.
   if (import.meta.env.DEV && size >= 24 && size <= 32) {
-    const branch = showImage ? "image" : showInitials ? "logo" : "empty";
     // eslint-disable-next-line no-console
-    // console.log(
-    //   `[UserAvatar ${userId}] render → ${branch} (fromStore=${fromStore === null ? "null" : fromStore === undefined ? "undefined" : "<path>"}, hint=${avatarUrlHint === null ? "null" : avatarUrlHint === undefined ? "undefined" : "<path>"}, failed=${imageFailed})`,
-    // );
+    console.log(
+      `[UserAvatar ${userId}] render → ${showImage ? "image" : showInitials ? "logo" : "empty"} (fromStore=${fromStore === null ? "null" : fromStore === undefined ? "undefined" : "<path>"}, hint=${avatarUrlHint === null ? "null" : avatarUrlHint === undefined ? "undefined" : "<path>"}, failed=${imageFailed})`,
+    );
   }
 
   const containerStyle: CSSProperties = {

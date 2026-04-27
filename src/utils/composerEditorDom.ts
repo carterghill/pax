@@ -1,4 +1,152 @@
 import { normalizeImageSrcHref } from "./directImageUrl";
+import { MATRIX_BODY_MXID_PATTERN } from "./matrixBodyMxid";
+
+/** Serialized Matrix mention: full MXID (or `@room`) stored on the span; visible label is separate. */
+export const PAX_COMPOSER_MENTION_USER_ID_ATTR = "data-pax-mention-user-id";
+
+export type ComposerMentionPillStyle = {
+  backgroundColor: string;
+  color: string;
+  fontWeight: number;
+};
+
+/** Inline mention chip for the rich-text composer (matches MessageMarkdown pill look). */
+export function createComposerMentionSpan(
+  userId: string,
+  visibleLabel: string,
+  style: ComposerMentionPillStyle,
+): HTMLSpanElement {
+  const span = document.createElement("span");
+  span.setAttribute(PAX_COMPOSER_MENTION_USER_ID_ATTR, userId);
+  span.contentEditable = "false";
+  span.textContent = visibleLabel;
+  Object.assign(span.style, {
+    display: "inline",
+    padding: "1px 6px",
+    borderRadius: "4px",
+    backgroundColor: style.backgroundColor,
+    color: style.color,
+    fontWeight: String(style.fontWeight),
+    userSelect: "text",
+    transition: "background-color 120ms ease",
+    cursor: "default",
+    verticalAlign: "baseline",
+  } satisfies Partial<CSSStyleDeclaration>);
+  return span;
+}
+
+function composerTextNodeIsMxidExempt(textNode: Text): boolean {
+  let p: Node | null = textNode.parentElement;
+  while (p) {
+    if (!(p instanceof HTMLElement)) break;
+    const tag = p.tagName;
+    if (tag === "CODE" || tag === "PRE") return true;
+    if (p.hasAttribute(PAX_COMPOSER_MENTION_USER_ID_ATTR)) return true;
+    p = p.parentElement;
+  }
+  return false;
+}
+
+/** Plain-text offset of a collapsed caret within the composer (for restoring selection after DOM edits). */
+export function getCaretPlainTextOffset(root: HTMLElement, sel: Selection): number | null {
+  if (!sel || sel.rangeCount === 0 || !sel.isCollapsed) return null;
+  const range = sel.getRangeAt(0);
+  const pre = document.createRange();
+  pre.selectNodeContents(root);
+  pre.setEnd(range.startContainer, range.startOffset);
+  return pre.toString().replace(/\u200b/g, "").length;
+}
+
+export function setCaretPlainTextOffset(root: HTMLElement, offset: number): void {
+  const sel = window.getSelection();
+  if (!sel) return;
+  let charCount = 0;
+  const walker = document.createTreeWalker(root, NodeFilter.SHOW_TEXT);
+  while (walker.nextNode()) {
+    const tn = walker.currentNode as Text;
+    const len = (tn.textContent ?? "").replace(/\u200b/g, "").length;
+    if (charCount + len >= offset) {
+      const cleanTarget = offset - charCount;
+      let rawOffset = 0;
+      let cleanSeen = 0;
+      const raw = tn.textContent ?? "";
+      for (let i = 0; i < raw.length; i++) {
+        if (cleanSeen === cleanTarget) break;
+        if (raw[i] !== "\u200b") cleanSeen++;
+        rawOffset = i + 1;
+      }
+      const r = document.createRange();
+      r.setStart(tn, Math.min(rawOffset, raw.length));
+      r.collapse(true);
+      sel.removeAllRanges();
+      sel.addRange(r);
+      return;
+    }
+    charCount += len;
+  }
+  const r = document.createRange();
+  r.selectNodeContents(root);
+  r.collapse(false);
+  sel.removeAllRanges();
+  sel.addRange(r);
+}
+
+/**
+ * Wrap bare MXID / `@room` tokens in text nodes with mention spans. Preserves caret when possible.
+ * Skips `code` / `pre` and text inside existing mention spans.
+ */
+export function replaceBareMxidsWithPillsInComposer(
+  root: HTMLElement,
+  getPillLabel: (mxid: string) => string,
+  makeSpan: (mxid: string, label: string) => HTMLSpanElement,
+): boolean {
+  const sel = window.getSelection();
+  let caretBefore: number | null = null;
+  if (sel && sel.rangeCount > 0 && sel.isCollapsed && sel.anchorNode && root.contains(sel.anchorNode)) {
+    caretBefore = getCaretPlainTextOffset(root, sel);
+  }
+
+  const textNodes: Text[] = [];
+  const w = document.createTreeWalker(root, NodeFilter.SHOW_TEXT);
+  while (w.nextNode()) {
+    const tn = w.currentNode as Text;
+    if (composerTextNodeIsMxidExempt(tn)) continue;
+    textNodes.push(tn);
+  }
+
+  let changed = false;
+  for (const tn of textNodes) {
+    if (!tn.isConnected || !tn.parentNode) continue;
+    const text = tn.textContent ?? "";
+    const matches = [...text.matchAll(new RegExp(MATRIX_BODY_MXID_PATTERN, "g"))];
+    if (matches.length === 0) continue;
+
+    const frag = document.createDocumentFragment();
+    let last = 0;
+    for (const m of matches) {
+      const idx = m.index!;
+      const mxid = m[0];
+      if (idx > last) frag.appendChild(document.createTextNode(text.slice(last, idx)));
+      frag.appendChild(makeSpan(mxid, getPillLabel(mxid)));
+      last = idx + mxid.length;
+      changed = true;
+    }
+    if (last < text.length) frag.appendChild(document.createTextNode(text.slice(last)));
+    tn.parentNode.replaceChild(frag, tn);
+  }
+
+  if (changed && caretBefore != null) {
+    const afterLen = getEditorPlainText(root).length;
+    setCaretPlainTextOffset(root, Math.min(caretBefore, afterLen));
+  }
+
+  return changed;
+}
+
+export type FillComposerMentionPills = {
+  getPillLabel: (mxid: string) => string;
+  makeSpan: (mxid: string, label: string) => HTMLSpanElement;
+};
 
 // ─── Serialize (rich DOM → markdown) ────────────────────────────────────────
 
@@ -12,6 +160,9 @@ export function serializeComposerEditor(root: HTMLElement): string {
 
     if (tag === "IMG") return el.getAttribute("data-url") ?? "";
     if (tag === "BR") return "\n";
+    if (tag === "SPAN" && el.hasAttribute(PAX_COMPOSER_MENTION_USER_ID_ATTR)) {
+      return el.getAttribute(PAX_COMPOSER_MENTION_USER_ID_ATTR) ?? "";
+    }
 
     let inner = "";
     for (const c of el.childNodes) inner += visit(c);
@@ -66,6 +217,7 @@ export function fillComposerEditorFromMarkdown(
   root: HTMLElement,
   markdown: string,
   imgStyle: { borderRadius: number; maxWidth: string },
+  mentionPills?: FillComposerMentionPills,
 ): void {
   let html = markdown;
 
@@ -114,6 +266,9 @@ export function fillComposerEditorFromMarkdown(
   html = html.replace(/\n/g, "<br>");
 
   root.innerHTML = html || "\u200b";
+  if (mentionPills) {
+    replaceBareMxidsWithPillsInComposer(root, mentionPills.getPillLabel, mentionPills.makeSpan);
+  }
 }
 
 // ─── Plain text ─────────────────────────────────────────────────────────────

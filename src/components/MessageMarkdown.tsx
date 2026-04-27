@@ -28,6 +28,7 @@ import {
   hrefLooksLikeDirectImageUrl,
   normalizeImageSrcHref,
 } from "../utils/directImageUrl";
+import { MATRIX_BODY_MXID_RE_GLOBAL } from "../utils/matrixBodyMxid";
 
 /** Word joiner–wrapped `(edited)` inside markdown emphasis so we can style it without matching user italics. */
 const EDITED_EMPHASIS = ` *\u2060(edited)\u2060*`;
@@ -78,14 +79,7 @@ function isExternalHref(href: string | undefined): boolean {
 /*  Mention pill processing                                            */
 /* ------------------------------------------------------------------ */
 
-/**
- * Regex for Matrix user IDs in body text.  Matches `@localpart:server.tld`
- * and `@localpart:server.tld:port`.  The localpart allows `[a-z0-9._=\-/]`
- * per the spec (case-insensitive match here for robustness).
- *
- * Also matches the literal `@room` token for @room pings.
- */
-const MXID_RE = /@(?:room|[a-zA-Z0-9._=\-/]+:[a-zA-Z0-9.\-]+\.[a-zA-Z]{2,}(?::\d+)?)/g;
+const MXID_RE = MATRIX_BODY_MXID_RE_GLOBAL;
 
 /**
  * Split a plain string at Matrix user ID boundaries, returning a mix of
@@ -227,7 +221,7 @@ function mentionifyReactNode(
   }
   if (typeof node === "number") return node;
   if (Array.isArray(node)) {
-    return node.map((child, i) =>
+    return node.map((child) =>
       mentionifyReactNode(child, inCode, mentionSet, resolveLabel, onMentionClick, pillStyle, pillHoverBg),
     );
   }

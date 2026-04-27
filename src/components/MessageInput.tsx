@@ -12,8 +12,9 @@ import {
 import { createPortal } from "react-dom";
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
-import type { Message } from "../types/matrix";
+import type { Message, RoomMember } from "../types/matrix";
 import CircularUploadRing from "./CircularUploadRing";
+import { useRoomMembers } from "../hooks/useRoomMembers";
 import {
   Type,
   Bold,
@@ -58,6 +59,9 @@ import {
   toggleInlineCode,
   toggleCodeBlock,
   toggleLink,
+  createComposerMentionSpan,
+  replaceBareMxidsWithPillsInComposer,
+  type ComposerMentionPillStyle,
 } from "../utils/composerEditorDom";
 import { MODAL_LAYER_Z } from "./ModalLayer";
 
@@ -268,6 +272,224 @@ export default function MessageInput({
   const [pendingFile, setPendingFile] = useState<PendingAttachment | null>(null);
   const pendingFileRef = useRef<PendingAttachment | null>(null);
 
+  // ─── Mention autocomplete ─────────────────────────────────────────────────
+
+  const { members: roomMembers } = useRoomMembers(roomId);
+
+  const memberLabelById = useMemo(() => {
+    const m = new Map<string, string>();
+    for (const mem of roomMembers) {
+      const label = (mem.displayName?.trim() || mem.userId).trim();
+      m.set(mem.userId.trim().toLowerCase(), label);
+    }
+    return m;
+  }, [roomMembers]);
+
+  const resolveMemberLabel = useCallback(
+    (uid: string) => {
+      const hit = memberLabelById.get(uid.trim().toLowerCase());
+      if (hit) return hit;
+      return uid;
+    },
+    [memberLabelById],
+  );
+
+  const getComposerMentionVisibleLabel = useCallback(
+    (mxid: string) => {
+      if (mxid === "@room") return "@room";
+      const resolved = resolveMemberLabel(mxid);
+      if (resolved.startsWith("@")) return resolved.split(":")[0];
+      return `@${resolved}`;
+    },
+    [resolveMemberLabel],
+  );
+
+  const composerMentionPillStyle = useMemo<ComposerMentionPillStyle>(
+    () => ({
+      backgroundColor: `${palette.accent}22`,
+      color: palette.accent,
+      fontWeight: typography.fontWeightMedium,
+    }),
+    [palette.accent, typography.fontWeightMedium],
+  );
+
+  const makeComposerMentionSpan = useCallback(
+    (mxid: string, label: string) => createComposerMentionSpan(mxid, label, composerMentionPillStyle),
+    [composerMentionPillStyle],
+  );
+
+  const [mentionQuery, setMentionQuery] = useState("");
+  const [mentionMenuOpen, setMentionMenuOpen] = useState(false);
+  const [mentionIndex, setMentionIndex] = useState(0);
+  /** Guard to skip re-detection after we programmatically insert a mention. */
+  const mentionInsertingRef = useRef(false);
+  const mentionMenuRef = useRef<HTMLDivElement>(null);
+
+  /** Filtered + scored members for the autocomplete menu. */
+  const mentionCandidates = useMemo(() => {
+    if (!mentionMenuOpen || !mentionQuery) return [];
+    const q = mentionQuery.toLowerCase();
+    return roomMembers
+      .filter((m) => {
+        // Don't suggest yourself
+        if (m.userId === selfUserId) return false;
+        const localpart = m.userId.startsWith("@")
+          ? m.userId.slice(1).split(":")[0]
+          : m.userId.split(":")[0];
+        const dn = (m.displayName ?? "").toLowerCase();
+        return localpart.toLowerCase().includes(q) || dn.includes(q);
+      })
+      .slice(0, 8);
+  }, [mentionMenuOpen, mentionQuery, roomMembers, selfUserId]);
+
+  // Clamp mentionIndex when candidates change.
+  useEffect(() => {
+    setMentionIndex((prev) => Math.min(prev, Math.max(0, mentionCandidates.length - 1)));
+  }, [mentionCandidates.length]);
+
+  // Close the menu when candidates are empty.
+  useEffect(() => {
+    if (mentionMenuOpen && mentionCandidates.length === 0 && mentionQuery.length > 0) {
+      setMentionMenuOpen(false);
+    }
+  }, [mentionMenuOpen, mentionCandidates.length, mentionQuery]);
+
+  // Scroll the highlighted item into view when navigating with keyboard.
+  useEffect(() => {
+    if (!mentionMenuOpen || !mentionMenuRef.current) return;
+    const items = mentionMenuRef.current.querySelectorAll("[role='option']");
+    items[mentionIndex]?.scrollIntoView({ block: "nearest" });
+  }, [mentionIndex, mentionMenuOpen]);
+
+  /**
+   * Get the text before the cursor and find an active `@query` pattern.
+   * Returns the query string (after `@`) or null if no mention context.
+   */
+  function getMentionContext(): string | null {
+    const el = editorRef.current;
+    if (!el) return null;
+    const sel = window.getSelection();
+    if (!sel || sel.rangeCount === 0 || !sel.isCollapsed) return null;
+
+    // Build text-before-cursor by walking the editor DOM.
+    const range = sel.getRangeAt(0);
+    const preRange = document.createRange();
+    preRange.selectNodeContents(el);
+    preRange.setEnd(range.startContainer, range.startOffset);
+    const textBefore = preRange.toString().replace(/\u200b/g, "");
+
+    // Walk backwards from end to find @ trigger.
+    const lastAt = textBefore.lastIndexOf("@");
+    if (lastAt === -1) return null;
+
+    // @ must be at start or preceded by whitespace / newline.
+    if (lastAt > 0) {
+      const charBefore = textBefore[lastAt - 1];
+      if (!/[\s\n]/.test(charBefore)) return null;
+    }
+
+    const query = textBefore.slice(lastAt + 1);
+    // No spaces or newlines allowed in the query portion.
+    if (/[\s\n]/.test(query)) return null;
+    return query;
+  }
+
+  /**
+   * Find a member whose displayName or localpart exactly matches `query`
+   * (case-insensitive).  Used for auto-resolve on space/colon.
+   */
+  function findExactMemberMatch(query: string): RoomMember | null {
+    const q = query.toLowerCase();
+    for (const m of roomMembers) {
+      if (m.userId === selfUserId) continue;
+      const localpart = m.userId.startsWith("@")
+        ? m.userId.slice(1).split(":")[0]
+        : m.userId.split(":")[0];
+      if (localpart.toLowerCase() === q) return m;
+      if (m.displayName && m.displayName.toLowerCase() === q) return m;
+    }
+    return null;
+  }
+
+  /**
+   * Replace the current `@query` text in the editor with the full MXID and
+   * a trailing space, using execCommand so undo history is preserved.
+   */
+  function completeMention(member: RoomMember) {
+    const el = editorRef.current;
+    if (!el) return;
+    const sel = window.getSelection();
+    if (!sel || sel.rangeCount === 0) return;
+
+    // Re-derive text-before-cursor to find the exact @ position.
+    const range = sel.getRangeAt(0);
+    const preRange = document.createRange();
+    preRange.selectNodeContents(el);
+    preRange.setEnd(range.startContainer, range.startOffset);
+    const textBefore = preRange.toString().replace(/\u200b/g, "");
+    const lastAt = textBefore.lastIndexOf("@");
+    if (lastAt === -1) return;
+
+    // We need to select from the @ to the current cursor, then replace.
+    // Walk the DOM to find the text node + offset corresponding to `lastAt`.
+    let charCount = 0;
+    let startNode: Node | null = null;
+    let startOffset = 0;
+
+    const walker = document.createTreeWalker(el, NodeFilter.SHOW_TEXT);
+    while (walker.nextNode()) {
+      const tn = walker.currentNode;
+      const len = (tn.textContent ?? "").replace(/\u200b/g, "").length;
+      if (charCount + len > lastAt) {
+        startNode = tn;
+        // Map clean charCount back to raw offset.
+        const cleanTarget = lastAt - charCount;
+        let rawOffset = 0;
+        let cleanSeen = 0;
+        const raw = tn.textContent ?? "";
+        for (let i = 0; i < raw.length; i++) {
+          if (cleanSeen === cleanTarget) break;
+          if (raw[i] !== "\u200b") cleanSeen++;
+          rawOffset = i + 1;
+        }
+        startOffset = rawOffset;
+        break;
+      }
+      charCount += len;
+    }
+    if (!startNode) return;
+
+    // Select from @ to cursor.
+    const replaceRange = document.createRange();
+    replaceRange.setStart(startNode, startOffset);
+    replaceRange.setEnd(range.startContainer, range.startOffset);
+    sel.removeAllRanges();
+    sel.addRange(replaceRange);
+
+    mentionInsertingRef.current = true;
+    replaceRange.deleteContents();
+    const span = makeComposerMentionSpan(
+      member.userId,
+      getComposerMentionVisibleLabel(member.userId),
+    );
+    replaceRange.insertNode(span);
+    const space = document.createTextNode(" ");
+    span.after(space);
+    const after = document.createRange();
+    after.setStartAfter(space);
+    after.collapse(true);
+    sel.removeAllRanges();
+    sel.addRange(after);
+    mentionInsertingRef.current = false;
+
+    setMentionMenuOpen(false);
+    setMentionQuery("");
+    setMentionIndex(0);
+
+    // Sync state.
+    refreshComposerDomState();
+  }
+
   useEffect(() => {
     invoke<string>("get_giphy_api_key").then(setGiphyApiKey).catch(() => {});
   }, []);
@@ -409,18 +631,64 @@ export default function MessageInput({
     if (interactionLocked) return;
     const el = editorRef.current;
     if (!el) return;
+    if (!mentionInsertingRef.current) {
+      replaceBareMxidsWithPillsInComposer(el, getComposerMentionVisibleLabel, makeComposerMentionSpan);
+    }
     const text = getEditorPlainText(el);
     const media = el.querySelector("img") != null;
     setPlainText(text);
     setHasComposerMedia(media);
     syncHeight();
 
+    // ── Mention autocomplete detection ────────────────────────────────────
+    if (!mentionInsertingRef.current) {
+      const ctx = getMentionContext();
+      if (ctx !== null && ctx.length > 0) {
+        // Check for auto-resolve: if the last character is space or colon,
+        // see if the text before it exactly matches a member.
+        const lastChar = ctx[ctx.length - 1];
+        if (lastChar === " " || lastChar === ":") {
+          const queryWithout = ctx.slice(0, -1);
+          const match = findExactMemberMatch(queryWithout);
+          if (match) {
+            // Replace @query + trailing char with @mxid + space.
+            // We need to re-derive context after the replace, so defer.
+            requestAnimationFrame(() => {
+              // Re-check that context is still valid (user might have
+              // typed more in the meantime).
+              const recheck = getMentionContext();
+              if (recheck === null) return;
+              const recheckClean = recheck.replace(/[\s:]$/, "");
+              const m2 = findExactMemberMatch(recheckClean);
+              if (!m2) return;
+              // Select back to the @ and replace.
+              completeMention(m2);
+            });
+            setMentionMenuOpen(false);
+          } else {
+            setMentionMenuOpen(false);
+            setMentionQuery("");
+          }
+        } else {
+          setMentionQuery(ctx);
+          setMentionMenuOpen(true);
+          setMentionIndex(0);
+        }
+      } else if (ctx !== null && ctx.length === 0) {
+        // Just typed `@` with nothing after — don't open yet, wait for a char.
+        setMentionMenuOpen(false);
+        setMentionQuery("");
+      } else {
+        setMentionMenuOpen(false);
+        setMentionQuery("");
+      }
+    }
+
     if (editingMessage) return;
     if (draftDmPeerUserId) return;
     if (text.trim().length > 0 || media) {
       sendTyping(true);
       if (typingTimeout.current) clearTimeout(typingTimeout.current);
-      // typingTimeout.current = setTimeout(() => sendTyping(false), 3000);
       typingTimeout.current = setTimeout(() => {
         sendTyping(false);
       }, 3000);
@@ -527,7 +795,10 @@ export default function MessageInput({
     if (!editingMessage) return;
     const el = editorRef.current;
     if (!el) return;
-    fillComposerEditorFromMarkdown(el, editingMessage.body, composerImgStyle);
+    fillComposerEditorFromMarkdown(el, editingMessage.body, composerImgStyle, {
+      getPillLabel: getComposerMentionVisibleLabel,
+      makeSpan: makeComposerMentionSpan,
+    });
     const text = getEditorPlainText(el);
     const media = el.querySelector("img") != null;
     setPlainText(text);
@@ -542,7 +813,14 @@ export default function MessageInput({
         sel.collapseToEnd();
       }
     });
-  }, [editingMessage?.eventId]);
+  }, [
+    editingMessage?.eventId,
+    editingMessage?.body,
+    composerImgStyle,
+    getComposerMentionVisibleLabel,
+    makeComposerMentionSpan,
+    syncHeight,
+  ]);
 
   // ─── Format actions ───────────────────────────────────────────────────────
 
@@ -903,6 +1181,32 @@ export default function MessageInput({
 
   function handleKeyDown(e: React.KeyboardEvent) {
     if (interactionLocked) return;
+
+    // ── Mention autocomplete keyboard handling ────────────────────────────
+    if (mentionMenuOpen && mentionCandidates.length > 0) {
+      if (e.key === "ArrowDown") {
+        e.preventDefault();
+        setMentionIndex((i) => Math.min(i + 1, mentionCandidates.length - 1));
+        return;
+      }
+      if (e.key === "ArrowUp") {
+        e.preventDefault();
+        setMentionIndex((i) => Math.max(i - 1, 0));
+        return;
+      }
+      if (e.key === "Enter" || e.key === "Tab") {
+        e.preventDefault();
+        const selected = mentionCandidates[mentionIndex];
+        if (selected) completeMention(selected);
+        return;
+      }
+      if (e.key === "Escape") {
+        e.preventDefault();
+        setMentionMenuOpen(false);
+        return;
+      }
+    }
+
     if (e.key === "Enter" && !e.shiftKey) {
       e.preventDefault();
       handleSend();
@@ -1215,6 +1519,9 @@ export default function MessageInput({
         [data-pax-composer] > div:only-child { margin: 0; }
         [data-pax-composer-root] button:disabled { cursor: default !important; }
         [data-pax-composer-root] [data-pax-composer][contenteditable="false"] { cursor: default !important; }
+        [data-pax-composer] span[data-pax-mention-user-id]:hover {
+          background-color: ${palette.accent}38 !important;
+        }
       `}</style>
 
       <div
@@ -1222,6 +1529,99 @@ export default function MessageInput({
         data-pax-composer-root
         style={{ padding: `0 ${spacing.unit * 3}px ${spacing.unit * 3}px`, position: "relative" }}
       >
+
+      {/* ── Mention autocomplete menu ──────────────────────────────────────── */}
+      {mentionMenuOpen && mentionCandidates.length > 0 && (
+        <div
+          ref={mentionMenuRef}
+          role="listbox"
+          aria-label="Mention suggestions"
+          style={{
+            position: "absolute",
+            bottom: "100%",
+            // Match composer width (abs positioning uses the padding box; in-flow content is inset).
+            left: spacing.unit * 3,
+            right: spacing.unit * 3,
+            marginBottom: spacing.unit,
+            backgroundColor: palette.bgSecondary,
+            border: `1px solid ${palette.border}`,
+            borderRadius: spacing.unit * 1.5,
+            boxShadow:
+              resolvedColorScheme === "light"
+                ? "0 -2px 12px rgba(0,0,0,0.10)"
+                : "0 -2px 16px rgba(0,0,0,0.40)",
+            overflow: "hidden",
+            zIndex: COMPOSER_POPOVER_Z,
+          }}
+        >
+          {mentionCandidates.map((m, i) => {
+            const localpart = m.userId.startsWith("@")
+              ? m.userId.slice(1).split(":")[0]
+              : m.userId.split(":")[0];
+            const isSelected = i === mentionIndex;
+            const mentionRowFadePx = spacing.unit * 4;
+            const mentionRowMask = `linear-gradient(90deg, #000 0%, #000 calc(100% - ${mentionRowFadePx}px), transparent 100%)`;
+            return (
+              <div
+                key={m.userId}
+                role="option"
+                aria-selected={isSelected}
+                title={`${m.displayName ?? localpart} ${m.userId}`}
+                onMouseDown={(e) => {
+                  // mouseDown (not click) so it fires before the editor blur.
+                  e.preventDefault();
+                  completeMention(m);
+                }}
+                onMouseEnter={() => setMentionIndex(i)}
+                style={{
+                  display: "flex",
+                  alignItems: "center",
+                  minWidth: 0,
+                  padding: `${spacing.unit * 1.5}px ${spacing.unit * 2.5}px`,
+                  cursor: "pointer",
+                  backgroundColor: isSelected ? palette.bgHover : "transparent",
+                  transition: "background-color 60ms ease",
+                }}
+              >
+                <div
+                  style={{
+                    display: "flex",
+                    alignItems: "center",
+                    gap: spacing.unit * 2,
+                    minWidth: 0,
+                    flex: 1,
+                    overflow: "hidden",
+                    whiteSpace: "nowrap",
+                    maskImage: mentionRowMask,
+                    WebkitMaskImage: mentionRowMask,
+                  }}
+                >
+                  <span
+                    style={{
+                      fontWeight: typography.fontWeightMedium,
+                      color: palette.textPrimary,
+                      fontSize: typography.fontSizeBase,
+                      flexShrink: 0,
+                    }}
+                  >
+                    {m.displayName ?? localpart}
+                  </span>
+                  <span
+                    style={{
+                      fontSize: typography.fontSizeSmall,
+                      color: palette.textSecondary,
+                      flexShrink: 0,
+                    }}
+                  >
+                    {m.userId}
+                  </span>
+                </div>
+              </div>
+            );
+          })}
+        </div>
+      )}
+
       <div
         style={{
           backgroundColor: palette.bgActive,
