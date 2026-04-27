@@ -61,6 +61,12 @@ export interface Message {
   replyTo?: MessageReplyTo;
   /** Aggregated m.reaction keys for this event (from server / sync). */
   reactions?: MessageReaction[];
+  /**
+   * MXIDs from `m.mentions.user_ids` on this event.  The frontend renders
+   * mention pills for MXIDs that appear in both this list AND the body text,
+   * avoiding false positives from substring matching alone.
+   */
+  mentionedUserIds?: string[];
   /** True when the latest content comes from an m.replace edit */
   edited?: boolean;
   /** Matrix `m.image` payload: serialized `MediaRequestParameters` for authenticated download. */

@@ -105,6 +105,12 @@ pub struct MessageInfo {
     /// Aggregated `m.reaction` annotations for this event (Matrix annotation key → senders).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub reactions: Option<Vec<MessageReactionSummary>>,
+    /// MXIDs from `m.mentions.user_ids` on this event.  Used by the frontend
+    /// to render mention pills: only MXIDs that appear in this list AND in the
+    /// body text are pill-ified, avoiding false positives from body-substring
+    /// matching alone.  Empty vec when the event has no structured mentions.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub mentioned_user_ids: Vec<String>,
 }
 
 /// Live sync: add or remove one reaction annotation on `target_event_id`.
@@ -200,6 +206,19 @@ pub struct PresencePayload {
 pub struct RoomMessagePayload {
     pub room_id: String,
     pub message: MessageInfo,
+    /// True when this event's `m.mentions.user_ids` includes the current user's
+    /// MXID.  Derived from the structured `m.mentions` content — the same data
+    /// the server uses for push-rule highlight evaluation.  The desktop
+    /// notification hook uses this instead of body-substring matching so that
+    /// notifications stay aligned with the red-badge mention count.
+    pub mentions_me: bool,
+    /// True when `m.mentions.room` is set (the sender pinged `@room`).
+    pub room_ping: bool,
+    /// True when the room is a 1:1 DM (matrix-sdk `is_direct()`).  The
+    /// notification hook mirrors the badge's DM-promotion rule: in a non-muted
+    /// DM, every message is treated as notification-worthy for levels that care
+    /// about mentions, matching `effectiveMentionCount` behaviour.
+    pub is_dm: bool,
 }
 
 /// Live edit: merge into the existing timeline row with `target_event_id` (do not append).

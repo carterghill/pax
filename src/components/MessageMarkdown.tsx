@@ -1,4 +1,4 @@
-import { useMemo, isValidElement, memo, type MouseEvent, type ReactNode } from "react";
+import React, { useMemo, useCallback, isValidElement, cloneElement, memo, type MouseEvent, type ReactElement, type ReactNode } from "react";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
 import type { Components } from "react-markdown";
@@ -38,6 +38,13 @@ interface MessageMarkdownProps {
   edited?: boolean;
   /** When set, https image/GIF links (inline previews) open in the app media viewer instead of the browser. */
   onOpenDirectImage?: (url: string, title: string) => void;
+  /** MXIDs from `m.mentions.user_ids`.  Only MXIDs in this list are pill-ified
+   *  when found in the body text — avoids false positives from substring matching. */
+  mentionedUserIds?: string[];
+  /** Resolve a user MXID to a display name for the pill label. */
+  resolveMemberLabel?: (userId: string) => string;
+  /** Called when a mention pill is clicked (opens the user's profile). */
+  onMentionClick?: (userId: string) => void;
 }
 
 function flattenTextNode(value: ReactNode): string {
@@ -67,16 +74,223 @@ function isExternalHref(href: string | undefined): boolean {
   return /^https?:\/\//i.test(href) || href.startsWith("//");
 }
 
-function E({ children }: { children: ReactNode }) {
-  return <>{emojifyMarkdownChildren(children)}</>;
+/* ------------------------------------------------------------------ */
+/*  Mention pill processing                                            */
+/* ------------------------------------------------------------------ */
+
+/**
+ * Regex for Matrix user IDs in body text.  Matches `@localpart:server.tld`
+ * and `@localpart:server.tld:port`.  The localpart allows `[a-z0-9._=\-/]`
+ * per the spec (case-insensitive match here for robustness).
+ *
+ * Also matches the literal `@room` token for @room pings.
+ */
+const MXID_RE = /@(?:room|[a-zA-Z0-9._=\-/]+:[a-zA-Z0-9.\-]+\.[a-zA-Z]{2,}(?::\d+)?)/g;
+
+/**
+ * Split a plain string at Matrix user ID boundaries, returning a mix of
+ * text and pill React elements.
+ *
+ * Full MXIDs (`@localpart:server.tld`) in body text are always intentional
+ * mentions — nobody types them by accident.  The regex is specific enough
+ * to avoid false positives on plain words.
+ *
+ * When `mentionSet` is populated (from `m.mentions.user_ids`), only MXIDs
+ * in that set are pill-ified — the tightest possible filter.  When it's
+ * empty (older clients, ruma round-trip limitation), all regex-matched
+ * MXIDs are pill-ified.  `@room` is always pill-ified.
+ */
+function mentionifyString(
+  text: string,
+  mentionSet: Set<string>,
+  resolveLabel: (userId: string) => string,
+  onMentionClick: ((userId: string) => void) | undefined,
+  pillStyle: React.CSSProperties,
+  pillHoverBg: string,
+): ReactNode {
+  MXID_RE.lastIndex = 0;
+  const nodes: ReactNode[] = [];
+  let cursor = 0;
+  let m: RegExpExecArray | null;
+  const hasStructuredMentions = mentionSet.size > 0;
+
+  while ((m = MXID_RE.exec(text)) !== null) {
+    const mxid = m[0];
+    const isRoom = mxid === "@room";
+
+    // When structured m.mentions is available, only pill-ify listed MXIDs.
+    if (!isRoom && hasStructuredMentions && !mentionSet.has(mxid)) continue;
+
+    if (m.index > cursor) nodes.push(text.slice(cursor, m.index));
+
+    let label: string;
+    if (isRoom) {
+      label = "@room";
+    } else {
+      const resolved = resolveLabel(mxid);
+      // resolveLabel returns the raw MXID when the user isn't in the member
+      // map.  In that case, use the localpart as a clean fallback label
+      // (e.g. "@carter" from "@carter:matrix.example.com") rather than
+      // doubling the @ or showing the full server name.
+      label = resolved.startsWith("@")
+        ? resolved.split(":")[0]  // "@carter"
+        : `@${resolved}`;        // "@Carter" from display name "Carter"
+    }
+
+    nodes.push(
+      <MentionPillSpan
+        key={`mp-${m.index}`}
+        label={label}
+        userId={isRoom ? null : mxid}
+        onClick={onMentionClick}
+        style={pillStyle}
+        hoverBg={pillHoverBg}
+      />,
+    );
+    cursor = m.index + mxid.length;
+  }
+
+  if (nodes.length === 0) return text;
+  if (cursor < text.length) nodes.push(text.slice(cursor));
+  return <>{nodes}</>;
+}
+
+/** Minimal pill span — avoids a full component to keep the render tree light. */
+function MentionPillSpan({
+  label,
+  userId,
+  onClick,
+  style,
+  hoverBg,
+}: {
+  label: string;
+  userId: string | null;
+  onClick: ((userId: string) => void) | undefined;
+  style: React.CSSProperties;
+  hoverBg: string;
+}) {
+  return (
+    <span
+      role={userId && onClick ? "button" : undefined}
+      tabIndex={userId && onClick ? 0 : undefined}
+      onClick={
+        userId && onClick
+          ? (e: MouseEvent) => {
+              e.stopPropagation();
+              onClick(userId);
+            }
+          : undefined
+      }
+      onKeyDown={
+        userId && onClick
+          ? (e: React.KeyboardEvent) => {
+              if (e.key === "Enter" || e.key === " ") {
+                e.preventDefault();
+                onClick(userId);
+              }
+            }
+          : undefined
+      }
+      onMouseEnter={(e) => {
+        (e.currentTarget as HTMLSpanElement).style.backgroundColor = hoverBg;
+      }}
+      onMouseLeave={(e) => {
+        (e.currentTarget as HTMLSpanElement).style.backgroundColor =
+          style.backgroundColor as string;
+      }}
+      style={style}
+    >
+      {label}
+    </span>
+  );
+}
+
+/**
+ * Walk a React node tree and replace text nodes that contain Matrix user IDs
+ * with a mix of text and `MentionPillSpan` elements.  Mirrors the structure
+ * of `emojifyReactNode` in emojifyTwemoji — recurse into children of valid
+ * elements, leave code blocks untouched, process raw strings.
+ */
+function mentionifyReactNode(
+  node: ReactNode,
+  inCode: boolean,
+  mentionSet: Set<string>,
+  resolveLabel: (userId: string) => string,
+  onMentionClick: ((userId: string) => void) | undefined,
+  pillStyle: React.CSSProperties,
+  pillHoverBg: string,
+): ReactNode {
+  if (inCode) return node;
+  if (node == null || typeof node === "boolean") return node;
+  if (typeof node === "string") {
+    return mentionifyString(node, mentionSet, resolveLabel, onMentionClick, pillStyle, pillHoverBg);
+  }
+  if (typeof node === "number") return node;
+  if (Array.isArray(node)) {
+    return node.map((child, i) =>
+      mentionifyReactNode(child, inCode, mentionSet, resolveLabel, onMentionClick, pillStyle, pillHoverBg),
+    );
+  }
+  if (isValidElement(node)) {
+    const el = node as ReactElement;
+    const tag = typeof el.type === "string" ? el.type : "";
+    const nowInCode = inCode || tag === "code" || tag === "pre";
+    const props = el.props as { children?: ReactNode };
+    if (props.children != null) {
+      const processed = mentionifyReactNode(
+        props.children, nowInCode, mentionSet, resolveLabel, onMentionClick, pillStyle, pillHoverBg,
+      );
+      if (processed !== props.children) {
+        return cloneElement(el, {}, processed);
+      }
+    }
+  }
+  return node;
 }
 
 export default memo(function MessageMarkdown({
   children,
   edited = false,
   onOpenDirectImage,
+  mentionedUserIds,
+  resolveMemberLabel,
+  onMentionClick,
 }: MessageMarkdownProps) {
   const { palette, typography, spacing, resolvedColorScheme } = useTheme();
+
+  // Pill styles — computed once and stable across renders.
+  const pillStyle = useMemo<React.CSSProperties>(
+    () => ({
+      display: "inline",
+      padding: "1px 6px",
+      borderRadius: 4,
+      backgroundColor: `${palette.accent}22`,
+      color: palette.accent,
+      fontWeight: 500,
+      cursor: onMentionClick ? "pointer" : "default",
+      userSelect: "text" as const,
+      transition: "background-color 120ms ease",
+    }),
+    [palette.accent, onMentionClick],
+  );
+  const pillHoverBg = useMemo(() => `${palette.accent}38`, [palette.accent]);
+
+  // Unified child-processing function: emoji first, then mention pills.
+  const mentionSet = useMemo(
+    () => new Set(mentionedUserIds ?? []),
+    [mentionedUserIds],
+  );
+
+  const processNode = useCallback(
+    (node: ReactNode): ReactNode => {
+      const emojified = emojifyMarkdownChildren(node);
+      if (!resolveMemberLabel) return emojified;
+      return mentionifyReactNode(
+        emojified, false, mentionSet, resolveMemberLabel, onMentionClick, pillStyle, pillHoverBg,
+      );
+    },
+    [mentionSet, resolveMemberLabel, onMentionClick, pillStyle, pillHoverBg],
+  );
 
   const markdownSource = useMemo(() => {
     if (!edited) return children;
@@ -86,7 +300,15 @@ export default memo(function MessageMarkdown({
   const emojiOnlyBody = useMemo(() => isOnlyEmojisAndWhitespace(children), [children]);
 
   const components = useMemo<Components>(
-    () => ({
+    () => {
+      // Local E wrapper: runs emoji + mention pill processing on children.
+      // Defined here so it closes over `processNode` without needing a
+      // separate component identity that would invalidate React's reconciler.
+      const E = ({ children: c }: { children: ReactNode }) => (
+        <>{processNode(c)}</>
+      );
+
+      return {
       p: ({ children: c }) => (
         <p
           style={{
@@ -617,8 +839,9 @@ export default memo(function MessageMarkdown({
           />
         );
       },
-    }),
-    [palette, typography, spacing, resolvedColorScheme, edited, onOpenDirectImage],
+    };
+    },
+    [palette, typography, spacing, resolvedColorScheme, edited, onOpenDirectImage, processNode],
   );
 
   // Extract embeddable URLs from the raw text and render them below the markdown.

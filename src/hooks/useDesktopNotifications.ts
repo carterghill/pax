@@ -12,6 +12,12 @@ import type { NotificationLevel } from "./useNotificationSettings";
 interface RoomMessagePayload {
   roomId: string;
   message: Message;
+  /** Structured `m.mentions`: the sender's `user_ids` list includes our MXID. */
+  mentionsMe: boolean;
+  /** Structured `m.mentions`: the sender set `room: true` (@room ping). */
+  roomPing: boolean;
+  /** `matrix-sdk is_direct()` — true for 1:1 DMs. */
+  isDm: boolean;
 }
 
 /* ------------------------------------------------------------------ */
@@ -34,50 +40,55 @@ interface LevelCacheEntry {
 }
 
 /* ------------------------------------------------------------------ */
-/*  Mention matching                                                   */
+/*  Notification decision                                              */
 /* ------------------------------------------------------------------ */
 
 /**
- * Does `body` mention the user?  Case-insensitive substring match on the
- * localpart.  Deliberately loose — false positives (e.g. "alice" matching
- * when the user is `@alice:foo` and someone says "palace") are acceptable
- * here because the push-rule layer is already doing the same loose match
- * for actual mobile pushes, so we'd see the same behaviour anyway.  Keeping
- * this cheap avoids a regex compile per incoming message.
- */
-function bodyMentionsUser(body: string, mxidLocalpart: string): boolean {
-  if (!mxidLocalpart) return false;
-  return body.toLowerCase().includes(mxidLocalpart.toLowerCase());
-}
-
-function bodyHasRoomPing(body: string): boolean {
-  return body.includes("@room");
-}
-
-/**
- * Given an effective level and the message body, decide whether to notify.
- * Mirrors the per-level semantics from the reconciler module docs:
+ * Given an effective level and the structured mention data from the Rust
+ * payload, decide whether to notify.
  *
+ * This mirrors the badge's logic so the two stay in sync:
+ *
+ *   - `mentionsMe` / `roomPing` are derived from the event's `m.mentions`
+ *     content on the Rust side — the same structured data the server uses
+ *     for push-rule highlight evaluation (which feeds `highlight_count` /
+ *     `num_unread_mentions` on the badge side).
+ *
+ *   - For DMs, the badge uses `effectiveMentionCount` which promotes every
+ *     unread DM message to the red badge (unless muted).  We mirror that
+ *     here: in a DM, any level that cares about mentions also notifies on
+ *     every message, because the whole point of a DM is that every message
+ *     is addressed to you.  Muted DMs (level `none`) are handled before
+ *     this function is reached — the level resolves to `none` and we
+ *     return `false` immediately.
+ *
+ * Level semantics (unchanged from the user's perspective):
  *   - all          → always
- *   - allMentions  → @room or user mention
- *   - userMentions → user mention only
- *   - roomPings    → @room only
+ *   - allMentions  → @room ping, user mention, or any DM message
+ *   - userMentions → user mention or any DM message
+ *   - roomPings    → @room ping only (DMs don't produce @room pings)
  *   - none         → never
  */
 function shouldNotifyForLevel(
   level: NotificationLevel,
-  body: string,
-  mxidLocalpart: string,
+  mentionsMe: boolean,
+  roomPing: boolean,
+  isDm: boolean,
 ): boolean {
   switch (level) {
     case "all":
       return true;
     case "allMentions":
-      return bodyHasRoomPing(body) || bodyMentionsUser(body, mxidLocalpart);
+      // DM promotion: every DM message is notification-worthy, matching
+      // the badge's effectiveMentionCount behaviour.
+      if (isDm) return true;
+      return roomPing || mentionsMe;
     case "userMentions":
-      return bodyMentionsUser(body, mxidLocalpart);
+      // DM promotion: same reasoning — every DM message is "to you".
+      if (isDm) return true;
+      return mentionsMe;
     case "roomPings":
-      return bodyHasRoomPing(body);
+      return roomPing;
     case "none":
       return false;
     default:
@@ -125,12 +136,24 @@ export interface DesktopNotificationsOptions {
  * Subscribes to `room-message` events and dispatches desktop notifications
  * according to the user's configured notification level.
  *
+ * Mention detection uses the structured `m.mentions` data from the event
+ * (piped through the `room-message` payload as `mentionsMe` / `roomPing`),
+ * which is the same data the server uses for push-rule highlight evaluation.
+ * This keeps desktop notifications aligned with the red-badge mention count
+ * that uses `highlight_count` / `num_unread_mentions`.
+ *
+ * DM promotion mirrors `effectiveMentionCount`: in a non-muted DM, every
+ * incoming message is treated as notification-worthy for levels that care
+ * about mentions (`allMentions`, `userMentions`), because the server doesn't
+ * set highlights for plain DM text but the whole point of a DM is that
+ * every message is addressed to you.
+ *
  * Suppression logic:
  *   - Own messages never notify.
  *   - If the message is in the currently-active room AND the window is
  *     focused, don't notify — the user is looking right at it.
- *   - Otherwise, consult the room's effective level and body content via
- *     `shouldNotifyForLevel`.
+ *   - Otherwise, consult the room's effective level and structured mention
+ *     data via `shouldNotifyForLevel`.
  *
  * The hook also handles the plugin's click action (`notification`), which
  * focuses the main window and emits `pax-notification-clicked` with the
@@ -200,9 +223,6 @@ export function useDesktopNotifications({
   // Permission check + message subscription.
   useEffect(() => {
     if (!userId) return;
-    const mxidLocalpart = userId.startsWith("@")
-      ? userId.slice(1).split(":")[0]
-      : userId.split(":")[0];
 
     let cancelled = false;
     let permissionGranted = false;
@@ -240,7 +260,7 @@ export function useDesktopNotifications({
     }
 
     async function handleMessage(payload: RoomMessagePayload) {
-      const { roomId, message } = payload;
+      const { roomId, message, mentionsMe, roomPing, isDm } = payload;
 
       // Own message — ignore.
       if (message.sender === userIdRef.current) return;
@@ -254,9 +274,7 @@ export function useDesktopNotifications({
       }
 
       const level = await resolveLevel(roomId);
-      if (
-        !shouldNotifyForLevel(level, message.body ?? "", mxidLocalpart)
-      ) {
+      if (!shouldNotifyForLevel(level, mentionsMe, roomPing, isDm)) {
         return;
       }
 

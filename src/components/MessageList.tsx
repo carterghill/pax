@@ -427,6 +427,8 @@ interface MessageRowProps {
   } | null;
   onReplyThreadClick: (eventId: string) => void;
   onOpenSenderProfile?: (senderUserId: string) => void;
+  /** Resolve a user MXID to a display name (for mention pills). */
+  resolveMemberLabel?: (userId: string) => string;
 }
 
 const MessageRow = memo(function MessageRow({
@@ -456,6 +458,7 @@ const MessageRow = memo(function MessageRow({
   replyThread,
   onReplyThreadClick,
   onOpenSenderProfile,
+  resolveMemberLabel,
 }: MessageRowProps) {
   const menuBtn = spacingUnit * 7;
   const rowActive = isMenuOpen || isReactionPickerOpen;
@@ -668,6 +671,9 @@ const MessageRow = memo(function MessageRow({
               <MessageMarkdown
                 edited={Boolean(msg.edited)}
                 onOpenDirectImage={onOpenDirectImage}
+                mentionedUserIds={msg.mentionedUserIds}
+                resolveMemberLabel={resolveMemberLabel}
+                onMentionClick={onOpenSenderProfile}
               >
                 {msg.body}
               </MessageMarkdown>
@@ -698,6 +704,9 @@ const MessageRow = memo(function MessageRow({
               <MessageMarkdown
                 edited={Boolean(msg.edited)}
                 onOpenDirectImage={onOpenDirectImage}
+                mentionedUserIds={msg.mentionedUserIds}
+                resolveMemberLabel={resolveMemberLabel}
+                onMentionClick={onOpenSenderProfile}
               >
                 {msg.body}
               </MessageMarkdown>
@@ -761,6 +770,9 @@ const MessageRow = memo(function MessageRow({
               <MessageMarkdown
                 edited={Boolean(msg.edited)}
                 onOpenDirectImage={onOpenDirectImage}
+                mentionedUserIds={msg.mentionedUserIds}
+                resolveMemberLabel={resolveMemberLabel}
+                onMentionClick={onOpenSenderProfile}
               >
                 {msg.body}
               </MessageMarkdown>
@@ -783,6 +795,9 @@ const MessageRow = memo(function MessageRow({
               <MessageMarkdown
                 edited={Boolean(msg.edited)}
                 onOpenDirectImage={onOpenDirectImage}
+                mentionedUserIds={msg.mentionedUserIds}
+                resolveMemberLabel={resolveMemberLabel}
+                onMentionClick={onOpenSenderProfile}
               >
                 {msg.body}
               </MessageMarkdown>
@@ -828,6 +843,9 @@ const MessageRow = memo(function MessageRow({
               <MessageMarkdown
                 edited={Boolean(msg.edited)}
                 onOpenDirectImage={onOpenDirectImage}
+                mentionedUserIds={msg.mentionedUserIds}
+                resolveMemberLabel={resolveMemberLabel}
+                onMentionClick={onOpenSenderProfile}
               >
                 {msg.body}
               </MessageMarkdown>
@@ -871,6 +889,9 @@ const MessageRow = memo(function MessageRow({
               <MessageMarkdown
                 edited={Boolean(msg.edited)}
                 onOpenDirectImage={onOpenDirectImage}
+                mentionedUserIds={msg.mentionedUserIds}
+                resolveMemberLabel={resolveMemberLabel}
+                onMentionClick={onOpenSenderProfile}
               >
                 {msg.body}
               </MessageMarkdown>
@@ -886,6 +907,9 @@ const MessageRow = memo(function MessageRow({
           <MessageMarkdown
             edited={Boolean(msg.edited)}
             onOpenDirectImage={onOpenDirectImage}
+                mentionedUserIds={msg.mentionedUserIds}
+                resolveMemberLabel={resolveMemberLabel}
+                onMentionClick={onOpenSenderProfile}
           >
             {msg.unsupportedMatrixMsgtype?.trim()
               ? `${msg.body} · ${msg.unsupportedMatrixMsgtype.trim()}`
@@ -2065,6 +2089,7 @@ const MessageList = forwardRef<MessageListHandle, MessageListProps>(function Mes
             replyThread={getReplyThreadPreview(msg, messageByEventId)}
             onReplyThreadClick={onReplyPreviewClick}
             onOpenSenderProfile={onOpenSenderProfile}
+            resolveMemberLabel={resolveMemberLabel}
           />
         );
       })}

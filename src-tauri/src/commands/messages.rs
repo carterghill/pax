@@ -273,6 +273,7 @@ pub async fn get_messages(
         video_height: Option<u32>,
         unsupported_matrix_msgtype: Option<String>,
         reply_to: Option<MessageReplyTo>,
+        mentioned_user_ids: Vec<String>,
     }
     let mut raw_msgs = Vec::new();
     let mut unique_senders = Vec::new();
@@ -425,6 +426,7 @@ pub async fn get_messages(
 
                 let ext = extract_message_display(&original.content);
                 let reply_to = reply_to_from_message_relation(&original.content.relates_to);
+                let mentioned_user_ids = extract_mentioned_user_ids(&original.content);
                 raw_msgs.push(RawMsg {
                     event_id: original.event_id.to_string(),
                     sender: sender_str,
@@ -441,6 +443,7 @@ pub async fn get_messages(
                     video_height: ext.video_height,
                     unsupported_matrix_msgtype: ext.unsupported_matrix_msgtype,
                     reply_to,
+                    mentioned_user_ids,
                 });
             }
         }
@@ -561,6 +564,7 @@ pub async fn get_messages(
                 file_display_name,
                 unsupported_matrix_msgtype,
                 reactions,
+                mentioned_user_ids: m.mentioned_user_ids,
             }
         })
         .collect();
@@ -730,6 +734,7 @@ async fn build_message_infos_from_timeline_events(
         video_height: Option<u32>,
         unsupported_matrix_msgtype: Option<String>,
         reply_to: Option<MessageReplyTo>,
+        mentioned_user_ids: Vec<String>,
     }
 
     let mut raw_msgs = Vec::new();
@@ -805,6 +810,7 @@ async fn build_message_infos_from_timeline_events(
 
                     let ext = extract_message_display(&original.content);
                     let reply_to = reply_to_from_message_relation(&original.content.relates_to);
+                    let mentioned_user_ids = extract_mentioned_user_ids(&original.content);
                     raw_msgs.push(RawMsg {
                         event_id: original.event_id.to_string(),
                         sender: sender_str,
@@ -821,6 +827,7 @@ async fn build_message_infos_from_timeline_events(
                         video_height: ext.video_height,
                         unsupported_matrix_msgtype: ext.unsupported_matrix_msgtype,
                         reply_to,
+                        mentioned_user_ids,
                     });
                 }
                 _ => {}
@@ -919,6 +926,7 @@ async fn build_message_infos_from_timeline_events(
                 file_display_name,
                 unsupported_matrix_msgtype,
                 reactions,
+                mentioned_user_ids: m.mentioned_user_ids,
             }
         })
         .collect();
@@ -1373,6 +1381,7 @@ pub async fn start_sync(
             }
 
             let ext = extract_message_display(&ev.content);
+            let mentioned_user_ids = extract_mentioned_user_ids(&ev.content);
             let reply_to = reply_to_from_message_relation(&ev.content.relates_to);
             let sender = ev.sender.to_string();
 
@@ -1392,15 +1401,57 @@ pub async fn start_sync(
 
             let timestamp: u64 = ev.origin_server_ts.0.into();
 
+            // --- Extract structured m.mentions ---
+            //
+            // `RoomMessageEventContent` in ruma-common 0.17 doesn't expose
+            // `m.mentions` as a public field on the struct, but the data IS
+            // round-tripped through (de)serialization.  Re-serializing the
+            // already-deserialized content to JSON and plucking the field is
+            // cheap (in-memory, no network) and guaranteed to preserve
+            // whatever the sending client included.
+            //
+            // This gives us the same mention signal the server uses for
+            // push-rule highlight evaluation — aligning desktop notifications
+            // with the red-badge mention count.
+            let (mentions_me, room_ping) = {
+                let mut me = false;
+                let mut rp = false;
+                if let Ok(val) = serde_json::to_value(&ev.content) {
+                    if let Some(mentions) = val.get("m.mentions") {
+                        if let Some(user_ids) =
+                            mentions.get("user_ids").and_then(|v| v.as_array())
+                        {
+                            if let Some(uid) = self_uid.as_deref().map(|u| u.as_str()) {
+                                me = user_ids
+                                    .iter()
+                                    .any(|v| v.as_str() == Some(uid));
+                            }
+                        }
+                        if let Some(r) = mentions.get("room").and_then(|v| v.as_bool()) {
+                            rp = r;
+                        }
+                    }
+                }
+                (me, rp)
+            };
+
+            let is_dm = room.is_direct().await.unwrap_or(false);
+
             log::debug!(
-                "[sync] room-message room=…{} event={} sender={}",
+                "[sync] room-message room=…{} event={} sender={} mentions_me={} room_ping={} is_dm={}",
                 short_room,
                 ev.event_id,
                 sender,
+                mentions_me,
+                room_ping,
+                is_dm,
             );
 
             let payload = RoomMessagePayload {
                 room_id,
+                mentions_me,
+                room_ping,
+                is_dm,
                 message: MessageInfo {
                     event_id: ev.event_id.to_string(),
                     sender,
@@ -1421,6 +1472,7 @@ pub async fn start_sync(
                     file_display_name: ext.file_display_name,
                     unsupported_matrix_msgtype: ext.unsupported_matrix_msgtype,
                     reactions: None,
+                    mentioned_user_ids,
                 },
             };
             let _ = app.emit("room-message", payload);
@@ -2041,6 +2093,30 @@ fn body_for_unhandled_room_message(msgtype: &str, stripped_body: String) -> (Str
         "[Unsupported message]".to_string(),
         Some(msgtype.to_owned()),
     )
+}
+
+/// Extract the list of mentioned user MXIDs from a message's `m.mentions.user_ids`.
+///
+/// Uses the same `serde_json::to_value` round-trip as the notification payload's
+/// `mentions_me` / `room_ping` extraction.  Returns an empty vec when the event
+/// has no structured mentions (old client, plain text, etc.).
+fn extract_mentioned_user_ids(
+    content: &matrix_sdk::ruma::events::room::message::RoomMessageEventContent,
+) -> Vec<String> {
+    let Ok(val) = serde_json::to_value(content) else {
+        return Vec::new();
+    };
+    let Some(user_ids) = val
+        .get("m.mentions")
+        .and_then(|m| m.get("user_ids"))
+        .and_then(|v| v.as_array())
+    else {
+        return Vec::new();
+    };
+    user_ids
+        .iter()
+        .filter_map(|v| v.as_str().map(|s| s.to_owned()))
+        .collect()
 }
 
 fn extract_message_display(

@@ -1,4 +1,4 @@
-import { Fragment, useState, useCallback, useEffect, useRef, useMemo } from "react";
+import { useState, useCallback, useEffect, useRef, useMemo } from "react";
 import type { CSSProperties } from "react";
 import { createPortal } from "react-dom";
 import { invoke } from "@tauri-apps/api/core";
@@ -144,9 +144,16 @@ function SpaceAvatar({ space }: { space: Room }) {
 
   return (
     <SpaceSidebarSquircleClip>
-      <button
-        type="button"
-        onClick={() => {}}
+      {/* Using a <div role="button"> instead of <button> because
+          Chromium/WebView2 internally marks <button> elements as
+          "not droppable" and forces the deny cursor when an HTML5
+          drag crosses their border pixels — even when a parent's
+          dragover handler calls preventDefault.  A div with
+          role="button" is semantically equivalent for accessibility
+          but doesn't trigger the form-element quirk. */}
+      <div
+        role="button"
+        tabIndex={0}
         style={{
           ...SIDEBAR_ICON_INNER_BUTTON_BASE,
           cursor: "pointer",
@@ -160,6 +167,7 @@ function SpaceAvatar({ space }: { space: Room }) {
           <img
             src={avatarSrc(space.avatarUrl)}
             alt={space.name}
+            draggable={false}
             style={{
               display: "block",
               width: "100%",
@@ -170,7 +178,7 @@ function SpaceAvatar({ space }: { space: Room }) {
         ) : (
           initials
         )}
-      </button>
+      </div>
     </SpaceSidebarSquircleClip>
   );
 }
@@ -374,15 +382,18 @@ export default function SpaceSidebar({
   // an active drag means "drop at the bottom of the list".
   const [draggedSpaceId, setDraggedSpaceId] = useState<string | null>(null);
   const [dropBeforeId, setDropBeforeId] = useState<string | null | "end">(null);
+  const spaceListRef = useRef<HTMLDivElement>(null);
+
+  // Ref for the window-level listeners so we can remove the exact same
+  // function instances on drag end.
+  const windowDragListenersRef = useRef<{
+    dragover: (e: DragEvent) => void;
+    drop: (e: DragEvent) => void;
+  } | null>(null);
 
   const handleSpaceDragStart = useCallback(
     (e: React.DragEvent, spaceId: string) => {
-      // Use the move effect; copy would imply the original stays put,
-      // which isn't the mental model for sidebar reordering.
       e.dataTransfer.effectAllowed = "move";
-      // Setting a payload is required on Firefox for the drag to fire at
-      // all; the value itself doesn't matter to us since we read
-      // `draggedSpaceId` from state.
       try {
         e.dataTransfer.setData("text/plain", spaceId);
       } catch {
@@ -390,6 +401,27 @@ export default function SpaceSidebar({
       }
       setDraggedSpaceId(spaceId);
       setDropBeforeId(null);
+
+      // Install window-level listeners SYNCHRONOUSLY in dragstart so
+      // they're in place before the very first dragover event fires.
+      // The previous useEffect approach had a one-frame timing gap
+      // (useEffect runs after paint) where dragover events would fire
+      // without a listener, causing the deny cursor to flash.
+      if (windowDragListenersRef.current) {
+        // Shouldn't happen, but clean up defensively.
+        document.removeEventListener("dragover", windowDragListenersRef.current.dragover);
+        document.removeEventListener("drop", windowDragListenersRef.current.drop);
+      }
+      const onDragOver = (ev: DragEvent) => {
+        ev.preventDefault();
+        if (ev.dataTransfer) ev.dataTransfer.dropEffect = "move";
+      };
+      const onDrop = (ev: DragEvent) => {
+        ev.preventDefault();
+      };
+      document.addEventListener("dragover", onDragOver);
+      document.addEventListener("drop", onDrop);
+      windowDragListenersRef.current = { dragover: onDragOver, drop: onDrop };
     },
     []
   );
@@ -397,55 +429,80 @@ export default function SpaceSidebar({
   const handleSpaceDragEnd = useCallback(() => {
     setDraggedSpaceId(null);
     setDropBeforeId(null);
+    if (windowDragListenersRef.current) {
+      document.removeEventListener("dragover", windowDragListenersRef.current.dragover);
+      document.removeEventListener("drop", windowDragListenersRef.current.drop);
+      windowDragListenersRef.current = null;
+    }
+  }, []);
+
+  // Safety: clean up document-level listeners if the component unmounts
+  // mid-drag (e.g. switching to a different layout).
+  useEffect(() => {
+    return () => {
+      if (windowDragListenersRef.current) {
+        document.removeEventListener("dragover", windowDragListenersRef.current.dragover);
+        document.removeEventListener("drop", windowDragListenersRef.current.drop);
+        windowDragListenersRef.current = null;
+      }
+    };
   }, []);
 
   /**
-   * Update the insertion indicator while hovering over a space avatar.
-   * We show the indicator above or below the hovered target based on
-   * which vertical half of the avatar the pointer is in — the same
-   * pattern Element/Discord use.
+   * Compute the drop insertion point from `clientY` relative to the
+   * avatar bounding rects.  This runs on the space-list container's
+   * `onDragOver` — one handler for the entire column, no per-element
+   * wiring needed.  The Y-position approach is inherently gap-proof:
+   * gaps, padding, borders, and indicators don't need their own handlers
+   * because the container covers them all.
    */
-  const handleSpaceDragOver = useCallback(
-    (e: React.DragEvent, targetSpaceId: string) => {
+  const handleContainerDragOver = useCallback(
+    (e: React.DragEvent) => {
       if (!draggedSpaceId) return;
-      // preventDefault is required or the drop event never fires.
       e.preventDefault();
       e.dataTransfer.dropEffect = "move";
-      const rect = e.currentTarget.getBoundingClientRect();
-      const midpoint = rect.top + rect.height / 2;
-      const insertBefore = e.clientY < midpoint;
-      // Find the target's position in the current list to compute the
-      // "insert before" reference.  When dropping on the bottom half of
-      // the last item, `dropBeforeId` becomes the sentinel "end".
-      const idx = spaces.findIndex((s) => s.id === targetSpaceId);
-      if (idx < 0) return;
-      let nextDropBeforeId: string | "end";
-      if (insertBefore) {
-        nextDropBeforeId = targetSpaceId;
-      } else if (idx === spaces.length - 1) {
-        nextDropBeforeId = "end";
-      } else {
-        nextDropBeforeId = spaces[idx + 1].id;
+
+      const container = spaceListRef.current;
+      if (!container) return;
+
+      const y = e.clientY;
+      const avatars = container.querySelectorAll<HTMLElement>(
+        "[data-space-id]"
+      );
+
+      // Walk the avatar list top-to-bottom.  The first avatar whose
+      // vertical midpoint is below the cursor is the "insert before"
+      // target.  If the cursor is below every avatar's midpoint, the
+      // target is "end" (append to the bottom).
+      let target: string | "end" = "end";
+      for (const el of avatars) {
+        const rect = el.getBoundingClientRect();
+        const mid = rect.top + rect.height / 2;
+        const id = el.dataset.spaceId!;
+        if (y < mid) {
+          target = id;
+          break;
+        }
       }
-      // Suppress indicator when the drop wouldn't move the item:
-      //   - dropping immediately before yourself
-      //   - dropping immediately after yourself (i.e. your next neighbour is
-      //     the drop target)
-      //   - dropping at the very end when you're already the last item
+
+      // Suppress indicator when the drop would be a no-op:
       if (
-        nextDropBeforeId === draggedSpaceId ||
-        (nextDropBeforeId === "end" &&
+        target === draggedSpaceId ||
+        (target === "end" &&
           spaces[spaces.length - 1]?.id === draggedSpaceId) ||
-        (nextDropBeforeId !== "end" &&
-          spaces[spaces.findIndex((s) => s.id === nextDropBeforeId) - 1]?.id ===
-            draggedSpaceId)
+        (target !== "end" &&
+          (() => {
+            const idx = spaces.findIndex((s) => s.id === target);
+            return (
+              idx > 0 && spaces[idx - 1].id === draggedSpaceId
+            );
+          })())
       ) {
         setDropBeforeId(null);
         return;
       }
-      setDropBeforeId((prev) =>
-        prev === nextDropBeforeId ? prev : nextDropBeforeId
-      );
+
+      setDropBeforeId((prev) => (prev === target ? prev : target));
     },
     [draggedSpaceId, spaces]
   );
@@ -460,9 +517,6 @@ export default function SpaceSidebar({
       if (!dragged || !onReorderSpaces) return;
       if (before === null) return;
 
-      // Rebuild the post-drop order.  `before` is either a space id
-      // (meaning "insert immediately before this one") or the sentinel
-      // "end" (meaning "append to the bottom").
       const without = spaces.filter((s) => s.id !== dragged);
       const nextOrder: string[] = [];
       if (before === "end") {
@@ -478,8 +532,6 @@ export default function SpaceSidebar({
           nextOrder.push(s.id);
         }
         if (!inserted) {
-          // `before` is no longer in the list (shouldn't happen because
-          // React state for `spaces` is the same we computed against).
           nextOrder.push(dragged);
         }
       }
@@ -618,10 +670,17 @@ export default function SpaceSidebar({
             indicatorColor={palette.textHeading}
           >
             <SpaceSidebarSquircleClip>
-              <button
-                type="button"
+              <div
+                role="button"
+                tabIndex={0}
                 aria-label="Home"
                 onClick={() => onSelectSpace("")}
+                onKeyDown={(e) => {
+                  if (e.key === "Enter" || e.key === " ") {
+                    e.preventDefault();
+                    onSelectSpace("");
+                  }
+                }}
                 style={{
                   ...SIDEBAR_ICON_INNER_BUTTON_BASE,
                   backgroundColor: palette.accent,
@@ -654,7 +713,7 @@ export default function SpaceSidebar({
                     }}
                   />
                 </div>
-              </button>
+              </div>
             </SpaceSidebarSquircleClip>
           </SpaceIconRow>
         </div>
@@ -672,23 +731,24 @@ export default function SpaceSidebar({
 
         {/* Space avatars.
          *
-         * Wrapped in a flex sub-container with gap: 0 so we can render
-         * explicit drop-target spacer divs in the seams between avatars.
-         * The parent column has gap: 8, which left an 8px dead zone
-         * between consecutive avatars where no `dragover` ever fired (the
-         * gap region belongs to no child); the spacers fill that seam so
-         * the cursor stays a valid drop target across the entire column.
+         * Drop-position is computed by the container's `onDragOver` from
+         * `clientY` vs each avatar's bounding rect midpoint — one handler
+         * for the whole column, no per-element wiring, no spacer elements,
+         * no gap-seam issues.  A document-level dragover listener (active
+         * only during drags) suppresses the deny cursor everywhere else on
+         * screen.
          *
-         * The parent's gap-8 still applies above and below the
-         * sub-container, preserving the original spacing from the divider
-         * down to the first avatar and from the last avatar up to the
-         * "+" button. */}
+         * Each avatar carries a `data-space-id` attribute so the container
+         * handler can identify it via `querySelectorAll`. */}
         <div
+          ref={spaceListRef}
+          onDragOver={handleContainerDragOver}
+          onDrop={handleSpaceDrop}
           style={{
             display: "flex",
             flexDirection: "column",
             alignItems: "center",
-            gap: 0,
+            gap: 8,
             width: "100%",
           }}
         >
@@ -701,176 +761,104 @@ export default function SpaceSidebar({
             const showInsertAfterLast =
               idx === spaces.length - 1 && dropBeforeId === "end";
 
-            // Spacer that fills the 8px seam between this avatar and the
-            // previous one.  Treats a drag-over as "insert before this
-            // avatar" — the same target the avatar's own top half would
-            // resolve to.  Suppresses no-ops (dragging an avatar over
-            // either of the two seams that already touch it).
-            const spacerEl =
-              idx > 0 ? (
-                <div
-                  onDragOver={(e) => {
-                    if (!draggedSpaceId) return;
-                    e.preventDefault();
-                    e.dataTransfer.dropEffect = "move";
-                    if (
-                      space.id === draggedSpaceId ||
-                      spaces[idx - 1].id === draggedSpaceId
-                    ) {
-                      setDropBeforeId(null);
-                      return;
-                    }
-                    setDropBeforeId((prev) =>
-                      prev === space.id ? prev : space.id
-                    );
-                  }}
-                  onDrop={handleSpaceDrop}
-                  style={{
-                    width: ICON_SIZE,
-                    // 10px hit area pulled in by 1px on each side so
-                    // consecutive children physically overlap by 1px and
-                    // any sub-pixel rounding gap at the seams is fully
-                    // absorbed by redundant hit-test coverage.  Net visual
-                    // contribution to layout = 10 - 1 - 1 = 8px, matching
-                    // the original gap.
-                    height: 10,
-                    marginTop: -1,
-                    marginBottom: -1,
-                    flexShrink: 0,
-                  }}
-                />
-              ) : null;
-
             return (
-              <Fragment key={space.id}>
-                {spacerEl}
-                <div
-                  aria-label={space.name}
-                  draggable={!!onReorderSpaces}
-                  onDragStart={(e) => handleSpaceDragStart(e, space.id)}
-                  onDragEnd={handleSpaceDragEnd}
-                  onDragOver={(e) => handleSpaceDragOver(e, space.id)}
-                  onDrop={handleSpaceDrop}
-                  onClick={(e) => {
-                    // Suppress clicks that are really the tail end of a drag:
-                    // if we've just reordered, `draggedSpaceId` will have been
-                    // cleared by onDragEnd before this fires, but defensively
-                    // ignore when the client coordinates indicate a drag was
-                    // in progress.
-                    if (e.defaultPrevented) return;
-                    onSelectSpace(space.id);
-                  }}
-                  onMouseEnter={(e) => {
-                    sidebarTooltipAnchorRef.current = e.currentTarget;
-                    const r = e.currentTarget.getBoundingClientRect();
-                    setSidebarTooltip({
-                      name: space.name,
-                      left: r.right + 8,
-                      top: r.top + r.height / 2,
-                    });
-                  }}
-                  onMouseLeave={() => {
-                    sidebarTooltipAnchorRef.current = null;
-                    setSidebarTooltip(null);
-                  }}
-                  onContextMenu={(e) => {
-                    e.preventDefault();
-                    setSpaceContextMenu({
-                      x: e.clientX,
-                      y: e.clientY,
-                      spaceId: space.id,
-                      spaceName: space.name,
-                    });
-                  }}
-                  style={{
-                    position: "relative",
-                    cursor: onReorderSpaces ? "grab" : "pointer",
-                    // Match the squircle clip's rounding so the OS drag-
-                    // image snapshot of this element comes out squircle-
-                    // shaped instead of a hard rectangle.  We deliberately
-                    // do NOT set `overflow: hidden` here because the
-                    // unread/selected pill and mention badge are absolutely
-                    // positioned outside this element's box and need to
-                    // remain visible.
-                    borderRadius: ICON_RADIUS,
-                    // While dragging this avatar, fade it so the source
-                    // position is visually distinct from the insertion line.
-                    opacity: isBeingDragged ? 0.35 : 1,
-                    transition: "opacity 0.08s linear",
-                  }}
+              <div
+                key={space.id}
+                data-space-id={space.id}
+                aria-label={space.name}
+                draggable={!!onReorderSpaces}
+                onDragStart={(e) => handleSpaceDragStart(e, space.id)}
+                onDragEnd={handleSpaceDragEnd}
+                onClick={(e) => {
+                  if (e.defaultPrevented) return;
+                  onSelectSpace(space.id);
+                }}
+                onMouseEnter={(e) => {
+                  sidebarTooltipAnchorRef.current = e.currentTarget;
+                  const r = e.currentTarget.getBoundingClientRect();
+                  setSidebarTooltip({
+                    name: space.name,
+                    left: r.right + 8,
+                    top: r.top + r.height / 2,
+                  });
+                }}
+                onMouseLeave={() => {
+                  sidebarTooltipAnchorRef.current = null;
+                  setSidebarTooltip(null);
+                }}
+                onContextMenu={(e) => {
+                  e.preventDefault();
+                  setSpaceContextMenu({
+                    x: e.clientX,
+                    y: e.clientY,
+                    spaceId: space.id,
+                    spaceName: space.name,
+                  });
+                }}
+                style={{
+                  position: "relative",
+                  cursor: onReorderSpaces ? "grab" : "pointer",
+                  borderRadius: ICON_RADIUS,
+                  opacity: isBeingDragged ? 0.35 : 1,
+                  transition: "opacity 0.08s linear",
+                }}
+              >
+                {showInsertBefore && (
+                  <div
+                    aria-hidden
+                    style={{
+                      position: "absolute",
+                      left: (SIDEBAR_WIDTH - ICON_SIZE) / 2 - 2,
+                      right: (SIDEBAR_WIDTH - ICON_SIZE) / 2 - 2,
+                      top: -5,
+                      height: 3,
+                      borderRadius: 2,
+                      backgroundColor: palette.textPrimary,
+                      pointerEvents: "none",
+                    }}
+                  />
+                )}
+                <SpaceIconRow
+                  selected={selected}
+                  unread={unread}
+                  mentions={mentions}
+                  indicatorColor={palette.textHeading}
                 >
-                  {/* Insertion indicator drawn above the avatar when this is
-                      the drop target with "insert before" semantics.
-                      WebView2/Chromium don't reliably skip absolutely-
-                      positioned elements during drag hit-testing even with
-                      `pointer-events: none` — the drag events fire on the
-                      indicator and (without our own preventDefault) the
-                      browser shows the deny cursor.  Wiring our own
-                      `onDragOver` keeps the cursor valid while passing the
-                      drop straight through to `handleSpaceDrop`. */}
-                  {showInsertBefore && (
-                    <div
-                      aria-hidden
-                      onDragOver={(e) => {
-                        if (!draggedSpaceId) return;
-                        e.preventDefault();
-                        e.dataTransfer.dropEffect = "move";
-                      }}
-                      onDrop={handleSpaceDrop}
-                      style={{
-                        position: "absolute",
-                        left: (SIDEBAR_WIDTH - ICON_SIZE) / 2 - 2,
-                        right: (SIDEBAR_WIDTH - ICON_SIZE) / 2 - 2,
-                        top: -5,
-                        height: 3,
-                        borderRadius: 2,
-                        backgroundColor: palette.textPrimary,
-                      }}
-                    />
-                  )}
-                  <SpaceIconRow
-                    selected={selected}
-                    unread={unread}
-                    mentions={mentions}
-                    indicatorColor={palette.textHeading}
-                  >
-                    <SpaceAvatar space={space} />
-                  </SpaceIconRow>
-                  {/* Insertion indicator at the very bottom of the list when
-                      dropping past the last avatar.  Same `pointer-events`
-                      fix as the "insert before" indicator above. */}
-                  {showInsertAfterLast && (
-                    <div
-                      aria-hidden
-                      onDragOver={(e) => {
-                        if (!draggedSpaceId) return;
-                        e.preventDefault();
-                        e.dataTransfer.dropEffect = "move";
-                      }}
-                      onDrop={handleSpaceDrop}
-                      style={{
-                        position: "absolute",
-                        left: (SIDEBAR_WIDTH - ICON_SIZE) / 2 - 2,
-                        right: (SIDEBAR_WIDTH - ICON_SIZE) / 2 - 2,
-                        bottom: -5,
-                        height: 3,
-                        borderRadius: 2,
-                        backgroundColor: palette.textPrimary,
-                      }}
-                    />
-                  )}
-                </div>
-              </Fragment>
+                  <SpaceAvatar space={space} />
+                </SpaceIconRow>
+                {showInsertAfterLast && (
+                  <div
+                    aria-hidden
+                    style={{
+                      position: "absolute",
+                      left: (SIDEBAR_WIDTH - ICON_SIZE) / 2 - 2,
+                      right: (SIDEBAR_WIDTH - ICON_SIZE) / 2 - 2,
+                      bottom: -5,
+                      height: 3,
+                      borderRadius: 2,
+                      backgroundColor: palette.textPrimary,
+                      pointerEvents: "none",
+                    }}
+                  />
+                )}
+              </div>
             );
           })}
         </div>
 
         {/* Add space button */}
         <SpaceSidebarSquircleClip>
-          <button
-            type="button"
+          <div
+            role="button"
+            tabIndex={0}
             onClick={handleOpenDialog}
             aria-label="Create or join a space"
+            onKeyDown={(e) => {
+              if (e.key === "Enter" || e.key === " ") {
+                e.preventDefault();
+                handleOpenDialog();
+              }
+            }}
             onMouseEnter={(e) => {
               setAddHovered(true);
               sidebarTooltipAnchorRef.current = e.currentTarget;
@@ -899,7 +887,7 @@ export default function SpaceSidebar({
               strokeWidth={2}
               style={{ display: "block", shapeRendering: "geometricPrecision" }}
             />
-          </button>
+          </div>
         </SpaceSidebarSquircleClip>
 
         {/* Spacer to keep settings pinned at the bottom */}
@@ -917,10 +905,17 @@ export default function SpaceSidebar({
         />
 
         <SpaceSidebarSquircleClip>
-          <button
-            type="button"
+          <div
+            role="button"
+            tabIndex={0}
             onClick={onOpenSettings}
             aria-label="Settings"
+            onKeyDown={(e) => {
+              if (e.key === "Enter" || e.key === " ") {
+                e.preventDefault();
+                onOpenSettings();
+              }
+            }}
             onMouseEnter={(e) => {
               setSettingsHovered(true);
               sidebarTooltipAnchorRef.current = e.currentTarget;
@@ -949,7 +944,7 @@ export default function SpaceSidebar({
               strokeWidth={2}
               style={{ display: "block", shapeRendering: "geometricPrecision" }}
             />
-          </button>
+          </div>
         </SpaceSidebarSquircleClip>
       </div>
 

@@ -335,18 +335,24 @@ export function useSpaceUnreadRollup(
   /**
    * Core per-room badge number.
    *
-   * Raw mention count is the lower bound — a server-computed highlight
-   * (keyword, explicit ping) always counts.  For DMs, bump this up to the
-   * unread-message count if the DM isn't effectively muted: the server
-   * doesn't produce highlights for plain DM messages, but the whole point
-   * of a DM is that every message is addressed to you, so every unread
-   * message should contribute to the badge.
+   * When the room is effectively muted (level `none`), return 0 — the server
+   * still increments `highlight_count` for built-in override rules
+   * (`contains_user_name`, `roomnotif`) even with a room-kind `dont_notify`
+   * push rule installed, but the user's intent is "don't bother me."  This
+   * is the same client-side suppression Element does for its "Off" preset.
+   *
+   * For non-muted rooms, the raw mention count is the lower bound — a
+   * server-computed highlight (keyword, explicit ping) always counts.
+   * For DMs, bump this up to the unread-message count: the server doesn't
+   * produce highlights for plain DM messages, but the whole point of a DM
+   * is that every message is addressed to you, so every unread message
+   * should contribute to the badge.
    */
   const effectiveMentionCount = useCallback(
     (roomId: string): number => {
+      if (isRoomEffectivelyMuted(roomId)) return 0;
       const base = mentionCount(roomId);
       if (!dmIdSet.has(roomId)) return base;
-      if (isRoomEffectivelyMuted(roomId)) return base;
       return Math.max(base, messageCount(roomId));
     },
     [mentionCount, messageCount, dmIdSet, isRoomEffectivelyMuted],
