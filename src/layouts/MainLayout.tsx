@@ -581,7 +581,33 @@ export default function MainLayout({
     }
     return ids;
   }, [visibleRooms, childJoinedSubspaces, roomsBySpace]);
-  const voiceParticipants = useVoiceParticipants(voiceRoomIds);
+  const { participantsInScope: voiceParticipants, allParticipantsByRoom } =
+    useVoiceParticipants(voiceRoomIds);
+
+  /** Per top-level space: active voice in subtree; `self` = current user is in a call (green badge). */
+  const spaceVoiceActivity = useMemo(() => {
+    const out: Partial<Record<string, "others" | "self">> = {};
+    const nu = normalizeUserId(userId);
+    for (const space of topLevelSpaces) {
+      if (space.membership !== "joined") continue;
+      const treeIds = collectRoomIdsInSpaceTree(space.id, roomsBySpace);
+      let hasAny = false;
+      let selfIn = false;
+      for (const rid of treeIds) {
+        const room = getRoom(rid);
+        if (!room || room.roomType !== VOICE_ROOM_TYPE) continue;
+        const parts = allParticipantsByRoom[rid] ?? [];
+        if (parts.length === 0) continue;
+        hasAny = true;
+        if (parts.some((p) => normalizeUserId(p.userId) === nu)) selfIn = true;
+      }
+      if (hasAny) {
+        out[space.id] = selfIn ? "self" : "others";
+      }
+    }
+    return out;
+  }, [topLevelSpaces, roomsBySpace, getRoom, allParticipantsByRoom, userId]);
+
   const livekitByRoom = useLivekitVoiceSnapshots(voiceRoomIds);
   const voiceParticipantStatesByRoom = useMemo(() => {
     type VoiceRowState = {
@@ -1065,6 +1091,7 @@ export default function MainLayout({
           spaceMentionCount={effectiveSpaceMentionCount}
           isHomeUnread={isHomeUnread()}
           homeMentionCount={effectiveHomeMentionCount()}
+          spaceVoiceActivity={spaceVoiceActivity}
         />
         <div style={{ position: "relative", flexShrink: 0, zIndex: 1 }}>
           <RoomSidebar

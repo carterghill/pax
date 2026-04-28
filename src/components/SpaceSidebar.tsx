@@ -2,7 +2,7 @@ import { useState, useCallback, useEffect, useRef, useMemo } from "react";
 import type { CSSProperties } from "react";
 import { createPortal } from "react-dom";
 import { invoke } from "@tauri-apps/api/core";
-import { Plus, Settings } from "lucide-react";
+import { Plus, Settings, Volume2 } from "lucide-react";
 import { useTheme } from "../theme/ThemeContext";
 import type { Room } from "../types/matrix";
 import { collectRoomIdsInSpaceTree } from "../utils/spaceModeration";
@@ -53,6 +53,11 @@ interface SpaceSidebarProps {
   isHomeUnread: boolean;
   /** Total mentions across Home-bucket rooms. */
   homeMentionCount: number;
+  /**
+   * Voice activity in the space tree (any joined voice room with active call members).
+   * `self` → user is in one of those voice rooms (green indicator); `others` → grey.
+   */
+  spaceVoiceActivity: Partial<Record<string, "others" | "self">>;
 }
 
 /** Constant icon geometry shared by every row (Home, spaces, add, settings). */
@@ -209,6 +214,7 @@ function SpaceIconRow({
   mentions,
   children,
   indicatorColor,
+  voiceActivity,
 }: {
   selected: boolean;
   unread: boolean;
@@ -216,6 +222,8 @@ function SpaceIconRow({
   children: React.ReactNode;
   /** Primary text colour for the indicator; threaded from theme by the caller. */
   indicatorColor: string;
+  /** Active voice somewhere in this space; green when the current user is in a call. */
+  voiceActivity?: "others" | "self";
 }) {
   // Compute target geometry.  The element is always mounted; height 0 means
   // "invisible for now, ready to grow from the centre on the next state flip".
@@ -278,6 +286,40 @@ function SpaceIconRow({
           {mentions > 99 ? "99+" : mentions}
         </span>
       )}
+      {voiceActivity != null && (
+        <span
+          aria-hidden
+          title={voiceActivity === "self" ? "You are in a voice channel" : "Voice activity"}
+          style={{
+            position: "absolute",
+            right: -2,
+            bottom: -2,
+            width: 20,
+            height: 20,
+            borderRadius: 10,
+            display: "flex",
+            alignItems: "center",
+            justifyContent: "center",
+            boxSizing: "border-box",
+            backgroundColor:
+              voiceActivity === "self" ? "rgba(22, 31, 24, 0.96)" : "rgba(32, 33, 39, 0.96)",
+            border:
+              voiceActivity === "self"
+                ? "2px solid #22c55e"
+                : "2px solid rgba(255, 255, 255, 0.55)",
+            boxShadow:
+              "inset 0 0 0 1px rgba(0,0,0,0.45), 0 1px 3px rgba(0,0,0,0.55)",
+            pointerEvents: "none",
+          }}
+        >
+          <Volume2
+            size={12}
+            strokeWidth={2.5}
+            color={voiceActivity === "self" ? "#4ade80" : "#d1d5db"}
+            style={{ display: "block", flexShrink: 0 }}
+          />
+        </span>
+      )}
     </div>
   );
 }
@@ -298,6 +340,7 @@ export default function SpaceSidebar({
   spaceMentionCount,
   isHomeUnread,
   homeMentionCount,
+  spaceVoiceActivity,
 }: SpaceSidebarProps) {
   const { palette } = useTheme();
   const sidebarScrollRef = useRef<HTMLDivElement | null>(null);
@@ -791,12 +834,19 @@ export default function SpaceSidebar({
             const showInsertBefore = dropBeforeId === space.id;
             const showInsertAfterLast =
               idx === spaces.length - 1 && dropBeforeId === "end";
+            const va = spaceVoiceActivity[space.id];
+            const spaceAriaLabel =
+              va === "self"
+                ? `${space.name}, you are in a voice channel`
+                : va === "others"
+                  ? `${space.name}, voice activity`
+                  : space.name;
 
             return (
               <div
                 key={space.id}
                 data-space-id={space.id}
-                aria-label={space.name}
+                aria-label={spaceAriaLabel}
                 draggable={!!onReorderSpaces}
                 onDragStart={(e) => handleSpaceDragStart(e, space.id)}
                 onDragEnd={handleSpaceDragEnd}
@@ -854,6 +904,7 @@ export default function SpaceSidebar({
                   unread={unread}
                   mentions={mentions}
                   indicatorColor={palette.textHeading}
+                  voiceActivity={spaceVoiceActivity[space.id]}
                 >
                   <SpaceAvatar space={space} />
                 </SpaceIconRow>

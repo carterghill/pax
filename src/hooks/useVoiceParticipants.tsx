@@ -9,7 +9,14 @@ interface VoiceParticipantsChangedPayload {
   participantsByRoom: ParticipantMap;
 }
 
-export function useVoiceParticipants(voiceRoomIds: string[]) {
+export type VoiceParticipantsResult = {
+  /** Voice rooms for the current sidebar scope (sorted lists). */
+  participantsInScope: ParticipantMap;
+  /** Every joined Matrix voice channel — use for rollups (e.g. space icons). */
+  allParticipantsByRoom: ParticipantMap;
+};
+
+export function useVoiceParticipants(voiceRoomIds: string[]): VoiceParticipantsResult {
   // Full map of ALL voice rooms across ALL spaces, keyed by room ID.
   // Never filtered down -- space switching just projects from this.
   const [allParticipants, setAllParticipants] = useState<ParticipantMap>({});
@@ -69,5 +76,8 @@ export function useVoiceParticipants(voiceRoomIds: string[]) {
     return result;
   }, [voiceRoomIds, allParticipants]);
 
-  return filtered;
+  return {
+    participantsInScope: filtered,
+    allParticipantsByRoom: allParticipants,
+  };
 }
