@@ -63,10 +63,17 @@ pub async fn run_idle_monitor(app: Arc<AppHandle>, display_server: DisplayServer
                 }
             }
             _ => {
-                // X11 / macOS / Windows – use the user-idle crate.
-                match user_idle::UserIdle::get_time() {
-                    Ok(idle) => Some(idle.as_milliseconds() as u64),
-                    Err(_) => None,
+                // X11 / macOS / Windows – `user-idle`. Not available on Android/iOS (#cfg in Cargo.toml).
+                #[cfg(any(target_os = "android", target_os = "ios"))]
+                {
+                    None
+                }
+                #[cfg(not(any(target_os = "android", target_os = "ios")))]
+                {
+                    match user_idle::UserIdle::get_time() {
+                        Ok(idle) => Some(idle.as_milliseconds() as u64),
+                        Err(_) => None,
+                    }
                 }
             }
         };

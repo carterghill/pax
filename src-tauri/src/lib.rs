@@ -298,7 +298,9 @@ pub fn run() {
         hide_server_config,
     };
 
-    // Detect best video codec based on GPU before any screen share publishes
+    // Detect best video codec based on GPU before any screen share publishes (desktop only;
+    // mobile uses `DETECTED_CODEC` default in `codec::resolve_codec()`).
+    #[cfg(desktop)]
     detect_codec_early();
 
     let state = Arc::new(AppState {
@@ -593,12 +595,14 @@ pub fn run() {
                 );
             }
 
-            // Set window icon (taskbar + title bar) from our bundled icons
             let main_window = app
                 .get_webview_window("main")
                 .expect("main window not found");
-            let icon = tauri::include_image!("icons/128x128.png");
-            let _ = main_window.set_icon(icon);
+            #[cfg(desktop)]
+            {
+                let icon = tauri::include_image!("icons/128x128.png");
+                let _ = main_window.set_icon(icon);
+            }
 
             #[cfg(desktop)]
             {
@@ -711,6 +715,7 @@ pub fn run() {
 
 /// Detect the best video codec by probing the GPU adapter at startup.
 /// Runs synchronously (blocking) because it's called once during init.
+#[cfg(desktop)]
 fn detect_codec_early() {
     let instance = wgpu::Instance::new(&wgpu::InstanceDescriptor {
         backends: wgpu::Backends::DX12 | wgpu::Backends::VULKAN,

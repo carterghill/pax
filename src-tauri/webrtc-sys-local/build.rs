@@ -48,6 +48,14 @@ fn main() {
         return;
     }
 
+    // `webrtc-sys-build` reads only ANDROID_NDK_HOME; auto-detect assumes `~/Android/sdk/ndk`
+    // while many installs use `~/Android/Sdk/ndk`. Tauri/cli often exports NDK_HOME only.
+    if env::var_os("ANDROID_NDK_HOME").is_none() {
+        if let Ok(ndk_home) = env::var("NDK_HOME") {
+            env::set_var("ANDROID_NDK_HOME", ndk_home);
+        }
+    }
+
     let target_os = env::var("CARGO_CFG_TARGET_OS").unwrap();
     let target_arch = env::var("CARGO_CFG_TARGET_ARCH").unwrap();
     let is_desktop = target_os == "linux" || target_os == "windows" || target_os == "macos";

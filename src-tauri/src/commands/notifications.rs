@@ -81,10 +81,18 @@ pub async fn focus_main_window(app: AppHandle) -> Result<(), String> {
     let Some(win) = app.get_webview_window("main") else {
         return Ok(());
     };
-    // `unminimize` is a no-op if not minimized; `show` is a no-op if
-    // already visible.  Both are cheap — we issue them unconditionally
-    // rather than querying state first.
-    let _ = win.unminimize();
-    let _ = win.show();
-    win.set_focus().map_err(|e| format!("set_focus: {e}"))
+    #[cfg(desktop)]
+    {
+        // `unminimize` is a no-op if not minimized; `show` is a no-op if
+        // already visible. Both are cheap — we issue them unconditionally
+        // rather than querying state first.
+        let _ = win.unminimize();
+        let _ = win.show();
+        return win.set_focus().map_err(|e| format!("set_focus: {e}"));
+    }
+    #[cfg(not(desktop))]
+    {
+        let _ = win;
+        Ok(())
+    }
 }
