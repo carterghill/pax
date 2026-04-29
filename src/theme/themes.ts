@@ -15,6 +15,7 @@ const spacing: ThemeSpacing = {
   unit: 4,
   sidebarWidth: 240,
   spaceSidebarWidth: 72,
+  userMenuWidth: 240,
   headerHeight: 54,
 };
 

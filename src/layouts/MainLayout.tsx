@@ -35,6 +35,10 @@ import { useMatrixUserProfile } from "../hooks/useMatrixUserProfile";
 import { useUserAvatar } from "../hooks/useUserAvatar";
 import { useResizeHandle } from "../hooks/useResizeHandle";
 import { useSpaceOrder, applyStoredSpaceOrder } from "../hooks/useSpaceOrder";
+import { useIsMobile } from "../hooks/useIsMobile";
+import SideDrawer from "../components/SideDrawer";
+import MobileBottomNav, { mobileBottomNavContentInsetCss } from "../components/MobileBottomNav";
+import { defaultThemeDefinition } from "../theme/themes";
 
 const ROOM_SIDEBAR_WIDTH_KEY = "pax-room-sidebar-width";
 const USER_MENU_WIDTH_KEY = "pax-user-menu-width";
@@ -43,7 +47,6 @@ const MAX_ROOM_SIDEBAR_WIDTH = 400;
 const MIN_USER_MENU_WIDTH = 180;
 const MAX_USER_MENU_WIDTH = 400;
 const MIN_CHAT_VIEW_WIDTH = 200;
-const SPACE_SIDEBAR_WIDTH = 72;
 const ROOM_SIDEBAR_RESIZE_HANDLE = 6;
 
 function getStoredUserMenuWidth(defaultWidth: number): number {
@@ -324,16 +327,53 @@ export default function MainLayout({
   const [roomSidebarWidth, setRoomSidebarWidth] = useState(() =>
     getStoredRoomSidebarWidth(spacing.sidebarWidth)
   );
-  const [userMenuWidth, setUserMenuWidth] = useState(() => getStoredUserMenuWidth(240));
+  const [userMenuWidth, setUserMenuWidth] = useState(() =>
+    getStoredUserMenuWidth(defaultThemeDefinition.spacing.userMenuWidth)
+  );
+
+  const isMobile = useIsMobile();
+  const [mobileSpaceDrawerOpen, setMobileSpaceDrawerOpen] = useState(false);
+  const [mobileRoomDrawerOpen, setMobileRoomDrawerOpen] = useState(false);
+
+  const openMobileSpacesDrawer = useCallback(() => {
+    setMobileSpaceDrawerOpen(true);
+    setMobileRoomDrawerOpen(false);
+  }, []);
+
+  const openMobileRoomsDrawer = useCallback(() => {
+    setMobileRoomDrawerOpen(true);
+    setMobileSpaceDrawerOpen(false);
+  }, []);
+
+  useEffect(() => {
+    if (!isMobile) {
+      setMobileSpaceDrawerOpen(false);
+      setMobileRoomDrawerOpen(false);
+    }
+  }, [isMobile]);
+
+  useEffect(() => {
+    if (!isMobile) return;
+    setMobileRoomDrawerOpen(false);
+  }, [activeRoomId, isMobile]);
+
+  useEffect(() => {
+    if (!isMobile) return;
+    setMobileSpaceDrawerOpen(false);
+  }, [activeSpaceId, isMobile]);
 
   const sidebarResize = useResizeHandle({
     width: roomSidebarWidth,
     onWidthChange: setRoomSidebarWidth,
     min: MIN_ROOM_SIDEBAR_WIDTH,
-    max: () => Math.min(
-      MAX_ROOM_SIDEBAR_WIDTH,
-      window.innerWidth - SPACE_SIDEBAR_WIDTH - MIN_CHAT_VIEW_WIDTH - userMenuWidth
-    ),
+    max: () =>
+      Math.min(
+        MAX_ROOM_SIDEBAR_WIDTH,
+        window.innerWidth -
+          spacing.spaceSidebarWidth -
+          MIN_CHAT_VIEW_WIDTH -
+          userMenuWidth
+      ),
   });
 
   useEffect(() => {
@@ -1065,6 +1105,99 @@ export default function MainLayout({
     });
   }, [spaces, getRoom, optimisticOrders]);
 
+  const mobileRoomDrawerPanelWidth = Math.min(
+    roomSidebarWidth,
+    Math.max(MIN_ROOM_SIDEBAR_WIDTH, Math.floor(window.innerWidth * 0.92))
+  );
+  const roomSidebarWidthApplied = isMobile ? mobileRoomDrawerPanelWidth : roomSidebarWidth;
+
+  const spaceSidebarEl = (
+    <SpaceSidebar
+      spaces={topLevelSpaces}
+      roomsBySpace={roomsBySpace}
+      activeSpaceId={activeSpaceId}
+      spaceHighlightId={spaceSidebarHighlightId}
+      onSelectSpace={handleSelectSpace}
+      onSpacesChanged={handleSpacesChanged}
+      onOpenSettings={handleOpenSettings}
+      onReorderSpaces={handleReorderSpaces}
+      userId={userId}
+      onLeftSpace={handleLeftSpace}
+      onRoomsLeft={handleRoomsLeft}
+      isSpaceUnread={isSpaceUnread}
+      spaceMentionCount={effectiveSpaceMentionCount}
+      isHomeUnread={isHomeUnread()}
+      homeMentionCount={effectiveHomeMentionCount()}
+      spaceVoiceActivity={spaceVoiceActivity}
+    />
+  );
+
+  const roomSidebarEl = (
+    <>
+      <RoomSidebar
+        width={roomSidebarWidthApplied}
+        rooms={visibleRooms}
+        getSubSpaceRoomsOrdered={getSubSpaceRoomsOrdered}
+        getRoom={getRoom}
+        onOpenSubSpace={handleSelectSpace}
+        activeRoomId={activeRoomId}
+        onSelectRoom={handleSelectRoom}
+        onSelectSpaceHome={() => setActiveRoomId(null)}
+        isSpaceHomeActive={
+          activeRoomId === null &&
+          !!activeSpace &&
+          activeSpace.membership === "joined"
+        }
+        showSpaceHomeNav={!!activeSpace && activeSpace.membership === "joined"}
+        spaceName={activeSpace?.name ?? "Home"}
+        spaceInviteId={
+          activeSpace && activeSpace.membership === "joined" ? activeSpaceId : null
+        }
+        userId={userId}
+        userAvatarUrl={userAvatarUrl}
+        voiceParticipants={voiceParticipants}
+        connectedVoiceRoomId={voiceCall.connectedRoomId}
+        isVoiceConnecting={voiceCall.isConnecting}
+        disconnectingFromRoomId={voiceCall.disconnectingFromRoomId}
+        screenSharingOwners={voiceCall.screenSharingOwners}
+        voiceParticipantStatesByRoom={voiceParticipantStatesByRoom}
+        onSetParticipantVolume={voiceCall.setParticipantVolume}
+        onLeftRoom={handleLeftRoom}
+        activeSpaceId={activeSpaceId}
+        roomsBySpace={roomsBySpace}
+        showHomeAddRoom={activeSpaceId === null}
+        onRoomsChanged={handleSpacesChanged}
+        parentSpace={parentSpaceNav}
+        onNavigateToParentSpace={handleNavigateToParentSpace}
+        canManageActiveSpaceChildren={canManageActiveSpace}
+        onReorderSpaceChildren={handleReorderSpaceChildren}
+        pendingReorderIds={pendingReorderIds}
+        isUnread={isUnread}
+        mentionCount={effectiveMentionCount}
+      />
+      {!isMobile && (
+        <div
+          onMouseDown={sidebarResize.onMouseDown}
+          onDoubleClick={() => setRoomSidebarWidth(spacing.sidebarWidth)}
+          onMouseEnter={() => sidebarResize.setIsHovered(true)}
+          onMouseLeave={() => sidebarResize.setIsHovered(false)}
+          style={{
+            position: "absolute",
+            top: 0,
+            bottom: 0,
+            right: -(ROOM_SIDEBAR_RESIZE_HANDLE / 2),
+            width: ROOM_SIDEBAR_RESIZE_HANDLE,
+            cursor: "col-resize",
+            backgroundColor: sidebarResize.isHovered ? palette.border : "transparent",
+            transition: "background-color 0.15s",
+            zIndex: 2,
+          }}
+          title="Drag to resize, double-click to reset"
+        />
+      )}
+    </>
+  );
+
   return (
     <PresenceContext.Provider value={{ manualStatus, setManualStatus, effectivePresence, statusMessage, setStatusMessage }}>
       <div style={{
@@ -1075,155 +1208,120 @@ export default function MainLayout({
         maxWidth: "100vw",
         overflow: "hidden",
       }}>
-        <SpaceSidebar
-          spaces={topLevelSpaces}
-          roomsBySpace={roomsBySpace}
-          activeSpaceId={activeSpaceId}
-          spaceHighlightId={spaceSidebarHighlightId}
-          onSelectSpace={handleSelectSpace}
-          onSpacesChanged={handleSpacesChanged}
-          onOpenSettings={handleOpenSettings}
-          onReorderSpaces={handleReorderSpaces}
-          userId={userId}
-          onLeftSpace={handleLeftSpace}
-          onRoomsLeft={handleRoomsLeft}
-          isSpaceUnread={isSpaceUnread}
-          spaceMentionCount={effectiveSpaceMentionCount}
-          isHomeUnread={isHomeUnread()}
-          homeMentionCount={effectiveHomeMentionCount()}
-          spaceVoiceActivity={spaceVoiceActivity}
-        />
-        <div style={{ position: "relative", flexShrink: 0, zIndex: 1 }}>
-          <RoomSidebar
-            width={roomSidebarWidth}
-            rooms={visibleRooms}
-            getSubSpaceRoomsOrdered={getSubSpaceRoomsOrdered}
-            getRoom={getRoom}
-            onOpenSubSpace={handleSelectSpace}
-            activeRoomId={activeRoomId}
-            onSelectRoom={handleSelectRoom}
-            onSelectSpaceHome={() => setActiveRoomId(null)}
-            isSpaceHomeActive={
-              activeRoomId === null &&
-              !!activeSpace &&
-              activeSpace.membership === "joined"
-            }
-            showSpaceHomeNav={!!activeSpace && activeSpace.membership === "joined"}
-            spaceName={activeSpace?.name ?? "Home"}
-            spaceInviteId={
-              activeSpace && activeSpace.membership === "joined" ? activeSpaceId : null
-            }
-            userId={userId}
-            userAvatarUrl={userAvatarUrl}
-            voiceParticipants={voiceParticipants}
-            connectedVoiceRoomId={voiceCall.connectedRoomId}
-            isVoiceConnecting={voiceCall.isConnecting}
-            disconnectingFromRoomId={voiceCall.disconnectingFromRoomId}
-            screenSharingOwners={voiceCall.screenSharingOwners}
-            voiceParticipantStatesByRoom={voiceParticipantStatesByRoom}
-            onSetParticipantVolume={voiceCall.setParticipantVolume}
-            onLeftRoom={handleLeftRoom}
-            activeSpaceId={activeSpaceId}
-            roomsBySpace={roomsBySpace}
-            showHomeAddRoom={activeSpaceId === null}
-            onRoomsChanged={handleSpacesChanged}
-            parentSpace={parentSpaceNav}
-            onNavigateToParentSpace={handleNavigateToParentSpace}
-            canManageActiveSpaceChildren={canManageActiveSpace}
-            onReorderSpaceChildren={handleReorderSpaceChildren}
-            pendingReorderIds={pendingReorderIds}
-            isUnread={isUnread}
-            mentionCount={effectiveMentionCount}
-          />
-          <div
-            onMouseDown={sidebarResize.onMouseDown}
-            onDoubleClick={() => setRoomSidebarWidth(spacing.sidebarWidth)}
-            onMouseEnter={() => sidebarResize.setIsHovered(true)}
-            onMouseLeave={() => sidebarResize.setIsHovered(false)}
-            style={{
-              position: "absolute",
-              top: 0,
-              bottom: 0,
-              right: -(ROOM_SIDEBAR_RESIZE_HANDLE / 2),
-              width: ROOM_SIDEBAR_RESIZE_HANDLE,
-              cursor: "col-resize",
-              backgroundColor: sidebarResize.isHovered ? palette.border : "transparent",
-              transition: "background-color 0.15s",
-              zIndex: 2,
-            }}
-            title="Drag to resize, double-click to reset"
-          />
-        </div>
+        {!isMobile ? spaceSidebarEl : (
+          <SideDrawer
+            open={mobileSpaceDrawerOpen}
+            onClose={() => setMobileSpaceDrawerOpen(false)}
+            side="left"
+            widthPx={spacing.spaceSidebarWidth}
+          >
+            {spaceSidebarEl}
+          </SideDrawer>
+        )}
+        {!isMobile ? (
+          <div style={{ position: "relative", flexShrink: 0, zIndex: 1 }}>{roomSidebarEl}</div>
+        ) : (
+          <SideDrawer
+            open={mobileRoomDrawerOpen}
+            onClose={() => setMobileRoomDrawerOpen(false)}
+            side="left"
+            widthPx={mobileRoomDrawerPanelWidth}
+          >
+            {roomSidebarEl}
+          </SideDrawer>
+        )}
         <main style={{
           flex: 1,
           minWidth: 0,
+          minHeight: 0,
           overflow: "hidden",
           backgroundColor: palette.bgPrimary,
           color: palette.textPrimary,
           display: "flex",
+          flexDirection: "column",
+          paddingBottom: isMobile ? mobileBottomNavContentInsetCss() : 0,
         }}>
-          {showingDraftDm && pendingDm ? (
-            <ChatView
-              draftDm={pendingDm}
-              userId={userId}
-              userMenuWidth={userMenuWidth}
-              onUserMenuWidthChange={(next: number) => {
-                const clamped = Math.max(MIN_USER_MENU_WIDTH, Math.min(MAX_USER_MENU_WIDTH, next));
-                setUserMenuWidth(clamped);
-              }}
-              onStartDirectMessage={handleStartDirectMessage}
-              onDraftDmResolved={handleDraftDmResolved}
-              onCancelDraftDm={handleCancelDraftDm}
-            />
-          ) : activeRoom && activeRoom.membership === "invited" ? (
-            <InvitationView room={activeRoom} onJoined={fetchRooms} />
-          ) : activeRoom && activeRoom.roomType === VOICE_ROOM_TYPE ? (
-            <VoiceRoomView
-              room={activeRoom}
-              voiceCall={voiceCall}
-              voiceParticipants={voiceParticipants[activeRoom.id] ?? []}
-              livekitInRoom={livekitByRoom[activeRoom.id] ?? []}
-              userId={userId}
-            />
-          ) : activeRoom ? (
-            <ChatView
-              room={activeRoom}
-              userId={userId}
-              userMenuWidth={userMenuWidth}
-              onUserMenuWidthChange={(next: number) => {
-                const clamped = Math.max(MIN_USER_MENU_WIDTH, Math.min(MAX_USER_MENU_WIDTH, next));
-                setUserMenuWidth(clamped);
-              }}
-              onStartDirectMessage={handleStartDirectMessage}
-              moderationSpaceTreeRoomIds={moderationSpaceTreeRoomIds}
-              moderationSpaceName={moderationSpaceName}
-            />
-          ) : activeSpace && activeSpace.membership === "invited" ? (
-            <InvitationView room={activeSpace} onJoined={fetchRooms} />
-          ) : activeSpace && activeSpace.membership === "joined" ? (
-            <SpaceHomeView
-              space={activeSpace}
-              onSelectRoom={handleSelectRoom}
-              onSelectChildSpace={handleSelectSpace}
-              getRoomsInChildSpace={roomsBySpace}
-              onRoomsChanged={handleSpacesChanged}
-              orphanRooms={orphanRoomsForSpaceHome}
-              orphanSpaces={orphanSpacesForSpaceHome}
-              parentSpace={parentSpaceNav}
-              onNavigateToParentSpace={handleNavigateToParentSpace}
-            />
-          ) : (
-            <div style={{
-              flex: 1,
-              display: "flex",
-              alignItems: "center",
-              justifyContent: "center",
-              color: palette.textSecondary,
-            }}>
-              Select a room
-            </div>
-          )}
+          <div style={{
+            flex: 1,
+            minHeight: 0,
+            minWidth: 0,
+            display: "flex",
+            flexDirection: "column",
+            overflow: "hidden",
+          }}>
+            {showingDraftDm && pendingDm ? (
+              <ChatView
+                draftDm={pendingDm}
+                userId={userId}
+                userMenuWidth={userMenuWidth}
+                isMobile={isMobile}
+                onUserMenuWidthChange={(next: number) => {
+                  const clamped = Math.max(MIN_USER_MENU_WIDTH, Math.min(MAX_USER_MENU_WIDTH, next));
+                  setUserMenuWidth(clamped);
+                }}
+                onStartDirectMessage={handleStartDirectMessage}
+                onDraftDmResolved={handleDraftDmResolved}
+                onCancelDraftDm={handleCancelDraftDm}
+              />
+            ) : activeRoom && activeRoom.membership === "invited" ? (
+              <InvitationView room={activeRoom} onJoined={fetchRooms} />
+            ) : activeRoom && activeRoom.roomType === VOICE_ROOM_TYPE ? (
+              <VoiceRoomView
+                room={activeRoom}
+                voiceCall={voiceCall}
+                voiceParticipants={voiceParticipants[activeRoom.id] ?? []}
+                livekitInRoom={livekitByRoom[activeRoom.id] ?? []}
+                userId={userId}
+              />
+            ) : activeRoom ? (
+              <ChatView
+                room={activeRoom}
+                userId={userId}
+                userMenuWidth={userMenuWidth}
+                isMobile={isMobile}
+                onUserMenuWidthChange={(next: number) => {
+                  const clamped = Math.max(MIN_USER_MENU_WIDTH, Math.min(MAX_USER_MENU_WIDTH, next));
+                  setUserMenuWidth(clamped);
+                }}
+                onStartDirectMessage={handleStartDirectMessage}
+                moderationSpaceTreeRoomIds={moderationSpaceTreeRoomIds}
+                moderationSpaceName={moderationSpaceName}
+              />
+            ) : activeSpace && activeSpace.membership === "invited" ? (
+              <InvitationView room={activeSpace} onJoined={fetchRooms} />
+            ) : activeSpace && activeSpace.membership === "joined" ? (
+              <SpaceHomeView
+                space={activeSpace}
+                onSelectRoom={handleSelectRoom}
+                onSelectChildSpace={handleSelectSpace}
+                getRoomsInChildSpace={roomsBySpace}
+                onRoomsChanged={handleSpacesChanged}
+                orphanRooms={orphanRoomsForSpaceHome}
+                orphanSpaces={orphanSpacesForSpaceHome}
+                parentSpace={parentSpaceNav}
+                onNavigateToParentSpace={handleNavigateToParentSpace}
+              />
+            ) : (
+              <div style={{
+                flex: 1,
+                display: "flex",
+                alignItems: "center",
+                justifyContent: "center",
+                color: palette.textSecondary,
+              }}>
+                Select a room
+              </div>
+            )}
+          </div>
         </main>
+        {isMobile && (
+          <MobileBottomNav
+            palette={palette}
+            spacing={spacing}
+            onOpenSpaces={openMobileSpacesDrawer}
+            onOpenRooms={openMobileRoomsDrawer}
+          />
+        )}
         {settingsOpen && (
           <SettingsDialog
             onClose={handleCloseSettings}

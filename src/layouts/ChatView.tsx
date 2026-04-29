@@ -12,6 +12,7 @@ import MessageInput, { type EditingMessageRef, type MessageFileSendBridge } from
 import UserMenu from "../components/UserMenu";
 import UserProfileDialog from "../components/UserProfileDialog";
 import RoomDownloadsButton from "../components/RoomDownloadsButton";
+import SideDrawer from "../components/SideDrawer";
 import { useMessages } from "../hooks/useMessages";
 import { useMatrixUserProfile } from "../hooks/useMatrixUserProfile";
 import { useTheme } from "../theme/ThemeContext";
@@ -19,7 +20,6 @@ import { Message, Room } from "../types/matrix";
 import { useResizeHandle } from "../hooks/useResizeHandle";
 import { effectiveDmTitle, isDmChatUi } from "../utils/dmDisplay";
 
-const USER_MENU_DEFAULT_WIDTH = 240;
 const MIN_USER_MENU_WIDTH = 180;
 const MAX_USER_MENU_WIDTH = 400;
 const USER_MENU_RESIZE_HANDLE = 6;
@@ -46,6 +46,7 @@ interface ChatViewProps {
   draftDm?: { peerUserId: string; displayNameHint: string } | null;
   onDraftDmResolved?: (roomId: string) => void | Promise<void>;
   onCancelDraftDm?: () => void;
+  isMobile?: boolean;
 }
 
 interface TypingPayload {
@@ -151,6 +152,7 @@ export default function ChatView({
   moderationSpaceName = null,
   onDraftDmResolved,
   onCancelDraftDm,
+  isMobile = false,
 }: ChatViewProps) {
   const isDraft = draftDm != null;
   const activeRoom = room ?? null;
@@ -208,7 +210,7 @@ export default function ChatView({
   const { palette, typography, spacing } = useTheme();
   const [typingNames, setTypingNames] = useState<string[]>([]);
   const [localTyping, setLocalTyping] = useState(false);
-  const [showUsers, setShowUsers] = useState(true);
+  const [showUsers, setShowUsers] = useState(!isMobile);
   const [editingMessage, setEditingMessage] = useState<EditingMessageRef | null>(null);
   const [replyDraft, setReplyDraft] = useState<Message | null>(null);
   const [pinnedMenuOpen, setPinnedMenuOpen] = useState(false);
@@ -223,6 +225,15 @@ export default function ChatView({
     max: () => Math.min(MAX_USER_MENU_WIDTH, (containerRef.current?.offsetWidth ?? 600) - 200),
     direction: -1,
   });
+
+  useEffect(() => {
+    if (isMobile) setShowUsers(false);
+    else setShowUsers(true);
+  }, [isMobile]);
+
+  useEffect(() => {
+    if (isMobile) setShowUsers(false);
+  }, [activeRoom?.id, isMobile]);
 
   useEffect(() => {
     if (isDraft || !activeRoom) return;
@@ -340,9 +351,9 @@ export default function ChatView({
         minHeight: 0,
         display: "flex",
         flexDirection: "column",
-        height: "100vh",
         minWidth: 0,
         overflow: "hidden",
+        height: isMobile ? "100%" : "100vh",
       }}>
         <div style={dmBannerStyle}>
           <button
@@ -434,13 +445,18 @@ export default function ChatView({
 
   if (!activeRoom) return null;
 
+  const userMenuPanelWidth = Math.min(
+    userMenuWidth,
+    Math.max(MIN_USER_MENU_WIDTH, Math.floor(window.innerWidth * 0.92))
+  );
+
   return (
     <div ref={containerRef} style={{
       flex: 1,
       minHeight: 0,
       display: "flex",
       flexDirection: "column",
-      height: "100vh",
+      height: isMobile ? "100%" : "100vh",
       minWidth: 0,
       overflow: "hidden",
     }}>
@@ -626,8 +642,8 @@ export default function ChatView({
           </div>
         </div>
 
-        {/* User menu panel with resizable inside border (not for 1:1 DMs) */}
-        {showUsers && !isDmChatUi(activeRoom) && (
+        {/* User menu: inline on desktop, right drawer on mobile */}
+        {!isMobile && showUsers && !isDmChatUi(activeRoom) && (
           <div style={{
             position: "relative",
             flexShrink: 0,
@@ -647,7 +663,7 @@ export default function ChatView({
             />
             <div
               onMouseDown={userMenuResize.onMouseDown}
-              onDoubleClick={() => onUserMenuWidthChange(USER_MENU_DEFAULT_WIDTH)}
+              onDoubleClick={() => onUserMenuWidthChange(spacing.userMenuWidth)}
               onMouseEnter={() => userMenuResize.setIsHovered(true)}
               onMouseLeave={() => userMenuResize.setIsHovered(false)}
               style={{
@@ -666,6 +682,25 @@ export default function ChatView({
           </div>
         )}
       </div>
+
+      {isMobile && showUsers && !isDmChatUi(activeRoom) && (
+        <SideDrawer
+          open={showUsers}
+          onClose={() => setShowUsers(false)}
+          side="right"
+          widthPx={userMenuPanelWidth}
+        >
+          <UserMenu
+            width={userMenuPanelWidth}
+            roomId={activeRoom.id}
+            roomName={activeRoom.name}
+            userId={userId}
+            moderationSpaceTreeRoomIds={moderationSpaceTreeRoomIds}
+            moderationSpaceName={moderationSpaceName}
+            onStartDirectMessage={onStartDirectMessage}
+          />
+        </SideDrawer>
+      )}
 
       {messageSenderProfileUserId && (
         <UserProfileDialog

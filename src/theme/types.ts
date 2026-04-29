@@ -36,6 +36,8 @@ export interface ThemeSpacing {
   unit: number;  // base unit in px, e.g. 4
   sidebarWidth: number;
   spaceSidebarWidth: number;
+  /** Default width for the channel member list / user menu column. */
+  userMenuWidth: number;
   headerHeight: number;
 }
 
