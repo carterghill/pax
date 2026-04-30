@@ -35,6 +35,55 @@ use tokio::time::{interval_at, Instant as TokioInstant, MissedTickBehavior};
 struct SendStream(cpal::Stream);
 unsafe impl Send for SendStream {}
 unsafe impl Sync for SendStream {}
+
+/// Mic input stream: cpal on most platforms, GStreamer pulsesrc on Linux.
+/// On Linux, cpal's ALSA backend gives useless virtual device names ("default",
+/// "pipewire", "pulse") that all route through PipeWire's default source — which
+/// may be a `.monitor` loopback.  Using GStreamer `pulsesrc` lets us target a
+/// specific PulseAudio/PipeWire source by name, matching what Discord/Firefox do.
+#[allow(dead_code)]
+enum MicInputStream {
+    Cpal(cpal::Stream),
+    #[cfg(target_os = "linux")]
+    Gst {
+        pipeline: gstreamer::Pipeline,
+        shutdown: Arc<AtomicBool>,
+        _thread: Option<std::thread::JoinHandle<()>>,
+    },
+}
+unsafe impl Send for MicInputStream {}
+unsafe impl Sync for MicInputStream {}
+
+impl MicInputStream {
+    fn play(&self) -> Result<(), String> {
+        match self {
+            MicInputStream::Cpal(s) => s.play().map_err(|e| format!("{}", e)),
+            #[cfg(target_os = "linux")]
+            MicInputStream::Gst { .. } => Ok(()), // pipeline already Playing when constructed
+        }
+    }
+}
+
+impl Drop for MicInputStream {
+    fn drop(&mut self) {
+        match self {
+            MicInputStream::Cpal(_) => {} // cpal::Stream stops on drop
+            #[cfg(target_os = "linux")]
+            MicInputStream::Gst {
+                pipeline,
+                shutdown,
+                _thread,
+            } => {
+                use gstreamer::prelude::*;
+                shutdown.store(true, Ordering::Relaxed);
+                let _ = pipeline.set_state(gstreamer::State::Null);
+                if let Some(t) = _thread.take() {
+                    let _ = t.join();
+                }
+            }
+        }
+    }
+}
 // ─── Constants ──────────────────────────────────────────────────────────────
 const SAMPLE_RATE: u32 = 48000;
 const NUM_CHANNELS: u32 = 1;
@@ -150,8 +199,8 @@ pub struct VoiceSession {
     audio_state: Arc<Mutex<AudioState>>,
     room_id: String,
     local_identity: String,
-    /// Stored to keep the cpal streams alive (dropped on disconnect)
-    _input_stream: Option<SendStream>,
+    /// Stored to keep the cpal/GStreamer mic stream alive (dropped on disconnect)
+    _input_stream: Option<MicInputStream>,
     _output_stream: Option<SendStream>,
     /// Cancellation handle for the event loop
     shutdown_tx: mpsc::Sender<()>,
@@ -243,8 +292,8 @@ impl VoiceManager {
             )
             .await
             .map_err(|e| format!("Failed to publish mic track: {}", e))?;
-        // 4. Now set up cpal streams (no more .await after this point)
-        // Create a channel for mic frames: cpal callback → pump task
+        // 4. Set up audio streams (GStreamer pulsesrc on Linux, cpal elsewhere)
+        // Create a channel for mic frames: capture callback → pump task
         let (mic_frame_tx, mic_frame_rx) = mpsc::channel::<Vec<i16>>(10); // small bounded buffer
         let noise_proc = Arc::new(Mutex::new(NoiseProcessor::new()));
         noise_proc
@@ -259,7 +308,7 @@ impl VoiceManager {
         .map_err(|e| format!("Failed to open microphone: {}", e))?;
         let output_stream = setup_speaker_output(audio_state.clone(), output_device_id.as_deref())
             .map_err(|e| format!("Failed to open speakers: {}", e))?;
-        // 5. Start mic capture pump (receives frames from cpal callback → LiveKit)
+        // 5. Start mic capture pump (receives frames from mic callback → LiveKit)
         let mic_source = audio_source.clone();
         tokio::spawn(async move {
             mic_capture_pump(mic_source, mic_frame_rx).await;
@@ -285,15 +334,15 @@ impl VoiceManager {
             )
             .await;
         });
-        // 7. Start cpal streams and wrap for Send safety
+        // 7. Start audio streams
         input_stream
             .play()
             .map_err(|e| format!("Mic stream error: {}", e))?;
         output_stream
             .play()
             .map_err(|e| format!("Speaker stream error: {}", e))?;
-        // Wrap in SendStream so VoiceSession is Send+Sync for Tauri State
-        let input_stream = SendStream(input_stream);
+        // Wrap output in SendStream so VoiceSession is Send+Sync for Tauri State
+        // (input is already Send+Sync via MicInputStream)
         let output_stream = SendStream(output_stream);
         // Store session
         {
@@ -1584,6 +1633,24 @@ fn setup_mic_input(
     noise_proc: Arc<Mutex<NoiseProcessor>>,
     frame_tx: mpsc::Sender<Vec<i16>>,
     preferred_device_id: Option<&str>,
+) -> Result<MicInputStream, String> {
+    #[cfg(target_os = "linux")]
+    {
+        return setup_mic_input_linux(audio_state, noise_proc, frame_tx, preferred_device_id);
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        setup_mic_input_cpal(audio_state, noise_proc, frame_tx, preferred_device_id)
+            .map(MicInputStream::Cpal)
+    }
+}
+
+/// cpal-based mic input (Windows, macOS). Also used as fallback on Linux.
+fn setup_mic_input_cpal(
+    audio_state: Arc<Mutex<AudioState>>,
+    noise_proc: Arc<Mutex<NoiseProcessor>>,
+    frame_tx: mpsc::Sender<Vec<i16>>,
+    preferred_device_id: Option<&str>,
 ) -> Result<cpal::Stream, String> {
     let host = cpal::default_host();
     let device = select_input_device(&host, preferred_device_id)?;
@@ -1950,6 +2017,18 @@ fn select_output_device(
 }
 
 pub fn list_audio_devices() -> Result<AudioDeviceList, String> {
+    #[cfg(target_os = "linux")]
+    {
+        return list_audio_devices_linux();
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        list_audio_devices_cpal()
+    }
+}
+
+/// cpal-based device enumeration (Windows, macOS).
+fn list_audio_devices_cpal() -> Result<AudioDeviceList, String> {
     let host = cpal::default_host();
 
     let default_input_name = host
@@ -1971,5 +2050,325 @@ pub fn list_audio_devices() -> Result<AudioDeviceList, String> {
     Ok(AudioDeviceList {
         input: build_audio_device_infos(&input_entries, default_input_name.as_deref()),
         output: build_audio_device_infos(&output_entries, default_output_name.as_deref()),
+    })
+}
+
+// ─── Linux: PulseAudio/PipeWire-native device enumeration ───────────────────
+//
+// cpal's ALSA backend on PipeWire shows virtual PCM names ("default",
+// "pipewire", "pulse") instead of real device names.  All of these route
+// through PipeWire's default source, which may be a `.monitor` loopback —
+// capturing all desktop audio instead of the mic.
+//
+// We solve this by using `pactl` to enumerate real sources and sinks, and
+// GStreamer `pulsesrc` to capture from a specific source by name — exactly
+// matching what other apps (Firefox, Discord) do on Linux.
+
+#[cfg(target_os = "linux")]
+fn list_audio_devices_linux() -> Result<AudioDeviceList, String> {
+    use std::process::Command;
+
+    // ── Input devices from `pactl list sources` (filtering .monitor) ────
+    let default_source = Command::new("pactl")
+        .args(["info"])
+        .output()
+        .ok()
+        .and_then(|o| String::from_utf8(o.stdout).ok())
+        .and_then(|s| {
+            s.lines()
+                .find(|l| l.trim().starts_with("Default Source:"))
+                .and_then(|l| l.trim().strip_prefix("Default Source:"))
+                .map(|v| v.trim().to_string())
+        })
+        .unwrap_or_default();
+
+    let sources_output = Command::new("pactl")
+        .args(["list", "sources"])
+        .output()
+        .map_err(|e| format!("pactl list sources failed: {}", e))?;
+    let sources_text = String::from_utf8_lossy(&sources_output.stdout);
+
+    let mut input_devices = Vec::new();
+    let mut current_name = String::new();
+    let mut current_desc = String::new();
+
+    for line in sources_text.lines() {
+        let trimmed = line.trim();
+        if trimmed.starts_with("Name:") {
+            // Flush previous entry
+            flush_pactl_source(
+                &current_name,
+                &current_desc,
+                &default_source,
+                &mut input_devices,
+            );
+            current_name = trimmed
+                .trim_start_matches("Name:")
+                .trim()
+                .to_string();
+            current_desc.clear();
+        } else if trimmed.starts_with("Description:") {
+            current_desc = trimmed
+                .trim_start_matches("Description:")
+                .trim()
+                .to_string();
+        }
+    }
+    // Don't forget the last entry
+    flush_pactl_source(
+        &current_name,
+        &current_desc,
+        &default_source,
+        &mut input_devices,
+    );
+
+    // ── Output devices: cpal works fine for output (no monitor issue) ───
+    // NOTE: Output still shows ALSA names. This is a cosmetic issue only —
+    // output routing is almost never wrong the way input is. Migrating output
+    // to pactl + GStreamer pulsesink is a future improvement.
+    let host = cpal::default_host();
+    let default_output_name = host.default_output_device().map(|d| device_name(&d));
+    let output_entries = sorted_named_devices(
+        host.output_devices()
+            .map_err(|e| format!("Failed to enumerate output devices: {}", e))?,
+    );
+    let output_devices = build_audio_device_infos(&output_entries, default_output_name.as_deref());
+
+    log::info!(
+        "Linux audio devices: {} inputs (filtered monitors), {} outputs",
+        input_devices.len(),
+        output_devices.len()
+    );
+    Ok(AudioDeviceList {
+        input: input_devices,
+        output: output_devices,
+    })
+}
+
+/// Emit one source entry if it's not a monitor.
+#[cfg(target_os = "linux")]
+fn flush_pactl_source(
+    name: &str,
+    desc: &str,
+    default_source: &str,
+    out: &mut Vec<AudioDeviceInfo>,
+) {
+    if name.is_empty() || name.ends_with(".monitor") {
+        return;
+    }
+    out.push(AudioDeviceInfo {
+        id: name.to_string(),
+        name: if desc.is_empty() {
+            name.to_string()
+        } else {
+            desc.to_string()
+        },
+        is_default: name == default_source,
+    });
+}
+
+// ─── Linux: GStreamer pulsesrc mic capture ───────────────────────────────────
+
+/// Find a real microphone source when the default is a `.monitor` loopback.
+/// Returns the PulseAudio source name to use, or None to let pulsesrc pick.
+#[cfg(target_os = "linux")]
+fn find_best_default_source() -> Option<String> {
+    use std::process::Command;
+
+    let info = Command::new("pactl")
+        .args(["info"])
+        .output()
+        .ok()
+        .and_then(|o| String::from_utf8(o.stdout).ok())?;
+    let current = info
+        .lines()
+        .find(|l| l.trim().starts_with("Default Source:"))?
+        .trim()
+        .strip_prefix("Default Source:")?
+        .trim();
+
+    if !current.ends_with(".monitor") {
+        // Default is already a real source
+        return None;
+    }
+
+    // Default is a monitor — scan for a real mic
+    let list = Command::new("pactl")
+        .args(["list", "sources", "short"])
+        .output()
+        .ok()
+        .and_then(|o| String::from_utf8(o.stdout).ok())?;
+
+    for line in list.lines() {
+        let parts: Vec<&str> = line.split_whitespace().collect();
+        if parts.len() >= 2 && !parts[1].ends_with(".monitor") {
+            log::info!(
+                "Linux mic: default source '{}' is a monitor, using '{}' instead",
+                current,
+                parts[1]
+            );
+            return Some(parts[1].to_string());
+        }
+    }
+
+    log::warn!(
+        "Linux mic: default source '{}' is a monitor but no real mic found",
+        current
+    );
+    None
+}
+
+/// Linux mic capture using GStreamer `pulsesrc`.
+///
+/// This replaces cpal for mic input on Linux because cpal's ALSA backend
+/// cannot target specific PipeWire/PulseAudio sources — all ALSA virtual
+/// devices route through the default source, which may be a monitor.
+///
+/// `pulsesrc device="<source_name>"` lets us pick the exact source, matching
+/// how the screen share audio already captures desktop audio on Linux.
+#[cfg(target_os = "linux")]
+fn setup_mic_input_linux(
+    audio_state: Arc<Mutex<AudioState>>,
+    noise_proc: Arc<Mutex<NoiseProcessor>>,
+    frame_tx: mpsc::Sender<Vec<i16>>,
+    preferred_device_id: Option<&str>,
+) -> Result<MicInputStream, String> {
+    use gstreamer::prelude::*;
+
+    if let Err(e) = gstreamer::init() {
+        log::warn!("GStreamer init failed ({}), falling back to cpal", e);
+        return setup_mic_input_cpal(audio_state, noise_proc, frame_tx, preferred_device_id)
+            .map(MicInputStream::Cpal);
+    }
+
+    // Determine which PulseAudio source to use
+    let device_prop = match preferred_device_id {
+        Some(id) if !id.is_empty() => {
+            log::info!("Linux mic: using user-selected source '{}'", id);
+            format!(" device=\"{}\"", id)
+        }
+        _ => {
+            // "System default" — check if the default is a monitor and find a real mic
+            match find_best_default_source() {
+                Some(source) => {
+                    log::info!("Linux mic: auto-selected source '{}' (default was a monitor)", source);
+                    format!(" device=\"{}\"", source)
+                }
+                None => {
+                    log::info!("Linux mic: using PulseAudio default source");
+                    String::new() // pulsesrc with no device= uses @DEFAULT_SOURCE@
+                }
+            }
+        }
+    };
+
+    let pipeline_str = format!(
+        "pulsesrc{device_prop} \
+         ! audioconvert \
+         ! audioresample \
+         ! audio/x-raw,format=S16LE,rate={rate},channels={ch} \
+         ! appsink name=micsink emit-signals=false max-buffers=10 drop=true sync=false",
+        device_prop = device_prop,
+        rate = SAMPLE_RATE,
+        ch = NUM_CHANNELS,
+    );
+    log::info!("Linux mic pipeline: {}", pipeline_str);
+
+    let pipeline = match gstreamer::parse::launch(&pipeline_str) {
+        Ok(p) => p,
+        Err(e) => {
+            log::warn!("GStreamer mic pipeline failed ({}), falling back to cpal", e);
+            return setup_mic_input_cpal(audio_state, noise_proc, frame_tx, preferred_device_id)
+                .map(MicInputStream::Cpal);
+        }
+    };
+    let pipeline = pipeline
+        .downcast::<gstreamer::Pipeline>()
+        .map_err(|_| "Failed to cast mic pipeline")?;
+
+    let appsink = pipeline
+        .by_name("micsink")
+        .ok_or("micsink not found in pipeline")?
+        .downcast::<gstreamer_app::AppSink>()
+        .map_err(|_| "Failed to cast micsink to AppSink")?;
+
+    if let Err(e) = pipeline.set_state(gstreamer::State::Playing) {
+        log::warn!("Mic pipeline start failed ({:?}), falling back to cpal", e);
+        return setup_mic_input_cpal(audio_state, noise_proc, frame_tx, preferred_device_id)
+            .map(MicInputStream::Cpal);
+    }
+
+    log::info!("Linux mic: GStreamer pulsesrc pipeline started");
+
+    let shutdown = Arc::new(AtomicBool::new(false));
+    let shutdown_thread = shutdown.clone();
+    let pipeline_thread = pipeline.clone();
+
+    let thread = std::thread::Builder::new()
+        .name("gst-mic-capture".into())
+        .spawn(move || {
+            let frame_size = SAMPLES_PER_10MS as usize;
+            let mut buf: Vec<i16> = Vec::with_capacity(frame_size * 2);
+
+            while !shutdown_thread.load(Ordering::Relaxed) {
+                let sample = appsink.try_pull_sample(gstreamer::ClockTime::from_mseconds(100));
+                let Some(sample) = sample else {
+                    if appsink.is_eos() {
+                        log::info!("Linux mic: appsink EOS");
+                        break;
+                    }
+                    continue;
+                };
+
+                let buffer = match sample.buffer() {
+                    Some(b) => b,
+                    None => continue,
+                };
+                let map = match buffer.map_readable() {
+                    Ok(m) => m,
+                    Err(_) => continue,
+                };
+
+                let data = map.as_slice();
+                let samples = unsafe {
+                    std::slice::from_raw_parts(
+                        data.as_ptr() as *const i16,
+                        data.len() / std::mem::size_of::<i16>(),
+                    )
+                };
+
+                let (is_muted, ns_enabled) = {
+                    let st = audio_state.lock();
+                    (!st.mic_enabled, st.noise_suppression_enabled)
+                };
+
+                if is_muted {
+                    buf.extend(std::iter::repeat(0i16).take(samples.len()));
+                } else {
+                    buf.extend_from_slice(samples);
+                }
+
+                // Drain completed 480-sample frames — same logic as cpal path
+                drain_and_send_frames(
+                    &mut buf,
+                    frame_size,
+                    is_muted,
+                    ns_enabled,
+                    &noise_proc,
+                    &audio_state,
+                    &frame_tx,
+                );
+            }
+
+            use gstreamer::prelude::*;
+            let _ = pipeline_thread.set_state(gstreamer::State::Null);
+            log::info!("Linux mic: GStreamer capture thread exited");
+        })
+        .map_err(|e| format!("Mic capture thread spawn failed: {}", e))?;
+
+    Ok(MicInputStream::Gst {
+        pipeline,
+        shutdown,
+        _thread: Some(thread),
     })
 }
