@@ -1195,10 +1195,10 @@ export default function MainLayout({
     <PresenceContext.Provider value={{ manualStatus, setManualStatus, effectivePresence, statusMessage, setStatusMessage }}>
       <div style={{
         display: "flex",
-        height: "100vh",
+        height: "100%",
         width: "100%",
         minWidth: 0,
-        maxWidth: "100vw",
+        maxWidth: "100%",
         overflow: "hidden",
       }}>
         {!isMobile ? spaceSidebarEl : null}
