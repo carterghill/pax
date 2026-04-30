@@ -1,4 +1,4 @@
-import { LayoutGrid, MessageSquare } from "lucide-react";
+import { LayoutPanelLeft } from "lucide-react";
 import type { ThemePalette, ThemeSpacing } from "../theme/types";
 
 /** Row height excluding safe-area; main content uses `calc(row + env(safe-area))`. */
@@ -11,15 +11,13 @@ export function mobileBottomNavContentInsetCss(): string {
 interface MobileBottomNavProps {
   palette: ThemePalette;
   spacing: ThemeSpacing;
-  onOpenSpaces: () => void;
-  onOpenRooms: () => void;
+  onOpenNavigation: () => void;
 }
 
 export default function MobileBottomNav({
   palette,
   spacing,
-  onOpenSpaces,
-  onOpenRooms,
+  onOpenNavigation,
 }: MobileBottomNavProps) {
   const btn = {
     flex: 1,
@@ -54,13 +52,14 @@ export default function MobileBottomNav({
         paddingBottom: "env(safe-area-inset-bottom, 0px)",
       }}
     >
-      <button type="button" onClick={onOpenSpaces} style={btn} title="Spaces">
-        <LayoutGrid size={22} strokeWidth={2} />
-        <span>Spaces</span>
-      </button>
-      <button type="button" onClick={onOpenRooms} style={btn} title="Rooms">
-        <MessageSquare size={22} strokeWidth={2} />
-        <span>Rooms</span>
+      <button
+        type="button"
+        onClick={onOpenNavigation}
+        style={btn}
+        title="Spaces and rooms"
+      >
+        <LayoutPanelLeft size={22} strokeWidth={2} />
+        <span>Spaces & rooms</span>
       </button>
     </nav>
   );

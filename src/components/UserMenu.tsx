@@ -398,17 +398,17 @@ export default function UserMenu({
     const unavailable = displayMembers.filter((m) => resolveP(m) === "unavailable");
     const offline = displayMembers.filter((m) => resolveP(m) === "offline");
 
-    const groups = [
-      { label: `Online — ${online.length}`, members: online },
+    const groups: { sectionKey: string; label: string; members: RoomMember[] }[] = [
+      { sectionKey: "online", label: `Online — ${online.length}`, members: online },
       ...(unavailable.length > 0
-        ? [{ label: `Away — ${unavailable.length}`, members: unavailable }]
+        ? [{ sectionKey: "away", label: `Away — ${unavailable.length}`, members: unavailable }]
         : []),
-      { label: `Offline — ${offline.length}`, members: offline },
+      { sectionKey: "offline", label: `Offline — ${offline.length}`, members: offline },
     ];
 
     const r: VRow[] = [];
     for (const g of groups) {
-      r.push({ type: "header", key: `h:${g.label}`, label: g.label });
+      r.push({ type: "header", key: `h:${g.sectionKey}`, label: g.label });
       for (const m of g.members) r.push({ type: "member", key: m.userId, member: m });
     }
 
@@ -433,7 +433,10 @@ export default function UserMenu({
 
   const [startIdx, endIdx] = visibleWindow;
 
-  const knockMembers = knockData?.members ?? [];
+  const knockMembers = useMemo(() => {
+    const raw = knockData?.members ?? [];
+    return [...raw].sort((a, b) => a.userId.toLowerCase().localeCompare(b.userId.toLowerCase()));
+  }, [knockData]);
   const canInvite = knockData?.canInvite ?? false;
   const canKick = knockData?.canKick ?? false;
   const showKnocks = knockMembers.length > 0 && (canInvite || canKick);

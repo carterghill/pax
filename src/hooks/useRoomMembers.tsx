@@ -9,7 +9,6 @@ import {
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { RoomMember } from "../types/matrix";
-import { resolvePresenceWithDnd } from "../utils/statusMessage";
 import { useUserAvatarStoreOptional } from "../context/UserAvatarStore";
 
 interface PresencePayload {
@@ -30,16 +29,11 @@ function dedupeMembers(members: RoomMember[]): RoomMember[] {
   return [...byId.values()];
 }
 
+/** Stable list order for consumers that slice/filter into sections (e.g. UserMenu). Never sort by presence here — `UserMenu` overrides local-user presence from context while member state still has server presence, so tier-based sorting would disagree with grouping and rows swap when presence syncs. */
 function sortMembersForDisplay(members: RoomMember[]): RoomMember[] {
-  const order: Record<string, number> = { online: 0, dnd: 0, unavailable: 1, offline: 2 };
-  return [...members].sort((a, b) => {
-    const ao = order[resolvePresenceWithDnd(a.presence, a.statusMsg)] ?? 2;
-    const bo = order[resolvePresenceWithDnd(b.presence, b.statusMsg)] ?? 2;
-    if (ao !== bo) return ao - bo;
-    const an = (a.displayName ?? a.userId).toLowerCase();
-    const bn = (b.displayName ?? b.userId).toLowerCase();
-    return an.localeCompare(bn);
-  });
+  return [...members].sort((a, b) =>
+    a.userId.toLowerCase().localeCompare(b.userId.toLowerCase()),
+  );
 }
 
 /** Simple cache — last fetched member list per room. */
@@ -127,7 +121,7 @@ export function useRoomMembers(roomId: string) {
     };
   }, [fetchMembers]);
 
-  // ── Presence updates (affect sort order → update members state) ──
+  // ── Presence updates ──
   // Batched per frame, skip non-members.
   const pendingPresence = useRef<Map<string, { presence: string; statusMsg: string | null }>>(new Map());
   const presenceRaf = useRef<number | null>(null);

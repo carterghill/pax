@@ -316,7 +316,8 @@ pub async fn emit_unread_snapshot_if_changed(
     }
 }
 
-/// Clear the cache on logout / account switch so the next login starts fresh.
-pub async fn clear_unread_cache(cache: &UnreadStateCache) {
-    cache.lock().await.clear();
+/// Clear unread caches on logout / account switch so the next login starts fresh.
+pub async fn clear_unread_cache(state: &Arc<AppState>) {
+    state.unread_cache.lock().await.clear();
+    state.raw_unread_messages.lock().await.clear();
 }

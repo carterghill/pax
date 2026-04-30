@@ -332,35 +332,22 @@ export default function MainLayout({
   );
 
   const isMobile = useIsMobile();
-  const [mobileSpaceDrawerOpen, setMobileSpaceDrawerOpen] = useState(false);
-  const [mobileRoomDrawerOpen, setMobileRoomDrawerOpen] = useState(false);
+  const [mobileNavDrawerOpen, setMobileNavDrawerOpen] = useState(false);
 
-  const openMobileSpacesDrawer = useCallback(() => {
-    setMobileSpaceDrawerOpen(true);
-    setMobileRoomDrawerOpen(false);
-  }, []);
-
-  const openMobileRoomsDrawer = useCallback(() => {
-    setMobileRoomDrawerOpen(true);
-    setMobileSpaceDrawerOpen(false);
+  const openMobileNavDrawer = useCallback(() => {
+    setMobileNavDrawerOpen(true);
   }, []);
 
   useEffect(() => {
     if (!isMobile) {
-      setMobileSpaceDrawerOpen(false);
-      setMobileRoomDrawerOpen(false);
+      setMobileNavDrawerOpen(false);
     }
   }, [isMobile]);
 
   useEffect(() => {
     if (!isMobile) return;
-    setMobileRoomDrawerOpen(false);
-  }, [activeRoomId, isMobile]);
-
-  useEffect(() => {
-    if (!isMobile) return;
-    setMobileSpaceDrawerOpen(false);
-  }, [activeSpaceId, isMobile]);
+    setMobileNavDrawerOpen(false);
+  }, [activeRoomId, activeSpaceId, isMobile]);
 
   const sidebarResize = useResizeHandle({
     width: roomSidebarWidth,
@@ -1109,7 +1096,13 @@ export default function MainLayout({
     roomSidebarWidth,
     Math.max(MIN_ROOM_SIDEBAR_WIDTH, Math.floor(window.innerWidth * 0.92))
   );
-  const roomSidebarWidthApplied = isMobile ? mobileRoomDrawerPanelWidth : roomSidebarWidth;
+  const mobileNavDrawerTotalWidth = Math.min(
+    spacing.spaceSidebarWidth + mobileRoomDrawerPanelWidth,
+    typeof window !== "undefined" ? window.innerWidth : spacing.spaceSidebarWidth + mobileRoomDrawerPanelWidth
+  );
+  const mobileRoomPanelInNavDrawer =
+    mobileNavDrawerTotalWidth - spacing.spaceSidebarWidth;
+  const roomSidebarWidthApplied = isMobile ? mobileRoomPanelInNavDrawer : roomSidebarWidth;
 
   const spaceSidebarEl = (
     <SpaceSidebar
@@ -1208,26 +1201,31 @@ export default function MainLayout({
         maxWidth: "100vw",
         overflow: "hidden",
       }}>
-        {!isMobile ? spaceSidebarEl : (
-          <SideDrawer
-            open={mobileSpaceDrawerOpen}
-            onClose={() => setMobileSpaceDrawerOpen(false)}
-            side="left"
-            widthPx={spacing.spaceSidebarWidth}
-          >
-            {spaceSidebarEl}
-          </SideDrawer>
-        )}
+        {!isMobile ? spaceSidebarEl : null}
         {!isMobile ? (
           <div style={{ position: "relative", flexShrink: 0, zIndex: 1 }}>{roomSidebarEl}</div>
         ) : (
           <SideDrawer
-            open={mobileRoomDrawerOpen}
-            onClose={() => setMobileRoomDrawerOpen(false)}
+            open={mobileNavDrawerOpen}
+            onClose={() => setMobileNavDrawerOpen(false)}
             side="left"
-            widthPx={mobileRoomDrawerPanelWidth}
+            widthPx={mobileNavDrawerTotalWidth}
           >
-            {roomSidebarEl}
+            <div
+              style={{
+                display: "flex",
+                flexDirection: "row",
+                height: "100%",
+                width: "100%",
+                minHeight: 0,
+                overflow: "hidden",
+              }}
+            >
+              {spaceSidebarEl}
+              <div style={{ position: "relative", flexShrink: 0, minWidth: 0, zIndex: 1 }}>
+                {roomSidebarEl}
+              </div>
+            </div>
           </SideDrawer>
         )}
         <main style={{
@@ -1318,8 +1316,7 @@ export default function MainLayout({
           <MobileBottomNav
             palette={palette}
             spacing={spacing}
-            onOpenSpaces={openMobileSpacesDrawer}
-            onOpenRooms={openMobileRoomsDrawer}
+            onOpenNavigation={openMobileNavDrawer}
           />
         )}
         {settingsOpen && (
