@@ -17,7 +17,7 @@ import {
 } from "../hooks/useNotificationSettings";
 import { useDesktopNotifications } from "../hooks/useDesktopNotifications";
 import { PresenceContext } from "../hooks/PresenceContext";
-import { useState, useCallback, useMemo, useEffect, startTransition } from "react";
+import { useState, useCallback, useMemo, useEffect, useRef, startTransition } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { useTheme } from "../theme/ThemeContext";
 import SettingsDialog from "../components/SettingsDialog";
@@ -333,6 +333,7 @@ export default function MainLayout({
 
   const isMobile = useIsMobile();
   const [mobileNavDrawerOpen, setMobileNavDrawerOpen] = useState(false);
+  const prevActiveRoomIdRef = useRef<string | null>(null);
 
   const openMobileNavDrawer = useCallback(() => {
     setMobileNavDrawerOpen(true);
@@ -346,8 +347,18 @@ export default function MainLayout({
 
   useEffect(() => {
     if (!isMobile) return;
-    setMobileNavDrawerOpen(false);
-  }, [activeRoomId, activeSpaceId, isMobile]);
+    // Close the drawer when the user selects a room, but keep it open when
+    // they only change spaces (space switch is often followed by room pick).
+    // Avoid closing on initial mount.
+    if (prevActiveRoomIdRef.current === null) {
+      prevActiveRoomIdRef.current = activeRoomId;
+      return;
+    }
+    if (activeRoomId !== prevActiveRoomIdRef.current) {
+      setMobileNavDrawerOpen(false);
+    }
+    prevActiveRoomIdRef.current = activeRoomId;
+  }, [activeRoomId, isMobile]);
 
   // Android hardware back: MainActivity dispatches `pax-android-back` only when
   // `__paxAndroidBackHandlesNav` is set (mobile drawer layout). Toggle nav drawer.
