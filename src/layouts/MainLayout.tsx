@@ -37,7 +37,7 @@ import { useResizeHandle } from "../hooks/useResizeHandle";
 import { useSpaceOrder, applyStoredSpaceOrder } from "../hooks/useSpaceOrder";
 import { useIsMobile } from "../hooks/useIsMobile";
 import SideDrawer from "../components/SideDrawer";
-import MobileBottomNav, { mobileBottomNavContentInsetCss } from "../components/MobileBottomNav";
+
 import { defaultThemeDefinition } from "../theme/themes";
 
 const ROOM_SIDEBAR_WIDTH_KEY = "pax-room-sidebar-width";
@@ -348,6 +348,18 @@ export default function MainLayout({
     if (!isMobile) return;
     setMobileNavDrawerOpen(false);
   }, [activeRoomId, activeSpaceId, isMobile]);
+
+  // Android hardware back button: the native side dispatches a
+  // `pax-android-back` CustomEvent via evaluateJavascript.  Toggle the
+  // navigation drawer instead of leaving the app.
+  useEffect(() => {
+    if (!isMobile) return;
+    const onBack = () => {
+      setMobileNavDrawerOpen((prev) => !prev);
+    };
+    window.addEventListener("pax-android-back", onBack);
+    return () => window.removeEventListener("pax-android-back", onBack);
+  }, [isMobile]);
 
   const sidebarResize = useResizeHandle({
     width: roomSidebarWidth,
@@ -1210,6 +1222,8 @@ export default function MainLayout({
             onClose={() => setMobileNavDrawerOpen(false)}
             side="left"
             widthPx={mobileNavDrawerTotalWidth}
+            enableSwipeGesture
+            onSwipeOpen={openMobileNavDrawer}
           >
             <div
               style={{
@@ -1237,7 +1251,7 @@ export default function MainLayout({
           color: palette.textPrimary,
           display: "flex",
           flexDirection: "column",
-          paddingBottom: isMobile ? mobileBottomNavContentInsetCss() : 0,
+          paddingBottom: isMobile ? "env(safe-area-inset-bottom, 0px)" : 0,
         }}>
           <div style={{
             flex: 1,
@@ -1260,6 +1274,7 @@ export default function MainLayout({
                 onStartDirectMessage={handleStartDirectMessage}
                 onDraftDmResolved={handleDraftDmResolved}
                 onCancelDraftDm={handleCancelDraftDm}
+                onOpenNavigation={openMobileNavDrawer}
               />
             ) : activeRoom && activeRoom.membership === "invited" ? (
               <InvitationView room={activeRoom} onJoined={fetchRooms} />
@@ -1284,6 +1299,7 @@ export default function MainLayout({
                 onStartDirectMessage={handleStartDirectMessage}
                 moderationSpaceTreeRoomIds={moderationSpaceTreeRoomIds}
                 moderationSpaceName={moderationSpaceName}
+                onOpenNavigation={openMobileNavDrawer}
               />
             ) : activeSpace && activeSpace.membership === "invited" ? (
               <InvitationView room={activeSpace} onJoined={fetchRooms} />
@@ -1312,13 +1328,6 @@ export default function MainLayout({
             )}
           </div>
         </main>
-        {isMobile && (
-          <MobileBottomNav
-            palette={palette}
-            spacing={spacing}
-            onOpenNavigation={openMobileNavDrawer}
-          />
-        )}
         {settingsOpen && (
           <SettingsDialog
             onClose={handleCloseSettings}

@@ -20,6 +20,44 @@ import { Message, Room } from "../types/matrix";
 import { useResizeHandle } from "../hooks/useResizeHandle";
 import { effectiveDmTitle, isDmChatUi } from "../utils/dmDisplay";
 
+/** Header-level back button for mobile — round, large touch target, grey on press. */
+function NavBackButton({ onClick, palette }: {
+  onClick: () => void;
+  palette: { textSecondary: string; bgTertiary: string };
+  spacing: { unit: number };
+}) {
+  const [pressed, setPressed] = useState(false);
+  return (
+    <button
+      type="button"
+      onClick={onClick}
+      onPointerDown={() => setPressed(true)}
+      onPointerUp={() => setPressed(false)}
+      onPointerLeave={() => setPressed(false)}
+      onPointerCancel={() => setPressed(false)}
+      title="Open navigation"
+      style={{
+        background: pressed ? palette.bgTertiary : "none",
+        border: "none",
+        cursor: "pointer",
+        width: 40,
+        height: 40,
+        padding: 0,
+        borderRadius: "50%",
+        display: "flex",
+        alignItems: "center",
+        justifyContent: "center",
+        flexShrink: 0,
+        color: palette.textSecondary,
+        WebkitTapHighlightColor: "transparent",
+        transition: "background-color 0.12s",
+      }}
+    >
+      <ArrowLeft size={22} />
+    </button>
+  );
+}
+
 const MIN_USER_MENU_WIDTH = 180;
 const MAX_USER_MENU_WIDTH = 400;
 const USER_MENU_RESIZE_HANDLE = 6;
@@ -47,6 +85,8 @@ interface ChatViewProps {
   onDraftDmResolved?: (roomId: string) => void | Promise<void>;
   onCancelDraftDm?: () => void;
   isMobile?: boolean;
+  /** Mobile: open the navigation drawer. */
+  onOpenNavigation?: () => void;
 }
 
 interface TypingPayload {
@@ -153,6 +193,7 @@ export default function ChatView({
   onDraftDmResolved,
   onCancelDraftDm,
   isMobile = false,
+  onOpenNavigation,
 }: ChatViewProps) {
   const isDraft = draftDm != null;
   const activeRoom = room ?? null;
@@ -463,6 +504,9 @@ export default function ChatView({
       {/* Channel header — 1:1 DM matches draft banner (no member list toggle) */}
       {isDmChatUi(activeRoom) ? (
         <div style={dmBannerStyle}>
+          {isMobile && onOpenNavigation && (
+            <NavBackButton onClick={onOpenNavigation} palette={palette} spacing={spacing} />
+          )}
           <UserAvatar
             userId={activeRoom.dmPeerUserId ?? activeRoom.id}
             displayName={effectiveDmTitle(activeRoom)}
@@ -509,6 +553,9 @@ export default function ChatView({
           boxSizing: "border-box",
           minWidth: 0,
         }}>
+          {isMobile && onOpenNavigation && (
+            <NavBackButton onClick={onOpenNavigation} palette={palette} spacing={spacing} />
+          )}
           <Hash size={20} color={palette.textSecondary} style={{ flexShrink: 0 }} />
           <span style={{
             fontWeight: typography.fontWeightBold,
@@ -683,7 +730,7 @@ export default function ChatView({
         )}
       </div>
 
-      {isMobile && showUsers && !isDmChatUi(activeRoom) && (
+      {isMobile && !isDmChatUi(activeRoom) && (
         <SideDrawer
           open={showUsers}
           onClose={() => setShowUsers(false)}
