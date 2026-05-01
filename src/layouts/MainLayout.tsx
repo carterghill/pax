@@ -349,16 +349,20 @@ export default function MainLayout({
     setMobileNavDrawerOpen(false);
   }, [activeRoomId, activeSpaceId, isMobile]);
 
-  // Android hardware back button: the native side dispatches a
-  // `pax-android-back` CustomEvent via evaluateJavascript.  Toggle the
-  // navigation drawer instead of leaving the app.
+  // Android hardware back: MainActivity dispatches `pax-android-back` only when
+  // `__paxAndroidBackHandlesNav` is set (mobile drawer layout). Toggle nav drawer.
   useEffect(() => {
     if (!isMobile) return;
+    const w = window as Window & { __paxAndroidBackHandlesNav?: boolean };
+    w.__paxAndroidBackHandlesNav = true;
     const onBack = () => {
       setMobileNavDrawerOpen((prev) => !prev);
     };
     window.addEventListener("pax-android-back", onBack);
-    return () => window.removeEventListener("pax-android-back", onBack);
+    return () => {
+      delete w.__paxAndroidBackHandlesNav;
+      window.removeEventListener("pax-android-back", onBack);
+    };
   }, [isMobile]);
 
   const sidebarResize = useResizeHandle({
