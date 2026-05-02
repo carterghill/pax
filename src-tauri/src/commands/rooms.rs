@@ -10,7 +10,7 @@ use matrix_sdk::ruma::events::StateEventType;
 use matrix_sdk::{config::SyncSettings, Client, RoomMemberships, SessionMeta};
 use tauri::{Manager, State};
 
-use crate::types::{RoomInfo, SpaceChildInfo, SpaceChildOrder, SpaceInfo};
+use crate::types::{ParentSpaceInfo, RoomInfo, SpaceChildInfo, SpaceChildOrder, SpaceInfo};
 use crate::AppState;
 
 use super::auth::{
@@ -4315,6 +4315,213 @@ pub async fn resolve_room_alias(
         .map_err(|e| format!("Failed to parse alias response: {e}"))?;
 
     Ok(body)
+}
+
+// ─── Parent spaces discovery ───────────────────────────────────────────────────
+
+#[tauri::command]
+pub async fn get_room_parent_spaces(
+    state: State<'_, Arc<AppState>>,
+    room_id: String,
+) -> Result<Vec<ParentSpaceInfo>, String> {
+    let client = super::get_client(&state).await?;
+    let parsed =
+        matrix_sdk::ruma::RoomId::parse(&room_id).map_err(|e| format!("Invalid room ID: {e}"))?;
+    let _ = client.get_room(&parsed).ok_or("Room not found")?;
+
+    let homeserver = client.homeserver().to_string();
+    let access_token = client.access_token().ok_or("No access token")?;
+    let hs = homeserver.trim_end_matches('/');
+
+    // Fetch all room state and filter for m.space.parent events
+    let state_url = format!(
+        "{}/_matrix/client/v3/rooms/{}/state",
+        hs,
+        urlencoding::encode(&room_id),
+    );
+    let resp = state
+        .http_client
+        .get(&state_url)
+        .timeout(Duration::from_secs(15))
+        .bearer_auth(access_token.to_string())
+        .send()
+        .await
+        .map_err(|e| format!("State fetch failed: {}", fmt_error_chain(&e)))?;
+
+    if !resp.status().is_success() {
+        let status = resp.status();
+        let text = resp.text().await.unwrap_or_default();
+        return Err(format!("State fetch error ({}): {}", status, text));
+    }
+
+    let all_state: Vec<serde_json::Value> = resp
+        .json()
+        .await
+        .map_err(|e| format!("State parse error: {e}"))?;
+
+    // Collect parent space IDs from m.space.parent events
+    let parent_entries: Vec<(String, bool)> = all_state
+        .iter()
+        .filter(|ev| ev.get("type").and_then(|t| t.as_str()) == Some("m.space.parent"))
+        .filter_map(|ev| {
+            let space_id = ev.get("state_key")?.as_str()?.to_string();
+            // Only include parents whose content is non-empty (not redacted)
+            let content = ev.get("content")?;
+            if content.as_object().map_or(true, |o| o.is_empty()) {
+                return None;
+            }
+            let canonical = content.get("canonical").and_then(|c| c.as_bool()).unwrap_or(false);
+            Some((space_id, canonical))
+        })
+        .collect();
+
+    if parent_entries.is_empty() {
+        return Ok(Vec::new());
+    }
+
+    let avatar_cache = state.avatar_cache.clone();
+    let mut results = Vec::new();
+    let mut media_base_url_cache = std::collections::HashMap::new();
+
+    for (space_id, canonical) in &parent_entries {
+        // Check if user is already a member via the SDK
+        let local_room = matrix_sdk::ruma::RoomId::parse(space_id.as_str())
+            .ok()
+            .and_then(|rid| client.get_room(&rid));
+
+        if let Some(room) = &local_room {
+            let membership = match room.state() {
+                matrix_sdk::RoomState::Joined => "joined",
+                matrix_sdk::RoomState::Invited => "invited",
+                _ => "none",
+            };
+
+            let name = room.name().unwrap_or_else(|| space_id.clone());
+            let topic = room.topic();
+            let avatar_url = get_or_fetch_avatar(
+                room.avatar_url().as_deref(),
+                room.avatar(matrix_sdk::media::MediaFormat::File),
+                &avatar_cache,
+            )
+            .await;
+
+            // Member count: expensive to query all members for spaces we've
+            // already joined; the UI hides the count badge when 0 so this is fine.
+            let joined_count = 0u64;
+
+            // Try to get join_rule from state
+            let join_rule = http_get_room_state(
+                &state.http_client,
+                hs,
+                &access_token,
+                space_id,
+                "m.room.join_rules/",
+            )
+            .await
+            .ok()
+            .flatten()
+            .and_then(|b| b.get("join_rule").and_then(|v| v.as_str()).map(|s| s.to_string()));
+
+            results.push(ParentSpaceInfo {
+                id: space_id.clone(),
+                name,
+                topic,
+                avatar_url,
+                membership: membership.to_string(),
+                join_rule,
+                num_joined_members: joined_count,
+                canonical: *canonical,
+            });
+        } else {
+            // Not joined — try the hierarchy API to peek at the space
+            let hierarchy_url = format!(
+                "{}/_matrix/client/v1/rooms/{}/hierarchy?limit=1",
+                hs,
+                urlencoding::encode(space_id),
+            );
+            let hierarchy_resp = state
+                .http_client
+                .get(&hierarchy_url)
+                .timeout(Duration::from_secs(10))
+                .bearer_auth(access_token.to_string())
+                .send()
+                .await;
+
+            match hierarchy_resp {
+                Ok(r) if r.status().is_success() => {
+                    if let Ok(body) = r.json::<serde_json::Value>().await {
+                        // The first entry in "rooms" is always the queried room/space itself
+                        let space_data = body["rooms"]
+                            .as_array()
+                            .and_then(|arr| arr.first());
+
+                        if let Some(sd) = space_data {
+                            let name = sd["name"]
+                                .as_str()
+                                .unwrap_or("Unnamed")
+                                .to_string();
+                            let topic = sd["topic"]
+                                .as_str()
+                                .filter(|t| !t.is_empty())
+                                .map(|t| t.to_string());
+                            let join_rule = sd["join_rule"]
+                                .as_str()
+                                .map(|s| s.to_string());
+                            let num_joined = sd["num_joined_members"]
+                                .as_u64()
+                                .unwrap_or(0);
+
+                            let avatar_url = match sd["avatar_url"].as_str() {
+                                Some(mxc) => {
+                                    mxc_to_discovered_thumbnail_url(
+                                        &state.http_client,
+                                        &mut media_base_url_cache,
+                                        mxc,
+                                        64,
+                                        64,
+                                    )
+                                    .await
+                                }
+                                None => None,
+                            };
+
+                            results.push(ParentSpaceInfo {
+                                id: space_id.clone(),
+                                name,
+                                topic,
+                                avatar_url,
+                                membership: "none".to_string(),
+                                join_rule,
+                                num_joined_members: num_joined,
+                                canonical: *canonical,
+                            });
+                            continue;
+                        }
+                    }
+                }
+                _ => {}
+            }
+
+            // Fallback: hierarchy API failed (private space, forbidden, etc.)
+            results.push(ParentSpaceInfo {
+                id: space_id.clone(),
+                name: space_id.clone(),
+                topic: None,
+                avatar_url: None,
+                membership: "none".to_string(),
+                join_rule: None,
+                num_joined_members: 0,
+                canonical: *canonical,
+            });
+        }
+    }
+
+    // Sort: canonical parents first, then by name
+    results.sort_by(|a, b| {
+        b.canonical.cmp(&a.canonical).then_with(|| a.name.cmp(&b.name))
+    });
+
+    Ok(results)
 }
 
 #[cfg(test)]

@@ -345,3 +345,19 @@ pub struct SpaceInfo {
     pub avatar_url: Option<String>,
     pub children: Vec<SpaceChildInfo>,
 }
+
+/// A parent space discovered via `m.space.parent` state events on a room.
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ParentSpaceInfo {
+    pub id: String,
+    pub name: String,
+    pub topic: Option<String>,
+    pub avatar_url: Option<String>,
+    /// "joined", "invited", or "none"
+    pub membership: String,
+    pub join_rule: Option<String>,
+    pub num_joined_members: u64,
+    /// Whether this parent was marked as the canonical parent in the `m.space.parent` event.
+    pub canonical: bool,
+}

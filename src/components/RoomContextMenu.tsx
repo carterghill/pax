@@ -1,5 +1,5 @@
 import { useEffect, useRef } from "react";
-import { Settings, UserPlus, LogOut } from "lucide-react";
+import { Settings, UserPlus, LogOut, Layers } from "lucide-react";
 import { useTheme } from "../theme/ThemeContext";
 import { useOverlayObstruction } from "../hooks/useOverlayObstruction";
 
@@ -9,6 +9,7 @@ interface RoomContextMenuProps {
   roomName: string;
   onInvite: () => void;
   onOpenSettings: () => void;
+  onViewParentSpaces: () => void;
   onLeave: () => void;
   onClose: () => void;
 }
@@ -19,6 +20,7 @@ export default function RoomContextMenu({
   roomName,
   onInvite,
   onOpenSettings,
+  onViewParentSpaces,
   onLeave,
   onClose,
 }: RoomContextMenuProps) {
@@ -160,6 +162,36 @@ export default function RoomContextMenu({
       >
         <UserPlus size={14} color={palette.textSecondary} />
         Invite people
+      </button>
+
+      <button
+        onClick={() => {
+          onViewParentSpaces();
+          onClose();
+        }}
+        style={{
+          display: "flex",
+          alignItems: "center",
+          gap: spacing.unit * 2,
+          width: "100%",
+          padding: `${spacing.unit * 1.5}px ${spacing.unit * 2}px`,
+          border: "none",
+          borderRadius: 4,
+          backgroundColor: "transparent",
+          color: palette.textPrimary,
+          fontSize: typography.fontSizeSmall,
+          cursor: "pointer",
+          textAlign: "left",
+        }}
+        onMouseEnter={(e) => {
+          (e.currentTarget as HTMLButtonElement).style.backgroundColor = palette.bgActive;
+        }}
+        onMouseLeave={(e) => {
+          (e.currentTarget as HTMLButtonElement).style.backgroundColor = "transparent";
+        }}
+      >
+        <Layers size={14} color={palette.textSecondary} />
+        Parent spaces
       </button>
 
       <div

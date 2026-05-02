@@ -27,6 +27,7 @@ import RoomSettingsDialog from "./RoomSettingsDialog";
 import { collectRoomIdsInSpaceTree } from "../utils/spaceModeration";
 import InviteDialog from "./InviteDialog";
 import LeaveConfirmDialog from "./LeaveConfirmDialog";
+import ParentSpacesDialog from "./ParentSpacesDialog";
 import CreateRoomDialog from "./CreateRoomDialog";
 import type { RoomsChangedPayload } from "../types/roomsChanged";
 import { useUserVolume } from "../hooks/useUserVolume";
@@ -657,6 +658,7 @@ export default function RoomSidebar({
   const [leaveRoom, setLeaveRoom] = useState<{ id: string; name: string } | null>(null);
   const [leaveRoomError, setLeaveRoomError] = useState<string | null>(null);
   const [leaveRoomSubmitting, setLeaveRoomSubmitting] = useState(false);
+  const [parentSpacesRoom, setParentSpacesRoom] = useState<{ id: string; name: string } | null>(null);
   const [showAddRoomDialog, setShowAddRoomDialog] = useState(false);
   const settingsRoom = settingsRoomId ? getRoom(settingsRoomId) : null;
 
@@ -1588,6 +1590,10 @@ export default function RoomSidebar({
             setInviteRoom({ id: t.roomId, name: t.roomName });
           }}
           onOpenSettings={() => setSettingsRoomId(roomContextMenu.roomId)}
+          onViewParentSpaces={() => {
+            const t = roomContextMenu;
+            setParentSpacesRoom({ id: t.roomId, name: t.roomName });
+          }}
           onLeave={() => {
             const t = roomContextMenu;
             setLeaveRoomError(null);
@@ -1643,6 +1649,14 @@ export default function RoomSidebar({
               setLeaveRoomError(null);
             }
           }}
+        />
+      )}
+
+      {parentSpacesRoom && (
+        <ParentSpacesDialog
+          roomId={parentSpacesRoom.id}
+          roomName={parentSpacesRoom.name}
+          onClose={() => setParentSpacesRoom(null)}
         />
       )}
 

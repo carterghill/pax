@@ -438,6 +438,7 @@ pub fn run() {
             commands::rooms::search_public_spaces,
             commands::rooms::search_public_rooms,
             commands::rooms::resolve_room_alias,
+            commands::rooms::get_room_parent_spaces,
             commands::messages::get_messages,
             commands::messages::get_matrix_image_path,
             commands::messages::clear_media_cache,
