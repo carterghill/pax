@@ -13,6 +13,7 @@ pub mod overlay;
 pub mod pax_settings;
 pub mod presence;
 pub mod profile;
+pub mod push;
 pub mod push_rules;
 pub mod reconciler;
 pub mod rooms;

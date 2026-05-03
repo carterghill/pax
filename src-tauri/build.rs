@@ -51,6 +51,7 @@ fn main() {
         "PAX_HOMESERVER",
         "PAX_REGISTRATION_TOKEN",
         "PAX_HIDE_SERVER_CONFIG",
+        "PAX_PUSH_GATEWAY_URL",
     ];
 
     for var in vars {

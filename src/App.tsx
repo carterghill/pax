@@ -1,5 +1,5 @@
 import "./App.css";
-import { useState, useEffect, useRef, useMemo } from "react";
+import { useState, useEffect, useRef, useMemo, useCallback } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import MainLayout from "./layouts/MainLayout";
 import { UserAvatarStoreProvider } from "./context/UserAvatarStore";
@@ -13,6 +13,7 @@ import { useExternalLinkInterceptor } from "./hooks/useExternalLinks";
 import { listen } from "@tauri-apps/api/event";
 import QuitConfirmDialog from "./components/QuitConfirmDialog";
 import { homeserverUrlToHostname, sanitizeSignupUsernameInput } from "./utils/matrix";
+import { usePushNotifications } from "./hooks/usePushNotifications";
 
 if (import.meta.env.DEV) {
   const w = window as unknown as { invoke: typeof invoke; listen: typeof listen };
@@ -586,6 +587,15 @@ function AuthedApp({
     initialLoadComplete,
   } = useRooms(userId);
 
+  // Register FCM push token with the homeserver (Android only; no-op on desktop).
+  const { unregisterPush } = usePushNotifications({ userId });
+
+  // Wrap the sign-out handler to unregister the pusher first.
+  const handleSignOut = useCallback(async () => {
+    await unregisterPush();
+    onSignOut();
+  }, [onSignOut, unregisterPush]);
+
   if (!initialLoadComplete) {
     return (
       <div style={loadingStyles.container}>
@@ -600,7 +610,7 @@ function AuthedApp({
   return (
     <MainLayout
       userId={userId}
-      onSignOut={onSignOut}
+      onSignOut={handleSignOut}
       rooms={{ spaces, roomsBySpace, getRoom, fetchRooms, upsertOptimisticRoom }}
     />
   );

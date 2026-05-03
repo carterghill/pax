@@ -558,6 +558,10 @@ pub fn run() {
             commands::notifications::notify_supported,
             commands::notifications::notify_send,
             commands::notifications::focus_main_window,
+            // --- Push notifications (Android) ---
+            commands::push::register_pusher,
+            commands::push::unregister_pusher,
+            commands::push::push_gateway_configured,
             commands::tray_indicator::set_tray_unread_indicator,
             commands::lifecycle::exit_app,
             commands::lifecycle::hide_main_window,

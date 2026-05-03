@@ -1,0 +1,29 @@
+{
+  "project_info": {
+    "project_number": "768806987940",
+    "project_id": "pax-chat-189fe",
+    "storage_bucket": "pax-chat-189fe.firebasestorage.app"
+  },
+  "client": [
+    {
+      "client_info": {
+        "mobilesdk_app_id": "1:768806987940:android:d2ccab6fcf29e274351e31",
+        "android_client_info": {
+          "package_name": "com.carter.pax"
+        }
+      },
+      "oauth_client": [],
+      "api_key": [
+        {
+          "current_key": "AIzaSyAg2QJr44H-zwSBMA5b_5gJSHgEtXotoqw"
+        }
+      ],
+      "services": {
+        "appinvite_service": {
+          "other_platform_oauth_client": []
+        }
+      }
+    }
+  ],
+  "configuration_version": "1"
+}
