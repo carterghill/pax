@@ -73,9 +73,9 @@ export function usePushNotifications({
     if (!userId) return;
 
     let cancelled = false;
+    let pollTimer: ReturnType<typeof setTimeout> | null = null;
 
     (async () => {
-      // Check if the build even has a push gateway configured.
       try {
         const configured = await invoke<boolean>("push_gateway_configured");
         if (!configured) return;
@@ -85,31 +85,30 @@ export function usePushNotifications({
 
       if (cancelled) return;
 
-      // Check if the token was injected before React mounted.
-      const existing = window.__paxFcmToken;
-      if (existing) {
-        registerWithToken(existing);
-      }
-
-      // Listen for token injection / refresh from Kotlin side.
-      const handler = (e: Event) => {
+      // Poll for the FCM token from the Rust side (reads file written by Kotlin).
+      // The token file may not exist yet on first launch while Firebase fetches it.
+      const pollForToken = async () => {
         if (cancelled) return;
-        const token = (e as CustomEvent).detail?.token;
-        if (token && typeof token === "string") {
-          registerWithToken(token);
+        try {
+            const bridge = (window as any).PaxAndroid;
+            const token = bridge?.getFcmToken?.();
+            if (token && token.length > 0) {
+                registerWithToken(token);
+                return;
+            }
+        } catch (e) {
+            console.warn("[push] getFcmToken failed:", e);
+        }
+        if (!cancelled) {
+            pollTimer = setTimeout(pollForToken, 2000);
         }
       };
-      window.addEventListener("pax-fcm-token", handler);
-
-      // Cleanup
-      return () => {
-        cancelled = true;
-        window.removeEventListener("pax-fcm-token", handler);
-      };
+      pollForToken();
     })();
 
-    // Reset registration tracking when user changes (login/logout cycle).
     return () => {
+      cancelled = true;
+      if (pollTimer) clearTimeout(pollTimer);
       registeredTokenRef.current = null;
     };
   }, [userId, registerWithToken]);

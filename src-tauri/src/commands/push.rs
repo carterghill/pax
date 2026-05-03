@@ -16,6 +16,7 @@
 use std::sync::Arc;
 
 use tauri::State;
+use tauri::Manager;
 
 use crate::AppState;
 
@@ -141,6 +142,45 @@ pub async fn unregister_pusher(
     }
 
     Ok(())
+}
+
+/// Read the FCM token from the file written by MainActivity.kt.
+/// Returns `None` if the file doesn't exist (non-Android builds, or
+/// first launch before Firebase has fetched a token).
+#[tauri::command]
+pub async fn get_fcm_token(app: tauri::AppHandle) -> Result<Option<String>, String> {
+    #[cfg(target_os = "android")]
+    {
+        // Kotlin's filesDir = /data/data/<pkg>/files/
+        // Try multiple paths since Tauri's data_dir may differ from filesDir
+        let candidates = vec![
+            std::path::PathBuf::from("/data/data/com.carter.pax/files/fcm_token.txt"),
+            {
+                let d = app.path().data_dir().unwrap_or_default();
+                d.join("fcm_token.txt")
+            },
+            {
+                let d = app.path().app_data_dir().unwrap_or_default();
+                d.join("fcm_token.txt")
+            },
+        ];
+        for path in &candidates {
+            if let Ok(token) = std::fs::read_to_string(path) {
+                let token = token.trim().to_string();
+                if !token.is_empty() {
+                    log::info!("[push] read FCM token from {:?} ({} chars)", path, token.len());
+                    return Ok(Some(token));
+                }
+            }
+        }
+        log::warn!("[push] FCM token file not found in any candidate path");
+        Ok(None)
+    }
+    #[cfg(not(target_os = "android"))]
+    {
+        let _ = app;
+        Ok(None)
+    }
 }
 
 /// Returns whether push notifications are configured for this build.

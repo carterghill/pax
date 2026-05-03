@@ -6,7 +6,9 @@ import android.app.PendingIntent
 import android.content.Context
 import android.content.Intent
 import android.os.Build
+import android.util.Log
 import androidx.core.app.NotificationCompat
+import com.carter.pax.R
 import com.google.firebase.messaging.FirebaseMessagingService
 import com.google.firebase.messaging.RemoteMessage
 
@@ -26,6 +28,7 @@ import com.google.firebase.messaging.RemoteMessage
 class PaxFCMService : FirebaseMessagingService() {
 
     companion object {
+        private const val TAG = "PaxFCM"
         const val CHANNEL_ID = "pax_messages"
         const val PREFS_NAME = "pax_push"
         const val PREF_FCM_TOKEN = "fcm_token"
@@ -96,17 +99,25 @@ class PaxFCMService : FirebaseMessagingService() {
             PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
         )
 
-        val notification = NotificationCompat.Builder(this, CHANNEL_ID)
-            .setSmallIcon(android.R.drawable.ic_dialog_info) // TODO: replace with Pax icon resource
-            .setContentTitle(title)
-            .setContentText(body)
-            .setAutoCancel(true)
-            .setPriority(NotificationCompat.PRIORITY_HIGH)
-            .setContentIntent(pendingIntent)
-            .build()
-
         val manager = getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager
-        manager.notify(notificationIdCounter++, notification)
+
+        fun buildNotification(smallIcon: Int) =
+            NotificationCompat.Builder(this, CHANNEL_ID)
+                .setSmallIcon(smallIcon)
+                .setContentTitle(title)
+                .setContentText(body)
+                .setAutoCancel(true)
+                .setPriority(NotificationCompat.PRIORITY_HIGH)
+                .setContentIntent(pendingIntent)
+                .build()
+
+        val id = notificationIdCounter++
+        try {
+            manager.notify(id, buildNotification(R.drawable.ic_stat_pax))
+        } catch (e: RuntimeException) {
+            Log.w(TAG, "Posting notification with ic_stat_pax failed; using system fallback icon", e)
+            manager.notify(id, buildNotification(android.R.drawable.ic_dialog_info))
+        }
     }
 
     private fun createNotificationChannel() {
