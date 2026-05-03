@@ -8,7 +8,9 @@ ROOT = os.path.join(os.path.dirname(__file__), "..")
 ROOT = os.path.normpath(ROOT)
 
 IRIS = os.path.join(ROOT, "public", "logoIrisAltAndroid.png")
-WHITE = os.path.join(ROOT, "public", "logoWhiteAlt.png")
+# Large white-on-dark brand art; `white_logo_to_notify_icon` turns it into
+# status-bar-safe white-on-transparent mipmaps (ic_stat_pax).
+WHITE = os.path.join(ROOT, "public", "logoWhiteAltBig.png")
 RES = os.path.join(
     ROOT,
     "src-tauri",

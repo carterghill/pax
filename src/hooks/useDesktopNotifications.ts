@@ -318,6 +318,13 @@ export function useDesktopNotifications({
 
     (async () => {
       try {
+        if (await invoke<boolean>("push_gateway_configured")) return;
+      } catch {
+        /* fall through — desktop or unknown; keep native notification path */
+      }
+      if (cancelled) return;
+
+      try {
         permissionGranted = await invoke<boolean>("notify_supported");
       } catch {
         permissionGranted = false;
