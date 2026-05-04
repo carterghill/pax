@@ -37,6 +37,7 @@ import { useResizeHandle } from "../hooks/useResizeHandle";
 import { useSpaceOrder, applyStoredSpaceOrder } from "../hooks/useSpaceOrder";
 import { useIsMobile } from "../hooks/useIsMobile";
 import SideDrawer from "../components/SideDrawer";
+import NavBackButton from "../components/NavBackButton";
 
 import { defaultThemeDefinition } from "../theme/themes";
 
@@ -1357,11 +1358,16 @@ export default function MainLayout({
               <div style={{
                 flex: 1,
                 display: "flex",
+                flexDirection: "column",
                 alignItems: "center",
                 justifyContent: "center",
                 color: palette.textSecondary,
+                gap: isMobile ? spacing.unit * 2 : 0,
               }}>
                 Select a room
+                {isMobile ? (
+                  <NavBackButton onClick={openMobileNavDrawer} palette={palette} />
+                ) : null}
               </div>
             )}
           </div>

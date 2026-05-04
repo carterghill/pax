@@ -5,6 +5,7 @@ import { useRoomCanPinMessages } from "../hooks/useRoomCanPinMessages";
 import { useRoomPinnedEventIds } from "../hooks/useRoomPinnedEventIds";
 import { listen } from "@tauri-apps/api/event";
 import { ArrowLeft, Hash, MessageCircle, Users } from "lucide-react";
+import NavBackButton from "../components/NavBackButton";
 import UserAvatar from "../components/UserAvatar";
 import MessageList, { type MessageListHandle } from "../components/MessageList";
 import PinnedMessagesMenu from "../components/PinnedMessagesMenu";
@@ -19,44 +20,6 @@ import { useTheme } from "../theme/ThemeContext";
 import { Message, Room } from "../types/matrix";
 import { useResizeHandle } from "../hooks/useResizeHandle";
 import { effectiveDmTitle, isDmChatUi } from "../utils/dmDisplay";
-
-/** Header-level back button for mobile — round, large touch target, grey on press. */
-function NavBackButton({ onClick, palette }: {
-  onClick: () => void;
-  palette: { textSecondary: string; bgTertiary: string };
-  spacing: { unit: number };
-}) {
-  const [pressed, setPressed] = useState(false);
-  return (
-    <button
-      type="button"
-      onClick={onClick}
-      onPointerDown={() => setPressed(true)}
-      onPointerUp={() => setPressed(false)}
-      onPointerLeave={() => setPressed(false)}
-      onPointerCancel={() => setPressed(false)}
-      title="Open navigation"
-      style={{
-        background: pressed ? palette.bgTertiary : "none",
-        border: "none",
-        cursor: "pointer",
-        width: 40,
-        height: 40,
-        padding: 0,
-        borderRadius: "50%",
-        display: "flex",
-        alignItems: "center",
-        justifyContent: "center",
-        flexShrink: 0,
-        color: palette.textSecondary,
-        WebkitTapHighlightColor: "transparent",
-        transition: "background-color 0.12s",
-      }}
-    >
-      <ArrowLeft size={22} />
-    </button>
-  );
-}
 
 const MIN_USER_MENU_WIDTH = 180;
 const MAX_USER_MENU_WIDTH = 400;
@@ -553,7 +516,7 @@ export default function ChatView({
       {isDmChatUi(activeRoom) ? (
         <div style={dmBannerStyle}>
           {isMobile && onOpenNavigation && (
-            <NavBackButton onClick={onOpenNavigation} palette={palette} spacing={spacing} />
+            <NavBackButton onClick={onOpenNavigation} palette={palette} />
           )}
           <UserAvatar
             userId={activeRoom.dmPeerUserId ?? activeRoom.id}
@@ -602,7 +565,7 @@ export default function ChatView({
           minWidth: 0,
         }}>
           {isMobile && onOpenNavigation && (
-            <NavBackButton onClick={onOpenNavigation} palette={palette} spacing={spacing} />
+            <NavBackButton onClick={onOpenNavigation} palette={palette} />
           )}
           <Hash size={20} color={palette.textSecondary} style={{ flexShrink: 0 }} />
           <span style={{

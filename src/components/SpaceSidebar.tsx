@@ -776,7 +776,7 @@ export default function SpaceSidebar({
                   }}
                 >
                   <img
-                    src="/logo.png"
+                    src="/logoWhiteAlt.png"
                     alt=""
                     draggable={false}
                     style={{
