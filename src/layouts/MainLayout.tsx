@@ -733,6 +733,10 @@ export default function MainLayout({
 
   // Handle room selection — clicking a voice room joins the call (only if already joined/member)
   const handleSelectRoom = useCallback((roomId: string) => {
+    if (isMobile && roomId === activeRoomId) {
+      setMobileNavDrawerOpen(false);
+      return;
+    }
     setActiveRoomId(roomId);
 
     const room = getRoom(roomId);
@@ -740,7 +744,15 @@ export default function MainLayout({
       // Join voice room on click (only if not already connected to this room)
       connectVoiceCall(roomId);
     }
-  }, [setActiveRoomId, getRoom, connectedVoiceRoomId, connectVoiceCall]);
+  }, [
+    isMobile,
+    activeRoomId,
+    setMobileNavDrawerOpen,
+    setActiveRoomId,
+    getRoom,
+    connectedVoiceRoomId,
+    connectVoiceCall,
+  ]);
 
   const handleStartDirectMessage = useCallback(
     (peerUserId: string, displayNameHint: string) => {
