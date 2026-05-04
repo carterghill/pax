@@ -230,9 +230,10 @@ export function useDesktopNotifications({
 
     // Best-effort "which room did the user just click to open?" — the
     // plugin's click event doesn't round-trip custom data well, so we
-    // stash the last-shown notification's roomId here when `notify_send`
-    // succeeds and read it back when the click event fires.
-    const lastClickRoomIdRef = { current: null as string | null };
+    // stash the most-recent notification target for the native click handler.
+    const lastClickNotificationRef = {
+      current: null as { roomId: string; eventId: string } | null,
+    };
 
     async function resolveLevel(roomId: string): Promise<NotificationLevel> {
       const cached = levelCacheRef.current.get(roomId);
@@ -296,7 +297,10 @@ export function useDesktopNotifications({
       // The plugin's click event doesn't round-trip custom data well,
       // so we stash the most-recent-notification's roomId for the click
       // handler to use.
-      lastClickRoomIdRef.current = roomId;
+      lastClickNotificationRef.current = {
+        roomId,
+        eventId: message.eventId,
+      };
 
       try {
         await invoke("notify_send", {
@@ -354,17 +358,21 @@ export function useDesktopNotifications({
       // Plugin click action → focus window + let MainLayout know which
       // room to jump to.  The plugin's `notification` event fires on
       // click; payload isn't reliably round-tripped, so we use
-      // `lastClickRoomIdRef` as a best-effort hint (last notification
+      // `lastClickNotificationRef` as a best-effort hint (last notification
       // shown — good enough for "I clicked the toast that just popped").
       const offClick = await listen("notification", () => {
         if (cancelled) return;
         invoke("focus_main_window").catch(() => {
           /* best effort */
         });
-        const roomId = lastClickRoomIdRef.current;
-        if (roomId) {
+        const target = lastClickNotificationRef.current;
+        if (target) {
+          const detail: { roomId: string; eventId?: string } = {
+            roomId: target.roomId,
+            eventId: target.eventId,
+          };
           window.dispatchEvent(
-            new CustomEvent("pax-notification-clicked", { detail: { roomId } }),
+            new CustomEvent("pax-notification-clicked", { detail }),
           );
         }
       });

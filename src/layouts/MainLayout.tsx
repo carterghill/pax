@@ -229,6 +229,11 @@ export default function MainLayout({
   const [activeSpaceId, setActiveSpaceId] = useState<string | null>(null);
   const [activeRoomBySpace, setActiveRoomBySpace] = useState<Record<string, string | null>>({});
   const [settingsOpen, setSettingsOpen] = useState(false);
+  /** When non-null, ChatView scrolls to this timeline event after the room is active (push/desktop notification tap). */
+  const [notificationJump, setNotificationJump] = useState<{
+    roomId: string;
+    eventId: string;
+  } | null>(null);
   /** DM composer before the Matrix room exists (first send creates the room). */
   const [pendingDm, setPendingDm] = useState<{ peerUserId: string; displayNameHint: string } | null>(null);
   const pendingDmPeerProfile = useMatrixUserProfile(pendingDm?.peerUserId ?? null);
@@ -243,6 +248,17 @@ export default function MainLayout({
   const spaceKey = activeSpaceId ?? "";
   const activeRoomId = activeRoomBySpace[spaceKey] ?? null;
 
+  const clearNotificationJump = useCallback(() => {
+    setNotificationJump(null);
+  }, []);
+
+  useEffect(() => {
+    if (!notificationJump) return;
+    if (activeRoomId !== notificationJump.roomId) {
+      setNotificationJump(null);
+    }
+  }, [activeRoomId, notificationJump]);
+
   const setActiveRoomId = useCallback((roomId: string | null) => {
     startTransition(() => {
       setActiveRoomBySpace((prev) => ({ ...prev, [spaceKey]: roomId }));
@@ -254,21 +270,26 @@ export default function MainLayout({
   // It also fires a `pax-notification-clicked` CustomEvent on click-to-focus.
   useDesktopNotifications({ userId, activeRoomId, getRoom });
 
-  // Click-to-focus: when the user clicks a notification, jump to that room.
-  // The hook only knows the room id — we resolve which space it belongs to
-  // (picking the first matching ancestor) and switch both.
+  // Click-to-focus: when the user clicks a notification, jump to that room
+  // (and scroll to the notified event when `detail.eventId` is present).
   useEffect(() => {
     function onClicked(e: Event) {
-      const ce = e as CustomEvent<{ roomId: string }>;
+      const ce = e as CustomEvent<{ roomId: string; eventId?: string }>;
       const targetRoomId = ce.detail?.roomId;
       if (!targetRoomId) return;
       const room = getRoom(targetRoomId);
       if (!room) return;
+      const scrollEventId = ce.detail?.eventId?.trim();
       // Pick any joined parent space — if none, null (DMs / orphaned rooms).
       const parentSpaceId = room.parentSpaceIds.find((pid) =>
         joinedSpaceIdSet.has(pid),
       ) ?? null;
       startTransition(() => {
+        setNotificationJump(
+          scrollEventId
+            ? { roomId: targetRoomId, eventId: scrollEventId }
+            : null,
+        );
         setActiveSpaceId(parentSpaceId);
         setActiveRoomBySpace((prev) => ({
           ...prev,
@@ -1307,6 +1328,8 @@ export default function MainLayout({
                 userId={userId}
                 userMenuWidth={userMenuWidth}
                 isMobile={isMobile}
+                notificationJump={notificationJump}
+                onNotificationJumpConsumed={clearNotificationJump}
                 onUserMenuWidthChange={(next: number) => {
                   const clamped = Math.max(MIN_USER_MENU_WIDTH, Math.min(MAX_USER_MENU_WIDTH, next));
                   setUserMenuWidth(clamped);

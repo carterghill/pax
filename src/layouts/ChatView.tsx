@@ -77,6 +77,9 @@ interface ChatViewProps {
   userMenuWidth: number;
   onUserMenuWidthChange: (width: number) => void;
   onStartDirectMessage: (peerUserId: string, displayNameHint: string) => void;
+  /** Opened from a system notification: scroll this timeline event after the room is active. */
+  notificationJump?: { roomId: string; eventId: string } | null;
+  onNotificationJumpConsumed?: () => void;
   /** Space tree room ids when the active room is under a space (for kick/ban scope). */
   moderationSpaceTreeRoomIds?: string[] | null;
   moderationSpaceName?: string | null;
@@ -188,6 +191,8 @@ export default function ChatView({
   userMenuWidth,
   onUserMenuWidthChange,
   onStartDirectMessage,
+  notificationJump = null,
+  onNotificationJumpConsumed,
   moderationSpaceTreeRoomIds = null,
   moderationSpaceName = null,
   onDraftDmResolved,
@@ -259,6 +264,8 @@ export default function ChatView({
 
   const containerRef = useRef<HTMLDivElement>(null);
   const messageListRef = useRef<MessageListHandle>(null);
+  const messagesSnapshotRef = useRef<Message[]>([]);
+  messagesSnapshotRef.current = messages;
   const userMenuResize = useResizeHandle({
     width: userMenuWidth,
     onWidthChange: onUserMenuWidthChange,
@@ -358,6 +365,47 @@ export default function ChatView({
     },
     [isDraft, activeRoom, messages, loadMessagesAroundEvent],
   );
+
+  // Android / desktop notification tap: jump to the exact Matrix event when provided.
+  useEffect(() => {
+    if (isDraft || !activeRoom || !notificationJump) return;
+    if (notificationJump.roomId !== activeRoom.id) return;
+    const eventId = notificationJump.eventId;
+    if (!eventId) return;
+    let cancelled = false;
+    const finish = () => {
+      if (!cancelled) onNotificationJumpConsumed?.();
+    };
+    const msgs = messagesSnapshotRef.current;
+    const inWindow = msgs.some((m) => m.eventId === eventId);
+    if (inWindow) {
+      requestAnimationFrame(() => {
+        messageListRef.current?.scrollToEventId(eventId);
+        finish();
+      });
+      return () => {
+        cancelled = true;
+      };
+    }
+    void (async () => {
+      try {
+        await loadMessagesAroundEvent(eventId);
+      } finally {
+        if (cancelled) return;
+        requestAnimationFrame(() => {
+          requestAnimationFrame(() => {
+            if (!cancelled) {
+              messageListRef.current?.scrollToEventId(eventId);
+              finish();
+            }
+          });
+        });
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [isDraft, activeRoom?.id, notificationJump, loadMessagesAroundEvent, onNotificationJumpConsumed]);
 
   const handlePinnedStateChanged = useCallback(() => {
     void refreshPinned();

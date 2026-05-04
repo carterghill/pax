@@ -29,6 +29,7 @@ class PaxFCMService : FirebaseMessagingService() {
 
     companion object {
         private const val TAG = "PaxFCM"
+        private const val MAX_PREVIEW_LEN = 500
         const val CHANNEL_ID = "pax_messages"
         const val PREFS_NAME = "pax_push"
         const val PREF_FCM_TOKEN = "fcm_token"
@@ -56,46 +57,58 @@ class PaxFCMService : FirebaseMessagingService() {
     /**
      * Called for every data message from Sygnal.
      *
-     * Sygnal's `event_id_only` format sends minimal fields:
-     *   - `event_id`, `room_id`, `type`, `prio`, `unread`, `counts`
+     * Homeserver + Sygnal normally send (among others):
+     *   - `sender`, `sender_display_name`, `room_name`, `room_alias`, `room_id`, `event_id`
+     *   - `content` (legacy FCM: JSON string with `body`) or `content_body` (FCM HTTP v1)
      *
-     * With the full format it also includes:
-     *   - `sender`, `sender_display_name`, `room_name`, `content`
-     *
-     * We handle both: if display fields are present we use them,
-     * otherwise we show a generic "New message" notification.
+     * If the pusher was registered with `event_id_only`, most of these are absent
+     * and we fall back to a generic notification.
      */
     override fun onMessageReceived(message: RemoteMessage) {
         super.onMessageReceived(message)
         val data = message.data
         if (data.isEmpty()) return
 
-        val roomName = data["room_name"] ?: data["room_alias"]
-        val senderName = data["sender_display_name"] ?: data["sender"]
+        val roomName = data["room_name"]?.trim()?.takeIf { it.isNotEmpty() }
+        val roomAlias = data["room_alias"]?.trim()?.takeIf { it.isNotEmpty() }
+        val senderName = (data["sender_display_name"] ?: data["sender"])
+            ?.trim()?.takeIf { it.isNotEmpty() }
         val roomId = data["room_id"] ?: ""
+        val eventId = data["event_id"]?.trim()?.takeIf { it.isNotEmpty() } ?: ""
 
-        // Build notification text
+        val preview = messagePreview(data)
+        val roomLabel = roomContextLabel(roomName, roomAlias, senderName)
+
         val title: String
         val body: String
-
-        if (senderName != null && roomName != null) {
-            title = "$senderName ($roomName)"
-            body = data["content"]?.let { parseContentBody(it) } ?: "Sent a message"
-        } else if (senderName != null) {
-            title = senderName
-            body = data["content"]?.let { parseContentBody(it) } ?: "Sent a message"
-        } else {
-            title = "Pax"
-            body = "New message"
+        when {
+            senderName != null && roomLabel != null -> {
+                title = senderName
+                body = "$roomLabel · $preview"
+            }
+            senderName != null -> {
+                title = senderName
+                body = preview
+            }
+            roomLabel != null -> {
+                title = roomLabel
+                body = preview
+            }
+            else -> {
+                title = "Pax"
+                body = preview
+            }
         }
 
-        // Tap opens the app (MainActivity is singleTask, so it'll reuse the existing instance)
+        // Tap opens the app (MainActivity is singleTask, so it'll reuse the existing instance).
+        // `event_id` lets the WebView scroll to the notified message after switching rooms.
         val intent = Intent(this, MainActivity::class.java).apply {
             flags = Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_CLEAR_TOP
             putExtra("room_id", roomId)
+            if (eventId.isNotEmpty()) putExtra("event_id", eventId)
         }
         val pendingIntent = PendingIntent.getActivity(
-            this, roomId.hashCode(), intent,
+            this, roomId.hashCode() xor eventId.hashCode(), intent,
             PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
         )
 
@@ -106,6 +119,7 @@ class PaxFCMService : FirebaseMessagingService() {
                 .setSmallIcon(smallIcon)
                 .setContentTitle(title)
                 .setContentText(body)
+                .setStyle(NotificationCompat.BigTextStyle().bigText(body))
                 .setAutoCancel(true)
                 .setPriority(NotificationCompat.PRIORITY_HIGH)
                 .setContentIntent(pendingIntent)
@@ -134,8 +148,38 @@ class PaxFCMService : FirebaseMessagingService() {
         }
     }
 
+    /** Where the message lives: room display name, alias, or DM vs unknown. */
+    private fun roomContextLabel(
+        roomName: String?,
+        roomAlias: String?,
+        senderDisplay: String?,
+    ): String? {
+        if (roomName != null && senderDisplay != null &&
+            roomName.equals(senderDisplay, ignoreCase = true)
+        ) {
+            return "Direct message"
+        }
+        if (roomName != null) return roomName
+        if (roomAlias != null) return roomAlias
+        return null
+    }
+
     /**
-     * Best-effort parse of the `content` field from Sygnal.
+     * Human-readable one-line preview: Sygnal FCM v1 uses `content_body`;
+     * legacy sends `content` as a JSON string with `body`.
+     */
+    private fun messagePreview(data: Map<String, String>): String {
+        data["content_body"]?.trim()?.takeIf { it.isNotEmpty() }?.let {
+            return truncate(it, MAX_PREVIEW_LEN)
+        }
+        val content = data["content"] ?: return "New message"
+        val fromJson = parseContentBody(content)?.trim()?.takeIf { it.isNotEmpty() }
+        if (fromJson != null) return truncate(fromJson, MAX_PREVIEW_LEN)
+        return "New message"
+    }
+
+    /**
+     * Best-effort parse of the `content` field from Sygnal (legacy).
      * Sygnal sends it as a JSON string; we try to extract `body`.
      */
     private fun parseContentBody(content: String): String? {
@@ -145,5 +189,10 @@ class PaxFCMService : FirebaseMessagingService() {
         } catch (_: Exception) {
             null
         }
+    }
+
+    private fun truncate(s: String, max: Int): String {
+        if (s.length <= max) return s
+        return s.substring(0, max - 1) + "…"
     }
 }

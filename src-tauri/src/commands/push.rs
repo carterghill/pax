@@ -9,6 +9,9 @@
 //!      homeserver, pointing at our Sygnal push-gateway instance.
 //!   4. On logout the frontend calls `unregister_pusher` to remove it.
 //!
+//! Pusher `data` omits `format: event_id_only` so the homeserver sends the
+//! full notification payload (sender, room name, message preview) to Sygnal.
+//!
 //! Background notification *display* is handled entirely on the Kotlin side
 //! (`PaxFCMService`) — Sygnal sends FCM data messages, the service shows an
 //! Android system notification, no Rust involvement needed for that path.
@@ -57,11 +60,13 @@ pub async fn register_pusher(
         homeserver.trim_end_matches('/')
     );
 
+    // Omit `format` / skip `event_id_only` so the homeserver sends the full
+    // push-gateway notification (sender, room_name, content, …). Sygnal maps
+    // those fields into the FCM data payload for PaxFCMService.
     let body = serde_json::json!({
         "app_display_name": APP_DISPLAY_NAME,
         "app_id": APP_ID,
         "data": {
-            "format": "event_id_only",
             "url": format!("{}/_matrix/push/v1/notify", gateway_url.trim_end_matches('/'))
         },
         "device_display_name": device_display_name,

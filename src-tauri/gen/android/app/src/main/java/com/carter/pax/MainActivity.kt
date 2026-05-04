@@ -1,6 +1,7 @@
 package com.carter.pax
 
 import android.content.Context
+import android.content.Intent
 import android.os.Bundle
 import android.webkit.WebView
 import androidx.activity.OnBackPressedCallback
@@ -9,13 +10,23 @@ import com.google.firebase.messaging.FirebaseMessaging
 import android.util.Log
 
 import android.webkit.JavascriptInterface
+import org.json.JSONObject
 
 class MainActivity : TauriActivity() {
   private var webViewRef: WebView? = null
+  /** Cold start: intent arrives before the WebView exists — flush after first page load. */
+  private var pendingNotificationOpen: Pair<String, String?>? = null
 
   override fun onCreate(savedInstanceState: Bundle?) {
     enableEdgeToEdge()
     super.onCreate(savedInstanceState)
+    handleNotificationIntent(intent)
+  }
+
+  override fun onNewIntent(intent: Intent) {
+    super.onNewIntent(intent)
+    setIntent(intent)
+    handleNotificationIntent(intent)
   }
 
   override fun onWebViewCreate(webView: WebView) {
@@ -28,6 +39,11 @@ class MainActivity : TauriActivity() {
             super.onPageFinished(view, url)
             Log.d("PaxPush", "page finished, injecting token")
             injectFcmToken(webView)
+            val pending = pendingNotificationOpen
+            if (pending != null) {
+              dispatchOpenNotification(webView, pending.first, pending.second)
+              pendingNotificationOpen = null
+            }
         }
     }
 
@@ -52,6 +68,35 @@ class MainActivity : TauriActivity() {
             }
         }
     )
+  }
+
+  private fun handleNotificationIntent(intent: Intent?) {
+    val i = intent ?: return
+    val roomId = i.getStringExtra("room_id")?.trim() ?: return
+    if (roomId.isEmpty()) return
+    val eventId = i.getStringExtra("event_id")?.trim()?.takeIf { it.isNotEmpty() }
+    val wv = webViewRef
+    if (wv != null) {
+      dispatchOpenNotification(wv, roomId, eventId)
+    } else {
+      pendingNotificationOpen = roomId to eventId
+    }
+  }
+
+  /**
+   * Mirrors desktop `pax-notification-clicked` so MainLayout can open the room
+   * and ChatView can scroll to [eventId] when present.
+   */
+  private fun dispatchOpenNotification(webView: WebView, roomId: String, eventId: String?) {
+    val rid = JSONObject.quote(roomId)
+    val evPart =
+      if (eventId != null && eventId.isNotEmpty()) ",eventId:${JSONObject.quote(eventId)}" else ""
+    val js =
+      "(function(){var d={roomId:$rid$evPart};" +
+        "window.dispatchEvent(new CustomEvent('pax-notification-clicked',{detail:d}));})()"
+    webView.post {
+      webView.evaluateJavascript(js, null)
+    }
   }
 
   private fun injectFcmToken(webView: WebView) {
