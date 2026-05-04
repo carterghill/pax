@@ -55,6 +55,82 @@ const PAGE_SIZE = 50;
 /** Messages fetched for the initial load and jumpToRecent. */
 const INITIAL_LOAD_SIZE = 50;
 
+/** LRU cap for recent-window message snapshots (text + metadata only; no image bytes). */
+const MAX_ROOMS_MESSAGE_CACHE = 10;
+
+interface RoomMessagesCacheEntry {
+  messages: Message[];
+  olderToken: string | null;
+  isAtLatest: boolean;
+}
+
+const roomMessagesCache = new Map<string, RoomMessagesCacheEntry>();
+
+function cloneMessagesForCache(msgs: Message[]): Message[] {
+  return msgs.map((m) => ({
+    ...m,
+    reactions: m.reactions?.map((r) => ({ ...r })),
+  }));
+}
+
+function touchRoomMessagesCache(roomId: string) {
+  const entry = roomMessagesCache.get(roomId);
+  if (!entry) return;
+  roomMessagesCache.delete(roomId);
+  roomMessagesCache.set(roomId, entry);
+}
+
+function getRoomMessagesSnapshot(roomId: string): RoomMessagesCacheEntry | undefined {
+  const entry = roomMessagesCache.get(roomId);
+  if (!entry) return undefined;
+  touchRoomMessagesCache(roomId);
+  return {
+    messages: cloneMessagesForCache(entry.messages),
+    olderToken: entry.olderToken,
+    isAtLatest: entry.isAtLatest,
+  };
+}
+
+function putRoomMessagesSnapshot(roomId: string, entry: RoomMessagesCacheEntry) {
+  const stored: RoomMessagesCacheEntry = {
+    messages: cloneMessagesForCache(entry.messages),
+    olderToken: entry.olderToken,
+    isAtLatest: entry.isAtLatest,
+  };
+  if (roomMessagesCache.has(roomId)) roomMessagesCache.delete(roomId);
+  roomMessagesCache.set(roomId, stored);
+  while (roomMessagesCache.size > MAX_ROOMS_MESSAGE_CACHE) {
+    const oldest = roomMessagesCache.keys().next().value as string | undefined;
+    if (oldest === undefined) break;
+    roomMessagesCache.delete(oldest);
+  }
+}
+
+/**
+ * Persist only when the in-memory list matches a single tail fetch:
+ * at-latest, no backward pagination in this visit, and count ≤ initial load
+ * (so `olderToken` still matches this window).
+ */
+function trySaveRoomMessagesCache(
+  roomId: string,
+  snapshot: {
+    messages: Message[];
+    olderToken: string | null;
+    isAtLatest: boolean;
+    hasLoadedOlder: boolean;
+  },
+) {
+  if (!snapshot.isAtLatest || snapshot.hasLoadedOlder) return;
+  const trimmed = snapshot.messages.filter((m) => !m.eventId.startsWith("local:"));
+  if (trimmed.length === 0) return;
+  if (trimmed.length > INITIAL_LOAD_SIZE) return;
+  putRoomMessagesSnapshot(roomId, {
+    messages: trimmed,
+    olderToken: snapshot.olderToken,
+    isAtLatest: true,
+  });
+}
+
 /* ------------------------------------------------------------------ */
 /*  Pure helpers                                                       */
 /* ------------------------------------------------------------------ */
@@ -285,9 +361,9 @@ function applyMessageEdit(arr: Message[], payload: MessageEditPayload): Message[
 /*  Backward-compat export (App.tsx calls on logout)                   */
 /* ------------------------------------------------------------------ */
 
-/** No-op — the old global cache is gone. */
+/** Clears the recent-room message LRU (call on logout). */
 export function clearMessageCache() {
-  /* nothing to do */
+  roomMessagesCache.clear();
 }
 
 /* ------------------------------------------------------------------ */
@@ -331,6 +407,9 @@ export function useMessages(roomId: string | null, currentUserId: string | null 
   activeRoomIdRef.current = roomId;
   const loadingLockRef = useRef(false);
   const initialFetchingRef = useRef(false);
+  /** True after `loadOlder` / `loadMessagesAroundEvent` — tail-only cache would have wrong pagination. */
+  const hasLoadedOlderRef = useRef(false);
+  const prevRoomIdRef = useRef<string | null>(null);
   /** Dedupes `room-message-reaction` sync when we already updated from a successful chip invoke. */
   const reactionOptimisticEchoRef = useRef<Set<string>>(new Set());
 
@@ -353,6 +432,17 @@ export function useMessages(roomId: string | null, currentUserId: string | null 
   /* ================================================================ */
 
   useLayoutEffect(() => {
+    const switchingFrom = prevRoomIdRef.current;
+    if (switchingFrom != null && switchingFrom !== roomId) {
+      trySaveRoomMessagesCache(switchingFrom, {
+        messages: messagesRef.current,
+        olderToken: olderTokenRef.current,
+        isAtLatest: isAtLatestRef.current,
+        hasLoadedOlder: hasLoadedOlderRef.current,
+      });
+    }
+    prevRoomIdRef.current = roomId;
+
     loadingLockRef.current = false;
     initialFetchingRef.current = false;
     setLoadingOlder(false);
@@ -362,12 +452,23 @@ export function useMessages(roomId: string | null, currentUserId: string | null 
       for (const m of messagesRef.current) revokeLocalPreviewIfNeeded(m);
       commit([], null, true);
       setInitialLoading(false);
+      hasLoadedOlderRef.current = false;
       return;
     }
 
     for (const m of messagesRef.current) revokeLocalPreviewIfNeeded(m);
-    commit([], null, true);
-    setInitialLoading(true);
+
+    hasLoadedOlderRef.current = false;
+
+    const cached = getRoomMessagesSnapshot(roomId);
+    if (cached) {
+      commit(cached.messages, cached.olderToken, cached.isAtLatest);
+      primeAvatarsFromMessagesRef.current(cached.messages);
+      setInitialLoading(false);
+    } else {
+      commit([], null, true);
+      setInitialLoading(true);
+    }
   }, [roomId, commit]);
 
   /* ================================================================ */
@@ -403,6 +504,11 @@ export function useMessages(roomId: string | null, currentUserId: string | null 
         const msgs = batch.messages.slice().reverse();
         commit(msgs, batch.prevBatch, true);
         primeAvatarsFromMessagesRef.current(msgs);
+        putRoomMessagesSnapshot(target, {
+          messages: msgs,
+          olderToken: batch.prevBatch,
+          isAtLatest: true,
+        });
         setPendingRecentCount(0);
       } catch (e) {
         if (cancelled || activeRoomIdRef.current !== target) return;
@@ -540,6 +646,8 @@ export function useMessages(roomId: string | null, currentUserId: string | null 
       });
       if (activeRoomIdRef.current !== target) return;
 
+      hasLoadedOlderRef.current = true;
+
       const older = batch.messages.slice().reverse();
       if (older.length === 0) {
         olderTokenRef.current = null;
@@ -596,6 +704,12 @@ export function useMessages(roomId: string | null, currentUserId: string | null 
       const msgs = batch.messages.slice().reverse();
       commit(msgs, batch.prevBatch, true);
       primeAvatarsFromMessagesRef.current(msgs);
+      hasLoadedOlderRef.current = false;
+      putRoomMessagesSnapshot(target, {
+        messages: msgs,
+        olderToken: batch.prevBatch,
+        isAtLatest: true,
+      });
       setPendingRecentCount(0);
     } catch (e) {
       console.error("[useMessages] jumpToRecent error:", e);
@@ -850,9 +964,10 @@ export function useMessages(roomId: string | null, currentUserId: string | null 
           eventId,
         });
         if (activeRoomIdRef.current !== target) return;
+        hasLoadedOlderRef.current = true;
         const msgs = batch.messages.slice().reverse();
         commit(msgs, batch.prevBatch, false);
-        primeAvatarsFromMessages(msgs);
+        primeAvatarsFromMessagesRef.current(msgs);
         setPendingRecentCount(0);
       } catch (e) {
         console.error("[useMessages] loadMessagesAroundEvent error:", e);

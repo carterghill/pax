@@ -17,7 +17,7 @@ import {
 } from "../hooks/useNotificationSettings";
 import { useDesktopNotifications } from "../hooks/useDesktopNotifications";
 import { PresenceContext } from "../hooks/PresenceContext";
-import { useState, useCallback, useMemo, useEffect, useRef, startTransition } from "react";
+import { useState, useCallback, useMemo, useEffect, startTransition } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { useTheme } from "../theme/ThemeContext";
 import SettingsDialog from "../components/SettingsDialog";
@@ -249,6 +249,35 @@ export default function MainLayout({
   const spaceKey = activeSpaceId ?? "";
   const activeRoomId = activeRoomBySpace[spaceKey] ?? null;
 
+  const isMobile = useIsMobile();
+  const [mobileNavDrawerOpen, setMobileNavDrawerOpen] = useState(false);
+
+  const openMobileNavDrawer = useCallback(() => {
+    setMobileNavDrawerOpen(true);
+  }, []);
+
+  useEffect(() => {
+    if (!isMobile) {
+      setMobileNavDrawerOpen(false);
+    }
+  }, [isMobile]);
+
+  // Android hardware back: MainActivity dispatches `pax-android-back` only when
+  // `__paxAndroidBackHandlesNav` is set (mobile drawer layout). Toggle nav drawer.
+  useEffect(() => {
+    if (!isMobile) return;
+    const w = window as Window & { __paxAndroidBackHandlesNav?: boolean };
+    w.__paxAndroidBackHandlesNav = true;
+    const onBack = () => {
+      setMobileNavDrawerOpen((prev) => !prev);
+    };
+    window.addEventListener("pax-android-back", onBack);
+    return () => {
+      delete w.__paxAndroidBackHandlesNav;
+      window.removeEventListener("pax-android-back", onBack);
+    };
+  }, [isMobile]);
+
   const clearNotificationJump = useCallback(() => {
     setNotificationJump(null);
   }, []);
@@ -297,11 +326,12 @@ export default function MainLayout({
           [parentSpaceId ?? ""]: targetRoomId,
         }));
       });
+      if (isMobile) setMobileNavDrawerOpen(false);
     }
     window.addEventListener("pax-notification-clicked", onClicked);
     return () =>
       window.removeEventListener("pax-notification-clicked", onClicked);
-  }, [getRoom, joinedSpaceIdSet]);
+  }, [getRoom, joinedSpaceIdSet, isMobile, setMobileNavDrawerOpen]);
 
   // Clicking the already-active space clears room selection to show the space home
   const handleSelectSpace = useCallback((spaceId: string) => {
@@ -352,51 +382,6 @@ export default function MainLayout({
   const [userMenuWidth, setUserMenuWidth] = useState(() =>
     getStoredUserMenuWidth(defaultThemeDefinition.spacing.userMenuWidth)
   );
-
-  const isMobile = useIsMobile();
-  const [mobileNavDrawerOpen, setMobileNavDrawerOpen] = useState(false);
-  const prevActiveRoomIdRef = useRef<string | null>(null);
-
-  const openMobileNavDrawer = useCallback(() => {
-    setMobileNavDrawerOpen(true);
-  }, []);
-
-  useEffect(() => {
-    if (!isMobile) {
-      setMobileNavDrawerOpen(false);
-    }
-  }, [isMobile]);
-
-  useEffect(() => {
-    if (!isMobile) return;
-    // Close the drawer when the user selects a room, but keep it open when
-    // they only change spaces (space switch is often followed by room pick).
-    // Avoid closing on initial mount.
-    if (prevActiveRoomIdRef.current === null) {
-      prevActiveRoomIdRef.current = activeRoomId;
-      return;
-    }
-    if (activeRoomId !== prevActiveRoomIdRef.current) {
-      setMobileNavDrawerOpen(false);
-    }
-    prevActiveRoomIdRef.current = activeRoomId;
-  }, [activeRoomId, isMobile]);
-
-  // Android hardware back: MainActivity dispatches `pax-android-back` only when
-  // `__paxAndroidBackHandlesNav` is set (mobile drawer layout). Toggle nav drawer.
-  useEffect(() => {
-    if (!isMobile) return;
-    const w = window as Window & { __paxAndroidBackHandlesNav?: boolean };
-    w.__paxAndroidBackHandlesNav = true;
-    const onBack = () => {
-      setMobileNavDrawerOpen((prev) => !prev);
-    };
-    window.addEventListener("pax-android-back", onBack);
-    return () => {
-      delete w.__paxAndroidBackHandlesNav;
-      window.removeEventListener("pax-android-back", onBack);
-    };
-  }, [isMobile]);
 
   const sidebarResize = useResizeHandle({
     width: roomSidebarWidth,
@@ -738,6 +723,7 @@ export default function MainLayout({
       return;
     }
     setActiveRoomId(roomId);
+    if (isMobile) setMobileNavDrawerOpen(false);
 
     const room = getRoom(roomId);
     if (room && room.roomType === VOICE_ROOM_TYPE && room.membership === "joined" && connectedVoiceRoomId !== roomId) {
@@ -789,6 +775,7 @@ export default function MainLayout({
             [parentSpaceId ?? ""]: room.id,
           }));
         });
+        if (isMobile) setMobileNavDrawerOpen(false);
         return;
       }
       const draftId = pendingDmRoomId(peerUserId);
@@ -797,8 +784,9 @@ export default function MainLayout({
         setActiveSpaceId(null);
         setActiveRoomBySpace((prev) => ({ ...prev, "": draftId }));
       });
+      if (isMobile) setMobileNavDrawerOpen(false);
     },
-    [spaces, roomsBySpace, getRoom, joinedSpaceIdSet],
+    [spaces, roomsBySpace, getRoom, joinedSpaceIdSet, isMobile, setMobileNavDrawerOpen],
   );
 
   const handleDraftDmResolved = useCallback(
@@ -821,8 +809,9 @@ export default function MainLayout({
         setPendingDm(null);
         setActiveRoomId(dmRoomId);
       });
+      if (isMobile) setMobileNavDrawerOpen(false);
     },
-    [fetchRooms, setActiveRoomId, pendingDm, pendingDmPeerProfile],
+    [fetchRooms, setActiveRoomId, pendingDm, pendingDmPeerProfile, isMobile, setMobileNavDrawerOpen],
   );
 
   const handleCancelDraftDm = useCallback(() => {
