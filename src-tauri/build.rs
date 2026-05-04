@@ -34,11 +34,20 @@ fn main() {
     println!("cargo:rustc-check-cfg=cfg(has_vaapi)");
     println!("cargo:rustc-check-cfg=cfg(has_videotoolbox)");
 
-    // Tell Cargo to re-run this script if .env changes.
-    println!("cargo:rerun-if-changed=.env");
+    let manifest_dir =
+        PathBuf::from(std::env::var("CARGO_MANIFEST_DIR").expect("CARGO_MANIFEST_DIR set by Cargo"));
+    let workspace_dotenv = manifest_dir.join("..").join(".env");
+    let crate_dotenv = manifest_dir.join(".env");
 
-    // Load .env into the process environment (silently ignored if missing).
-    dotenvy::dotenv().ok();
+    // Re-run if either env file changes (root holds most Pax keys; src-tauri can override).
+    println!("cargo:rerun-if-changed={}", workspace_dotenv.display());
+    println!("cargo:rerun-if-changed={}", crate_dotenv.display());
+
+    // Crate .env first, then workspace root: dotenvy does not override existing vars,
+    // so keys only in `../.env` (e.g. PAX_HOMESERVER) are still picked up, while
+    // src-tauri can pin overrides like PAX_PUSH_GATEWAY_URL.
+    let _ = dotenvy::from_path(&crate_dotenv);
+    let _ = dotenvy::from_path(&workspace_dotenv);
 
     // Every var we want compiled in. If the var is set (in .env or the shell
     // environment), emit it so `option_env!("VAR")` returns `Some(value)`.
