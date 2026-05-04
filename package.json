@@ -7,6 +7,7 @@
     "dev": "vite",
     "start": "concurrently \"vite\" \"tauri dev\"",
     "build": "tsc && vite build",
+    "android:icons": "python scripts/gen_android_icons.py",
     "preview": "vite preview",
     "tauri": "tauri"
   },
