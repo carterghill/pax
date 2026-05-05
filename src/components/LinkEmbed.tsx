@@ -35,7 +35,7 @@ const MAX_EMBED_HEIGHT = 320;
 
 function IframeEmbedView({ embed, href }: { embed: IframeEmbed; href: string }) {
   const { palette, spacing, typography, resolvedColorScheme } = useTheme();
-  const [activated, setActivated] = useState(false);
+  const [activated] = useState(true);
   const [loaded, setLoaded] = useState(false);
   const [error, setError] = useState(false);
   const iframeRef = useRef<HTMLIFrameElement>(null);
@@ -129,65 +129,39 @@ function IframeEmbedView({ embed, href }: { embed: IframeEmbed; href: string }) 
       </div>
 
       <div style={{ position: "relative", width: "100%", height: clampedHeight }}>
-        {!activated ? (
-          <button
-            type="button"
-            onClick={() => setActivated(true)}
+        {!loaded && (
+          <div
             style={{
               position: "absolute",
               inset: 0,
-              width: "100%",
-              height: "100%",
               display: "flex",
               alignItems: "center",
               justifyContent: "center",
-              gap: spacing.unit,
               backgroundColor: palette.bgSecondary,
-              border: "none",
-              cursor: "pointer",
-              color: palette.textSecondary,
-              fontSize: typography.fontSizeSmall,
             }}
           >
-            <Play size={32} style={{ opacity: 0.5 }} />
-          </button>
-        ) : (
-          <>
-            {!loaded && (
-              <div
-                style={{
-                  position: "absolute",
-                  inset: 0,
-                  display: "flex",
-                  alignItems: "center",
-                  justifyContent: "center",
-                  backgroundColor: palette.bgSecondary,
-                }}
-              >
-                <Play size={32} color={palette.textSecondary} style={{ opacity: 0.4 }} />
-              </div>
-            )}
-            <iframe
-              ref={iframeRef}
-              src={embed.src}
-              title={embed.title ?? `${embed.provider} embed`}
-              allow="accelerometer; autoplay; clipboard-write; encrypted-media; gyroscope; picture-in-picture; web-share"
-              allowFullScreen
-              style={{
-                position: "absolute",
-                top: 0,
-                left: 0,
-                width: "100%",
-                height: "100%",
-                border: "none",
-                opacity: loaded ? 1 : 0,
-                transition: "opacity 0.2s ease",
-              }}
-              onLoad={() => setLoaded(true)}
-              onError={() => setError(true)}
-            />
-          </>
+            <Play size={32} color={palette.textSecondary} style={{ opacity: 0.4 }} />
+          </div>
         )}
+        <iframe
+          ref={iframeRef}
+          src={embed.src}
+          title={embed.title ?? `${embed.provider} embed`}
+          allow="accelerometer; autoplay; clipboard-write; encrypted-media; gyroscope; picture-in-picture; web-share"
+          allowFullScreen
+          style={{
+            position: "absolute",
+            top: 0,
+            left: 0,
+            width: "100%",
+            height: "100%",
+            border: "none",
+            opacity: loaded ? 1 : 0,
+            transition: "opacity 0.2s ease",
+          }}
+          onLoad={() => setLoaded(true)}
+          onError={() => setError(true)}
+        />
       </div>
     </div>
   );

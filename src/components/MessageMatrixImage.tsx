@@ -90,10 +90,10 @@ export default function MessageMatrixImage({
   }, [src]);
 
   const imgStyle: React.CSSProperties = {
+    width: "auto" as const,
     maxWidth: "100%",
     maxHeight: INLINE_IMAGE_MAX_HEIGHT,
     height: "auto" as const,
-    objectFit: "contain" as const,
     borderRadius: spacing.unit,
     display: "block" as const,
     marginTop: spacing.unit,
@@ -222,10 +222,10 @@ export default function MessageMatrixImage({
         decoding="async"
         draggable={false}
         style={{
+          width: "auto",
           maxWidth: "100%",
           maxHeight: INLINE_IMAGE_MAX_HEIGHT,
           height: "auto",
-          objectFit: "contain",
           borderRadius: spacing.unit,
           display: "block",
         }}

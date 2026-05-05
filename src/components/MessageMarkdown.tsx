@@ -376,11 +376,10 @@ export default memo(function MessageMarkdown({
                   }
                 : {})}
               style={{
-                display: "inline-block",
+                display: "block",
                 maxWidth: "100%",
                 lineHeight: 0,
                 textDecoration: "none",
-                verticalAlign: "bottom",
                 ...(onOpenDirectImage ? { cursor: "pointer" } : {}),
               }}
             >
@@ -803,7 +802,7 @@ export default memo(function MessageMarkdown({
                 }
               }}
               style={{
-                display: "inline-block",
+                display: "block",
                 maxWidth: "100%",
                 cursor: "pointer",
                 marginTop: spacing.unit,
