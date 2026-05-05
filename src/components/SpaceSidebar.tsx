@@ -2,7 +2,7 @@ import { useState, useCallback, useEffect, useRef, useMemo } from "react";
 import type { CSSProperties } from "react";
 import { createPortal } from "react-dom";
 import { invoke } from "@tauri-apps/api/core";
-import { Plus, Settings, Volume2 } from "lucide-react";
+import { Compass, Plus, Settings, Volume2 } from "lucide-react";
 import { useTheme } from "../theme/ThemeContext";
 import type { Room } from "../types/matrix";
 import { collectRoomIdsInSpaceTree } from "../utils/spaceModeration";
@@ -58,6 +58,8 @@ interface SpaceSidebarProps {
    * `self` → user is in one of those voice rooms (green indicator); `others` → grey.
    */
   spaceVoiceActivity: Partial<Record<string, "others" | "self">>;
+  isDiscoverOpen: boolean;
+  onToggleDiscover: () => void;
 }
 
 /** Constant icon geometry shared by every row (Home, spaces, add, settings). */
@@ -341,6 +343,8 @@ export default function SpaceSidebar({
   isHomeUnread,
   homeMentionCount,
   spaceVoiceActivity,
+  isDiscoverOpen,
+  onToggleDiscover,
 }: SpaceSidebarProps) {
   const { palette } = useTheme();
   const sidebarScrollRef = useRef<HTMLDivElement | null>(null);
@@ -390,6 +394,7 @@ export default function SpaceSidebar({
   const [showDialog, setShowDialog] = useState(false);
   const [canCreate, setCanCreate] = useState(true);
   const [addHovered, setAddHovered] = useState(false);
+  const [discoverHovered, setDiscoverHovered] = useState(false);
   const [settingsHovered, setSettingsHovered] = useState(false);
   const [spaceContextMenu, setSpaceContextMenu] = useState<{
     x: number;
@@ -738,7 +743,7 @@ export default function SpaceSidebar({
           style={{ position: "relative" }}
         >
           <SpaceIconRow
-            selected={activeSpaceId === "" || activeSpaceId === null}
+            selected={!isDiscoverOpen && (activeSpaceId === "" || activeSpaceId === null)}
             unread={isHomeUnread}
             mentions={homeMentionCount}
             indicatorColor={palette.textHeading}
@@ -827,7 +832,7 @@ export default function SpaceSidebar({
           }}
         >
           {spaces.map((space, idx) => {
-            const selected = spaceHighlightId === space.id;
+            const selected = !isDiscoverOpen && spaceHighlightId === space.id;
             const unread = !selected && isSpaceUnread(space.id);
             const mentions = spaceMentionCount(space.id);
             const isBeingDragged = draggedSpaceId === space.id;
@@ -926,6 +931,61 @@ export default function SpaceSidebar({
               </div>
             );
           })}
+        </div>
+
+        {/* Discover button */}
+        <div
+          onMouseEnter={(e) => {
+            setDiscoverHovered(true);
+            sidebarTooltipAnchorRef.current = e.currentTarget;
+            const r = e.currentTarget.getBoundingClientRect();
+            setSidebarTooltip({
+              name: "Discover",
+              left: r.right + 8,
+              top: r.top + r.height / 2,
+            });
+          }}
+          onMouseLeave={() => {
+            setDiscoverHovered(false);
+            sidebarTooltipAnchorRef.current = null;
+            setSidebarTooltip(null);
+          }}
+          style={{ position: "relative" }}
+        >
+          <SpaceIconRow
+            selected={isDiscoverOpen}
+            unread={false}
+            mentions={0}
+            indicatorColor={palette.textHeading}
+          >
+            <SpaceSidebarSquircleClip>
+              <div
+                role="button"
+                tabIndex={0}
+                onClick={onToggleDiscover}
+                aria-label="Discover spaces and rooms"
+                onKeyDown={(e) => {
+                  if (e.key === "Enter" || e.key === " ") {
+                    e.preventDefault();
+                    onToggleDiscover();
+                  }
+                }}
+                style={{
+                  ...SIDEBAR_ICON_INNER_BUTTON_BASE,
+                  backgroundColor: discoverHovered ? palette.bgActive : palette.bgPrimary,
+                  color: isDiscoverOpen || discoverHovered ? palette.textHeading : palette.textSecondary,
+                  cursor: "pointer",
+                  transition: "background-color 0.15s ease, color 0.15s ease",
+                }}
+              >
+                <Compass
+                  size={22}
+                  strokeWidth={2}
+                  style={{ display: "block", shapeRendering: "geometricPrecision" }}
+                />
+              </div>
+            </SpaceSidebarSquircleClip>
+          </SpaceIconRow>
         </div>
 
         {/* Add space button */}

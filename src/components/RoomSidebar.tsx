@@ -260,6 +260,20 @@ interface RoomSidebarProps {
    * handler once `fetchRooms()` returns.
    */
   pendingReorderIds?: ReadonlySet<string>;
+  /** When true, the sidebar shows discover-mode: "Discover" header + server list. */
+  discoverMode?: boolean;
+  /** The currently selected server in discover mode (null = all servers). */
+  activeDiscoverServer?: string | null;
+  /** User's own homeserver — shown as "Homeserver" at the top of the list. */
+  discoverHomeserver?: string | null;
+  /** Well-known public servers to list under the section label. */
+  discoverPublicServers?: string[];
+  /** User-added custom servers. */
+  discoverCustomServers?: string[];
+  /** Called when user selects a discover server (null = all). */
+  onSelectDiscoverServer?: (server: string | null) => void;
+  /** Called when user adds a new custom server. */
+  onAddDiscoverServer?: (server: string) => void;
 }
 
 function VoiceParticipantRow({
@@ -599,6 +613,62 @@ function ChannelBlock({
   );
 }
 
+function DiscoverServerRow({
+  label,
+  value,
+  activeDiscoverServer,
+  onSelect,
+  palette,
+  spacing,
+  typography,
+}: {
+  label: string;
+  value: string | null;
+  activeDiscoverServer: string | null | undefined;
+  onSelect: ((server: string | null) => void) | undefined;
+  palette: ReturnType<typeof useTheme>["palette"];
+  spacing: ReturnType<typeof useTheme>["spacing"];
+  typography: ReturnType<typeof useTheme>["typography"];
+}) {
+  const isSelected = activeDiscoverServer === value;
+  return (
+    <button
+      type="button"
+      onClick={() => onSelect?.(value)}
+      style={{
+        display: "flex",
+        alignItems: "center",
+        width: "100%",
+        padding: `${spacing.unit * 1.5}px ${spacing.unit * 3}px`,
+        borderRadius: spacing.unit,
+        border: "none",
+        backgroundColor: isSelected ? palette.bgActive : "transparent",
+        color: isSelected ? palette.textHeading : palette.textSecondary,
+        fontSize: typography.fontSizeBase,
+        fontWeight: isSelected ? typography.fontWeightMedium : typography.fontWeightNormal,
+        fontFamily: typography.fontFamily,
+        cursor: "pointer",
+        textAlign: "left",
+        transition: "background-color 0.1s, color 0.1s",
+      }}
+      onMouseEnter={(e) => {
+        if (!isSelected) {
+          (e.currentTarget as HTMLButtonElement).style.backgroundColor = palette.bgHover;
+          (e.currentTarget as HTMLButtonElement).style.color = palette.textPrimary;
+        }
+      }}
+      onMouseLeave={(e) => {
+        if (!isSelected) {
+          (e.currentTarget as HTMLButtonElement).style.backgroundColor = "transparent";
+          (e.currentTarget as HTMLButtonElement).style.color = palette.textSecondary;
+        }
+      }}
+    >
+      {label}
+    </button>
+  );
+}
+
 export default function RoomSidebar({
   width,
   rooms,
@@ -633,10 +703,19 @@ export default function RoomSidebar({
   canManageActiveSpaceChildren = false,
   onReorderSpaceChildren,
   pendingReorderIds,
+  discoverMode = false,
+  activeDiscoverServer = null,
+  discoverHomeserver = null,
+  discoverPublicServers = [],
+  discoverCustomServers = [],
+  onSelectDiscoverServer,
+  onAddDiscoverServer,
 }: RoomSidebarProps) {
   const { palette, spacing, typography } = useTheme();
   /** Sub-space id → expanded; absence means expanded (default open). */
   const [subSpaceExpanded, setSubSpaceExpanded] = useState<Record<string, boolean>>({});
+  const [addServerOpen, setAddServerOpen] = useState(false);
+  const [addServerValue, setAddServerValue] = useState("");
   const { getVolume, setVolume } = useUserVolume();
   const [contextMenu, setContextMenu] = useState<{
     x: number;
@@ -1078,9 +1157,9 @@ export default function RoomSidebar({
             whiteSpace: "nowrap",
           }}
         >
-          {spaceName}
+          {discoverMode ? "Discover" : spaceName}
         </h2>
-        {spaceInviteId ? (
+        {!discoverMode && spaceInviteId ? (
           <button
             type="button"
             title="Invite people to this space"
@@ -1117,7 +1196,184 @@ export default function RoomSidebar({
       </div>
       <div style={{ flex: 1, overflowY: "auto", padding: spacing.unit * 2 }}>
         <style>{`@keyframes spin { from { transform: rotate(0deg); } to { transform: rotate(360deg); } }`}</style>
-        {showHomeAddRoom && (
+        {discoverMode && (
+          <div style={{ display: "flex", flexDirection: "column" }}>
+            {/* All servers */}
+            <DiscoverServerRow
+              label="All servers"
+              value={null}
+              activeDiscoverServer={activeDiscoverServer}
+              onSelect={onSelectDiscoverServer}
+              palette={palette}
+              spacing={spacing}
+              typography={typography}
+            />
+
+            {/* Homeserver */}
+            {discoverHomeserver && (
+              <DiscoverServerRow
+                label="Homeserver"
+                value={discoverHomeserver}
+                activeDiscoverServer={activeDiscoverServer}
+                onSelect={onSelectDiscoverServer}
+                palette={palette}
+                spacing={spacing}
+                typography={typography}
+              />
+            )}
+
+            {/* Public servers section */}
+            <div
+              style={{
+                marginTop: spacing.unit * 2,
+                marginBottom: spacing.unit * 0.5,
+                padding: `0 ${spacing.unit * 3}px`,
+                fontSize: typography.fontSizeSmall,
+                fontWeight: typography.fontWeightMedium,
+                color: palette.textSecondary,
+                textTransform: "uppercase",
+                letterSpacing: "0.06em",
+              }}
+            >
+              Public servers
+            </div>
+            {discoverPublicServers.map((server) => (
+              <DiscoverServerRow
+                key={server}
+                label={server}
+                value={server}
+                activeDiscoverServer={activeDiscoverServer}
+                onSelect={onSelectDiscoverServer}
+                palette={palette}
+                spacing={spacing}
+                typography={typography}
+              />
+            ))}
+
+            {/* Custom servers */}
+            {discoverCustomServers.length > 0 && (
+              <>
+                <div
+                  style={{
+                    marginTop: spacing.unit * 2,
+                    marginBottom: spacing.unit * 0.5,
+                    padding: `0 ${spacing.unit * 3}px`,
+                    fontSize: typography.fontSizeSmall,
+                    fontWeight: typography.fontWeightMedium,
+                    color: palette.textSecondary,
+                    textTransform: "uppercase",
+                    letterSpacing: "0.06em",
+                  }}
+                >
+                  Custom
+                </div>
+                {discoverCustomServers.map((server) => (
+                  <DiscoverServerRow
+                    key={server}
+                    label={server}
+                    value={server}
+                    activeDiscoverServer={activeDiscoverServer}
+                    onSelect={onSelectDiscoverServer}
+                    palette={palette}
+                    spacing={spacing}
+                    typography={typography}
+                  />
+                ))}
+              </>
+            )}
+
+            {/* Add server */}
+            <div style={{ marginTop: spacing.unit * 2 }}>
+              {addServerOpen ? (
+                <div style={{ padding: `0 ${spacing.unit * 2}px`, display: "flex", gap: spacing.unit }}>
+                  <input
+                    autoFocus
+                    type="text"
+                    placeholder="server.example.com"
+                    value={addServerValue}
+                    onChange={(e) => setAddServerValue(e.target.value)}
+                    onKeyDown={(e) => {
+                      if (e.key === "Enter") {
+                        const s = addServerValue.trim();
+                        if (s) { onAddDiscoverServer?.(s); }
+                        setAddServerValue("");
+                        setAddServerOpen(false);
+                      } else if (e.key === "Escape") {
+                        setAddServerValue("");
+                        setAddServerOpen(false);
+                      }
+                    }}
+                    style={{
+                      flex: 1,
+                      background: palette.bgPrimary,
+                      border: `1px solid ${palette.border}`,
+                      borderRadius: 6,
+                      padding: `${spacing.unit}px ${spacing.unit * 1.5}px`,
+                      color: palette.textPrimary,
+                      fontSize: typography.fontSizeSmall,
+                      fontFamily: typography.fontFamily,
+                      outline: "none",
+                      minWidth: 0,
+                    }}
+                  />
+                  <button
+                    type="button"
+                    onClick={() => {
+                      const s = addServerValue.trim();
+                      if (s) { onAddDiscoverServer?.(s); }
+                      setAddServerValue("");
+                      setAddServerOpen(false);
+                    }}
+                    style={{
+                      flexShrink: 0,
+                      padding: `${spacing.unit}px ${spacing.unit * 1.5}px`,
+                      borderRadius: 6,
+                      border: "none",
+                      backgroundColor: palette.accent,
+                      color: "#fff",
+                      fontSize: typography.fontSizeSmall,
+                      fontFamily: typography.fontFamily,
+                      cursor: "pointer",
+                    }}
+                  >
+                    Add
+                  </button>
+                </div>
+              ) : (
+                <button
+                  type="button"
+                  onClick={() => setAddServerOpen(true)}
+                  style={{
+                    display: "flex",
+                    alignItems: "center",
+                    gap: spacing.unit * 1.5,
+                    width: "100%",
+                    padding: `${spacing.unit * 1.5}px ${spacing.unit * 3}px`,
+                    borderRadius: spacing.unit,
+                    border: "none",
+                    backgroundColor: "transparent",
+                    color: palette.textSecondary,
+                    fontSize: typography.fontSizeBase,
+                    fontFamily: typography.fontFamily,
+                    cursor: "pointer",
+                    textAlign: "left",
+                  }}
+                  onMouseEnter={(e) => {
+                    (e.currentTarget as HTMLButtonElement).style.backgroundColor = palette.bgHover;
+                    (e.currentTarget as HTMLButtonElement).style.color = palette.textPrimary;
+                  }}
+                  onMouseLeave={(e) => {
+                    (e.currentTarget as HTMLButtonElement).style.backgroundColor = "transparent";
+                    (e.currentTarget as HTMLButtonElement).style.color = palette.textSecondary;
+                  }}
+                >
+                  + Add server
+                </button>
+              )}
+            </div>
+          </div>
+        )}
+        {!discoverMode && showHomeAddRoom && (
           <div style={{ marginBottom: spacing.unit * 2 }}>
             <button
               type="button"
@@ -1155,7 +1411,7 @@ export default function RoomSidebar({
             </button>
           </div>
         )}
-        {showSpaceHomeNav && (
+        {!discoverMode && showSpaceHomeNav && (
           <div style={{ marginBottom: spacing.unit }}>
             {parentSpace && onNavigateToParentSpace ? (
               <button
@@ -1247,7 +1503,7 @@ export default function RoomSidebar({
             "activeSpaceChild" drag scope so the user can freely reorder
             sub-spaces among rooms.  Sub-space INTERIOR rooms are a
             separate "subSpaceRoom" scope (different parent in Matrix). */}
-        {rooms.map((item, itemIdx) => {
+        {!discoverMode && rooms.map((item, itemIdx) => {
           const isLast = itemIdx === rooms.length - 1;
           const isPending = !!pendingReorderIds && pendingReorderIds.has(item.id);
 
@@ -1548,7 +1804,7 @@ export default function RoomSidebar({
             </DraggableRow>
           );
         })}
-        {!hasChannelList && (
+        {!discoverMode && !hasChannelList && (
           <div style={{
             color: palette.textSecondary,
             padding: `${spacing.unit * 2}px ${spacing.unit * 3}px`,

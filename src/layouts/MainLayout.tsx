@@ -1,5 +1,6 @@
 import SpaceSidebar from "../components/SpaceSidebar";
 import RoomSidebar from "../components/RoomSidebar";
+import DiscoverView from "../components/DiscoverView";
 import ChatView from "../layouts/ChatView";
 import VoiceRoomView from "../components/VoiceRoomView";
 import InvitationView from "../layouts/InvitationView";
@@ -40,6 +41,15 @@ import SideDrawer from "../components/SideDrawer";
 import NavBackButton from "../components/NavBackButton";
 
 import { defaultThemeDefinition } from "../theme/themes";
+
+const DISCOVER_PUBLIC_SERVERS = [
+  "matrix.org",
+  "tchncs.de",
+  "4d2.org",
+  "nope.chat",
+  "mozilla.org",
+  "unredacted.org",
+];
 
 const ROOM_SIDEBAR_WIDTH_KEY = "pax-room-sidebar-width";
 const USER_MENU_WIDTH_KEY = "pax-user-menu-width";
@@ -230,6 +240,9 @@ export default function MainLayout({
   const [activeSpaceId, setActiveSpaceId] = useState<string | null>(null);
   const [activeRoomBySpace, setActiveRoomBySpace] = useState<Record<string, string | null>>({});
   const [settingsOpen, setSettingsOpen] = useState(false);
+  const [discoverOpen, setDiscoverOpen] = useState(false);
+  const [activeDiscoverServer, setActiveDiscoverServer] = useState<string | null>(null);
+  const [currentHomeserver, setCurrentHomeserver] = useState<string | null>(null);
   /** When non-null, ChatView scrolls to this timeline event after the room is active (push/desktop notification tap). */
   const [notificationJump, setNotificationJump] = useState<{
     roomId: string;
@@ -295,6 +308,40 @@ export default function MainLayout({
     });
   }, [spaceKey]);
 
+  useEffect(() => {
+    invoke<string>("current_homeserver")
+      .then(setCurrentHomeserver)
+      .catch(() => setCurrentHomeserver(null));
+  }, []);
+
+  const handleOpenDiscover = useCallback(() => {
+    setDiscoverOpen(true);
+  }, []);
+
+  const [customDiscoverServers, setCustomDiscoverServers] = useState<string[]>([]);
+
+  const handleAddDiscoverServer = useCallback((server: string) => {
+    setCustomDiscoverServers((prev) =>
+      prev.includes(server) ? prev : [...prev, server]
+    );
+  }, []);
+
+  // Full server list for DiscoverView when "All" is selected.
+  // Memoized so the array reference is stable across unrelated re-renders —
+  // DiscoverView's useEffect depends on this and would otherwise re-fire and
+  // cancel in-flight searches on every presence/room update.
+  const discoverServers = useMemo(
+    () =>
+      Array.from(
+        new Set(
+          [currentHomeserver, ...DISCOVER_PUBLIC_SERVERS, ...customDiscoverServers].filter(
+            (s): s is string => !!s
+          )
+        )
+      ),
+    [currentHomeserver, customDiscoverServers]
+  );
+
   // Desktop notifications.  The hook watches `room-message`, gates by
   // per-room level + focus, and dispatches via the notification plugin.
   // It also fires a `pax-notification-clicked` CustomEvent on click-to-focus.
@@ -337,13 +384,16 @@ export default function MainLayout({
   const handleSelectSpace = useCallback((spaceId: string) => {
     const id = spaceId || null;
     startTransition(() => {
-      if (id === activeSpaceId) {
-        // Re-clicking same space: clear room selection
+      setDiscoverOpen(false);
+      // Only clear room selection when re-clicking the active space normally —
+      // not when navigating back from discover, where it would incorrectly
+      // reset the remembered room for the space that was open before discover.
+      if (!discoverOpen && id === activeSpaceId) {
         setActiveRoomBySpace((prev) => ({ ...prev, [spaceId || ""]: null }));
       }
       setActiveSpaceId(id);
     });
-  }, [activeSpaceId]);
+  }, [activeSpaceId, discoverOpen]);
 
   const { palette, spacing } = useTheme();
   const activeSpace = activeSpaceId ? getRoom(activeSpaceId) : null;
@@ -1172,6 +1222,8 @@ export default function MainLayout({
       isHomeUnread={isHomeUnread()}
       homeMentionCount={effectiveHomeMentionCount()}
       spaceVoiceActivity={spaceVoiceActivity}
+      isDiscoverOpen={discoverOpen}
+      onToggleDiscover={handleOpenDiscover}
     />
   );
 
@@ -1217,6 +1269,13 @@ export default function MainLayout({
         pendingReorderIds={pendingReorderIds}
         isUnread={isUnread}
         mentionCount={effectiveMentionCount}
+        discoverMode={discoverOpen}
+        activeDiscoverServer={activeDiscoverServer}
+        discoverHomeserver={currentHomeserver}
+        discoverPublicServers={DISCOVER_PUBLIC_SERVERS}
+        discoverCustomServers={customDiscoverServers}
+        onSelectDiscoverServer={setActiveDiscoverServer}
+        onAddDiscoverServer={handleAddDiscoverServer}
       />
       {!isMobile && (
         <div
@@ -1299,7 +1358,13 @@ export default function MainLayout({
             flexDirection: "column",
             overflow: "hidden",
           }}>
-            {showingDraftDm && pendingDm ? (
+            {discoverOpen ? (
+              <DiscoverView
+                server={activeDiscoverServer}
+                discoverServers={discoverServers}
+                onJoined={handleSpacesChanged}
+              />
+            ) : showingDraftDm && pendingDm ? (
               <ChatView
                 draftDm={pendingDm}
                 userId={userId}
