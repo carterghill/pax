@@ -1,4 +1,4 @@
-import { useEffect, useState, type CSSProperties } from "react";
+import { useEffect, useRef, useState, type CSSProperties } from "react";
 import { useTheme } from "../theme/ThemeContext";
 import { userInitialAvatarBackground } from "../utils/userAvatarColor";
 import { avatarSrc } from "../utils/avatarSrc";
@@ -84,7 +84,11 @@ export default function UserAvatar({
   const effectiveUrl =
     fromStore !== undefined ? fromStore : avatarUrlHint || null;
   const [imageFailed, setImageFailed] = useState(false);
+  const failedUrlRef = useRef<string | null>(null);
   useEffect(() => {
+    if (!effectiveUrl) return;
+    if (effectiveUrl === failedUrlRef.current) return;
+    failedUrlRef.current = null;
     setImageFailed(false);
   }, [effectiveUrl]);
 
@@ -109,16 +113,6 @@ export default function UserAvatar({
   const confirmedNoAvatar = fromStore === null && !avatarUrlHint;
   const showImage = hasKnownUrl;
   const showInitials = !hasKnownUrl && confirmedNoAvatar;
-
-  // DIAGNOSTIC: log which branch we render in for sidebar-sized
-  // avatars. If a flash shows something other than `image` we want
-  // to see which one and for how many frames.
-  if (import.meta.env.DEV && size >= 24 && size <= 32) {
-    // eslint-disable-next-line no-console
-    console.log(
-      `[UserAvatar ${userId}] render → ${showImage ? "image" : showInitials ? "logo" : "empty"} (fromStore=${fromStore === null ? "null" : fromStore === undefined ? "undefined" : "<path>"}, hint=${avatarUrlHint === null ? "null" : avatarUrlHint === undefined ? "undefined" : "<path>"}, failed=${imageFailed})`,
-    );
-  }
 
   const containerStyle: CSSProperties = {
     width: size,
@@ -170,11 +164,7 @@ export default function UserAvatar({
           // laid out — no blank-box interstitial.
           decoding="sync"
           onError={() => {
-            // eslint-disable-next-line no-console
-            console.log(
-              `[UserAvatar ${userId}] img onError — invalidating, src was:`,
-              avatarSrc(effectiveUrl),
-            );
+            failedUrlRef.current = effectiveUrl;
             setImageFailed(true);
             // The on-disk temp file probably got cleaned up — drop the
             // entry so the next mount re-fetches through the store.

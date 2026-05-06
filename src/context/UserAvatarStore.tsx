@@ -141,7 +141,17 @@ class UserAvatarStore {
         // in the browser's image cache, so the `<img>` paints
         // in the same frame it mounts instead of flashing
         // through a blank-box state that reads as initials.
-        this.preload(value as AvatarUrl);
+        // onMiss evicts the stale entry if the cached path no
+        // longer exists on disk (e.g. after a cache purge),
+        // so the next <UserAvatar> render re-fetches cleanly.
+        const capturedKey = key;
+        const capturedValue = value as AvatarUrl;
+        this.preload(capturedValue, () => {
+          if (this.entries.get(capturedKey) === capturedValue) {
+            this.entries.delete(capturedKey);
+            this.schedulePersist();
+          }
+        });
         count += 1;
       }
     } catch {
@@ -220,7 +230,7 @@ class UserAvatarStore {
    * isn't actually an initials render at all. Priming the image
    * cache eliminates the gap.
    */
-  private preload(url: AvatarUrl): void {
+  private preload(url: AvatarUrl, onMiss?: () => void): void {
     if (!url || typeof url !== "string") return;
     if (typeof window === "undefined") return; // SSR-safe guard
     try {
@@ -232,6 +242,7 @@ class UserAvatarStore {
       // ephemeral node.
       const img = new Image();
       img.decoding = "async";
+      if (onMiss) img.onerror = onMiss;
       img.src = src;
     } catch {
       /* ignore — preload is best-effort */
