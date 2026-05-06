@@ -6,7 +6,8 @@
       "Bash(npm run *)",
       "Bash(npx vite *)",
       "Bash(find /home/carter/Documents/pax/src-tauri/target/release/build/pax-*/output)",
-      "Bash(xargs ls -lt)"
+      "Bash(xargs ls -lt)",
+      "Bash(cargo check *)"
     ]
   }
 }

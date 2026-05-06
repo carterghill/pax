@@ -186,6 +186,36 @@ export default function SpaceHomeView({
       return { ...prev, [id]: !cur };
     });
   }, []);
+
+  // ── Unjoined sub-space expansion ──
+  const [unjoinedSubExpanded, setUnjoinedSubExpanded] = useState<Record<string, boolean>>({});
+  const [unjoinedSubChildren, setUnjoinedSubChildren] = useState<Record<string, SpaceChildInfo[]>>({});
+  const [unjoinedSubLoading, setUnjoinedSubLoading] = useState<Record<string, boolean>>({});
+  const unjoinedSubFetched = useRef(new Set<string>());
+  const toggleUnjoinedSub = useCallback((subId: string) => {
+    setUnjoinedSubExpanded((prev) => {
+      const next = !prev[subId];
+      if (next && !unjoinedSubFetched.current.has(subId)) {
+        unjoinedSubFetched.current.add(subId);
+        setUnjoinedSubLoading((p) => ({ ...p, [subId]: true }));
+        invoke<SpaceInfo>("get_space_info", { spaceId: subId })
+          .then((si) => {
+            setUnjoinedSubChildren((p) => ({
+              ...p,
+              [subId]: si.children.filter((c) => !isChildMatrixSpace(c)),
+            }));
+          })
+          .catch(() => {
+            setUnjoinedSubChildren((p) => ({ ...p, [subId]: [] }));
+          })
+          .finally(() => {
+            setUnjoinedSubLoading((p) => ({ ...p, [subId]: false }));
+          });
+      }
+      return { ...prev, [subId]: next };
+    });
+  }, []);
+
   const permCheckedRef = useRef<string | null>(null);
 
   // ── Knock requests ──
@@ -253,6 +283,10 @@ export default function SpaceHomeView({
   useEffect(() => {
     setSubSpaceExpandedHome({});
     setSubSpaceHierarchyChildren({});
+    setUnjoinedSubExpanded({});
+    setUnjoinedSubChildren({});
+    setUnjoinedSubLoading({});
+    unjoinedSubFetched.current.clear();
   }, [space.id]);
 
   useEffect(() => {
@@ -467,6 +501,17 @@ export default function SpaceHomeView({
     );
   }, [info, roomIdsListedUnderSubspaces]);
 
+  const availableSubSpaces = useMemo(() =>
+    availableRoomsFiltered
+      .filter(isChildMatrixSpace)
+      .sort((a, b) => compareByDisplayThenKey(a.name, a.id, b.name, b.id)),
+    [availableRoomsFiltered]
+  );
+  const availableNonSpaceRooms = useMemo(() =>
+    availableRoomsFiltered.filter((c) => !isChildMatrixSpace(c)),
+    [availableRoomsFiltered]
+  );
+
   const spaceDescription = useMemo(() => {
     const t = (info?.topic ?? "").trim();
     return t || null;
@@ -483,6 +528,10 @@ export default function SpaceHomeView({
             const found = (mergedSubChannelsBySubId[sub.id] ?? []).find((c) => c.id === roomId);
             if (found) return found;
           }
+          for (const children of Object.values(unjoinedSubChildren)) {
+            const found = children.find((c) => c.id === roomId);
+            if (found) return found;
+          }
           return undefined;
         })();
       try {
@@ -491,7 +540,7 @@ export default function SpaceHomeView({
           id: roomId,
           name: childMeta?.name ?? roomId,
           avatarUrl: childMeta?.avatarUrl ?? null,
-          isSpace: false,
+          isSpace: childMeta?.roomType === SPACE_ROOM_TYPE,
           parentSpaceIds: [parentForOptimistic],
           roomType: childMeta?.roomType ?? null,
           membership: "joined",
@@ -521,7 +570,7 @@ export default function SpaceHomeView({
       }
       setJoiningRoomId(null);
     },
-    [info, space.id, joinedSubspaces, mergedSubChannelsBySubId, onRoomsChanged, fetchInfo]
+    [info, space.id, joinedSubspaces, mergedSubChannelsBySubId, unjoinedSubChildren, onRoomsChanged, fetchInfo]
   );
 
   const initials = space.name
@@ -1136,10 +1185,183 @@ export default function SpaceHomeView({
           />
         )}
 
-        {availableRoomsFiltered.length > 0 && (
+        {availableSubSpaces.length > 0 && (
+          <div style={{ marginBottom: spacing.unit * 6 }}>
+            <div style={{
+              fontSize: typography.fontSizeSmall,
+              fontWeight: typography.fontWeightBold,
+              color: palette.textSecondary,
+              textTransform: "uppercase" as const,
+              letterSpacing: "0.02em",
+              padding: `${spacing.unit * 2}px ${spacing.unit * 2}px`,
+              marginBottom: spacing.unit,
+            }}>
+              Available Spaces — {availableSubSpaces.length}
+            </div>
+            <div style={{ display: "flex", flexDirection: "column", gap: spacing.unit }}>
+              {availableSubSpaces.map((sub) => {
+                const expanded = unjoinedSubExpanded[sub.id] === true;
+                const children = unjoinedSubChildren[sub.id];
+                const isLoading = unjoinedSubLoading[sub.id] === true;
+                const ChevronIcon = expanded ? ChevronDown : ChevronRight;
+                const subInitials = sub.name
+                  .split(" ")
+                  .map((w) => w[0])
+                  .join("")
+                  .slice(0, 2)
+                  .toUpperCase();
+                return (
+                  <div key={sub.id}>
+                    <div
+                      style={{
+                        display: "flex",
+                        alignItems: "center",
+                        gap: spacing.unit * 2,
+                        padding: `${spacing.unit * 2.5}px ${spacing.unit * 3}px`,
+                        borderRadius: spacing.unit * 1.5,
+                        cursor: "pointer",
+                        userSelect: "none",
+                      }}
+                      onClick={() => toggleUnjoinedSub(sub.id)}
+                      onMouseEnter={(e) => {
+                        e.currentTarget.style.backgroundColor = palette.bgHover;
+                      }}
+                      onMouseLeave={(e) => {
+                        e.currentTarget.style.backgroundColor = "transparent";
+                      }}
+                    >
+                      <ChevronIcon size={16} strokeWidth={2} style={{ flexShrink: 0, color: palette.textSecondary }} aria-hidden />
+                      {sub.avatarUrl ? (
+                        <img
+                          src={avatarSrc(sub.avatarUrl)}
+                          alt=""
+                          style={{
+                            width: 36,
+                            height: 36,
+                            borderRadius: 10,
+                            objectFit: "cover",
+                            flexShrink: 0,
+                          }}
+                        />
+                      ) : (
+                        <div style={{
+                          width: 36,
+                          height: 36,
+                          borderRadius: 10,
+                          backgroundColor: spaceInitialAvatarBackground(sub.id, resolvedColorScheme),
+                          color: "#fff",
+                          display: "flex",
+                          alignItems: "center",
+                          justifyContent: "center",
+                          fontSize: 13,
+                          fontWeight: typography.fontWeightBold,
+                          flexShrink: 0,
+                        }}>
+                          {subInitials}
+                        </div>
+                      )}
+                      <div style={{ flex: 1, minWidth: 0 }}>
+                        <div style={{
+                          fontSize: typography.fontSizeBase,
+                          fontWeight: typography.fontWeightMedium,
+                          color: palette.textHeading,
+                          overflow: "hidden",
+                          textOverflow: "ellipsis",
+                          whiteSpace: "nowrap",
+                        }}>
+                          {sub.name}
+                        </div>
+                        <div style={{
+                          fontSize: typography.fontSizeSmall,
+                          color: palette.textSecondary,
+                          display: "flex",
+                          alignItems: "center",
+                          gap: spacing.unit,
+                          marginTop: 1,
+                        }}>
+                          <Users size={11} color={palette.textSecondary} />
+                          <span>Sub-space · {sub.numJoinedMembers} member{sub.numJoinedMembers !== 1 ? "s" : ""}</span>
+                        </div>
+                      </div>
+                      <button
+                        onClick={(e) => { e.stopPropagation(); handleJoinRoom(sub.id); }}
+                        disabled={joiningRoomId === sub.id}
+                        style={{
+                          flexShrink: 0,
+                          display: "flex",
+                          alignItems: "center",
+                          gap: spacing.unit,
+                          padding: `${spacing.unit * 1.5}px ${spacing.unit * 3}px`,
+                          borderRadius: spacing.unit * 1.5,
+                          border: "none",
+                          backgroundColor: palette.accent,
+                          color: "#fff",
+                          fontSize: typography.fontSizeSmall,
+                          fontWeight: typography.fontWeightBold,
+                          cursor: joiningRoomId === sub.id ? "default" : "pointer",
+                          opacity: joiningRoomId === sub.id ? 0.7 : 1,
+                        }}
+                      >
+                        <LogIn size={13} />
+                        {joiningRoomId === sub.id ? "Joining..." : "Join"}
+                      </button>
+                    </div>
+                    {expanded && (
+                      <div style={{
+                        paddingLeft: spacing.unit * 5,
+                        marginTop: spacing.unit,
+                      }}>
+                        {isLoading ? (
+                          <div style={{
+                            display: "flex",
+                            alignItems: "center",
+                            gap: spacing.unit * 2,
+                            padding: `${spacing.unit * 2}px ${spacing.unit * 3}px`,
+                            color: palette.textSecondary,
+                            fontSize: typography.fontSizeSmall,
+                          }}>
+                            <Loader2 size={14} style={{ animation: "spin 1s linear infinite" }} />
+                            Loading rooms...
+                          </div>
+                        ) : children && children.length > 0 ? (
+                          <div style={{ display: "flex", flexDirection: "column", gap: spacing.unit }}>
+                            {children.map((room) => (
+                              <RoomRow
+                                key={room.id}
+                                room={room}
+                                isJoining={joiningRoomId === room.id}
+                                onClick={() => {
+                                  if (room.membership === "joined") onSelectRoom(room.id);
+                                }}
+                                onJoin={() => handleJoinRoom(room.id, space.id)}
+                                palette={palette}
+                                typography={typography}
+                                spacing={spacing}
+                              />
+                            ))}
+                          </div>
+                        ) : (
+                          <div style={{
+                            padding: `${spacing.unit * 2}px ${spacing.unit * 3}px`,
+                            color: palette.textSecondary,
+                            fontSize: typography.fontSizeSmall,
+                          }}>
+                            No visible rooms
+                          </div>
+                        )}
+                      </div>
+                    )}
+                  </div>
+                );
+              })}
+            </div>
+          </div>
+        )}
+
+        {availableNonSpaceRooms.length > 0 && (
           <RoomSection
             title="Available Rooms"
-            rooms={availableRoomsFiltered}
+            rooms={availableNonSpaceRooms}
             onClickRoom={onSelectRoom}
             joiningRoomId={joiningRoomId}
             onJoinRoom={handleJoinRoom}
