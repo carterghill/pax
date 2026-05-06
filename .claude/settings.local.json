@@ -4,7 +4,9 @@
       "Bash(xargs grep -l -i \"join\\\\|discover\")",
       "Bash(npx tsc *)",
       "Bash(npm run *)",
-      "Bash(npx vite *)"
+      "Bash(npx vite *)",
+      "Bash(find /home/carter/Documents/pax/src-tauri/target/release/build/pax-*/output)",
+      "Bash(xargs ls -lt)"
     ]
   }
 }

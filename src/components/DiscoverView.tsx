@@ -234,6 +234,7 @@ export default function DiscoverView({ server, discoverServers, onJoined }: Disc
   const [joiningId, setJoiningId] = useState<string | null>(null);
   const [joinSuccess, setJoinSuccess] = useState<string | null>(null);
   const abortRef = useRef(0);
+  const [hasSearched, setHasSearched] = useState(false);
 
   const servers = server ? [server] : discoverServers;
 
@@ -243,6 +244,8 @@ export default function DiscoverView({ server, discoverServers, onJoined }: Disc
       setLoading(true);
       setError(null);
       const termValue = term.trim() || null;
+
+      setHasSearched(true);
 
       try {
         const [spaceSettled, roomSettled] = await Promise.all([
@@ -306,8 +309,13 @@ export default function DiscoverView({ server, discoverServers, onJoined }: Disc
     [server, discoverServers]
   );
 
-  // Re-search when server selection changes
+  // Re-search when server selection changes, but only if a specific server is
+  // selected or the user has already searched. Skipping the auto-search when
+  // "All servers" is selected with no term prevents firing N×2 simultaneous
+  // federation requests to the homeserver on mount, which was causing hierarchy
+  // and message fetches for federated rooms to time out.
   useEffect(() => {
+    if (server === null && !searchTerm.trim()) return;
     doSearch(searchTerm);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [server, discoverServers]);
@@ -542,7 +550,7 @@ export default function DiscoverView({ server, discoverServers, onJoined }: Disc
               paddingTop: spacing.unit * 8,
             }}
           >
-            No results
+            {hasSearched ? "No results" : "Search for spaces and rooms, or select a server to browse"}
           </div>
         )}
 
