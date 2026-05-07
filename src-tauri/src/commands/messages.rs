@@ -1704,6 +1704,10 @@ pub async fn start_sync(
                         return;
                     }
                     let space_id = room.room_id().to_string();
+                    super::rooms::invalidate_hierarchy_cache(
+                        &state.hierarchy_cache,
+                        &space_id,
+                    );
                     log::info!(
                         "[pax reconcile] m.space.child changed in {space_id}; reconciling children"
                     );

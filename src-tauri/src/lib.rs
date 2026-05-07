@@ -108,6 +108,7 @@ pub struct AppState {
     ///     devices syncing down).
     pub raw_unread_messages:
         Arc<Mutex<HashMap<matrix_sdk::ruma::OwnedRoomId, u64>>>,
+    pub hierarchy_cache: Arc<commands::rooms::HierarchyCache>,
 }
 
 impl AppState {
@@ -327,6 +328,7 @@ pub fn run() {
         desired_presence: Arc::new(StdMutex::new("online".to_string())),
         unread_cache: Arc::new(Mutex::new(HashMap::new())),
         raw_unread_messages: Arc::new(Mutex::new(HashMap::new())),
+        hierarchy_cache: Arc::new(std::sync::Mutex::new(HashMap::new())),
     });
 
     let app_builder = tauri::Builder::default()

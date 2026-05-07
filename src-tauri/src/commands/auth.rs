@@ -129,6 +129,9 @@ pub async fn logout(state: State<'_, Arc<AppState>>, app: tauri::AppHandle) -> R
     *state.client.lock().await = None;
     state.avatar_cache.clear().await;
     crate::commands::unread::clear_unread_cache(state.inner()).await;
+    if let Ok(mut hc) = state.hierarchy_cache.lock() {
+        hc.clear();
+    }
     state.presence_map.lock().await.clear();
     *state.sync_running.lock().await = false;
 

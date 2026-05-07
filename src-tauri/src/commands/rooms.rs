@@ -508,6 +508,22 @@ struct SpaceChildMeta {
     origin_server_ts: u64,
 }
 
+const HIERARCHY_CACHE_TTL: Duration = Duration::from_secs(300);
+
+#[derive(Clone)]
+pub(crate) struct CachedHierarchy {
+    result: HashMap<String, Vec<SpaceChildMeta>>,
+    fetched_at: std::time::Instant,
+}
+
+pub(crate) type HierarchyCache = std::sync::Mutex<HashMap<String, CachedHierarchy>>;
+
+pub(crate) fn invalidate_hierarchy_cache(cache: &HierarchyCache, space_id: &str) {
+    if let Ok(mut guard) = cache.lock() {
+        guard.remove(space_id);
+    }
+}
+
 async fn fetch_space_children_for_room(
     room: matrix_sdk::Room,
 ) -> (String, Vec<SpaceChildMeta>) {
@@ -844,40 +860,84 @@ pub async fn get_rooms(state: State<'_, Arc<AppState>>) -> Result<Vec<RoomInfo>,
     // Supplement local m.space.child cache with the room hierarchy API.
     // The local state store is often incomplete for remote/federated spaces
     // (missing sub-spaces or their children).  The hierarchy API federates
-    // properly, so we call it for every joined space and merge any children
-    // the local cache missed.
+    // properly, so we call it for joined spaces and merge any children the
+    // local cache missed.
+    //
+    // Results are cached per-space with a TTL to avoid barraging the
+    // homeserver on every sync iteration.  Cache entries are invalidated
+    // early when an m.space.child state event arrives via sync.
     if let Some(access_token) = client.access_token() {
         let homeserver = client.homeserver().to_string();
         let at = access_token.to_string();
         let hc = state.http_client.clone();
         let all_space_ids: Vec<String> = space_children.keys().cloned().collect();
+
+        let now = std::time::Instant::now();
+        let mut cached_results: Vec<HashMap<String, Vec<SpaceChildMeta>>> = Vec::new();
+        let mut stale_space_ids: Vec<String> = Vec::new();
+
+        if let Ok(cache) = state.hierarchy_cache.lock() {
+            for sid in &all_space_ids {
+                if let Some(entry) = cache.get(sid) {
+                    if now.duration_since(entry.fetched_at) < HIERARCHY_CACHE_TTL {
+                        cached_results.push(entry.result.clone());
+                        continue;
+                    }
+                }
+                stale_space_ids.push(sid.clone());
+            }
+        } else {
+            stale_space_ids = all_space_ids.clone();
+        }
+
         log::info!(
-            "get_rooms: hierarchy enrichment for {} spaces",
-            all_space_ids.len()
+            "get_rooms: hierarchy enrichment for {} spaces ({} cached, {} to fetch)",
+            all_space_ids.len(),
+            all_space_ids.len() - stale_space_ids.len(),
+            stale_space_ids.len()
         );
-        let hierarchy_results: Vec<HashMap<String, Vec<SpaceChildMeta>>> =
-            stream::iter(all_space_ids.into_iter().map(|sid| {
-                let hc = hc.clone();
-                let hs = homeserver.clone();
-                let at = at.clone();
-                async move { fetch_hierarchy_children(&hc, &hs, &at, &sid).await }
-            }))
-            .buffer_unordered(GET_ROOMS_SPACE_CHILD_CONCURRENCY)
-            .collect()
-            .await;
+
+        let fresh_results: Vec<(String, HashMap<String, Vec<SpaceChildMeta>>)> =
+            if !stale_space_ids.is_empty() {
+                stream::iter(stale_space_ids.into_iter().map(|sid| {
+                    let hc = hc.clone();
+                    let hs = homeserver.clone();
+                    let at = at.clone();
+                    async move {
+                        let result = fetch_hierarchy_children(&hc, &hs, &at, &sid).await;
+                        (sid, result)
+                    }
+                }))
+                .buffer_unordered(GET_ROOMS_SPACE_CHILD_CONCURRENCY)
+                .collect()
+                .await
+            } else {
+                Vec::new()
+            };
+
+        if let Ok(mut cache) = state.hierarchy_cache.lock() {
+            for (sid, result) in &fresh_results {
+                cache.insert(
+                    sid.clone(),
+                    CachedHierarchy {
+                        result: result.clone(),
+                        fetched_at: now,
+                    },
+                );
+            }
+        }
+
         let mut added_total = 0usize;
-        for hm in hierarchy_results {
+        for hm in cached_results
+            .into_iter()
+            .chain(fresh_results.into_iter().map(|(_, r)| r))
+        {
             for (sid, hierarchy_ch) in hm {
                 let entry = space_children.entry(sid.clone()).or_default();
                 let existing: HashSet<String> =
                     entry.iter().map(|c| c.child_id.clone()).collect();
                 for child in hierarchy_ch {
                     if !existing.contains(&child.child_id) {
-                        log::info!(
-                            "get_rooms: hierarchy added child {} to space {}",
-                            child.child_id,
-                            sid
-                        );
                         entry.push(child);
                         added_total += 1;
                     }
