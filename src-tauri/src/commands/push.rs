@@ -19,7 +19,6 @@
 use std::sync::Arc;
 
 use tauri::State;
-use tauri::Manager;
 
 use crate::AppState;
 

@@ -902,8 +902,14 @@ export default function MainLayout({
   }, [spaces, activeSpaceId]);
 
   const handleSpacesChanged = useCallback(async (payload?: RoomsChangedPayload) => {
-    if (payload?.optimisticRoom) {
-      upsertOptimisticRoom(payload.optimisticRoom);
+    const optimisticRooms = [
+      ...(payload?.optimisticRooms ?? []),
+      ...(payload?.optimisticRoom ? [payload.optimisticRoom] : []),
+    ];
+    if (optimisticRooms.length > 0) {
+      for (const room of optimisticRooms) {
+        upsertOptimisticRoom(room);
+      }
       void fetchRooms();
       return;
     }

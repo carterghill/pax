@@ -108,13 +108,46 @@ function withStableRoomDisplayName(
   return incoming;
 }
 
+/**
+ * Remote space relationships can briefly disappear from the SDK store while
+ * sync catches up. Keep the last known parent/order data in that specific
+ * empty-parent case so sub-spaces do not flash as top-level spaces.
+ */
+function withStableRoomTopology(
+  previous: Room | undefined,
+  incoming: Room
+): Room {
+  if (!previous || previous.id !== incoming.id) return incoming;
+  if (incoming.parentSpaceIds.length > 0 || previous.parentSpaceIds.length === 0) {
+    return incoming;
+  }
+  return {
+    ...incoming,
+    parentSpaceIds: previous.parentSpaceIds,
+    spaceChildOrders:
+      Object.keys(incoming.spaceChildOrders ?? {}).length > 0
+        ? incoming.spaceChildOrders
+        : previous.spaceChildOrders,
+  };
+}
+
+function withStableRoomDisplayNameAndTopology(
+  previous: Room | undefined,
+  incoming: Room
+): Room {
+  return withStableRoomTopology(
+    previous,
+    withStableRoomDisplayName(previous, incoming)
+  );
+}
+
 function mergeFetchedRoomsPreserveNames(
   previousList: Room[],
   incomingList: Room[]
 ): Room[] {
   const prevById = new Map(previousList.map((r) => [r.id, r]));
   return incomingList.map((room) =>
-    withStableRoomDisplayName(prevById.get(room.id), room)
+    withStableRoomDisplayNameAndTopology(prevById.get(room.id), room)
   );
 }
 
@@ -156,7 +189,7 @@ export function useRooms(userId: string | null) {
   const mergeRooms = useCallback((serverRooms: Room[], pendingRooms: Room[]) => {
     const pendingById = new Map(pendingRooms.map((r) => [r.id, r]));
     const mergedServer = serverRooms.map((room) =>
-      withStableRoomDisplayName(pendingById.get(room.id), room)
+      withStableRoomDisplayNameAndTopology(pendingById.get(room.id), room)
     );
     const serverIds = new Set(serverRooms.map((r) => r.id));
     const orphanPending = pendingRooms.filter((r) => !serverIds.has(r.id));
@@ -174,7 +207,7 @@ export function useRooms(userId: string | null) {
         optimisticRoomsRef.current.map((r) => [r.id, r])
       );
       const listWithOptNames = list.map((room) =>
-        withStableRoomDisplayName(optById.get(room.id), room)
+        withStableRoomDisplayNameAndTopology(optById.get(room.id), room)
       );
 
       let mergedFetched: Room[] = [];
