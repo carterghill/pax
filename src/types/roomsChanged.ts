@@ -4,6 +4,7 @@ import type { Room } from "./matrix";
 export type RoomsChangedPayload = {
   joinedRoomId?: string;
   optimisticRoom?: Room;
+  optimisticRooms?: Room[];
   /** Topic for a newly created child room (not stored on `Room`); used by space home cache. */
   newSpaceChildTopic?: string | null;
 };

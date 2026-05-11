@@ -1615,26 +1615,40 @@ pub async fn start_sync(
                 if !gate.load(Ordering::Relaxed) {
                     return;
                 }
-                // Only self-join transitions — skip other members' events,
-                // self non-Join transitions, and in-place updates while
-                // already Joined (e.g. avatar / displayname edits).
+                // Only self membership transitions affect the room list.
+                // Skip other members' events and in-place updates while
+                // already in the same membership state (e.g. avatar /
+                // displayname edits).
                 if ev.state_key.as_str() != self_id {
                     return;
                 }
-                if ev.content.membership != MembershipState::Join {
-                    return;
-                }
-                let prev_was_join = ev
+                let prev_membership = ev
                     .unsigned
                     .prev_content
                     .as_ref()
-                    .map(|c| c.membership == MembershipState::Join)
-                    .unwrap_or(false);
-                if prev_was_join {
+                    .map(|c| c.membership.clone());
+                if prev_membership
+                    .as_ref()
+                    .map(|prev| prev == &ev.content.membership)
+                    .unwrap_or(false)
+                {
                     return;
                 }
 
                 let room_id = room.room_id().to_string();
+                let _ = app.emit("rooms-changed", ());
+
+                if ev.content.membership != MembershipState::Join {
+                    return;
+                }
+                if prev_membership
+                    .as_ref()
+                    .map(|prev| prev == &MembershipState::Join)
+                    .unwrap_or(false)
+                {
+                    return;
+                }
+
                 log::info!("[pax reconcile] self-joined {room_id}; reconciling");
                 if let Err(e) =
                     super::reconciler::reconcile_room(&state, &app, &room_id).await
@@ -1704,10 +1718,7 @@ pub async fn start_sync(
                         return;
                     }
                     let space_id = room.room_id().to_string();
-                    super::rooms::invalidate_hierarchy_cache(
-                        &state.hierarchy_cache,
-                        &space_id,
-                    );
+                    let _ = app.emit("rooms-changed", ());
                     log::info!(
                         "[pax reconcile] m.space.child changed in {space_id}; reconciling children"
                     );
@@ -1737,6 +1748,7 @@ pub async fn start_sync(
                 if !gate.load(Ordering::Relaxed) {
                     return;
                 }
+                let _ = app.emit("rooms-changed", ());
                 log::info!("[pax reconcile] m.direct changed; reconciling all rooms");
                 if let Err(e) = super::reconciler::reconcile_all(&state, &app).await {
                     log::warn!("[pax reconcile] m.direct reconcile failed: {e}");
@@ -1915,8 +1927,6 @@ pub async fn start_sync(
                     );
                 }
             }
-
-            let _ = app.emit("rooms-changed", ());
 
             // Emit per-room unread diffs since last iteration.  Pure in-memory
             // reads (RwLock) — cheap even for hundreds of rooms.  See

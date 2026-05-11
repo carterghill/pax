@@ -35,7 +35,6 @@ const MAX_EMBED_HEIGHT = 320;
 
 function IframeEmbedView({ embed, href }: { embed: IframeEmbed; href: string }) {
   const { palette, spacing, typography, resolvedColorScheme } = useTheme();
-  const [activated] = useState(true);
   const [loaded, setLoaded] = useState(false);
   const [error, setError] = useState(false);
   const iframeRef = useRef<HTMLIFrameElement>(null);

@@ -54,6 +54,24 @@ function roomToSpaceChildInfo(r: Room, fromHierarchy?: SpaceChildInfo): SpaceChi
   };
 }
 
+function childInfoToRoom(child: SpaceChildInfo, parentSpaceId: string): Room | null {
+  if (child.membership !== "joined") return null;
+  return {
+    id: child.id,
+    name: child.name,
+    avatarUrl: child.avatarUrl,
+    isSpace: child.roomType === SPACE_ROOM_TYPE,
+    parentSpaceIds: [parentSpaceId],
+    roomType: child.roomType,
+    topic: child.topic,
+    membership: "joined",
+    isDirect: child.isDirect,
+    dmPeerUserId: child.dmPeerUserId,
+    dmPeerPresence: child.dmPeerPresence,
+    dmPeerStatusMsg: child.dmPeerStatusMsg,
+  };
+}
+
 /** Merge hierarchy children of a sub-space with rooms from sync (invited/joined). */
 function mergeSubSpaceChannels(
   syncRooms: Room[],
@@ -175,7 +193,7 @@ export default function SpaceHomeView({
   const addSpaceMenuRef = useRef<HTMLDivElement>(null);
   /** Sub-space id → expanded in space home (absent = expanded). */
   const [subSpaceExpandedHome, setSubSpaceExpandedHome] = useState<Record<string, boolean>>({});
-  /** Per–sub-space hierarchy from `get_space_info(sub.id)` (joinable rooms not in sync). */
+  /** Per-sub-space hierarchy fetched only when the user explicitly expands an unjoined sub-space. */
   const [subSpaceHierarchyChildren, setSubSpaceHierarchyChildren] = useState<
     Record<string, SpaceChildInfo[]>
   >({});
@@ -236,6 +254,12 @@ export default function SpaceHomeView({
         setCachedSpaceInfo(requestedId, data);
         if (activeSpaceIdRef.current !== requestedId) return;
         setInfo(data);
+        const optimisticRooms = data.children
+          .map((child) => childInfoToRoom(child, requestedId))
+          .filter((room): room is Room => room !== null);
+        if (optimisticRooms.length > 0) {
+          void onRoomsChanged({ optimisticRooms });
+        }
         if (!background) setError(null);
       })
       .catch((e) => {
@@ -251,7 +275,7 @@ export default function SpaceHomeView({
         if (activeSpaceIdRef.current !== requestedId) return;
         if (!background) setLoading(false);
       });
-  }, [space.id]);
+  }, [space.id, onRoomsChanged]);
 
   // Live-update DM presence dots on the space home list (sync pushes `presence` events).
   useEffect(() => {
@@ -290,38 +314,6 @@ export default function SpaceHomeView({
   }, [space.id]);
 
   useEffect(() => {
-    if (!info) {
-      setSubSpaceHierarchyChildren({});
-      return;
-    }
-    const subs = info.children
-      .filter((c) => c.membership === "joined" && isChildMatrixSpace(c))
-      .sort((a, b) => compareByDisplayThenKey(a.name, a.id, b.name, b.id));
-    if (subs.length === 0) {
-      setSubSpaceHierarchyChildren({});
-      return;
-    }
-    let cancelled = false;
-    (async () => {
-      const map: Record<string, SpaceChildInfo[]> = {};
-      await Promise.all(
-        subs.map(async (sub) => {
-          try {
-            const si = await invoke<SpaceInfo>("get_space_info", { spaceId: sub.id });
-            if (!cancelled) map[sub.id] = si.children;
-          } catch {
-            if (!cancelled) map[sub.id] = [];
-          }
-        })
-      );
-      if (!cancelled) setSubSpaceHierarchyChildren(map);
-    })();
-    return () => {
-      cancelled = true;
-    };
-  }, [info, space.id]);
-
-  useEffect(() => {
     setJoiningRoomId(null);
     setShowCreateRoom(false);
     setShowCreateSubSpace(false);
@@ -334,6 +326,12 @@ export default function SpaceHomeView({
     const cached = getCachedSpaceInfo(space.id);
     if (cached) {
       setInfo(cached);
+      const optimisticRooms = cached.children
+        .map((child) => childInfoToRoom(child, space.id))
+        .filter((room): room is Room => room !== null);
+      if (optimisticRooms.length > 0) {
+        void onRoomsChanged({ optimisticRooms });
+      }
       setError(null);
       setLoading(false);
       fetchInfo({ background: true });
@@ -343,7 +341,7 @@ export default function SpaceHomeView({
       setLoading(true);
       fetchInfo();
     }
-  }, [space.id, fetchInfo]);
+  }, [space.id, fetchInfo, onRoomsChanged]);
 
   // Check whether the user can add rooms to this space
   useEffect(() => {
