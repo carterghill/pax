@@ -5,7 +5,6 @@ import {
   useEffect,
   useLayoutEffect,
   useMemo,
-  Fragment,
   type CSSProperties,
 } from "react";
 import { createPortal } from "react-dom";
@@ -14,7 +13,6 @@ import { listen } from "@tauri-apps/api/event";
 import type { Message, RoomMember } from "../types/matrix";
 import { useRoomMembers } from "../hooks/useRoomMembers";
 import {
-  Type,
   Bold,
   Italic,
   Strikethrough,
@@ -70,6 +68,10 @@ import {
 import GiphyPicker from "../features/chat/composer/GiphyPicker";
 import { useComposerTypingNotice } from "../features/chat/composer/useComposerTypingNotice";
 import ComposerContextBar from "../features/chat/composer/ComposerContextBar";
+import ComposerFormattingToolbar, {
+  ComposerFormattingToggle,
+  type ComposerFormatItem,
+} from "../features/chat/composer/ComposerFormattingToolbar";
 
 export interface EditingMessageRef {
   eventId: string;
@@ -704,9 +706,7 @@ export default function MessageInput({
     refreshFormats();
   }, [activeFormats, refreshFormats]);
 
-  type FormatItem = { icon: typeof Bold; label: string; run: () => void; formatKey?: string };
-
-  const formatGroups: FormatItem[][] = [
+  const formatGroups: ComposerFormatItem[][] = [
     [
       { icon: Bold, label: "Bold", formatKey: "bold", run: () => execFormat("bold") },
       { icon: Italic, label: "Italic", formatKey: "italic", run: () => execFormat("italic") },
@@ -1696,42 +1696,17 @@ export default function MessageInput({
             </button>
           </div>
         </div>
-        <button
-          type="button"
-          title="Text formatting"
-          aria-expanded={formatOpen}
-          aria-haspopup="menu"
-          disabled={interactionLocked}
-          onMouseDown={(e) => e.preventDefault()}
-          onClick={() => setFormatOpen((o) => !o)}
-          style={{
-            flexShrink: 0,
-            display: "flex",
-            alignItems: "center",
-            justifyContent: "center",
-            width: inputToolBtnSize,
-            height: inputToolBtnSize,
-            padding: 0,
-            margin: spacing.unit,
-            marginLeft: 0,
-            border: "none",
-            borderRadius: inputToolBtnRadius,
-            backgroundColor: formatOpen ? palette.bgHover : "transparent",
-            color: formatOpen ? palette.textPrimary : palette.textSecondary,
-            cursor: interactionLocked ? "default" : "pointer",
-            opacity: interactionLocked ? 0.35 : 1,
-          }}
-          onMouseEnter={(e) => {
-            if (interactionLocked) return;
-            hoverToolBtn(e, formatOpen, true);
-          }}
-          onMouseLeave={(e) => {
-            if (interactionLocked) return;
-            hoverToolBtn(e, formatOpen, false);
-          }}
-        >
-          <Type size={inputToolIconSize} strokeWidth={2} />
-        </button>
+        <ComposerFormattingToggle
+          formatOpen={formatOpen}
+          interactionLocked={interactionLocked}
+          palette={palette}
+          spacing={spacing}
+          inputToolBtnSize={inputToolBtnSize}
+          inputToolBtnRadius={inputToolBtnRadius}
+          inputToolIconSize={inputToolIconSize}
+          onToggleFormatOpen={() => setFormatOpen((o) => !o)}
+          onHoverToolButton={hoverToolBtn}
+        />
         <button
           type="button"
           title={editingMessage ? "Save edit" : "Send message"}
@@ -1773,102 +1748,18 @@ export default function MessageInput({
         </button>
         </div>
 
-        {/* Inline format toolbar */}
-        {formatOpen && (
-          <>
-            <div
-              aria-hidden
-              style={{
-                height: 1,
-                marginLeft: spacing.unit * 2,
-                marginRight: spacing.unit * 2,
-                backgroundColor: palette.borderSecondary ?? palette.border,
-                opacity: palette.borderSecondary ? 1 : 0.25,
-              }}
-            />
-            <div
-              role="toolbar"
-              aria-label="Markdown formatting"
-              style={{
-                padding: `${spacing.unit * 1.5}px ${spacing.unit * 2}px`,
-                display: "flex",
-                flexDirection: "row",
-                flexWrap: "wrap",
-                alignItems: "center",
-                gap: formatBtnGap,
-                columnGap: groupGap,
-              }}
-            >
-              {formatGroups.map((group, groupIndex) => (
-                <Fragment key={groupIndex}>
-                  {groupIndex > 0 && (
-                    <div
-                      aria-hidden
-                      role="separator"
-                      style={{
-                        width: 1,
-                        height: inputToolBtnSize - spacing.unit * 0.75,
-                        flexShrink: 0,
-                        alignSelf: "center",
-                        borderRadius: 1,
-                        backgroundColor: palette.border,
-                        opacity: 0.3,
-                      }}
-                    />
-                  )}
-                  <div
-                    style={{
-                      display: "flex",
-                      flexDirection: "row",
-                      flexWrap: "nowrap",
-                      alignItems: "center",
-                      gap: formatBtnGap,
-                    }}
-                  >
-                    {group.map(({ icon: Icon, label, run, formatKey }) => {
-                      const isActive = formatKey ? activeFormats.has(formatKey) : false;
-                      return (
-                        <button
-                          key={label}
-                          type="button"
-                          role="menuitem"
-                          title={label}
-                          aria-label={label}
-                          aria-pressed={isActive}
-                          onMouseDown={(e) => e.preventDefault()}
-                          onClick={run}
-                          style={{
-                            display: "flex",
-                            alignItems: "center",
-                            justifyContent: "center",
-                            width: inputToolBtnSize,
-                            height: inputToolBtnSize,
-                            padding: 0,
-                            border: "none",
-                            borderRadius: inputToolBtnRadius,
-                            backgroundColor: isActive ? palette.bgHover : "transparent",
-                            color: isActive ? palette.textHeading : palette.textSecondary,
-                            cursor: "pointer",
-                          }}
-                          onMouseEnter={(e) => {
-                            e.currentTarget.style.backgroundColor = palette.bgHover;
-                            e.currentTarget.style.color = palette.textHeading;
-                          }}
-                          onMouseLeave={(e) => {
-                            e.currentTarget.style.backgroundColor = isActive ? palette.bgHover : "transparent";
-                            e.currentTarget.style.color = isActive ? palette.textHeading : palette.textSecondary;
-                          }}
-                        >
-                          <Icon size={inputToolIconSize} strokeWidth={2} />
-                        </button>
-                      );
-                    })}
-                  </div>
-                </Fragment>
-              ))}
-            </div>
-          </>
-        )}
+        <ComposerFormattingToolbar
+          formatOpen={formatOpen}
+          formatGroups={formatGroups}
+          activeFormats={activeFormats}
+          palette={palette}
+          spacing={spacing}
+          formatBtnGap={formatBtnGap}
+          groupGap={groupGap}
+          inputToolBtnSize={inputToolBtnSize}
+          inputToolBtnRadius={inputToolBtnRadius}
+          inputToolIconSize={inputToolIconSize}
+        />
       </div>
     </div>
       {pickerPortal}
