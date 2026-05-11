@@ -64,6 +64,20 @@ import {
   type ComposerMentionPillStyle,
 } from "../utils/composerEditorDom";
 import { MODAL_LAYER_Z } from "./ModalLayer";
+import {
+  getMatrixMaxUploadBytes,
+  roomFileStagingRemove,
+  sendFileMessage,
+  uploadRoomFile,
+} from "../features/chat/api";
+import {
+  formatBinaryBytes,
+  stagingByteLenMatchesFile,
+  streamFileToStaging,
+  type PendingAttachment,
+  UPLOAD_HTTP_END,
+  UPLOAD_STAGING_END,
+} from "../features/chat/composer/fileUpload";
 
 export interface EditingMessageRef {
   eventId: string;
@@ -106,23 +120,6 @@ interface MessageInputProps {
 /** Below `MODAL_LAYER_Z` so emoji/GIF popovers stay under full-screen modals. */
 const COMPOSER_POPOVER_Z = MODAL_LAYER_Z - 1000;
 
-/** Single combined progress scale: staging 0..END, HTTP upload END..HTTP_END, then send/sync. */
-const UPLOAD_STAGING_END = 0.15;
-const UPLOAD_HTTP_END = 0.9;
-
-type PendingAttachment = {
-  uploadId: string;
-  name: string;
-  mimeType: string;
-  sourceFile: File;
-  contentUri: string | null;
-  byteSize: number | null;
-  previewUrl: string | null;
-  phase: "reading" | "uploading" | "ready" | "error";
-  progress01: number;
-  errorMessage?: string;
-};
-
 function formatInvokeErr(err: unknown): string {
   if (typeof err === "string") return err;
   if (err instanceof Error) return err.message;
@@ -145,67 +142,6 @@ function replyTargetSummary(msg: Message): string {
   const t = msg.body.trim();
   if (!t) return who;
   return t.length > 100 ? `${who} · ${t.slice(0, 100)}…` : `${who} · ${t}`;
-}
-
-/** Human-readable size (binary units) for upload limit messaging. */
-function formatBinaryBytes(n: number): string {
-  if (!Number.isFinite(n) || n <= 0) return "0 B";
-  const units = ["B", "KiB", "MiB", "GiB", "TiB"];
-  let v = n;
-  let i = 0;
-  while (v >= 1024 && i < units.length - 1) {
-    v /= 1024;
-    i++;
-  }
-  return i === 0 ? `${Math.round(v)} ${units[i]}` : `${v >= 10 ? v.toFixed(1) : v.toFixed(2)} ${units[i]}`;
-}
-
-const STAGING_CHUNK = 512 * 1024;
-
-function uint8ToBase64Chunk(u8: Uint8Array): string {
-  const CH = 8192;
-  const parts: string[] = [];
-  for (let i = 0; i < u8.length; i += CH) {
-    parts.push(String.fromCharCode(...u8.subarray(i, i + CH)));
-  }
-  return btoa(parts.join(""));
-}
-
-/** Writes the file to a Rust-side staging file in small base64 IPC chunks (bounded memory). */
-async function streamFileToStaging(
-  file: File,
-  uploadId: string,
-  onFraction: (f: number) => void,
-): Promise<void> {
-  const size = file.size;
-  if (size === 0) {
-    await invoke("room_file_staging_reset", { uploadId });
-    onFraction(1);
-    return;
-  }
-  await invoke("room_file_staging_reset", { uploadId });
-  let offset = 0;
-  while (offset < size) {
-    const end = Math.min(offset + STAGING_CHUNK, size);
-    const buf = await file.slice(offset, end).arrayBuffer();
-    const u8 = new Uint8Array(buf);
-    await invoke("room_file_staging_append_b64", {
-      uploadId,
-      chunkB64: uint8ToBase64Chunk(u8),
-    });
-    offset = end;
-    onFraction(offset / size);
-  }
-}
-
-async function stagingByteLenMatchesFile(uploadId: string, fileSize: number): Promise<boolean> {
-  let len = 0;
-  try {
-    len = await invoke<number>("room_file_staging_byte_len", { uploadId });
-  } catch {
-    len = 0;
-  }
-  return len === fileSize;
 }
 
 function fixedPopoverStyle(bottom: number, right: number): CSSProperties {
@@ -898,7 +834,7 @@ export default function MessageInput({
         pendingFileRef.current = uploading;
         setPendingFile(uploading);
 
-        const [contentUri, byteSize] = await invoke<[string, number]>("upload_room_file", {
+        const [contentUri, byteSize] = await uploadRoomFile({
           roomId,
           uploadId: cur.uploadId,
           fileName: cur.name,
@@ -920,7 +856,7 @@ export default function MessageInput({
       } catch (e) {
         const msg = formatInvokeErr(e);
         console.error("Attachment prepare failed:", e);
-        void invoke("room_file_staging_remove", { uploadId }).catch(() => {});
+        void roomFileStagingRemove(uploadId).catch(() => {});
         setPendingFile((p) =>
           p?.uploadId === uploadId
             ? { ...p, phase: "error", errorMessage: msg, progress01: 0 }
@@ -957,7 +893,7 @@ export default function MessageInput({
           bridge.patchMessage(localEventId, {
             localFileUpload: { phase: "uploading", progress: UPLOAD_STAGING_END },
           });
-          const res = await invoke<[string, number]>("upload_room_file", {
+          const res = await uploadRoomFile({
             roomId,
             uploadId: snapshot.uploadId,
             fileName: snapshot.name,
@@ -972,7 +908,7 @@ export default function MessageInput({
         });
 
         const cap = caption.trim();
-        const serverEventId = await invoke<string>("send_file_message", {
+        const serverEventId = await sendFileMessage({
           roomId,
           contentUri,
           fileName: snapshot.name,
@@ -988,7 +924,7 @@ export default function MessageInput({
       } catch (e) {
         const msg = formatInvokeErr(e);
         console.error("Failed to send file message:", e);
-        void invoke("room_file_staging_remove", { uploadId: snapshot.uploadId }).catch(() => {});
+        void roomFileStagingRemove(snapshot.uploadId).catch(() => {});
         bridge.patchMessage(localEventId, {
           localFileUpload: { phase: "failed", progress: 0, errorMessage: msg },
         });
@@ -1252,7 +1188,7 @@ export default function MessageInput({
 
       let maxBytes: number | null = null;
       try {
-        maxBytes = await invoke<number | null>("get_matrix_max_upload_bytes");
+        maxBytes = await getMatrixMaxUploadBytes();
       } catch {
         // e.g. not logged in — still allow picking; server will reject if needed
       }
@@ -1297,7 +1233,7 @@ export default function MessageInput({
   function clearPendingFile() {
     const p = pendingFileRef.current;
     if (p?.uploadId) {
-      void invoke("room_file_staging_remove", { uploadId: p.uploadId }).catch(() => {});
+      void roomFileStagingRemove(p.uploadId).catch(() => {});
     }
     if (p?.previewUrl) URL.revokeObjectURL(p.previewUrl);
     pendingFileRef.current = null;
