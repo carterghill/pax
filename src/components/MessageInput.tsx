@@ -71,6 +71,7 @@ import {
   UPLOAD_STAGING_END,
 } from "../features/chat/composer/fileUpload";
 import GiphyPicker from "../features/chat/composer/GiphyPicker";
+import { useComposerTypingNotice } from "../features/chat/composer/useComposerTypingNotice";
 
 export interface EditingMessageRef {
   eventId: string;
@@ -192,14 +193,19 @@ export default function MessageInput({
   const emojiPickerMountRef = useRef<HTMLDivElement>(null);
   const [popoverPos, setPopoverPos] = useState<{ bottom: number; right: number } | null>(null);
   const insertEmojiFromPickerRef = useRef<(native: string) => void>(() => {});
-  const typingTimeout = useRef<ReturnType<typeof setTimeout> | null>(null);
-  const isTyping = useRef(false);
-  const lastTypingSentAt = useRef(0);
   const { palette, typography, spacing, resolvedColorScheme } = useTheme();
   const [giphyApiKey, setGiphyApiKey] = useState("");
   const fileInputRef = useRef<HTMLInputElement>(null);
   const [pendingFile, setPendingFile] = useState<PendingAttachment | null>(null);
   const pendingFileRef = useRef<PendingAttachment | null>(null);
+  const { clearTypingTimeout, handleComposerActivity, sendTyping } = useComposerTypingNotice({
+    roomId,
+    draftDmPeerUserId,
+    interactionLocked,
+    editing: editingMessage != null,
+    composerPermission,
+    onLocalTypingActive,
+  });
 
   // ─── Mention autocomplete ─────────────────────────────────────────────────
 
@@ -470,45 +476,6 @@ export default function MessageInput({
     document.execCommand("defaultParagraphSeparator", false, "div");
   }, []);
 
-  // ─── Typing indicator ─────────────────────────────────────────────────────
-
-  const sendTyping = useCallback(
-    (typing: boolean) => {
-      if (draftDmPeerUserId) return;
-      if (interactionLockedRef.current) return;
-
-      if (typing) {
-        const now = Date.now();
-        if (isTyping.current && now - lastTypingSentAt.current < 3000) return;
-        lastTypingSentAt.current = now;
-        if (!isTyping.current) {
-          isTyping.current = true;
-          onLocalTypingActive?.(true);
-        }
-        invoke("send_typing_notice", { roomId, typing: true }).catch(() => {});
-      } else {
-        if (!isTyping.current) return;
-        isTyping.current = false;
-        lastTypingSentAt.current = 0;
-        onLocalTypingActive?.(false);
-        invoke("send_typing_notice", { roomId, typing: false }).catch(() => {});
-      }
-    },
-    [roomId, onLocalTypingActive, draftDmPeerUserId],
-  );
-
-  useEffect(() => {
-    return () => {
-      if (draftDmPeerUserId) return;
-      if (typingTimeout.current) clearTimeout(typingTimeout.current);
-      if (isTyping.current) {
-        invoke("send_typing_notice", { roomId, typing: false }).catch(() => {});
-        isTyping.current = false;
-        onLocalTypingActive?.(false);
-      }
-    };
-  }, [roomId, onLocalTypingActive, draftDmPeerUserId]);
-
   useEffect(() => {
     pendingFileRef.current = pendingFile;
   }, [pendingFile]);
@@ -547,12 +514,6 @@ export default function MessageInput({
       unlisten?.();
     };
   }, [roomId, fileSendBridge]);
-
-  useEffect(() => {
-    if (!editingMessage) return;
-    if (typingTimeout.current) clearTimeout(typingTimeout.current);
-    sendTyping(false);
-  }, [editingMessage, sendTyping]);
 
   // ─── Editor input handler ─────────────────────────────────────────────────
 
@@ -613,18 +574,7 @@ export default function MessageInput({
       }
     }
 
-    if (editingMessage) return;
-    if (draftDmPeerUserId) return;
-    if (text.trim().length > 0 || media) {
-      sendTyping(true);
-      if (typingTimeout.current) clearTimeout(typingTimeout.current);
-      typingTimeout.current = setTimeout(() => {
-        sendTyping(false);
-      }, 3000);
-    } else {
-      sendTyping(false);
-      if (typingTimeout.current) clearTimeout(typingTimeout.current);
-    }
+    handleComposerActivity({ text, hasMedia: media });
   }
 
   // ─── Active format tracking ───────────────────────────────────────────────
@@ -944,7 +894,7 @@ export default function MessageInput({
     // Close picker but keep format toolbar open across sends.
     setPickerOpen(false);
     sendTyping(false);
-    if (typingTimeout.current) clearTimeout(typingTimeout.current);
+    clearTypingTimeout();
 
     setSending(true);
     try {
@@ -1243,16 +1193,6 @@ export default function MessageInput({
     if (draftDmPeerUserId) return;
     if (composerPermission !== "forbidden") return;
 
-    sendTyping(false);
-    if (typingTimeout.current) {
-      clearTimeout(typingTimeout.current);
-      typingTimeout.current = null;
-    }
-    if (isTyping.current) {
-      isTyping.current = false;
-      onLocalTypingActive?.(false);
-      invoke("send_typing_notice", { roomId, typing: false }).catch(() => {});
-    }
     setPickerOpen(false);
     setFormatOpen(false);
     clearPendingFile();
@@ -1267,7 +1207,7 @@ export default function MessageInput({
     if (editingMessageRef.current && onCancelEditRef.current) {
       onCancelEditRef.current();
     }
-  }, [composerPermission, draftDmPeerUserId, roomId, sendTyping, onLocalTypingActive, syncHeight]);
+  }, [composerPermission, draftDmPeerUserId, syncHeight]);
 
   // ─── Layout constants ─────────────────────────────────────────────────────
 
