@@ -790,6 +790,7 @@ const MessageRow = memo(function MessageRow({
               request={msg.videoMediaRequest}
               metaWidth={msg.videoWidth}
               metaHeight={msg.videoHeight}
+              mimeType={msg.fileMime}
             />
             {shouldShowCaptionBelowMedia(msg) ? (
               <MessageMarkdown

@@ -23,9 +23,6 @@ import {
   Heading1,
   Heading2,
   Minus,
-  Send,
-  Smile,
-  Paperclip,
 } from "lucide-react";
 import { Picker } from "emoji-mart";
 import data from "@emoji-mart/data";
@@ -66,13 +63,13 @@ import {
 import { useComposerTypingNotice } from "../features/chat/composer/useComposerTypingNotice";
 import ComposerContextBar from "../features/chat/composer/ComposerContextBar";
 import ComposerFormattingToolbar, {
-  ComposerFormattingToggle,
   type ComposerFormatItem,
 } from "../features/chat/composer/ComposerFormattingToolbar";
 import ComposerMediaPickerPopover, {
   type ComposerPickerTab,
 } from "../features/chat/composer/ComposerMediaPickerPopover";
 import MentionAutocompleteMenu from "../features/chat/composer/MentionAutocompleteMenu";
+import ComposerInputRow from "../features/chat/composer/ComposerInputRow";
 
 export interface EditingMessageRef {
   eventId: string;
@@ -1341,244 +1338,37 @@ export default function MessageInput({
           onCancelReply={onCancelReply}
           onClearPendingFile={clearPendingFile}
         />
-        {/* Top row: editor + toolbar buttons */}
-        <div
-          style={{
-            display: "flex",
-            alignItems: "center",
-            minHeight: spacing.unit * 11,
-            minWidth: 0,
-            flexWrap: "nowrap",
-            overflowX: "auto",
-            overflowY: "hidden",
-          }}
-        >
-        {/* File upload button (left of editor) */}
-        <input
-          ref={fileInputRef}
-          type="file"
-          style={{ display: "none" }}
-          onChange={handleFileSelected}
-        />
-        <button
-          type="button"
-          title={
-            draftDmPeerUserId
-              ? "Send a message first to create the conversation"
-              : pendingFile
-                ? "File attached"
-                : "Upload file"
-          }
-          aria-label={
-            draftDmPeerUserId
-              ? "Upload disabled until conversation exists"
-              : pendingFile
-                ? "File attached"
-                : "Upload file"
-          }
-          disabled={!!pendingFile || !!draftDmPeerUserId || interactionLocked}
-          onMouseDown={(e) => e.preventDefault()}
-          onClick={() => fileInputRef.current?.click()}
-          style={{
-            flexShrink: 0,
-            display: "flex",
-            alignItems: "center",
-            justifyContent: "center",
-            width: inputToolBtnSize,
-            height: inputToolBtnSize,
-            padding: 0,
-            marginLeft: spacing.unit * 2,
-            marginRight: 0,
-            border: "none",
-            borderRadius: inputToolBtnRadius,
-            backgroundColor: "transparent",
-            color: palette.textSecondary,
-            cursor: pendingFile || draftDmPeerUserId || interactionLocked ? "default" : "pointer",
-            opacity: pendingFile || draftDmPeerUserId || interactionLocked ? 0.35 : 1,
-          }}
-          onMouseEnter={(e) => {
-            if (pendingFile || draftDmPeerUserId || interactionLocked) return;
-            e.currentTarget.style.backgroundColor = palette.bgHover;
-            e.currentTarget.style.color = palette.textPrimary;
-          }}
-          onMouseLeave={(e) => {
-            if (pendingFile || draftDmPeerUserId || interactionLocked) return;
-            e.currentTarget.style.backgroundColor = "transparent";
-            e.currentTarget.style.color = palette.textSecondary;
-          }}
-        >
-          <Paperclip size={inputToolIconSize} strokeWidth={2} />
-        </button>
-        <div
-          style={{
-            position: "relative",
-            flex: 1,
-            minWidth: 0,
-            alignSelf: "stretch",
-          }}
-        >
-          {((!plainText.trim() && !hasComposerMedia) || interactionLocked) && (
-            <div
-              aria-hidden
-              style={{
-                position: "absolute",
-                left: 0,
-                top: 0,
-                right: 0,
-                padding: `${spacing.unit * 3}px ${spacing.unit * 2}px ${spacing.unit * 3}px ${spacing.unit * 2}px`,
-                pointerEvents: "none",
-                color: palette.textSecondary,
-                fontSize: emojiOnlyComposer
-                  ? typography.fontSizeBase * EMOJI_ONLY_DISPLAY_SCALE
-                  : typography.fontSizeBase,
-                fontFamily: `${typography.fontFamily}, var(--pax-twemoji-font-stack)`,
-                lineHeight: typography.lineHeight,
-                whiteSpace: "nowrap",
-                overflow: "hidden",
-                boxSizing: "border-box",
-                WebkitMaskImage: `linear-gradient(to right, #fff 0%, #fff calc(100% - ${spacing.unit * 5}px), transparent 100%)`,
-                maskImage: `linear-gradient(to right, #fff 0%, #fff calc(100% - ${spacing.unit * 5}px), transparent 100%)`,
-              }}
-            >
-              {placeholderText}
-            </div>
-          )}
-          <div
-            ref={editorRef}
-            data-pax-composer
-            contentEditable={!interactionLocked}
-            role="textbox"
-            aria-multiline="true"
-            aria-label={placeholderText}
-            suppressContentEditableWarning
-            onInput={handleEditorInput}
-            onKeyDown={handleKeyDown}
-            onPaste={handleEditorPaste}
-            style={{
-              minWidth: 0,
-              width: "100%",
-              background: "none",
-              border: "none",
-              outline: "none",
-              color: palette.textPrimary,
-              fontSize: emojiOnlyComposer
-                ? typography.fontSizeBase * EMOJI_ONLY_DISPLAY_SCALE
-                : typography.fontSizeBase,
-              fontFamily: `${typography.fontFamily}, var(--pax-twemoji-font-stack)`,
-              lineHeight: typography.lineHeight,
-              padding: `${spacing.unit * 3}px ${spacing.unit * 2}px ${spacing.unit * 3}px ${spacing.unit * 2}px`,
-              maxHeight: composerMaxHeightPx,
-              overflowY: "hidden",
-              boxSizing: "border-box",
-              whiteSpace: "pre-wrap",
-              wordBreak: "break-word",
-              opacity: interactionLocked ? 0.65 : 1,
-              cursor: interactionLocked ? "default" : "text",
-            }}
-          />
-        </div>
-        <div
-          style={{
-            flexShrink: 0,
-            display: "flex",
-            flexDirection: "row",
-            alignItems: "center",
-            justifyContent: "center",
-            position: "relative",
-          }}
-        >
-          <div style={{ position: "relative", flexShrink: 0 }}>
-            <button
-              ref={pickerAnchorRef}
-              type="button"
-              title="Emoji & GIF"
-              aria-label="Emoji & GIF"
-              aria-expanded={pickerOpen}
-              aria-haspopup="dialog"
-              disabled={interactionLocked}
-              onMouseDown={(e) => e.preventDefault()}
-              onClick={handlePickerToggle}
-              style={{
-                flexShrink: 0,
-                display: "flex",
-                alignItems: "center",
-                justifyContent: "center",
-                width: inputToolBtnSize,
-                height: inputToolBtnSize,
-                padding: 0,
-                margin: spacing.unit,
-                marginRight: spacing.unit * 0.75,
-                border: "none",
-                borderRadius: inputToolBtnRadius,
-                backgroundColor: pickerOpen ? palette.bgHover : "transparent",
-                color: pickerOpen ? palette.textPrimary : palette.textSecondary,
-                cursor: interactionLocked ? "default" : "pointer",
-                opacity: interactionLocked ? 0.35 : 1,
-              }}
-              onMouseEnter={(e) => {
-                if (interactionLocked) return;
-                hoverToolBtn(e, pickerOpen, true);
-              }}
-              onMouseLeave={(e) => {
-                if (interactionLocked) return;
-                hoverToolBtn(e, pickerOpen, false);
-              }}
-            >
-              <Smile size={inputToolIconSize} strokeWidth={2} />
-            </button>
-          </div>
-        </div>
-        <ComposerFormattingToggle
-          formatOpen={formatOpen}
+        <ComposerInputRow
+          fileInputRef={fileInputRef}
+          editorRef={editorRef}
+          pickerAnchorRef={pickerAnchorRef}
+          pendingFile={pendingFile}
+          draftDmPeerUserId={draftDmPeerUserId}
           interactionLocked={interactionLocked}
+          plainText={plainText}
+          hasComposerMedia={hasComposerMedia}
+          emojiOnlyComposer={emojiOnlyComposer}
+          placeholderText={placeholderText}
+          composerMaxHeightPx={composerMaxHeightPx}
+          pickerOpen={pickerOpen}
+          formatOpen={formatOpen}
+          canSend={canSend}
+          editingMessage={editingMessage}
           palette={palette}
+          typography={typography}
           spacing={spacing}
           inputToolBtnSize={inputToolBtnSize}
           inputToolBtnRadius={inputToolBtnRadius}
           inputToolIconSize={inputToolIconSize}
-          onToggleFormatOpen={() => setFormatOpen((o) => !o)}
+          onFileSelected={handleFileSelected}
+          onEditorInput={handleEditorInput}
+          onEditorKeyDown={handleKeyDown}
+          onEditorPaste={handleEditorPaste}
+          onPickerToggle={handlePickerToggle}
+          onFormatToggle={() => setFormatOpen((open) => !open)}
+          onSend={() => void handleSend()}
           onHoverToolButton={hoverToolBtn}
         />
-        <button
-          type="button"
-          title={editingMessage ? "Save edit" : "Send message"}
-          aria-label={editingMessage ? "Save edit" : "Send message"}
-          disabled={!canSend}
-          onMouseDown={(e) => e.preventDefault()}
-          onClick={() => void handleSend()}
-          style={{
-            flexShrink: 0,
-            display: "flex",
-            alignItems: "center",
-            justifyContent: "center",
-            width: inputToolBtnSize,
-            height: inputToolBtnSize,
-            padding: 0,
-            marginTop: spacing.unit,
-            marginBottom: spacing.unit,
-            marginLeft: 0,
-            marginRight: spacing.unit * 2,
-            border: "none",
-            borderRadius: inputToolBtnRadius,
-            backgroundColor: "transparent",
-            color: palette.textSecondary,
-            cursor: canSend ? "pointer" : "default",
-            opacity: canSend ? 1 : 0.45,
-          }}
-          onMouseEnter={(e) => {
-            if (!canSend) return;
-            e.currentTarget.style.backgroundColor = palette.bgHover;
-            e.currentTarget.style.color = palette.textPrimary;
-          }}
-          onMouseLeave={(e) => {
-            if (!canSend) return;
-            e.currentTarget.style.backgroundColor = "transparent";
-            e.currentTarget.style.color = palette.textSecondary;
-          }}
-        >
-          <Send size={inputToolIconSize} strokeWidth={2} />
-        </button>
-        </div>
 
         <ComposerFormattingToolbar
           formatOpen={formatOpen}

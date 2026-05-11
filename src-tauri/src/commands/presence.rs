@@ -87,10 +87,7 @@ pub async fn sync_presence(
     app: tauri::AppHandle,
 ) -> Result<(), String> {
     let client = get_client(&state).await?;
-    let self_id = client
-        .user_id()
-        .ok_or("No user ID")?
-        .to_string();
+    let self_id = client.user_id().ok_or("No user ID")?.to_string();
 
     // Collect unique user IDs across all joined rooms.
     let mut user_ids = HashSet::new();

@@ -1,32 +1,26 @@
 import { useEffect, useRef, useState } from "react";
 import { Loader2 } from "lucide-react";
-import { convertFileSrc, invoke } from "@tauri-apps/api/core";
 import { useTheme } from "../theme/ThemeContext";
 import { inlineMediaAspectBoxStyle } from "../utils/inlineMediaLayout";
 
 const INLINE_VIDEO_MAX_HEIGHT = 480;
-
-function formatInvokeError(err: unknown): string {
-  if (typeof err === "string") return err;
-  if (err instanceof Error) return err.message;
-  try {
-    return JSON.stringify(err);
-  } catch {
-    return String(err);
-  }
-}
+const MATRIX_MEDIA_URL_PREFIX = navigator.userAgent.includes("Windows")
+  ? "http://paxmatrixmedia.localhost"
+  : "paxmatrixmedia://localhost";
 
 interface MessageMatrixVideoProps {
   request: unknown;
   /** Matrix `m.video` `info` dimensions when known (loading placeholder only). */
   metaWidth?: number;
   metaHeight?: number;
+  mimeType?: string | null;
 }
 
 export default function MessageMatrixVideo({
   request,
   metaWidth,
   metaHeight,
+  mimeType,
 }: MessageMatrixVideoProps) {
   const { palette, typography, spacing } = useTheme();
   const [src, setSrc] = useState<string | null>(null);
@@ -45,40 +39,19 @@ export default function MessageMatrixVideo({
       : null;
 
   useEffect(() => {
-    let cancelled = false;
     setSrc(null);
     setFailed(false);
     setErrorDetail(null);
 
-    let parsed: unknown;
     try {
-      parsed = JSON.parse(requestKey);
+      JSON.parse(requestKey);
     } catch {
-      if (!cancelled) {
-        setFailed(true);
-        setErrorDetail("Invalid video request data.");
-      }
-      return () => {
-        cancelled = true;
-      };
+      setFailed(true);
+      setErrorDetail("Invalid video request data.");
+      return;
     }
 
-    invoke<string>("get_matrix_image_path", { request: parsed })
-      .then((path) => {
-        if (!cancelled) setSrc(convertFileSrc(path));
-      })
-      .catch((err) => {
-        const msg = formatInvokeError(err);
-        console.error("get_matrix_image_path (video):", msg);
-        if (!cancelled) {
-          setFailed(true);
-          setErrorDetail(msg.length > 200 ? `${msg.slice(0, 200)}…` : msg);
-        }
-      });
-
-    return () => {
-      cancelled = true;
-    };
+    setSrc(`${MATRIX_MEDIA_URL_PREFIX}/download?request=${encodeURIComponent(requestKey)}`);
   }, [requestKey]);
 
   // Release video resources when src changes or component unmounts
@@ -168,8 +141,8 @@ export default function MessageMatrixVideo({
 
   return (
     <video
+      key={src}
       ref={videoRef}
-      src={src}
       controls
       playsInline
       preload="metadata"
@@ -179,6 +152,8 @@ export default function MessageMatrixVideo({
         setErrorDetail("Video could not be played (unsupported format or file missing).");
         setSrc(null);
       }}
-    />
+    >
+      <source src={src} type={mimeType ?? "video/mp4"} />
+    </video>
   );
 }

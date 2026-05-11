@@ -25,8 +25,7 @@ static TRAY_ICONS: OnceLock<(
 )> = OnceLock::new();
 
 #[cfg(desktop)]
-fn tray_icon_triple(
-) -> &'static (
+fn tray_icon_triple() -> &'static (
     tauri::image::Image<'static>,
     tauri::image::Image<'static>,
     tauri::image::Image<'static>,
@@ -83,16 +82,14 @@ fn set_tray_unread_indicator_impl(app: AppHandle, dot: TrayIndicatorDot) -> Resu
         TrayIndicatorDot::Red => red.clone(),
         TrayIndicatorDot::Blue => blue.clone(),
     };
-    tray
-        .set_icon(Some(icon))
+    tray.set_icon(Some(icon))
         .map_err(|e| format!("tray set_icon: {e}"))?;
     let tip = match dot {
         TrayIndicatorDot::None => "Pax",
         TrayIndicatorDot::Red => "Pax — unread",
         TrayIndicatorDot::Blue => "Pax — unread (no notifications)",
     };
-    tray
-        .set_tooltip(Some(tip))
+    tray.set_tooltip(Some(tip))
         .map_err(|e| format!("tray set_tooltip: {e}"))?;
     Ok(())
 }

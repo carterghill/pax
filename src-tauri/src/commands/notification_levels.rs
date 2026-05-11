@@ -83,8 +83,7 @@ pub(super) fn has_suppression_installed(rules: &Value, room_id: &str) -> bool {
         return false;
     };
     room_rules.iter().any(|r| {
-        let id_matches =
-            r.get("rule_id").and_then(|id| id.as_str()) == Some(room_id);
+        let id_matches = r.get("rule_id").and_then(|id| id.as_str()) == Some(room_id);
         let has_dont_notify = r
             .get("actions")
             .and_then(|a| a.as_array())
@@ -139,9 +138,7 @@ pub async fn set_room_notification_level(
     // Write intent first; the reconcile picks it up and does the HTTP.
     set_room_level_inner(&state, &app, &room_id, Some(level)).await?;
     if let Err(e) = super::reconciler::reconcile_room(&state, &app, &room_id).await {
-        log::warn!(
-            "[pax] set_room_notification_level: reconcile_room failed ({room_id}): {e}"
-        );
+        log::warn!("[pax] set_room_notification_level: reconcile_room failed ({room_id}): {e}");
     }
     let _ = app.emit(
         "pax-room-notification-level-changed",
@@ -162,9 +159,7 @@ pub async fn clear_room_notification_level(
 ) -> Result<(), String> {
     set_room_level_inner(&state, &app, &room_id, None).await?;
     if let Err(e) = super::reconciler::reconcile_room(&state, &app, &room_id).await {
-        log::warn!(
-            "[pax] clear_room_notification_level: reconcile_room failed ({room_id}): {e}"
-        );
+        log::warn!("[pax] clear_room_notification_level: reconcile_room failed ({room_id}): {e}");
     }
     let _ = app.emit(
         "pax-room-notification-level-changed",
@@ -205,8 +200,7 @@ pub async fn get_all_room_notification_levels(
         }
         let id = room.room_id().to_string();
         let level =
-            super::reconciler::resolve_level_with_context(&room, &settings, &space_children)
-                .await;
+            super::reconciler::resolve_level_with_context(&room, &settings, &space_children).await;
         out.insert(id, level);
     }
     Ok(out)

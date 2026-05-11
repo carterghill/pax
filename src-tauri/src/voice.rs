@@ -376,7 +376,9 @@ impl VoiceManager {
         if let Some(session) = session {
             // Stop adaptive bitrate monitor
             session._abr_shutdown.store(true, Ordering::Relaxed);
-            session.screen_share_generation.fetch_add(1, Ordering::Relaxed);
+            session
+                .screen_share_generation
+                .fetch_add(1, Ordering::Relaxed);
             if let Some(mut handle) = session.screen_handle.lock().take() {
                 handle.stop();
             }
@@ -521,7 +523,15 @@ impl VoiceManager {
         window_handle: Option<String>,
         app_handle: &AppHandle,
     ) -> Result<(), String> {
-        let (room, audio_state, room_id, local_identity, screen_handle, abr_shutdown, screen_share_generation) = {
+        let (
+            room,
+            audio_state,
+            room_id,
+            local_identity,
+            screen_handle,
+            abr_shutdown,
+            screen_share_generation,
+        ) = {
             let guard = self.session.lock();
             let session = guard.as_ref().ok_or("Not in a voice call")?;
             (
@@ -595,7 +605,10 @@ impl VoiceManager {
         apply_bitrate_to_sender(&handle.track, crate::screen::ScreenShareQuality::High).await;
 
         abr_shutdown.store(false, Ordering::Relaxed);
-        tokio::spawn(adaptive_bitrate_monitor(track_for_abr, abr_shutdown.clone()));
+        tokio::spawn(adaptive_bitrate_monitor(
+            track_for_abr,
+            abr_shutdown.clone(),
+        ));
         let share_generation = screen_share_generation
             .fetch_add(1, Ordering::Relaxed)
             .wrapping_add(1);
@@ -651,7 +664,15 @@ impl VoiceManager {
 
     /// Stop sharing screen.
     pub async fn stop_screen_share(&self, app_handle: &AppHandle) -> Result<(), String> {
-        let (room, audio_state, room_id, local_identity, screen_handle, abr_shutdown, screen_share_generation) = {
+        let (
+            room,
+            audio_state,
+            room_id,
+            local_identity,
+            screen_handle,
+            abr_shutdown,
+            screen_share_generation,
+        ) = {
             let guard = self.session.lock();
             let session = guard.as_ref().ok_or("Not in a voice call")?;
             (
@@ -2102,10 +2123,7 @@ fn list_audio_devices_linux() -> Result<AudioDeviceList, String> {
                 &default_source,
                 &mut input_devices,
             );
-            current_name = trimmed
-                .trim_start_matches("Name:")
-                .trim()
-                .to_string();
+            current_name = trimmed.trim_start_matches("Name:").trim().to_string();
             current_desc.clear();
         } else if trimmed.starts_with("Description:") {
             current_desc = trimmed
@@ -2251,7 +2269,10 @@ fn setup_mic_input_linux(
             // "System default" — check if the default is a monitor and find a real mic
             match find_best_default_source() {
                 Some(source) => {
-                    log::info!("Linux mic: auto-selected source '{}' (default was a monitor)", source);
+                    log::info!(
+                        "Linux mic: auto-selected source '{}' (default was a monitor)",
+                        source
+                    );
                     format!(" device=\"{}\"", source)
                 }
                 None => {
@@ -2277,7 +2298,10 @@ fn setup_mic_input_linux(
     let pipeline = match gstreamer::parse::launch(&pipeline_str) {
         Ok(p) => p,
         Err(e) => {
-            log::warn!("GStreamer mic pipeline failed ({}), falling back to cpal", e);
+            log::warn!(
+                "GStreamer mic pipeline failed ({}), falling back to cpal",
+                e
+            );
             return setup_mic_input_cpal(audio_state, noise_proc, frame_tx, preferred_device_id)
                 .map(MicInputStream::Cpal);
         }

@@ -12,13 +12,16 @@ use crate::types::{
 };
 use crate::AppState;
 
-use super::{fmt_error_chain, get_client, get_or_fetch_avatar, resolve_room, encode_bytes_data_url, sniff_image_mime, AvatarDiskCache};
+use super::{
+    encode_bytes_data_url, fmt_error_chain, get_client, get_or_fetch_avatar, resolve_room,
+    sniff_image_mime, AvatarDiskCache,
+};
 use matrix_sdk::media::{MediaFormat, MediaRequestParameters};
 use matrix_sdk::ruma::api::client::profile::get_profile::v3::Request as GetProfileRequest;
 use matrix_sdk::ruma::api::client::profile::{AvatarUrl, DisplayName};
-use matrix_sdk::ruma::events::room::MediaSource;
 use matrix_sdk::ruma::events::room::member::MembershipState;
 use matrix_sdk::ruma::events::room::power_levels::UserPowerLevel;
+use matrix_sdk::ruma::events::room::MediaSource;
 
 /// True when `own` has strictly higher power than `target` (Matrix kick/ban rules).
 fn user_power_outranks(own: UserPowerLevel, target: UserPowerLevel) -> bool {
@@ -119,11 +122,14 @@ pub async fn get_room_members(
                 let results = join_all(futs).await;
                 for (uid, url) in results {
                     if let Some(data_url) = url {
-                        let _ = app.emit("member-avatar-updated", serde_json::json!({
-                            "roomId": rid,
-                            "userId": uid,
-                            "avatarUrl": data_url,
-                        }));
+                        let _ = app.emit(
+                            "member-avatar-updated",
+                            serde_json::json!({
+                                "roomId": rid,
+                                "userId": uid,
+                                "avatarUrl": data_url,
+                            }),
+                        );
                     }
                 }
             }
@@ -335,8 +341,8 @@ pub async fn get_matrix_user_profile(
     user_id: String,
 ) -> Result<MatrixUserProfile, String> {
     let client = get_client(&state).await?;
-    let uid = matrix_sdk::ruma::UserId::parse(&user_id)
-        .map_err(|e| format!("Invalid user ID: {e}"))?;
+    let uid =
+        matrix_sdk::ruma::UserId::parse(&user_id).map_err(|e| format!("Invalid user ID: {e}"))?;
 
     let response = client
         .send(GetProfileRequest::new(uid))
@@ -528,10 +534,7 @@ pub async fn get_knock_members(
     let homeserver = client.homeserver().to_string();
     let hs = homeserver.trim_end_matches('/');
     let encoded_room = urlencoding::encode(&room_id);
-    let user_id = client
-        .user_id()
-        .ok_or("Not logged in")?
-        .to_string();
+    let user_id = client.user_id().ok_or("Not logged in")?.to_string();
 
     // Fetch knock members via CS API
     let members_url = format!(
@@ -564,14 +567,9 @@ pub async fn get_knock_members(
     let mut members = Vec::new();
     if let Some(events) = chunk {
         for event in events {
-            let uid = event["state_key"]
-                .as_str()
-                .unwrap_or_default()
-                .to_string();
+            let uid = event["state_key"].as_str().unwrap_or_default().to_string();
             let content = &event["content"];
-            let display_name = content["displayname"]
-                .as_str()
-                .map(|s| s.to_string());
+            let display_name = content["displayname"].as_str().map(|s| s.to_string());
             let reason = content["reason"]
                 .as_str()
                 .filter(|s| !s.is_empty())
@@ -658,10 +656,7 @@ pub async fn get_knock_members(
                         .and_then(|v| v.as_i64())
                         .unwrap_or(0)
                 });
-            let invite_pl = pl
-                .get("invite")
-                .and_then(|v| v.as_i64())
-                .unwrap_or(0);
+            let invite_pl = pl.get("invite").and_then(|v| v.as_i64()).unwrap_or(0);
             let kick_pl = pl.get("kick").and_then(|v| v.as_i64()).unwrap_or(50);
             (user_pl >= invite_pl, user_pl >= kick_pl)
         }
@@ -699,10 +694,7 @@ pub async fn preview_leave_space(
         });
     }
 
-    let user_id = client
-        .user_id()
-        .ok_or("Not logged in")?
-        .to_string();
+    let user_id = client.user_id().ok_or("Not logged in")?.to_string();
 
     let access_token = client.access_token().ok_or("No access token")?;
     let homeserver = client.homeserver().to_string();
@@ -799,10 +791,7 @@ pub async fn search_user_directory(
         .map(|m| m.user_id().to_string())
         .collect();
 
-    let self_id = client
-        .user_id()
-        .ok_or("Not logged in")?
-        .to_string();
+    let self_id = client.user_id().ok_or("Not logged in")?.to_string();
 
     let url = format!("{}/_matrix/client/v3/user_directory/search", hs);
     let cap = limit.clamp(1, 50);
@@ -849,13 +838,7 @@ pub async fn search_user_directory(
             continue;
         }
         let avatar_url = if let Some(ref mxc) = hit.avatar_url {
-            resolve_mxc_avatar_data_url(
-                &state.http_client,
-                hs,
-                mxc,
-                &avatar_cache,
-            )
-            .await
+            resolve_mxc_avatar_data_url(&state.http_client, hs, mxc, &avatar_cache).await
         } else {
             None
         };
@@ -886,10 +869,7 @@ pub async fn get_invite_suggestions(
         .map(|m| m.user_id().to_string())
         .collect();
 
-    let self_id = client
-        .user_id()
-        .ok_or("Not logged in")?
-        .to_string();
+    let self_id = client.user_id().ok_or("Not logged in")?.to_string();
 
     let rooms: Vec<matrix_sdk::Room> = client
         .joined_rooms()
@@ -935,10 +915,11 @@ pub async fn get_invite_suggestions(
         }
     }
 
-    let mut pairs: Vec<(String, (usize, Option<String>, Option<String>))> = agg.into_iter().collect();
+    let mut pairs: Vec<(String, (usize, Option<String>, Option<String>))> =
+        agg.into_iter().collect();
     pairs.sort_by(|a, b| {
-        b.1.0
-            .cmp(&a.1.0)
+        b.1 .0
+            .cmp(&a.1 .0)
             .then_with(|| a.0.to_lowercase().cmp(&b.0.to_lowercase()))
     });
 
@@ -1134,8 +1115,7 @@ pub async fn get_member_moderation_permissions(
     let own_pl = self_member.power_level();
     let target_pl = target_member.power_level();
 
-    let can_kick =
-        self_member.can_kick() && user_power_outranks(own_pl, target_pl);
+    let can_kick = self_member.can_kick() && user_power_outranks(own_pl, target_pl);
     let can_ban = self_member.can_ban() && user_power_outranks(own_pl, target_pl);
 
     Ok(MemberModerationPermissions { can_kick, can_ban })

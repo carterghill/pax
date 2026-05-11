@@ -106,8 +106,7 @@ pub struct AppState {
     ///   - Cleared in the `SyncReceiptEvent` handler in `start_sync`
     ///     when a receipt for our MXID arrives (covers reads on other
     ///     devices syncing down).
-    pub raw_unread_messages:
-        Arc<Mutex<HashMap<matrix_sdk::ruma::OwnedRoomId, u64>>>,
+    pub raw_unread_messages: Arc<Mutex<HashMap<matrix_sdk::ruma::OwnedRoomId, u64>>>,
 }
 
 impl AppState {
@@ -343,10 +342,9 @@ pub fn run() {
                     // branches we don't need a round-trip — deciding here
                     // keeps the close event cycle atomic from GTK's POV.
                     let app = window.app_handle().clone();
-                    let pref =
-                        commands::lifecycle::get_close_window_preference(app.clone())
-                            .ok()
-                            .flatten();
+                    let pref = commands::lifecycle::get_close_window_preference(app.clone())
+                        .ok()
+                        .flatten();
                     match pref.as_deref() {
                         Some("minimize_tray") => {
                             api.prevent_close();
@@ -397,13 +395,18 @@ pub fn run() {
             app_builder.plugin(tauri_plugin_autostart::Builder::new().build())
         }
         #[cfg(not(desktop))]
-        { app_builder }
+        {
+            app_builder
+        }
     };
     app_builder
         .manage(state)
         .manage(voice::VoiceManager::new())
         .register_uri_scheme_protocol("paxvideo", |_app, request| {
             video_recv::handle_protocol_request(request)
+        })
+        .register_uri_scheme_protocol("paxmatrixmedia", |ctx, request| {
+            commands::messages::handle_matrix_media_protocol_request(ctx.app_handle().clone(), request)
         })
         .invoke_handler(tauri::generate_handler![
             commands::auth::logout,

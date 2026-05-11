@@ -262,7 +262,9 @@ impl AvatarDiskCache {
                     continue;
                 }
                 let p = Path::new(value);
-                let Ok(rel) = p.strip_prefix(&dir) else { continue };
+                let Ok(rel) = p.strip_prefix(&dir) else {
+                    continue;
+                };
                 if let Some(rel_str) = rel.to_str() {
                     rel_map.insert(mxc.clone(), rel_str.to_string());
                 }

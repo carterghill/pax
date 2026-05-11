@@ -162,8 +162,7 @@ async fn do_set_push_rule_enabled(
     let kind = validate_kind(kind)?;
     let (hs, token) = hs_auth(state).await?;
     let encoded_rule = urlencoding::encode(rule_id);
-    let url =
-        format!("{hs}/_matrix/client/v3/pushrules/global/{kind}/{encoded_rule}/enabled");
+    let url = format!("{hs}/_matrix/client/v3/pushrules/global/{kind}/{encoded_rule}/enabled");
 
     let resp = state
         .http_client
@@ -283,8 +282,7 @@ pub async fn set_push_rule_actions(
     let kind = validate_kind(&kind)?;
     let (hs, token) = hs_auth(&state).await?;
     let encoded_rule = urlencoding::encode(&rule_id);
-    let url =
-        format!("{hs}/_matrix/client/v3/pushrules/global/{kind}/{encoded_rule}/actions");
+    let url = format!("{hs}/_matrix/client/v3/pushrules/global/{kind}/{encoded_rule}/actions");
 
     let resp = state
         .http_client

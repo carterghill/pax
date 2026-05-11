@@ -67,9 +67,7 @@ const SPACE_CHILDREN_FETCH_TIMEOUT: Duration = Duration::from_secs(10);
 /// `get_state_events(StateEventType::SpaceChild)` with `AnySyncOrStrippedState`
 /// deserialisation.  Tolerates per-space fetch failures so one misbehaving
 /// space doesn't break the whole pass.
-pub(super) async fn fetch_space_children_map(
-    client: &Client,
-) -> HashMap<String, HashSet<String>> {
+pub(super) async fn fetch_space_children_map(client: &Client) -> HashMap<String, HashSet<String>> {
     let mut out = HashMap::new();
     let spaces = client.joined_rooms().into_iter().filter(|r| r.is_space());
     for space in spaces {
@@ -96,9 +94,7 @@ pub(super) async fn fetch_space_children_map(
                 }
             }
             Ok(Err(e)) => {
-                log::warn!(
-                    "[pax reconcile] space-child fetch for {space_id} failed: {e}"
-                );
+                log::warn!("[pax reconcile] space-child fetch for {space_id} failed: {e}");
             }
             Err(_) => {
                 log::warn!("[pax reconcile] space-child fetch for {space_id} timed out");
@@ -164,8 +160,8 @@ pub(super) async fn resolve_effective_level(
     room_id: &str,
 ) -> Result<NotificationLevel, String> {
     let client = get_client(state).await?;
-    let parsed = matrix_sdk::ruma::RoomId::parse(room_id)
-        .map_err(|e| format!("Invalid room ID: {e}"))?;
+    let parsed =
+        matrix_sdk::ruma::RoomId::parse(room_id).map_err(|e| format!("Invalid room ID: {e}"))?;
     let room = client
         .get_room(&parsed)
         .ok_or_else(|| "Room not found".to_string())?;
@@ -221,8 +217,8 @@ pub async fn reconcile_room(
     room_id: &str,
 ) -> Result<(), String> {
     let client = get_client(state).await?;
-    let parsed = matrix_sdk::ruma::RoomId::parse(room_id)
-        .map_err(|e| format!("Invalid room ID: {e}"))?;
+    let parsed =
+        matrix_sdk::ruma::RoomId::parse(room_id).map_err(|e| format!("Invalid room ID: {e}"))?;
     let room = client
         .get_room(&parsed)
         .ok_or_else(|| "Room not found".to_string())?;
@@ -237,10 +233,7 @@ pub async fn reconcile_room(
 
 /// Reconcile every joined room.  Called from the frontend on sync-ready
 /// and internally from `set_global_default_notification_level`.
-pub async fn reconcile_all(
-    state: &AppState,
-    _app: &AppHandle,
-) -> Result<ReconcileReport, String> {
+pub async fn reconcile_all(state: &AppState, _app: &AppHandle) -> Result<ReconcileReport, String> {
     let client = get_client(state).await?;
     let settings = load_notification_settings_inner(state).await?;
     let space_children = fetch_space_children_map(&client).await;
@@ -257,11 +250,7 @@ pub async fn reconcile_all(
             Ok(false) => {}
             Err(e) => {
                 report.errors += 1;
-                log::warn!(
-                    "[pax reconcile] room {} failed: {}",
-                    room.room_id(),
-                    e
-                );
+                log::warn!("[pax reconcile] room {} failed: {}", room.room_id(), e);
             }
         }
     }
@@ -287,8 +276,7 @@ pub async fn reconcile_rooms_for_space(
     let space_children = fetch_space_children_map(&client).await;
     let rules = load_push_rules_raw(state).await?;
 
-    let targets: HashSet<String> =
-        space_children.get(space_id).cloned().unwrap_or_default();
+    let targets: HashSet<String> = space_children.get(space_id).cloned().unwrap_or_default();
 
     let mut report = ReconcileReport::default();
     for room in client.joined_rooms() {

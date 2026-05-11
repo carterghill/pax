@@ -376,11 +376,9 @@ async fn livekit_jwt_service_url_for_refresh(
         .ok_or("Room not found for JWT service URL fallback")?;
     let homeserver = client.homeserver().to_string();
     // Prefer well-known over room state — room state may still hold a stale URL.
-    Ok(
-        discover_livekit_service_url(&room, http, &homeserver, true)
-            .await?
-            .url,
-    )
+    Ok(discover_livekit_service_url(&room, http, &homeserver, true)
+        .await?
+        .url)
 }
 
 #[tauri::command]
@@ -440,9 +438,12 @@ async fn send_delayed_leave_event(
     http: &reqwest::Client,
     room_id: &str,
 ) -> Result<String, DelayedLeaveError> {
-    let user_id = client.user_id().ok_or_else(|| DelayedLeaveError::Other("No user ID".into()))?;
-    let device_id =
-        client.device_id().ok_or_else(|| DelayedLeaveError::Other("No device ID".into()))?;
+    let user_id = client
+        .user_id()
+        .ok_or_else(|| DelayedLeaveError::Other("No user ID".into()))?;
+    let device_id = client
+        .device_id()
+        .ok_or_else(|| DelayedLeaveError::Other("No device ID".into()))?;
     let state_key = format!("_{}_{}_{}", user_id, device_id, "m.call");
     let homeserver = client.homeserver().to_string();
     let access_token = client
@@ -611,9 +612,7 @@ async fn matrix_voice_put_call_member(
 ) -> Result<(), String> {
     let room_id_parsed =
         matrix_sdk::ruma::RoomId::parse(room_id).map_err(|e| format!("Invalid room ID: {e}"))?;
-    let _room = client
-        .get_room(&room_id_parsed)
-        .ok_or("Room not found")?;
+    let _room = client.get_room(&room_id_parsed).ok_or("Room not found")?;
     let user_id = client.user_id().ok_or("No user ID")?;
     let device_id = client.device_id().ok_or("No device ID")?;
 
@@ -678,9 +677,7 @@ pub(crate) async fn matrix_voice_join(
 ) -> Result<(VoiceJoinResult, String), String> {
     let room_id_parsed =
         matrix_sdk::ruma::RoomId::parse(room_id).map_err(|e| format!("Invalid room ID: {e}"))?;
-    let room = client
-        .get_room(&room_id_parsed)
-        .ok_or("Room not found")?;
+    let room = client.get_room(&room_id_parsed).ok_or("Room not found")?;
     let homeserver = client.homeserver().to_string();
 
     let user_id = client.user_id().ok_or("No user ID")?;
@@ -698,8 +695,7 @@ pub(crate) async fn matrix_voice_join(
     let openid_expires = openid.expires_in.as_secs();
     let openid_token = openid.access_token.as_str();
 
-    let mut discovered =
-        discover_livekit_service_url(&room, http, &homeserver, false).await?;
+    let mut discovered = discover_livekit_service_url(&room, http, &homeserver, false).await?;
 
     let mut join = fetch_livekit_jwt(
         http,
@@ -1098,13 +1094,7 @@ fn start_heartbeat_loop(
 
             // 1. Restart the delayed leave (MSC4140 only)
             if let Some(ref did) = current_delay_id {
-                match restart_delayed_event(
-                    &st.http_client,
-                    &homeserver,
-                    &access_token,
-                    did,
-                )
-                .await
+                match restart_delayed_event(&st.http_client, &homeserver, &access_token, did).await
                 {
                     Ok(true) => {
                         // Normal heartbeat success — nothing else to do
@@ -1112,7 +1102,9 @@ fn start_heartbeat_loop(
                     Ok(false) => {
                         // 404: the delayed event was already fired (computer slept, network
                         // outage exceeded the timeout, etc.). Re-register and/or re-PUT.
-                        log::warn!("Delayed leave was fired while we were away — recovering session");
+                        log::warn!(
+                            "Delayed leave was fired while we were away — recovering session"
+                        );
                         match recover_session(c, &st.http_client, &room_id, &st).await {
                             Ok(Some(new_delay_id)) => {
                                 log::info!("Session recovered: new delay_id={}", new_delay_id);
@@ -1149,17 +1141,18 @@ fn start_heartbeat_loop(
             if last_membership_refresh.elapsed() >= refresh_threshold {
                 log::info!("Refreshing m.call.member to extend expiry window");
                 match livekit_jwt_service_url_for_refresh(c, &st.http_client, &room_id, &st).await {
-                    Ok(url) => match matrix_voice_put_call_member(c, &st.http_client, &room_id, &url)
-                        .await
-                    {
-                        Ok(()) => {
-                            log::info!("m.call.member refreshed successfully");
-                            last_membership_refresh = tokio::time::Instant::now();
+                    Ok(url) => {
+                        match matrix_voice_put_call_member(c, &st.http_client, &room_id, &url).await
+                        {
+                            Ok(()) => {
+                                log::info!("m.call.member refreshed successfully");
+                                last_membership_refresh = tokio::time::Instant::now();
+                            }
+                            Err(e) => {
+                                log::warn!("m.call.member refresh failed: {}", e);
+                            }
                         }
-                        Err(e) => {
-                            log::warn!("m.call.member refresh failed: {}", e);
-                        }
-                    },
+                    }
                     Err(e) => {
                         log::warn!("m.call.member refresh: no JWT service URL: {}", e);
                     }
@@ -1188,9 +1181,7 @@ async fn recover_session(
             Ok(Some(new_delay_id))
         }
         Err(DelayedLeaveError::Unsupported) => {
-            log::warn!(
-                "MSC4140 unsupported during session recovery — re-PUT call.member only"
-            );
+            log::warn!("MSC4140 unsupported during session recovery — re-PUT call.member only");
             app.msc4140_supported.store(false, Ordering::SeqCst);
             let jwt_url = livekit_jwt_service_url_for_refresh(client, http, room_id, app).await?;
             matrix_voice_put_call_member(client, http, room_id, &jwt_url).await?;

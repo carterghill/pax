@@ -1,6 +1,5 @@
 /// Read .env at compile time and bake the values into the binary via
 /// `cargo:rustc-env`. The source code then reads them with `option_env!()`.
-
 use std::path::PathBuf;
 
 /// Match webrtc-sys-local: find CUDA toolkit with `include/cuda.h` on Linux.
@@ -34,8 +33,9 @@ fn main() {
     println!("cargo:rustc-check-cfg=cfg(has_vaapi)");
     println!("cargo:rustc-check-cfg=cfg(has_videotoolbox)");
 
-    let manifest_dir =
-        PathBuf::from(std::env::var("CARGO_MANIFEST_DIR").expect("CARGO_MANIFEST_DIR set by Cargo"));
+    let manifest_dir = PathBuf::from(
+        std::env::var("CARGO_MANIFEST_DIR").expect("CARGO_MANIFEST_DIR set by Cargo"),
+    );
     let workspace_dotenv = manifest_dir.join("..").join(".env");
     let crate_dotenv = manifest_dir.join(".env");
 

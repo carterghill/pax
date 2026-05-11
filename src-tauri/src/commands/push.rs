@@ -50,9 +50,7 @@ pub async fn register_pusher(
 
     let client = super::get_client(&state).await?;
     let homeserver = client.homeserver().to_string();
-    let access_token = client
-        .access_token()
-        .ok_or("No access token")?;
+    let access_token = client.access_token().ok_or("No access token")?;
 
     let url = format!(
         "{}/_matrix/client/v3/pushers/set",
@@ -88,10 +86,7 @@ pub async fn register_pusher(
     if !resp.status().is_success() {
         let status = resp.status();
         let text = resp.text().await.unwrap_or_default();
-        return Err(format!(
-            "Pusher registration failed ({}): {}",
-            status, text
-        ));
+        return Err(format!("Pusher registration failed ({}): {}", status, text));
     }
 
     log::info!("[push] pusher registered successfully");
@@ -110,9 +105,7 @@ pub async fn unregister_pusher(
 ) -> Result<(), String> {
     let client = super::get_client(&state).await?;
     let homeserver = client.homeserver().to_string();
-    let access_token = client
-        .access_token()
-        .ok_or("No access token")?;
+    let access_token = client.access_token().ok_or("No access token")?;
 
     let url = format!(
         "{}/_matrix/client/v3/pushers/set",
@@ -134,7 +127,12 @@ pub async fn unregister_pusher(
         .json(&body)
         .send()
         .await
-        .map_err(|e| format!("Failed to unregister pusher: {}", super::fmt_error_chain(&e)))?;
+        .map_err(|e| {
+            format!(
+                "Failed to unregister pusher: {}",
+                super::fmt_error_chain(&e)
+            )
+        })?;
 
     if !resp.status().is_success() {
         let status = resp.status();
@@ -172,7 +170,11 @@ pub async fn get_fcm_token(app: tauri::AppHandle) -> Result<Option<String>, Stri
             if let Ok(token) = std::fs::read_to_string(path) {
                 let token = token.trim().to_string();
                 if !token.is_empty() {
-                    log::info!("[push] read FCM token from {:?} ({} chars)", path, token.len());
+                    log::info!(
+                        "[push] read FCM token from {:?} ({} chars)",
+                        path,
+                        token.len()
+                    );
                     return Ok(Some(token));
                 }
             }

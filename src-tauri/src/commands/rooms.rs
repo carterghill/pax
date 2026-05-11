@@ -3,12 +3,12 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use futures_util::stream::{self, StreamExt};
-use tokio::sync::Mutex;
 use matrix_sdk::authentication::matrix::MatrixSession;
 use matrix_sdk::authentication::SessionTokens;
 use matrix_sdk::ruma::events::StateEventType;
 use matrix_sdk::{config::SyncSettings, Client, RoomMemberships, SessionMeta};
 use tauri::{Manager, State};
+use tokio::sync::Mutex;
 
 use crate::types::{ParentSpaceInfo, RoomInfo, SpaceChildInfo, SpaceChildOrder, SpaceInfo};
 use crate::AppState;
@@ -508,9 +508,7 @@ struct SpaceChildMeta {
     origin_server_ts: u64,
 }
 
-async fn fetch_space_children_for_room(
-    room: matrix_sdk::Room,
-) -> (String, Vec<SpaceChildMeta>) {
+async fn fetch_space_children_for_room(room: matrix_sdk::Room) -> (String, Vec<SpaceChildMeta>) {
     let room_id = room.room_id().to_string();
     let mut children: Vec<SpaceChildMeta> = Vec::new();
     match tokio::time::timeout(
@@ -536,12 +534,12 @@ async fn fetch_space_children_for_room(
                             Err(_) => continue,
                         }
                     }
-                    matrix_sdk::deserialized_responses::RawAnySyncOrStrippedState::Stripped(raw) => {
-                        match raw.deserialize_as::<serde_json::Value>() {
-                            Ok(v) => v,
-                            Err(_) => continue,
-                        }
-                    }
+                    matrix_sdk::deserialized_responses::RawAnySyncOrStrippedState::Stripped(
+                        raw,
+                    ) => match raw.deserialize_as::<serde_json::Value>() {
+                        Ok(v) => v,
+                        Err(_) => continue,
+                    },
                 };
                 let Some(child_id) = value.get("state_key").and_then(|v| v.as_str()) else {
                     continue;
@@ -619,10 +617,7 @@ async fn dm_one_to_one_peer_summary(
         .members(RoomMemberships::JOIN | RoomMemberships::INVITE)
         .await
         .ok()?;
-    let others: Vec<_> = members
-        .into_iter()
-        .filter(|m| m.user_id() != me)
-        .collect();
+    let others: Vec<_> = members.into_iter().filter(|m| m.user_id() != me).collect();
     if others.len() != 1 {
         return None;
     }
@@ -644,13 +639,11 @@ async fn dm_one_to_one_peer_summary(
     // slow federation does not block `get_rooms`.
     if avatar.is_none() {
         if let Some(uid) = matrix_sdk::ruma::UserId::parse(&peer_id).ok() {
-            let profile_req = matrix_sdk::ruma::api::client::profile::get_profile::v3::Request::new(uid);
+            let profile_req =
+                matrix_sdk::ruma::api::client::profile::get_profile::v3::Request::new(uid);
             let profile_fut = client.send(profile_req);
-            if let Ok(Ok(resp)) = tokio::time::timeout(
-                std::time::Duration::from_secs(5),
-                profile_fut,
-            )
-            .await
+            if let Ok(Ok(resp)) =
+                tokio::time::timeout(std::time::Duration::from_secs(5), profile_fut).await
             {
                 let owned_mxc = resp
                     .get_static::<matrix_sdk::ruma::api::client::profile::AvatarUrl>()
@@ -684,11 +677,7 @@ async fn dm_one_to_one_peer_summary(
         .get(&peer_id)
         .cloned()
         .unwrap_or_else(|| "offline".to_string());
-    let status_msg = status_msg_map
-        .lock()
-        .await
-        .get(&peer_id)
-        .cloned();
+    let status_msg = status_msg_map.lock().await.get(&peer_id).cloned();
     Some((display, avatar, peer_id, presence, status_msg))
 }
 
@@ -786,8 +775,7 @@ pub async fn get_rooms(state: State<'_, Arc<AppState>>) -> Result<Vec<RoomInfo>,
         let mut flattened = 0usize;
         for (space_id, extra) in additions {
             let entry = space_children.entry(space_id).or_default();
-            let existing: HashSet<String> =
-                entry.iter().map(|c| c.child_id.clone()).collect();
+            let existing: HashSet<String> = entry.iter().map(|c| c.child_id.clone()).collect();
             for child in extra {
                 if !existing.contains(&child.child_id) {
                     entry.push(child);
@@ -806,8 +794,8 @@ pub async fn get_rooms(state: State<'_, Arc<AppState>>) -> Result<Vec<RoomInfo>,
     let space_children = Arc::new(space_children);
 
     // Joined rooms: parallel avatars, preserve sidebar order via index sort.
-    let mut joined_parts: Vec<(usize, RoomInfo)> = stream::iter(
-        joined_rooms.into_iter().enumerate().map(|(idx, room)| {
+    let mut joined_parts: Vec<(usize, RoomInfo)> =
+        stream::iter(joined_rooms.into_iter().enumerate().map(|(idx, room)| {
             let sc = space_children.clone();
             let ac = avatar_cache.clone();
             let pm = presence_map.clone();
@@ -874,18 +862,17 @@ pub async fn get_rooms(state: State<'_, Arc<AppState>>) -> Result<Vec<RoomInfo>,
                 };
                 (idx, info)
             }
-        }),
-    )
-    .buffer_unordered(GET_ROOMS_AVATAR_CONCURRENCY)
-    .collect()
-    .await;
+        }))
+        .buffer_unordered(GET_ROOMS_AVATAR_CONCURRENCY)
+        .collect()
+        .await;
 
     joined_parts.sort_by_key(|(i, _)| *i);
     let mut room_list: Vec<RoomInfo> = joined_parts.into_iter().map(|(_, r)| r).collect();
 
     // Invited rooms (same pattern).
-    let mut invited_parts: Vec<(usize, RoomInfo)> = stream::iter(
-        invited_rooms.into_iter().enumerate().map(|(idx, room)| {
+    let mut invited_parts: Vec<(usize, RoomInfo)> =
+        stream::iter(invited_rooms.into_iter().enumerate().map(|(idx, room)| {
             let sc = space_children.clone();
             let ac = avatar_cache.clone();
             let pm = presence_map.clone();
@@ -949,11 +936,10 @@ pub async fn get_rooms(state: State<'_, Arc<AppState>>) -> Result<Vec<RoomInfo>,
                 };
                 (idx, info)
             }
-        }),
-    )
-    .buffer_unordered(GET_ROOMS_AVATAR_CONCURRENCY)
-    .collect()
-    .await;
+        }))
+        .buffer_unordered(GET_ROOMS_AVATAR_CONCURRENCY)
+        .collect()
+        .await;
 
     invited_parts.sort_by_key(|(i, _)| *i);
     room_list.extend(invited_parts.into_iter().map(|(_, r)| r));
@@ -975,16 +961,15 @@ pub async fn join_room(
 ) -> Result<String, String> {
     let client = super::get_client(&state).await?;
 
-    let room_or_alias =
-        <&matrix_sdk::ruma::RoomOrAliasId>::try_from(room_id.as_str()).map_err(|e| {
-            format!("Invalid room ID or alias: {e}")
-        })?;
+    let room_or_alias = <&matrix_sdk::ruma::RoomOrAliasId>::try_from(room_id.as_str())
+        .map_err(|e| format!("Invalid room ID or alias: {e}"))?;
 
     // Federation hints (same discovery as the old raw HTTP join).
     let mut server_names = Vec::new();
     if let Some(via_servers) = via_servers.as_deref() {
         for via_server in via_servers {
-            for discovered in discover_federation_server_names(&state.http_client, via_server).await {
+            for discovered in discover_federation_server_names(&state.http_client, via_server).await
+            {
                 push_unique(&mut server_names, discovered);
             }
         }
@@ -1014,10 +999,7 @@ pub async fn join_room(
 }
 
 #[tauri::command]
-pub async fn leave_room(
-    state: State<'_, Arc<AppState>>,
-    room_id: String,
-) -> Result<(), String> {
+pub async fn leave_room(state: State<'_, Arc<AppState>>, room_id: String) -> Result<(), String> {
     let client = super::get_client(&state).await?;
     let access_token = client.access_token().ok_or("No access token")?;
     let homeserver = client.homeserver().to_string();
@@ -1110,10 +1092,7 @@ pub async fn knock_room(
         .await
         .map_err(|e| format!("Failed to parse knock response: {e}"))?;
 
-    Ok(result["room_id"]
-        .as_str()
-        .unwrap_or(&room_id)
-        .to_string())
+    Ok(result["room_id"].as_str().unwrap_or(&room_id).to_string())
 }
 
 /// Convert an MXC URI to an unauthenticated thumbnail URL.
@@ -1332,8 +1311,13 @@ pub async fn get_space_info(
             if membership == "joined" {
                 if let Ok(rid) = matrix_sdk::ruma::RoomId::parse(&child_id) {
                     if let Some(r) = client.get_room(&rid) {
-                        if let Some((dname, dav, pid, pres, smsg)) =
-                            dm_one_to_one_peer_summary(&r, &avatar_cache, &state.presence_map, &state.status_msg_map).await
+                        if let Some((dname, dav, pid, pres, smsg)) = dm_one_to_one_peer_summary(
+                            &r,
+                            &avatar_cache,
+                            &state.presence_map,
+                            &state.status_msg_map,
+                        )
+                        .await
                         {
                             name = dname;
                             avatar_url = dav;
@@ -1692,10 +1676,7 @@ pub async fn get_room_general_settings(
         matrix_sdk::ruma::RoomId::parse(&room_id).map_err(|e| format!("Invalid room ID: {e}"))?;
     let _ = client.get_room(&parsed).ok_or("Room not found")?;
 
-    let user_id = client
-        .user_id()
-        .ok_or("No user ID")?
-        .to_string();
+    let user_id = client.user_id().ok_or("No user ID")?.to_string();
     let homeserver = client.homeserver().to_string();
     let access_token = client.access_token().ok_or("No access token")?;
     let hs_trim = homeserver.trim_end_matches('/');
@@ -1761,9 +1742,7 @@ pub async fn get_room_general_settings(
         .and_then(|v| v.as_str())
         .filter(|s| !s.is_empty())
         .map(|s| s.to_string());
-    let room_alias_local = canonical_alias
-        .as_deref()
-        .and_then(|a| alias_local_part(a));
+    let room_alias_local = canonical_alias.as_deref().and_then(|a| alias_local_part(a));
 
     let homeserver_name = homeserver_name_from_room_id(&room_id);
 
@@ -1857,10 +1836,7 @@ pub async fn get_room_power_levels_settings(
         matrix_sdk::ruma::RoomId::parse(&room_id).map_err(|e| format!("Invalid room ID: {e}"))?;
     let _ = client.get_room(&parsed).ok_or("Room not found")?;
 
-    let user_id = client
-        .user_id()
-        .ok_or("No user ID")?
-        .to_string();
+    let user_id = client.user_id().ok_or("No user ID")?.to_string();
     let homeserver = client.homeserver().to_string();
     let access_token = client.access_token().ok_or("No access token")?;
     let hs_trim = homeserver.trim_end_matches('/');
@@ -1912,10 +1888,7 @@ pub async fn set_room_power_levels(
         matrix_sdk::ruma::RoomId::parse(&room_id).map_err(|e| format!("Invalid room ID: {e}"))?;
     client.get_room(&parsed).ok_or("Room not found")?;
 
-    let user_id = client
-        .user_id()
-        .ok_or("No user ID")?
-        .to_string();
+    let user_id = client.user_id().ok_or("No user ID")?.to_string();
     let homeserver = client.homeserver().to_string();
     let access_token = client.access_token().ok_or("No access token")?;
     let hs_trim = homeserver.trim_end_matches('/');
@@ -1962,10 +1935,7 @@ pub async fn get_space_settings(
         matrix_sdk::ruma::RoomId::parse(&space_id).map_err(|e| format!("Invalid room ID: {e}"))?;
     let room = client.get_room(&parsed).ok_or("Space not found")?;
 
-    let user_id = client
-        .user_id()
-        .ok_or("No user ID")?
-        .to_string();
+    let user_id = client.user_id().ok_or("No user ID")?.to_string();
     let homeserver = client.homeserver().to_string();
     let access_token = client.access_token().ok_or("No access token")?;
     let hs_trim = homeserver.trim_end_matches('/');
@@ -2148,7 +2118,11 @@ pub async fn get_space_settings(
             .json::<serde_json::Value>()
             .await
             .ok()
-            .and_then(|b| b.get("visibility").and_then(|v| v.as_str()).map(|v| v == "public"))
+            .and_then(|b| {
+                b.get("visibility")
+                    .and_then(|v| v.as_str())
+                    .map(|v| v == "public")
+            })
             .unwrap_or(false),
         _ => false,
     };
@@ -3459,9 +3433,7 @@ pub async fn set_space_child_order(
             return Err("Order string must be 50 characters or fewer.".to_string());
         }
         if !s.bytes().all(|b| (0x20..=0x7e).contains(&b)) {
-            return Err(
-                "Order string must only contain printable ASCII (0x20–0x7e).".to_string(),
-            );
+            return Err("Order string must only contain printable ASCII (0x20–0x7e).".to_string());
         }
     }
 
@@ -3723,14 +3695,9 @@ async fn normalize_public_room_avatar_urls(
     for room_data in chunk {
         let mut entry = room_data.clone();
         if let Some(mxc) = room_data["avatar_url"].as_str() {
-            if let Some(url) = mxc_to_discovered_thumbnail_url(
-                http_client,
-                &mut media_base_url_cache,
-                mxc,
-                64,
-                64,
-            )
-            .await
+            if let Some(url) =
+                mxc_to_discovered_thumbnail_url(http_client, &mut media_base_url_cache, mxc, 64, 64)
+                    .await
             {
                 entry["avatar_url"] = serde_json::json!(url);
             }
@@ -3765,19 +3732,19 @@ async fn discover_federation_server_names(
             .send()
             .await
         {
-            Ok(resp) if resp.status().is_success() => match resp.json::<serde_json::Value>().await {
-                Ok(body) => {
-                    push_unique(&mut federation_servers, apex.clone());
-                    if let Some(advertised) = body["m.server"].as_str() {
-                        push_unique(&mut federation_servers, advertised.to_string());
+            Ok(resp) if resp.status().is_success() => {
+                match resp.json::<serde_json::Value>().await {
+                    Ok(body) => {
+                        push_unique(&mut federation_servers, apex.clone());
+                        if let Some(advertised) = body["m.server"].as_str() {
+                            push_unique(&mut federation_servers, advertised.to_string());
+                        }
+                    }
+                    Err(e) => {
+                        log::warn!("search_public_spaces: failed to parse {well_known_url}: {e}");
                     }
                 }
-                Err(e) => {
-                    log::warn!(
-                        "search_public_spaces: failed to parse {well_known_url}: {e}"
-                    );
-                }
-            },
+            }
             Ok(resp) => {
                 log::debug!(
                     "search_public_spaces: {} returned {}",
@@ -3812,9 +3779,7 @@ async fn discover_federation_server_names(
                 }
             }
             Err(e) => {
-                log::warn!(
-                    "search_public_spaces: failed to parse {well_known_url}: {e}"
-                );
+                log::warn!("search_public_spaces: failed to parse {well_known_url}: {e}");
             }
         },
         Ok(resp) => {
@@ -3854,20 +3819,20 @@ async fn discover_client_base_urls(
             .send()
             .await
         {
-            Ok(resp) if resp.status().is_success() => match resp.json::<serde_json::Value>().await {
-                Ok(body) => {
-                    if let Some(base_url) = body["m.homeserver"]["base_url"].as_str() {
-                        if let Some(normalized) = canonicalize_homeserver_base_url(base_url) {
-                            push_unique(&mut base_urls, normalized);
+            Ok(resp) if resp.status().is_success() => {
+                match resp.json::<serde_json::Value>().await {
+                    Ok(body) => {
+                        if let Some(base_url) = body["m.homeserver"]["base_url"].as_str() {
+                            if let Some(normalized) = canonicalize_homeserver_base_url(base_url) {
+                                push_unique(&mut base_urls, normalized);
+                            }
                         }
                     }
+                    Err(e) => {
+                        log::warn!("search_public_spaces: failed to parse {well_known_url}: {e}");
+                    }
                 }
-                Err(e) => {
-                    log::warn!(
-                        "search_public_spaces: failed to parse {well_known_url}: {e}"
-                    );
-                }
-            },
+            }
             Ok(resp) => {
                 log::debug!(
                     "search_public_spaces: {} returned {}",
@@ -3908,7 +3873,11 @@ async fn search_public_spaces_direct_fallback(
 
     let normalized_search_term = search_term.map(|term| term.to_lowercase());
     let per_page = limit.max(50).min(100);
-    let max_pages = if normalized_search_term.is_some() { 5 } else { 2 };
+    let max_pages = if normalized_search_term.is_some() {
+        5
+    } else {
+        2
+    };
     let mut last_err: Option<String> = None;
 
     'base_urls: for base_url in base_urls {
@@ -3917,7 +3886,10 @@ async fn search_public_spaces_direct_fallback(
         let mut saw_success = false;
 
         for _ in 0..max_pages {
-            let mut url = format!("{}/_matrix/client/v3/publicRooms?limit={}", base_url, per_page);
+            let mut url = format!(
+                "{}/_matrix/client/v3/publicRooms?limit={}",
+                base_url, per_page
+            );
             if let Some(since) = &next_batch {
                 url.push_str("&since=");
                 url.push_str(&urlencoding::encode(since));
@@ -3975,10 +3947,7 @@ async fn search_public_spaces_direct_fallback(
                     if room_data["room_type"].as_str() != Some("m.space") {
                         continue;
                     }
-                    if !public_room_matches_search(
-                        room_data,
-                        normalized_search_term.as_deref(),
-                    ) {
+                    if !public_room_matches_search(room_data, normalized_search_term.as_deref()) {
                         continue;
                     }
                     matched_spaces.push(room_data.clone());
@@ -4003,9 +3972,8 @@ async fn search_public_spaces_direct_fallback(
         }
     }
 
-    Err(last_err.unwrap_or_else(|| {
-        format!("Direct public rooms lookup failed for {}", server_input)
-    }))
+    Err(last_err
+        .unwrap_or_else(|| format!("Direct public rooms lookup failed for {}", server_input)))
 }
 
 /// Remove spaces from a `publicRooms` chunk so the directory lists chat/voice rooms only.
@@ -4037,7 +4005,11 @@ async fn search_public_rooms_direct_fallback(
 
     let normalized_search_term = search_term.map(|term| term.to_lowercase());
     let per_page = limit.max(50).min(100);
-    let max_pages = if normalized_search_term.is_some() { 5 } else { 2 };
+    let max_pages = if normalized_search_term.is_some() {
+        5
+    } else {
+        2
+    };
     let mut last_err: Option<String> = None;
 
     'base_urls: for base_url in base_urls {
@@ -4046,7 +4018,10 @@ async fn search_public_rooms_direct_fallback(
         let mut saw_success = false;
 
         for _ in 0..max_pages {
-            let mut url = format!("{}/_matrix/client/v3/publicRooms?limit={}", base_url, per_page);
+            let mut url = format!(
+                "{}/_matrix/client/v3/publicRooms?limit={}",
+                base_url, per_page
+            );
             if let Some(since) = &next_batch {
                 url.push_str("&since=");
                 url.push_str(&urlencoding::encode(since));
@@ -4104,10 +4079,7 @@ async fn search_public_rooms_direct_fallback(
                     if room_data["room_type"].as_str() == Some("m.space") {
                         continue;
                     }
-                    if !public_room_matches_search(
-                        room_data,
-                        normalized_search_term.as_deref(),
-                    ) {
+                    if !public_room_matches_search(room_data, normalized_search_term.as_deref()) {
                         continue;
                     }
                     matched_rooms.push(room_data.clone());
@@ -4132,9 +4104,8 @@ async fn search_public_rooms_direct_fallback(
         }
     }
 
-    Err(last_err.unwrap_or_else(|| {
-        format!("Direct public rooms lookup failed for {}", server_input)
-    }))
+    Err(last_err
+        .unwrap_or_else(|| format!("Direct public rooms lookup failed for {}", server_input)))
 }
 
 #[tauri::command]
@@ -4198,7 +4169,8 @@ pub async fn search_public_spaces(
 
             match result {
                 Ok(result) => {
-                    let result = normalize_public_room_avatar_urls(&state.http_client, result).await;
+                    let result =
+                        normalize_public_room_avatar_urls(&state.http_client, result).await;
                     return Ok(enrich_public_rooms_with_membership(&client, result));
                 }
                 Err(err) => {
@@ -4329,7 +4301,8 @@ pub async fn search_public_rooms(
 
             match result {
                 Ok(result) => {
-                    let result = normalize_public_room_avatar_urls(&state.http_client, result).await;
+                    let result =
+                        normalize_public_room_avatar_urls(&state.http_client, result).await;
                     let result = filter_public_chunk_exclude_spaces(result);
                     return Ok(enrich_public_rooms_with_membership(&client, result));
                 }
@@ -4494,7 +4467,10 @@ pub async fn get_room_parent_spaces(
             if content.as_object().map_or(true, |o| o.is_empty()) {
                 return None;
             }
-            let canonical = content.get("canonical").and_then(|c| c.as_bool()).unwrap_or(false);
+            let canonical = content
+                .get("canonical")
+                .and_then(|c| c.as_bool())
+                .unwrap_or(false);
             Some((space_id, canonical))
         })
         .collect();
@@ -4544,7 +4520,11 @@ pub async fn get_room_parent_spaces(
             .await
             .ok()
             .flatten()
-            .and_then(|b| b.get("join_rule").and_then(|v| v.as_str()).map(|s| s.to_string()));
+            .and_then(|b| {
+                b.get("join_rule")
+                    .and_then(|v| v.as_str())
+                    .map(|s| s.to_string())
+            });
 
             results.push(ParentSpaceInfo {
                 id: space_id.clone(),
@@ -4575,25 +4555,16 @@ pub async fn get_room_parent_spaces(
                 Ok(r) if r.status().is_success() => {
                     if let Ok(body) = r.json::<serde_json::Value>().await {
                         // The first entry in "rooms" is always the queried room/space itself
-                        let space_data = body["rooms"]
-                            .as_array()
-                            .and_then(|arr| arr.first());
+                        let space_data = body["rooms"].as_array().and_then(|arr| arr.first());
 
                         if let Some(sd) = space_data {
-                            let name = sd["name"]
-                                .as_str()
-                                .unwrap_or("Unnamed")
-                                .to_string();
+                            let name = sd["name"].as_str().unwrap_or("Unnamed").to_string();
                             let topic = sd["topic"]
                                 .as_str()
                                 .filter(|t| !t.is_empty())
                                 .map(|t| t.to_string());
-                            let join_rule = sd["join_rule"]
-                                .as_str()
-                                .map(|s| s.to_string());
-                            let num_joined = sd["num_joined_members"]
-                                .as_u64()
-                                .unwrap_or(0);
+                            let join_rule = sd["join_rule"].as_str().map(|s| s.to_string());
+                            let num_joined = sd["num_joined_members"].as_u64().unwrap_or(0);
 
                             let avatar_url = match sd["avatar_url"].as_str() {
                                 Some(mxc) => {
@@ -4642,7 +4613,9 @@ pub async fn get_room_parent_spaces(
 
     // Sort: canonical parents first, then by name
     results.sort_by(|a, b| {
-        b.canonical.cmp(&a.canonical).then_with(|| a.name.cmp(&b.name))
+        b.canonical
+            .cmp(&a.canonical)
+            .then_with(|| a.name.cmp(&b.name))
     });
 
     Ok(results)
@@ -4651,8 +4624,8 @@ pub async fn get_room_parent_spaces(
 #[cfg(test)]
 mod tests {
     use super::{
-        canonicalize_homeserver_base_url, discovery_hosts_for_server_input,
-        discover_federation_server_names, normalize_server_name, public_room_matches_search,
+        canonicalize_homeserver_base_url, discover_federation_server_names,
+        discovery_hosts_for_server_input, normalize_server_name, public_room_matches_search,
     };
 
     #[test]
@@ -4714,7 +4687,9 @@ mod tests {
     #[test]
     fn extracts_server_name_from_matrix_identifiers_with_rsplit_once() {
         assert_eq!(
-            "!MfAmcoFvXtYUOhFCRt:4d2.org".rsplit_once(':').map(|(_, s)| s),
+            "!MfAmcoFvXtYUOhFCRt:4d2.org"
+                .rsplit_once(':')
+                .map(|(_, s)| s),
             Some("4d2.org")
         );
         assert_eq!(

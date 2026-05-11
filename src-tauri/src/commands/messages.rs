@@ -11,23 +11,26 @@ use tokio::io::{AsyncWriteExt, BufReader};
 use tokio::time::MissedTickBehavior;
 use tokio_util::io::ReaderStream;
 
+use matrix_sdk::deserialized_responses::TimelineEvent;
+use matrix_sdk::media::{MediaFormat, MediaRequestParameters, MediaThumbnailSettings, UniqueKey};
 use matrix_sdk::room::edit::EditedContent;
+use matrix_sdk::room::reply::{EnforceThread, Reply};
 use matrix_sdk::room::IncludeRelations;
 use matrix_sdk::room::MessagesOptions;
 use matrix_sdk::room::RelationsOptions;
-use matrix_sdk::room::reply::{EnforceThread, Reply};
 use matrix_sdk::ruma::events::direct::DirectEventContent;
+use matrix_sdk::ruma::events::reaction::ReactionEventContent;
+use matrix_sdk::ruma::events::relation::Annotation;
 use matrix_sdk::ruma::events::room::member::MembershipState;
 use matrix_sdk::ruma::events::room::member::OriginalSyncRoomMemberEvent;
 use matrix_sdk::ruma::events::room::message::OriginalSyncRoomMessageEvent;
 use matrix_sdk::ruma::events::room::message::Relation;
 use matrix_sdk::ruma::events::room::message::RoomMessageEventContent;
 use matrix_sdk::ruma::events::room::message::RoomMessageEventContentWithoutRelation;
-use matrix_sdk::ruma::events::reaction::ReactionEventContent;
+use matrix_sdk::ruma::events::room::pinned_events::RoomPinnedEventsEventContent;
 use matrix_sdk::ruma::events::room::redaction::OriginalSyncRoomRedactionEvent;
 use matrix_sdk::ruma::events::room::redaction::SyncRoomRedactionEvent;
-use matrix_sdk::ruma::events::relation::Annotation;
-use matrix_sdk::ruma::events::OriginalSyncMessageLikeEvent;
+use matrix_sdk::ruma::events::room::MediaSource;
 use matrix_sdk::ruma::events::space::child::SpaceChildEventContent;
 use matrix_sdk::ruma::events::typing::SyncTypingEvent;
 use matrix_sdk::ruma::events::AnyMessageLikeEventContent;
@@ -35,26 +38,27 @@ use matrix_sdk::ruma::events::AnySyncMessageLikeEvent;
 use matrix_sdk::ruma::events::AnySyncTimelineEvent;
 use matrix_sdk::ruma::events::GlobalAccountDataEvent;
 use matrix_sdk::ruma::events::MessageLikeEventType;
+use matrix_sdk::ruma::events::OriginalSyncMessageLikeEvent;
 use matrix_sdk::ruma::events::OriginalSyncStateEvent;
 use matrix_sdk::ruma::events::SyncMessageLikeEvent;
-use matrix_sdk::ruma::events::room::pinned_events::RoomPinnedEventsEventContent;
-use matrix_sdk::media::{MediaFormat, MediaRequestParameters, MediaThumbnailSettings, UniqueKey};
-use matrix_sdk::deserialized_responses::TimelineEvent;
 use matrix_sdk::ruma::EventId;
 use matrix_sdk::ruma::OwnedEventId;
-use matrix_sdk::ruma::UserId;
 use matrix_sdk::ruma::UInt;
+use matrix_sdk::ruma::UserId;
 use matrix_sdk::Client;
 use matrix_sdk::Room;
-use reqwest::header::{HeaderValue, CONTENT_LENGTH};
+use reqwest::header::{
+    HeaderValue, ACCEPT_RANGES, CONTENT_DISPOSITION, CONTENT_LENGTH, CONTENT_RANGE, CONTENT_TYPE,
+    RANGE,
+};
 use reqwest::Version;
 use tauri::{AppHandle, Emitter, Manager, State};
 
 use crate::types::{
-    MessageBatch, MessageEditPayload, MessageInfo, MessageReactionDeltaPayload, MessageRedactedPayload,
-    MessageReactionSummary, MessageReplyTo, PinnedMessagePreview, PresencePayload, RoomMessagePayload,
-    RoomPinPermission, RoomRedactionPolicy, RoomSendPermission, TypingPayload,
-    VoiceParticipantsChangedPayload,
+    MessageBatch, MessageEditPayload, MessageInfo, MessageReactionDeltaPayload,
+    MessageReactionSummary, MessageRedactedPayload, MessageReplyTo, PinnedMessagePreview,
+    PresencePayload, RoomMessagePayload, RoomPinPermission, RoomRedactionPolicy,
+    RoomSendPermission, TypingPayload, VoiceParticipantsChangedPayload,
 };
 use crate::AppState;
 
@@ -84,6 +88,201 @@ async fn get_matrix_media_bytes_with_timeout(
     }
 }
 
+fn matrix_plain_file_download_urls(
+    client: &Client,
+    params: &MediaRequestParameters,
+) -> Result<[String; 2], String> {
+    if !matches!(params.format, MediaFormat::File) {
+        return Err("direct media fetch only supports full files".to_string());
+    }
+
+    let MediaSource::Plain(mxc) = &params.source else {
+        return Err("direct media fetch only supports unencrypted MXC media".to_string());
+    };
+
+    let server_name = mxc
+        .server_name()
+        .map_err(|e| format!("Invalid MXC server name: {e}"))?
+        .as_str();
+    let media_id = mxc
+        .media_id()
+        .map_err(|e| format!("Invalid MXC media id: {e}"))?;
+    let homeserver = client.homeserver().to_string();
+
+    let base = homeserver.trim_end_matches('/');
+    let server_enc = urlencoding::encode(server_name);
+    let media_enc = urlencoding::encode(media_id);
+
+    Ok([
+        format!("{base}/_matrix/client/v1/media/download/{server_enc}/{media_enc}"),
+        format!("{base}/_matrix/media/v3/download/{server_enc}/{media_enc}"),
+    ])
+}
+
+async fn get_plain_matrix_file_bytes_direct(
+    state: &AppState,
+    client: &Client,
+    params: &MediaRequestParameters,
+    timeout: Duration,
+) -> Result<Vec<u8>, String> {
+    let access_token = client.access_token().ok_or("No access token")?;
+    let urls = matrix_plain_file_download_urls(client, params)?;
+
+    let mut last_err = String::new();
+    for url in urls {
+        let resp = state
+            .http_client
+            .get(&url)
+            .version(Version::HTTP_11)
+            .timeout(timeout)
+            .bearer_auth(access_token.to_string())
+            .send()
+            .await
+            .map_err(|e| format!("direct media download failed: {}", fmt_error_chain(&e)))?;
+
+        if resp.status().is_success() {
+            return resp.bytes().await.map(|b| b.to_vec()).map_err(|e| {
+                format!("direct media download body failed: {}", fmt_error_chain(&e))
+            });
+        }
+
+        let status = resp.status();
+        let body = resp.text().await.unwrap_or_default();
+        last_err = format!("direct media download failed ({status}): {body}");
+    }
+
+    Err(last_err)
+}
+
+fn media_protocol_response(
+    status: u16,
+    body: impl Into<Vec<u8>>,
+) -> tauri::http::Response<Vec<u8>> {
+    tauri::http::Response::builder()
+        .status(status)
+        .header("access-control-allow-origin", "*")
+        .body(body.into())
+        .unwrap_or_else(|_| {
+            tauri::http::Response::builder()
+                .status(500)
+                .body(Vec::new())
+                .expect("static response builds")
+        })
+}
+
+fn query_param(query: Option<&str>, key: &str) -> Option<String> {
+    query?.split('&').find_map(|pair| {
+        let (name, value) = pair.split_once('=')?;
+        if name == key {
+            urlencoding::decode(value).ok().map(|v| v.into_owned())
+        } else {
+            None
+        }
+    })
+}
+
+async fn handle_matrix_media_protocol_request_async(
+    app: AppHandle,
+    request: tauri::http::Request<Vec<u8>>,
+) -> tauri::http::Response<Vec<u8>> {
+    let request_json = match query_param(request.uri().query(), "request") {
+        Some(value) => value,
+        None => return media_protocol_response(400, "missing request"),
+    };
+    let params: MediaRequestParameters = match serde_json::from_str(&request_json) {
+        Ok(params) => params,
+        Err(e) => return media_protocol_response(400, format!("invalid media request: {e}")),
+    };
+    let state = app.state::<Arc<AppState>>();
+    let client = match get_client(&state).await {
+        Ok(client) => client,
+        Err(e) => return media_protocol_response(401, e),
+    };
+    let access_token = match client.access_token() {
+        Some(token) => token.to_string(),
+        None => return media_protocol_response(401, "No access token"),
+    };
+    let urls = match matrix_plain_file_download_urls(&client, &params) {
+        Ok(urls) => urls,
+        Err(e) => return media_protocol_response(400, e),
+    };
+    let range_header = request
+        .headers()
+        .get("range")
+        .and_then(|v| v.to_str().ok())
+        .map(str::to_owned);
+
+    let mut last_status = 502;
+    let mut last_body = Vec::new();
+    for url in urls {
+        let mut outbound = state
+            .http_client
+            .get(&url)
+            .version(Version::HTTP_11)
+            .timeout(MATRIX_IMAGE_FULL_FETCH_TIMEOUT)
+            .bearer_auth(&access_token);
+        if let Some(range) = range_header.as_deref() {
+            outbound = outbound.header(RANGE, range);
+        }
+
+        let resp = match outbound.send().await {
+            Ok(resp) => resp,
+            Err(e) => {
+                return media_protocol_response(
+                    502,
+                    format!("media proxy failed: {}", fmt_error_chain(&e)),
+                )
+            }
+        };
+        let status = resp.status();
+        let headers = resp.headers().clone();
+        let body = match resp.bytes().await {
+            Ok(body) => body.to_vec(),
+            Err(e) => {
+                return media_protocol_response(
+                    502,
+                    format!("media proxy body failed: {}", fmt_error_chain(&e)),
+                )
+            }
+        };
+
+        if status.is_success() {
+            let mut builder = tauri::http::Response::builder()
+                .status(status.as_u16())
+                .header("access-control-allow-origin", "*")
+                .header("cache-control", "private, max-age=3600");
+
+            for header in [
+                CONTENT_TYPE,
+                CONTENT_LENGTH,
+                CONTENT_RANGE,
+                ACCEPT_RANGES,
+                CONTENT_DISPOSITION,
+            ] {
+                if let Some(value) = headers.get(&header).and_then(|v| v.to_str().ok()) {
+                    builder = builder.header(header.as_str(), value);
+                }
+            }
+
+            return builder
+                .body(body)
+                .unwrap_or_else(|_| media_protocol_response(500, Vec::new()));
+        }
+
+        last_status = status.as_u16();
+        last_body = body;
+    }
+
+    media_protocol_response(last_status, last_body)
+}
+
+pub fn handle_matrix_media_protocol_request(
+    app: AppHandle,
+    request: tauri::http::Request<Vec<u8>>,
+) -> tauri::http::Response<Vec<u8>> {
+    tauri::async_runtime::block_on(handle_matrix_media_protocol_request_async(app, request))
+}
+
 /// Matrix user IDs are compared case-insensitively; event `sender` and `client.user_id()` can differ in casing.
 fn user_id_strings_equal(a: &str, b: &str) -> bool {
     a == b || a.to_lowercase() == b.to_lowercase()
@@ -110,7 +309,10 @@ enum ReactionFoldOp {
         key: String,
         sender: String,
     },
-    Redact { ts: u64, redacts: String },
+    Redact {
+        ts: u64,
+        redacts: String,
+    },
 }
 
 /// Build per-target reaction summaries from timeline events (chronological fold with redactions).
@@ -242,11 +444,17 @@ pub async fn get_messages(
     from: Option<String>,
     limit: u32,
 ) -> Result<MessageBatch, String> {
-    let short_room = if room_id.len() > 6 { &room_id[room_id.len()-6..] } else { &room_id };
+    let short_room = if room_id.len() > 6 {
+        &room_id[room_id.len() - 6..]
+    } else {
+        &room_id
+    };
     log::info!(
         "[get_messages] room=…{} from={} limit={}",
         short_room,
-        from.as_deref().map(|t| if t.len() > 16 { &t[..16] } else { t }).unwrap_or("null"),
+        from.as_deref()
+            .map(|t| if t.len() > 16 { &t[..16] } else { t })
+            .unwrap_or("null"),
         limit,
     );
     let t0 = std::time::Instant::now();
@@ -511,23 +719,21 @@ pub async fn get_messages(
                 unsupported_matrix_msgtype,
             ) = latest_replacement
                 .get(&m.event_id)
-                .map(
-                    |(b, img, vid, file, fm, fd, iw, ih, vw, vh, unsup, _ts)| {
-                        (
-                            b.clone(),
-                            img.clone(),
-                            vid.clone(),
-                            file.clone(),
-                            fm.clone(),
-                            fd.clone(),
-                            *iw,
-                            *ih,
-                            *vw,
-                            *vh,
-                            unsup.clone(),
-                        )
-                    },
-                )
+                .map(|(b, img, vid, file, fm, fd, iw, ih, vw, vh, unsup, _ts)| {
+                    (
+                        b.clone(),
+                        img.clone(),
+                        vid.clone(),
+                        file.clone(),
+                        fm.clone(),
+                        fd.clone(),
+                        *iw,
+                        *ih,
+                        *vw,
+                        *vh,
+                        unsup.clone(),
+                    )
+                })
                 .unwrap_or_else(|| {
                     (
                         m.body.clone(),
@@ -599,26 +805,25 @@ pub async fn send_message(
     let client = get_client(&state).await?;
     let room = resolve_room(&client, &room_id)?;
 
-    let content =
-        if let Some(raw) = reply_to_event_id {
-            let id_str = raw.trim();
-            if id_str.is_empty() {
-                return Err("Invalid reply event id".to_string());
-            }
-            let eid: OwnedEventId = EventId::parse(id_str)
-                .map_err(|e| format!("Invalid event id: {e}"))?
-                .to_owned();
-            let reply = Reply {
-                event_id: eid,
-                enforce_thread: EnforceThread::MaybeThreaded,
-            };
-            let without = RoomMessageEventContentWithoutRelation::text_plain(&body);
-            room.make_reply_event(without, reply)
-                .await
-                .map_err(|e| format!("Failed to build reply: {}", fmt_error_chain(&e)))?
-        } else {
-            RoomMessageEventContent::text_plain(&body)
+    let content = if let Some(raw) = reply_to_event_id {
+        let id_str = raw.trim();
+        if id_str.is_empty() {
+            return Err("Invalid reply event id".to_string());
+        }
+        let eid: OwnedEventId = EventId::parse(id_str)
+            .map_err(|e| format!("Invalid event id: {e}"))?
+            .to_owned();
+        let reply = Reply {
+            event_id: eid,
+            enforce_thread: EnforceThread::MaybeThreaded,
         };
+        let without = RoomMessageEventContentWithoutRelation::text_plain(&body);
+        room.make_reply_event(without, reply)
+            .await
+            .map_err(|e| format!("Failed to build reply: {}", fmt_error_chain(&e)))?
+    } else {
+        RoomMessageEventContent::text_plain(&body)
+    };
 
     room.send(content)
         .await
@@ -706,7 +911,10 @@ async fn current_pinned_event_ids(room: &Room) -> Result<Vec<OwnedEventId>, Stri
         Ok(Some(v)) => Ok(v),
         Ok(None) => Ok(room.pinned_event_ids().unwrap_or_default()),
         Err(e) => {
-            log::warn!("load_pinned_events failed: {}; using cache", fmt_error_chain(&e));
+            log::warn!(
+                "load_pinned_events failed: {}; using cache",
+                fmt_error_chain(&e)
+            );
             Ok(room.pinned_event_ids().unwrap_or_default())
         }
     }
@@ -873,23 +1081,21 @@ async fn build_message_infos_from_timeline_events(
                 unsupported_matrix_msgtype,
             ) = latest_replacement
                 .get(&m.event_id)
-                .map(
-                    |(b, img, vid, file, fm, fd, iw, ih, vw, vh, unsup, _ts)| {
-                        (
-                            b.clone(),
-                            img.clone(),
-                            vid.clone(),
-                            file.clone(),
-                            fm.clone(),
-                            fd.clone(),
-                            *iw,
-                            *ih,
-                            *vw,
-                            *vh,
-                            unsup.clone(),
-                        )
-                    },
-                )
+                .map(|(b, img, vid, file, fm, fd, iw, ih, vw, vh, unsup, _ts)| {
+                    (
+                        b.clone(),
+                        img.clone(),
+                        vid.clone(),
+                        file.clone(),
+                        fm.clone(),
+                        fd.clone(),
+                        *iw,
+                        *ih,
+                        *vw,
+                        *vh,
+                        unsup.clone(),
+                    )
+                })
                 .unwrap_or_else(|| {
                     (
                         m.body.clone(),
@@ -1006,7 +1212,9 @@ pub async fn get_pinned_message_previews(
         let (sender, preview) = match raw {
             AnySyncTimelineEvent::MessageLike(AnySyncMessageLikeEvent::RoomMessage(msg)) => {
                 match msg {
-                    SyncMessageLikeEvent::Redacted(_) => (String::new(), "Deleted message".to_string()),
+                    SyncMessageLikeEvent::Redacted(_) => {
+                        (String::new(), "Deleted message".to_string())
+                    }
                     SyncMessageLikeEvent::Original(o) => {
                         let sender = o.sender.to_string();
                         let ext = extract_message_display(&o.content);
@@ -1117,7 +1325,8 @@ pub async fn get_messages_around_event(
     ordered.extend(response.events_after);
 
     let avatar_cache = state.avatar_cache.clone();
-    let mut messages = build_message_infos_from_timeline_events(&room, ordered, &avatar_cache).await?;
+    let mut messages =
+        build_message_infos_from_timeline_events(&room, ordered, &avatar_cache).await?;
     messages.sort_by(|a, b| b.timestamp.cmp(&a.timestamp));
 
     Ok(MessageBatch {
@@ -1299,9 +1508,7 @@ pub async fn start_sync(
     let app_handle = app.clone();
     let avatar_cache = state.avatar_cache.clone();
     let raw_unread_for_msg = state.raw_unread_messages.clone();
-    let self_user_id_for_msg = client
-        .user_id()
-        .map(|u| u.to_owned());
+    let self_user_id_for_msg = client.user_id().map(|u| u.to_owned());
     client.add_event_handler(move |ev: OriginalSyncRoomMessageEvent, room: Room| {
         let app = app_handle.clone();
         let avatar_cache = avatar_cache.clone();
@@ -1521,9 +1728,9 @@ pub async fn start_sync(
 
             if let Ok(eid) = EventId::parse(&redacted_event_id) {
                 if let Ok(timeline_ev) = room.load_or_fetch_event(&eid, None).await {
-                    if let Ok(AnySyncTimelineEvent::MessageLike(AnySyncMessageLikeEvent::Reaction(
-                        r,
-                    ))) = timeline_ev.raw().deserialize()
+                    if let Ok(AnySyncTimelineEvent::MessageLike(
+                        AnySyncMessageLikeEvent::Reaction(r),
+                    )) = timeline_ev.raw().deserialize()
                     {
                         if let SyncMessageLikeEvent::Original(o) = r {
                             let p = MessageReactionDeltaPayload {
@@ -1602,10 +1809,7 @@ pub async fn start_sync(
         let state_h = state_arc.clone();
         let app_h = app.clone();
         let gate_h = reconcile_gate.clone();
-        let self_id = client
-            .user_id()
-            .map(|u| u.to_string())
-            .unwrap_or_default();
+        let self_id = client.user_id().map(|u| u.to_string()).unwrap_or_default();
         client.add_event_handler(move |ev: OriginalSyncRoomMemberEvent, room: Room| {
             let state = state_h.clone();
             let app = app_h.clone();
@@ -1650,12 +1854,8 @@ pub async fn start_sync(
                 }
 
                 log::info!("[pax reconcile] self-joined {room_id}; reconciling");
-                if let Err(e) =
-                    super::reconciler::reconcile_room(&state, &app, &room_id).await
-                {
-                    log::warn!(
-                        "[pax reconcile] room-join reconcile failed {room_id}: {e}"
-                    );
+                if let Err(e) = super::reconciler::reconcile_room(&state, &app, &room_id).await {
+                    log::warn!("[pax reconcile] room-join reconcile failed {room_id}: {e}");
                 }
             }
         });
@@ -1722,14 +1922,10 @@ pub async fn start_sync(
                     log::info!(
                         "[pax reconcile] m.space.child changed in {space_id}; reconciling children"
                     );
-                    if let Err(e) = super::reconciler::reconcile_rooms_for_space(
-                        &state, &app, &space_id,
-                    )
-                    .await
+                    if let Err(e) =
+                        super::reconciler::reconcile_rooms_for_space(&state, &app, &space_id).await
                     {
-                        log::warn!(
-                            "[pax reconcile] space-child reconcile failed {space_id}: {e}"
-                        );
+                        log::warn!("[pax reconcile] space-child reconcile failed {space_id}: {e}");
                     }
                 }
             },
@@ -1807,10 +2003,7 @@ pub async fn start_sync(
     let raw_unread = state.raw_unread_messages.clone();
     let reconcile_state_arc = state_arc.clone();
     let reconcile_gate_for_loop = reconcile_gate.clone();
-    let self_user_id = client
-        .user_id()
-        .map(|u| u.to_string())
-        .unwrap_or_default();
+    let self_user_id = client.user_id().map(|u| u.to_string()).unwrap_or_default();
 
     // Spawn the continuous sync loop in the background.
     // Uses sync_once in a manual loop so we can read `desired_presence` on each
@@ -1839,8 +2032,8 @@ pub async fn start_sync(
             };
 
             // The SDK tracks the `since` token internally between sync_once calls.
-            let settings = matrix_sdk::config::SyncSettings::default()
-                .set_presence(set_presence_value);
+            let settings =
+                matrix_sdk::config::SyncSettings::default().set_presence(set_presence_value);
 
             let response = match client.sync_once(settings).await {
                 Ok(r) => r,
@@ -1876,9 +2069,7 @@ pub async fn start_sync(
                 let a = app.clone();
                 tokio::spawn(async move {
                     if let Err(e) = super::reconciler::reconcile_all(&s, &a).await {
-                        log::warn!(
-                            "[pax reconcile] initial sync-ready reconcile failed: {e}"
-                        );
+                        log::warn!("[pax reconcile] initial sync-ready reconcile failed: {e}");
                     }
                 });
             }
@@ -1896,9 +2087,7 @@ pub async fn start_sync(
 
                     let presence_str = match ev.content.presence {
                         matrix_sdk::ruma::presence::PresenceState::Online => "online",
-                        matrix_sdk::ruma::presence::PresenceState::Unavailable => {
-                            "unavailable"
-                        }
+                        matrix_sdk::ruma::presence::PresenceState::Unavailable => "unavailable",
                         _ => "offline",
                     };
 
@@ -1932,7 +2121,13 @@ pub async fn start_sync(
             // reads (RwLock) — cheap even for hundreds of rooms.  See
             // `commands::unread` for why we poll instead of subscribing to
             // `room_info_notable_update_receiver`.
-            super::unread::emit_unread_snapshot_if_changed(&client, &unread_cache, &raw_unread, &app).await;
+            super::unread::emit_unread_snapshot_if_changed(
+                &client,
+                &unread_cache,
+                &raw_unread,
+                &app,
+            )
+            .await;
 
             // Push voice participants from a spawned task so we
             // don't block the sync loop with avatar fetches.
@@ -2000,10 +2195,7 @@ fn reply_to_from_message_relation(
 ) -> Option<MessageReplyTo> {
     let event_id: String = match rel {
         Some(Relation::Reply { in_reply_to }) => in_reply_to.event_id.to_string(),
-        Some(Relation::Thread(t)) => t
-            .in_reply_to
-            .as_ref()
-            .map(|i| i.event_id.to_string())?,
+        Some(Relation::Thread(t)) => t.in_reply_to.as_ref().map(|i| i.event_id.to_string())?,
         _ => return None,
     };
     Some(MessageReplyTo { event_id })
@@ -2037,7 +2229,10 @@ struct MessageDisplayExtract {
 }
 
 /// Matrix `info.w` / `info.h` when present and non-zero (for inline layout / loading placeholder).
-fn matrix_media_width_height(width: Option<UInt>, height: Option<UInt>) -> (Option<u32>, Option<u32>) {
+fn matrix_media_width_height(
+    width: Option<UInt>,
+    height: Option<UInt>,
+) -> (Option<u32>, Option<u32>) {
     match (width, height) {
         (Some(w), Some(h)) => {
             let w64 = u64::from(w);
@@ -2090,7 +2285,10 @@ fn bracket_label_for_unhandled_matrix_msgtype(msgtype: &str) -> Option<&'static 
 
 /// Fallback timeline text for [`MessageType`] variants Pax does not specialize: prefer Matrix `body`,
 /// with a short tag for known Element chat effects and similar types.
-fn body_for_unhandled_room_message(msgtype: &str, stripped_body: String) -> (String, Option<String>) {
+fn body_for_unhandled_room_message(
+    msgtype: &str,
+    stripped_body: String,
+) -> (String, Option<String>) {
     let stripped_trim = stripped_body.trim();
     if let Some(label) = bracket_label_for_unhandled_matrix_msgtype(msgtype) {
         let body = if stripped_trim.is_empty() {
@@ -2147,12 +2345,7 @@ fn extract_message_display(
     };
     let out = match &content.msgtype {
         MessageType::Image(img) => {
-            let body = apply_reply_strip(
-                &img
-                    .caption()
-                    .map(|s| s.to_string())
-                    .unwrap_or_default(),
-            );
+            let body = apply_reply_strip(&img.caption().map(|s| s.to_string()).unwrap_or_default());
             // Thumbnails are often a single static frame for GIFs (and sometimes transcoded to PNG/JPEG).
             // Request the original file for GIFs so the WebView can animate them.
             // Non-GIF: modest thumbnail size — large thumbs stress remote-media federation and some
@@ -2186,12 +2379,7 @@ fn extract_message_display(
             }
         }
         MessageType::Video(vid) => {
-            let body = apply_reply_strip(
-                &vid
-                    .caption()
-                    .map(|s| s.to_string())
-                    .unwrap_or_default(),
-            );
+            let body = apply_reply_strip(&vid.caption().map(|s| s.to_string()).unwrap_or_default());
             let req = MediaRequestParameters {
                 source: vid.source.clone(),
                 format: MediaFormat::File,
@@ -2364,8 +2552,8 @@ pub async fn get_matrix_image_path(
     state: State<'_, Arc<AppState>>,
     request: serde_json::Value,
 ) -> Result<String, String> {
-    let params: MediaRequestParameters = serde_json::from_value(request)
-        .map_err(|e| format!("Invalid media request: {e}"))?;
+    let params: MediaRequestParameters =
+        serde_json::from_value(request).map_err(|e| format!("Invalid media request: {e}"))?;
 
     let cache_key = format!("mmedia:{}", params.unique_key());
 
@@ -2386,14 +2574,22 @@ pub async fn get_matrix_image_path(
         MediaFormat::File => MATRIX_IMAGE_FULL_FETCH_TIMEOUT,
     };
 
-    let bytes = match get_matrix_media_bytes_with_timeout(
-        &client,
-        &params,
-        false,
-        first_timeout,
-    )
-    .await
-    {
+    let direct_plain_file = matches!(params.format, MediaFormat::File)
+        && matches!(&params.source, MediaSource::Plain(_));
+
+    let primary_fetch = if direct_plain_file {
+        match get_plain_matrix_file_bytes_direct(&state, &client, &params, first_timeout).await {
+            Ok(b) => Ok(b),
+            Err(e) => {
+                log::warn!("Direct Matrix media fetch failed; falling back to matrix-sdk: {e}");
+                get_matrix_media_bytes_with_timeout(&client, &params, false, first_timeout).await
+            }
+        }
+    } else {
+        get_matrix_media_bytes_with_timeout(&client, &params, false, first_timeout).await
+    };
+
+    let bytes = match primary_fetch {
         Ok(b) => b,
         Err(e) => {
             if matches!(&params.format, MediaFormat::Thumbnail(_)) {
@@ -2411,10 +2607,7 @@ pub async fn get_matrix_image_path(
                 {
                     Ok(b) => b,
                     Err(e2) => {
-                        let msg = format!(
-                            "Thumbnail failed: {} | Full image failed: {}",
-                            e, e2
-                        );
+                        let msg = format!("Thumbnail failed: {} | Full image failed: {}", e, e2);
                         log::warn!("Matrix image: {msg}");
                         return Err(msg);
                     }
@@ -2436,11 +2629,7 @@ pub async fn get_matrix_image_path(
         .map_err(|e| format!("Failed to get temp dir: {e}"))?;
     std::fs::create_dir_all(&temp_dir).map_err(|e| format!("Failed to create temp dir: {e}"))?;
 
-    let path = temp_dir.join(format!(
-        "pax_matrix_media_{}.{}",
-        uuid::Uuid::new_v4(),
-        ext
-    ));
+    let path = temp_dir.join(format!("pax_matrix_media_{}.{}", uuid::Uuid::new_v4(), ext));
 
     std::fs::write(&path, &bytes).map_err(|e| format!("Failed to write image temp file: {e}"))?;
 
@@ -2449,10 +2638,7 @@ pub async fn get_matrix_image_path(
         .ok_or("Temp file path is not valid UTF-8")?
         .to_string();
 
-    state
-        .avatar_cache
-        .insert(cache_key, path_str.clone())
-        .await;
+    state.avatar_cache.insert(cache_key, path_str.clone()).await;
 
     Ok(path_str)
 }
@@ -2471,9 +2657,7 @@ pub async fn get_matrix_image_path(
 /// different-resolution" flashes.  Keep avatars alive for the session;
 /// they get evicted naturally on logout and on startup (see `lib.rs`).
 #[tauri::command]
-pub async fn clear_media_cache(
-    state: State<'_, Arc<AppState>>,
-) -> Result<u32, String> {
+pub async fn clear_media_cache(state: State<'_, Arc<AppState>>) -> Result<u32, String> {
     // Evict only the `mmedia:` entries — avatars (persistent on disk,
     // tiny, shared across every view) are deliberately preserved so
     // we don't cascade 404s into every on-screen `<img>` the moment
@@ -2618,7 +2802,10 @@ pub async fn room_file_staging_reset(upload_id: String) -> Result<(), String> {
 
 /// Append one base64 chunk (from the webview) to the staging file — avoids multi‑GiB IPC payloads.
 #[tauri::command]
-pub async fn room_file_staging_append_b64(upload_id: String, chunk_b64: String) -> Result<(), String> {
+pub async fn room_file_staging_append_b64(
+    upload_id: String,
+    chunk_b64: String,
+) -> Result<(), String> {
     validate_upload_id(&upload_id)?;
     let chunk = data_encoding::BASE64
         .decode(chunk_b64.as_bytes())
@@ -2737,9 +2924,7 @@ async fn upload_room_file_from_staging_path(
         },
     );
 
-    let content_type: mime::Mime = mime_type
-        .parse()
-        .unwrap_or(mime::APPLICATION_OCTET_STREAM);
+    let content_type: mime::Mime = mime_type.parse().unwrap_or(mime::APPLICATION_OCTET_STREAM);
 
     log::info!(
         "[Pax Upload] file={} mime={} size={} (stream from disk)",
@@ -2809,10 +2994,7 @@ async fn upload_room_file_from_staging_path(
     let timeout_secs = if total == 0 {
         120
     } else {
-        total
-            .saturating_div(64 * 1024)
-            .max(900)
-            .min(86_400)
+        total.saturating_div(64 * 1024).max(900).min(86_400)
     };
 
     let content_length = HeaderValue::from_str(&total.to_string())
@@ -2848,10 +3030,7 @@ async fn upload_room_file_from_staging_path(
             .await
             .map_err(|e| format!("Failed to parse upload response: {e}"))?;
 
-        log::info!(
-            "[Pax Upload] uploaded → {}",
-            upload_result.content_uri
-        );
+        log::info!("[Pax Upload] uploaded → {}", upload_result.content_uri);
 
         Ok((upload_result.content_uri, total))
     }
@@ -2891,13 +3070,7 @@ async fn upload_room_file_staged_impl(
         return Err("Upload staging file missing (finish copying first)".to_string());
     }
     let r = upload_room_file_from_staging_path(
-        app,
-        state,
-        room_id,
-        upload_id,
-        file_name,
-        mime_type,
-        &path,
+        app, state, room_id, upload_id, file_name, mime_type, &path,
     )
     .await;
     let _ = tokio::fs::remove_file(&path).await;
@@ -2918,9 +3091,7 @@ async fn send_file_message_impl(
 
     let mxc_uri = matrix_sdk::ruma::OwnedMxcUri::from(content_uri);
 
-    let content_type: mime::Mime = mime_type
-        .parse()
-        .unwrap_or(mime::APPLICATION_OCTET_STREAM);
+    let content_type: mime::Mime = mime_type.parse().unwrap_or(mime::APPLICATION_OCTET_STREAM);
 
     let file_size = file_size_bytes.and_then(|n| UInt::try_from(n).ok());
 

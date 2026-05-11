@@ -281,8 +281,8 @@ async fn save_unread_settings(
     app: &AppHandle,
     settings: &UnreadSettings,
 ) -> Result<(), String> {
-    let body = serde_json::to_value(settings)
-        .map_err(|e| format!("Serialise unread_settings: {e}"))?;
+    let body =
+        serde_json::to_value(settings).map_err(|e| format!("Serialise unread_settings: {e}"))?;
     put_account_data_raw(state, UNREAD_SETTINGS_TYPE, &body).await?;
     let _ = app.emit("pax-unread-settings-changed", settings.clone());
     Ok(())
@@ -471,9 +471,7 @@ pub async fn set_space_notification_level(
         settings
     };
 
-    if let Err(e) =
-        super::reconciler::reconcile_rooms_for_space(&state, &app, &space_id).await
-    {
+    if let Err(e) = super::reconciler::reconcile_rooms_for_space(&state, &app, &space_id).await {
         log::warn!(
             "[pax] reconcile_rooms_for_space({space_id}) after set_space_notification_level failed: {e}"
         );

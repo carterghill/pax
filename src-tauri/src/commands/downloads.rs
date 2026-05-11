@@ -152,8 +152,7 @@ pub async fn start_room_download(
                         error: None,
                     },
                 );
-                match tokio::task::spawn_blocking(move || std::fs::copy(&source_canon, &dest))
-                    .await
+                match tokio::task::spawn_blocking(move || std::fs::copy(&source_canon, &dest)).await
                 {
                     Ok(Ok(n)) => {
                         emit_progress(
@@ -208,8 +207,8 @@ pub async fn start_room_download(
             let url_str = args
                 .url
                 .ok_or_else(|| "url is required for http".to_string())?;
-            let parsed = reqwest::Url::parse(url_str.trim())
-                .map_err(|e| format!("Invalid URL: {e}"))?;
+            let parsed =
+                reqwest::Url::parse(url_str.trim()).map_err(|e| format!("Invalid URL: {e}"))?;
             let scheme = parsed.scheme();
             if scheme != "https" && scheme != "http" {
                 return Err("Only http(s) URLs are allowed".to_string());
@@ -410,8 +409,7 @@ pub fn open_containing_folder(app: AppHandle, file_path: String) -> Result<(), S
     if app.opener().reveal_item_in_dir(path).is_ok() {
         return Ok(());
     }
-    app
-        .opener()
+    app.opener()
         .open_path(parent.to_string_lossy(), None::<&str>)
         .map_err(|e| e.to_string())
 }

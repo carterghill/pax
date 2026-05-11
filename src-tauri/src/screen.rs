@@ -55,9 +55,8 @@ pub struct ScreenShareHandle {
     /// xdg-desktop-portal screencast session — must be closed so the compositor
     /// clears the recording indicator (dropping the D-Bus proxy alone does not).
     #[cfg(target_os = "linux")]
-    _linux_portal_session: Option<
-        ashpd::desktop::Session<'static, ashpd::desktop::screencast::Screencast<'static>>,
-    >,
+    _linux_portal_session:
+        Option<ashpd::desktop::Session<'static, ashpd::desktop::screencast::Screencast<'static>>>,
 }
 
 impl ScreenShareHandle {
