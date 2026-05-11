@@ -1,6 +1,5 @@
 import { useEffect, useState } from "react";
-import { invoke } from "@tauri-apps/api/core";
-import type { RoomSendPermission } from "../types/matrix";
+import { getRoomCanSendMessages } from "../features/chat/api";
 
 /** `null` while loading for a room; on invoke failure defaults to `true` so a broken check does not block sending. */
 export function useRoomCanSendMessages(roomId: string | null) {
@@ -15,7 +14,7 @@ export function useRoomCanSendMessages(roomId: string | null) {
     let cancelled = false;
     setCanSend(null);
 
-    invoke<RoomSendPermission>("get_room_can_send_messages", { roomId })
+    getRoomCanSendMessages(roomId)
       .then((r) => {
         if (!cancelled) setCanSend(r.canSend);
       })

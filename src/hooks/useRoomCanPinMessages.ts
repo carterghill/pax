@@ -1,6 +1,5 @@
 import { useEffect, useState } from "react";
-import { invoke } from "@tauri-apps/api/core";
-import type { RoomPinPermission } from "../types/matrix";
+import { getRoomCanPinMessages } from "../features/chat/api";
 
 /** `null` while loading; on failure defaults to `false`. */
 export function useRoomCanPinMessages(roomId: string | null) {
@@ -15,7 +14,7 @@ export function useRoomCanPinMessages(roomId: string | null) {
     let cancelled = false;
     setCanPin(null);
 
-    invoke<RoomPinPermission>("get_room_can_pin_messages", { roomId })
+    getRoomCanPinMessages(roomId)
       .then((r) => {
         if (!cancelled) setCanPin(r.canPin);
       })

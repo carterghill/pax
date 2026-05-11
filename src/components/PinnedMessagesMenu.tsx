@@ -1,8 +1,8 @@
 import { useCallback, useEffect, useLayoutEffect, useRef, useState } from "react";
 import { createPortal } from "react-dom";
-import { invoke } from "@tauri-apps/api/core";
 import { Pin } from "lucide-react";
 import { useTheme } from "../theme/ThemeContext";
+import { getPinnedMessagePreviews } from "../features/chat/api";
 import type { PinnedMessagePreview } from "../types/matrix";
 
 const MENU_Z = 10_000;
@@ -29,9 +29,7 @@ export default function PinnedMessagesMenu({
   const load = useCallback(async () => {
     setLoading(true);
     try {
-      const rows = await invoke<PinnedMessagePreview[]>("get_pinned_message_previews", {
-        roomId,
-      });
+      const rows = await getPinnedMessagePreviews(roomId);
       setItems(rows);
     } catch {
       setItems([]);

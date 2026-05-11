@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useState } from "react";
-import { invoke } from "@tauri-apps/api/core";
+import { getRoomPinnedEventIds } from "../features/chat/api";
 
 export function useRoomPinnedEventIds(roomId: string | null) {
   const [pinnedEventIds, setPinnedEventIds] = useState<string[]>([]);
@@ -10,7 +10,7 @@ export function useRoomPinnedEventIds(roomId: string | null) {
       return;
     }
     try {
-      const ids = await invoke<string[]>("get_room_pinned_event_ids", { roomId });
+      const ids = await getRoomPinnedEventIds(roomId);
       setPinnedEventIds(ids);
     } catch {
       setPinnedEventIds([]);

@@ -1,5 +1,5 @@
 import { useEffect, useState } from "react";
-import { invoke } from "@tauri-apps/api/core";
+import { getRoomRedactionPolicy } from "../features/chat/api";
 import { RoomRedactionPolicy } from "../types/matrix";
 
 const defaultPolicy: RoomRedactionPolicy = {
@@ -17,7 +17,7 @@ export function useRoomRedactionPolicy(roomId: string | null) {
     }
 
     let cancelled = false;
-    invoke<RoomRedactionPolicy>("get_room_redaction_policy", { roomId })
+    getRoomRedactionPolicy(roomId)
       .then((p) => {
         if (!cancelled) setPolicy(p);
       })
