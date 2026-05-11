@@ -555,6 +555,31 @@ export default function MessageInput({
     handleComposerActivity({ text, hasMedia: media });
   }
 
+  const handleEditorPaste = useCallback(
+    (e: React.ClipboardEvent<HTMLDivElement>) => {
+      if (interactionLocked) {
+        e.preventDefault();
+        return;
+      }
+      e.preventDefault();
+      const text = e.clipboardData.getData("text/plain");
+      const el = editorRef.current;
+      if (!el) return;
+      const trimmed = text.trim();
+      if (hrefLooksLikeDirectImageUrl(trimmed)) {
+        insertImageAtSelection(el, trimmed, composerImgStyle, () => syncHeight());
+      } else {
+        insertPlainTextAtSelection(el, text);
+      }
+      refreshComposerDomState();
+    },
+    [composerImgStyle, interactionLocked, refreshComposerDomState, syncHeight],
+  );
+
+  const handlePickerToggle = useCallback(() => {
+    setPickerOpen((open) => !open);
+  }, []);
+
   // ─── Active format tracking ───────────────────────────────────────────────
 
   useEffect(() => {
@@ -1428,23 +1453,7 @@ export default function MessageInput({
             suppressContentEditableWarning
             onInput={handleEditorInput}
             onKeyDown={handleKeyDown}
-            onPaste={(e) => {
-              if (interactionLocked) {
-                e.preventDefault();
-                return;
-              }
-              e.preventDefault();
-              const text = e.clipboardData.getData("text/plain");
-              const el = editorRef.current;
-              if (!el) return;
-              const trimmed = text.trim();
-              if (hrefLooksLikeDirectImageUrl(trimmed)) {
-                insertImageAtSelection(el, trimmed, composerImgStyle, () => syncHeight());
-              } else {
-                insertPlainTextAtSelection(el, text);
-              }
-              refreshComposerDomState();
-            }}
+            onPaste={handleEditorPaste}
             style={{
               minWidth: 0,
               width: "100%",
@@ -1488,7 +1497,7 @@ export default function MessageInput({
               aria-haspopup="dialog"
               disabled={interactionLocked}
               onMouseDown={(e) => e.preventDefault()}
-              onClick={() => setPickerOpen((o) => !o)}
+              onClick={handlePickerToggle}
               style={{
                 flexShrink: 0,
                 display: "flex",
