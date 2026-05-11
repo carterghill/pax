@@ -31,7 +31,6 @@ import { paletteComposerOuterBorderStyle } from "../theme/paletteBorder";
 import { EMOJI_ONLY_DISPLAY_SCALE, isOnlyEmojisAndWhitespace } from "../utils/emojifyTwemoji";
 import { hrefLooksLikeDirectImageUrl } from "../utils/directImageUrl";
 import {
-  serializeComposerEditor,
   fillComposerEditorFromMarkdown,
   getEditorPlainText,
   insertPlainTextAtSelection,
@@ -49,18 +48,21 @@ import { MODAL_LAYER_Z } from "./ModalLayer";
 import {
   getMatrixMaxUploadBytes,
   roomFileStagingRemove,
-  sendFileMessage,
   uploadRoomFile,
 } from "../features/chat/api";
 import {
   formatBinaryBytes,
-  stagingByteLenMatchesFile,
   streamFileToStaging,
   type PendingAttachment,
   UPLOAD_HTTP_END,
   UPLOAD_STAGING_END,
 } from "../features/chat/composer/fileUpload";
 import { useComposerTypingNotice } from "../features/chat/composer/useComposerTypingNotice";
+import {
+  useComposerSubmit,
+  type EditingMessageRef,
+  type MessageFileSendBridge,
+} from "../features/chat/composer/useComposerSubmit";
 import ComposerContextBar from "../features/chat/composer/ComposerContextBar";
 import ComposerFormattingToolbar, {
   type ComposerFormatItem,
@@ -71,20 +73,8 @@ import ComposerMediaPickerPopover, {
 import MentionAutocompleteMenu from "../features/chat/composer/MentionAutocompleteMenu";
 import ComposerInputRow from "../features/chat/composer/ComposerInputRow";
 
-export interface EditingMessageRef {
-  eventId: string;
-  body: string;
-}
-
 export type ComposerPermission = "loading" | "allowed" | "forbidden";
-
-export type MessageFileSendBridge = {
-  addOptimistic: (msg: Message) => void;
-  patchMessage: (eventId: string, patch: Partial<Message>) => void;
-  patchMessageByUploadId: (uploadId: string, patch: Partial<Message>) => void;
-  replaceMessageEventId: (oldId: string, newId: string, patch?: Partial<Message>) => void;
-  removeMessage: (eventId: string) => void;
-};
+export type { EditingMessageRef, MessageFileSendBridge };
 
 interface MessageInputProps {
   roomId: string;
@@ -808,253 +798,36 @@ export default function MessageInput({
     [roomId],
   );
 
-  const runFileSendPipeline = useCallback(
-    async (
-      localEventId: string,
-      snapshot: PendingAttachment,
-      caption: string,
-      bridge: MessageFileSendBridge,
-    ) => {
-      try {
-        let contentUri = snapshot.contentUri;
-        let byteSize = snapshot.byteSize;
-        if (!contentUri) {
-          const ok = await stagingByteLenMatchesFile(snapshot.uploadId, snapshot.sourceFile.size);
-          if (!ok) {
-            await streamFileToStaging(snapshot.sourceFile, snapshot.uploadId, (f) => {
-              bridge.patchMessage(localEventId, {
-                localFileUpload: {
-                  phase: "encoding",
-                  progress: f * UPLOAD_STAGING_END,
-                },
-              });
-            });
-          }
-
-          bridge.patchMessage(localEventId, {
-            localFileUpload: { phase: "uploading", progress: UPLOAD_STAGING_END },
-          });
-          const res = await uploadRoomFile({
-            roomId,
-            uploadId: snapshot.uploadId,
-            fileName: snapshot.name,
-            mimeType: snapshot.mimeType,
-          });
-          contentUri = res[0];
-          byteSize = res[1];
-        }
-
-        bridge.patchMessage(localEventId, {
-          localFileUpload: { phase: "sending", progress: 0.92 },
-        });
-
-        const cap = caption.trim();
-        const serverEventId = await sendFileMessage({
-          roomId,
-          contentUri,
-          fileName: snapshot.name,
-          mimeType: snapshot.mimeType,
-          fileSize: byteSize ?? null,
-          caption: cap.length > 0 ? cap : null,
-        });
-
-        bridge.replaceMessageEventId(localEventId, serverEventId, {
-          localPipelineUploadId: undefined,
-          localFileUpload: { phase: "syncing", progress: 1 },
-        });
-      } catch (e) {
-        const msg = formatInvokeErr(e);
-        console.error("Failed to send file message:", e);
-        void roomFileStagingRemove(snapshot.uploadId).catch(() => {});
-        bridge.patchMessage(localEventId, {
-          localFileUpload: { phase: "failed", progress: 0, errorMessage: msg },
-        });
-      }
-    },
-    [roomId],
-  );
-
-  function detachPendingAttachmentForSend() {
-    pendingFileRef.current = null;
-    setPendingFile(null);
-  }
-
   // ─── Send / key handling ──────────────────────────────────────────────────
 
-  async function handleSend() {
-    if (interactionLocked) return;
-    const el = editorRef.current;
-    if (!el) return;
-    const markdown = serializeComposerEditor(el);
-    const trimmed = markdown.trim();
-    if ((!trimmed && !pendingFile) || sending) return;
-
-    // Close picker but keep format toolbar open across sends.
-    setPickerOpen(false);
-    sendTyping(false);
-    clearTypingTimeout();
-
-    setSending(true);
-    try {
-      if (draftDmPeerUserId) {
-        if (pendingFile) {
-          setSending(false);
-          return;
-        }
-        if (!trimmed || editingMessage) {
-          setSending(false);
-          return;
-        }
-        const rid = await invoke<string>("send_first_direct_message", {
-          peerUserId: draftDmPeerUserId,
-          body: trimmed,
-        });
-        const prevFormats = getActiveFormats(el);
-        el.innerHTML = "";
-        setPlainText("");
-        setHasComposerMedia(false);
-        await onDraftDmFirstMessage?.(rid);
-        onMessageSent();
-        el.focus();
-        if (prevFormats.has("bold") || prevFormats.has("italic") || prevFormats.has("strikethrough")) {
-          document.execCommand("insertText", false, "\u200b");
-          const sel = window.getSelection();
-          if (sel) { sel.selectAllChildren(el); }
-          for (const fmt of prevFormats) {
-            if (fmt === "bold") document.execCommand("bold");
-            else if (fmt === "italic") document.execCommand("italic");
-            else if (fmt === "strikethrough") document.execCommand("strikeThrough");
-          }
-          if (sel) { sel.collapseToEnd(); }
-        }
-        refreshFormats();
-        syncHeight();
-        setSending(false);
-        return;
-      }
-      if (pendingFile) {
-        if (!fileSendBridge || !selfUserId) {
-          setSending(false);
-          return;
-        }
-        if (editingMessage) {
-          setSending(false);
-          return;
-        }
-        const snap = pendingFileRef.current;
-        if (!snap) {
-          setSending(false);
-          return;
-        }
-        const localEventId = `local:${crypto.randomUUID()}`;
-        const cap = trimmed;
-        const body = cap.trim().length > 0 ? cap.trim() : "";
-
-        const optimPhase =
-          snap.phase === "ready"
-            ? "sending"
-            : snap.phase === "uploading"
-              ? "uploading"
-              : snap.phase === "error"
-                ? "failed"
-                : "encoding";
-
-        fileSendBridge.addOptimistic({
-          eventId: localEventId,
-          sender: selfUserId,
-          senderName: selfDisplayName?.trim() || selfUserId,
-          body,
-          timestamp: Date.now(),
-          avatarUrl: selfAvatarUrl ?? null,
-          fileDisplayName: snap.name,
-          fileMime: snap.mimeType,
-          localPipelineUploadId: snap.uploadId,
-          localFileUpload: {
-            phase: optimPhase,
-            progress: Math.min(1, snap.progress01),
-          },
-          localImagePreviewObjectUrl: snap.previewUrl,
-        });
-
-        detachPendingAttachmentForSend();
-
-        const prevFormats = getActiveFormats(el);
-        el.innerHTML = "";
-        setPlainText("");
-        setHasComposerMedia(false);
-        el.focus();
-        if (prevFormats.has("bold") || prevFormats.has("italic") || prevFormats.has("strikethrough")) {
-          document.execCommand("insertText", false, "\u200b");
-          const sel = window.getSelection();
-          if (sel) {
-            sel.selectAllChildren(el);
-          }
-          for (const fmt of prevFormats) {
-            if (fmt === "bold") document.execCommand("bold");
-            else if (fmt === "italic") document.execCommand("italic");
-            else if (fmt === "strikethrough") document.execCommand("strikeThrough");
-          }
-          if (sel) {
-            sel.collapseToEnd();
-          }
-        }
-        refreshFormats();
-        syncHeight();
-
-        void runFileSendPipeline(localEventId, snap, cap, fileSendBridge).finally(() => {
-          onMessageSent();
-        });
-
-        setSending(false);
-        return;
-      }
-
-      if (trimmed) {
-        // Text-only message
-        if (editingMessage) {
-          await invoke("edit_message", {
-            roomId,
-            eventId: editingMessage.eventId,
-            body: trimmed,
-          });
-          onCancelEdit?.();
-        } else {
-          await invoke("send_message", {
-            roomId,
-            body: trimmed,
-            replyToEventId: replyDraft?.eventId ?? null,
-          });
-          onCancelReply?.();
-        }
-      }
-      const prevFormats = getActiveFormats(el);
-      el.innerHTML = "";
-      setPlainText("");
-      setHasComposerMedia(false);
-      onMessageSent();
-      el.focus();
-      if (prevFormats.has("bold") || prevFormats.has("italic") || prevFormats.has("strikethrough")) {
-        document.execCommand("insertText", false, "\u200b");
-        const sel = window.getSelection();
-        if (sel) {
-          sel.selectAllChildren(el);
-        }
-        for (const fmt of prevFormats) {
-          if (fmt === "bold") document.execCommand("bold");
-          else if (fmt === "italic") document.execCommand("italic");
-          else if (fmt === "strikethrough") document.execCommand("strikeThrough");
-        }
-        if (sel) {
-          sel.collapseToEnd();
-        }
-      }
-      refreshFormats();
-      syncHeight();
-    } catch (e) {
-      console.error(editingMessage ? "Failed to edit:" : "Failed to send:", e);
-    }
-    setSending(false);
-  }
+  const { handleSend } = useComposerSubmit({
+    roomId,
+    interactionLocked,
+    sending,
+    setSending,
+    editorRef,
+    pendingFile,
+    pendingFileRef,
+    setPendingFile,
+    fileSendBridge,
+    selfUserId,
+    selfDisplayName,
+    selfAvatarUrl,
+    draftDmPeerUserId,
+    onDraftDmFirstMessage,
+    replyDraft,
+    onCancelReply,
+    editingMessage,
+    onCancelEdit,
+    onMessageSent,
+    setPlainText,
+    setHasComposerMedia,
+    setPickerOpen,
+    sendTyping,
+    clearTypingTimeout,
+    refreshFormats,
+    syncHeight,
+  });
 
   function handleKeyDown(e: React.KeyboardEvent) {
     if (interactionLocked) return;
