@@ -5,7 +5,6 @@ import {
   useEffect,
   useLayoutEffect,
   useMemo,
-  useContext,
   Fragment,
   type CSSProperties,
 } from "react";
@@ -35,17 +34,10 @@ import {
   File,
   X,
 } from "lucide-react";
-import {
-  Grid as GiphyGrid,
-  SearchBar as GiphySearchBar,
-  SearchContext,
-  SearchContextManager,
-} from "@giphy/react-components";
 import { Picker } from "emoji-mart";
 import data from "@emoji-mart/data";
 import { useTheme } from "../theme/ThemeContext";
 import { paletteComposerOuterBorderStyle } from "../theme/paletteBorder";
-import type { ResolvedColorScheme } from "../theme/types";
 import { EMOJI_ONLY_DISPLAY_SCALE, isOnlyEmojisAndWhitespace } from "../utils/emojifyTwemoji";
 import { hrefLooksLikeDirectImageUrl } from "../utils/directImageUrl";
 import {
@@ -78,6 +70,7 @@ import {
   UPLOAD_HTTP_END,
   UPLOAD_STAGING_END,
 } from "../features/chat/composer/fileUpload";
+import GiphyPicker from "../features/chat/composer/GiphyPicker";
 
 export interface EditingMessageRef {
   eventId: string;
@@ -1371,27 +1364,25 @@ export default function MessageInput({
         <div ref={emojiPickerMountRef} style={{ display: pickerTab === "emoji" ? "block" : "none" }} />
         <div style={{ display: pickerTab === "gif" ? "block" : "none" }}>
           {giphyApiKey ? (
-            <SearchContextManager apiKey={giphyApiKey}>
-              <GiphyPickerInner
-                palette={palette}
-                typography={typography}
-                spacing={spacing}
-                colorScheme={resolvedColorScheme}
-                onGifSelect={(gifUrl) => {
-                  const el = editorRef.current;
-                  if (!el) return;
-                  el.focus();
-                  if (hrefLooksLikeDirectImageUrl(gifUrl)) {
-                    insertImageAtSelection(el, gifUrl, composerImgStyle, () => syncHeight());
-                  } else {
-                    document.execCommand("insertText", false, gifUrl);
-                  }
-                  refreshComposerDomState();
-                  setPickerOpen(false);
-                  requestAnimationFrame(() => el.focus());
-                }}
-              />
-            </SearchContextManager>
+            <GiphyPicker
+              palette={palette}
+              typography={typography}
+              spacing={spacing}
+              apiKey={giphyApiKey}
+              onGifSelect={(gifUrl) => {
+                const el = editorRef.current;
+                if (!el) return;
+                el.focus();
+                if (hrefLooksLikeDirectImageUrl(gifUrl)) {
+                  insertImageAtSelection(el, gifUrl, composerImgStyle, () => syncHeight());
+                } else {
+                  document.execCommand("insertText", false, gifUrl);
+                }
+                refreshComposerDomState();
+                setPickerOpen(false);
+                requestAnimationFrame(() => el.focus());
+              }}
+            />
           ) : (
             <div
               style={{
@@ -2144,66 +2135,5 @@ export default function MessageInput({
     </div>
       {pickerPortal}
     </>
-  );
-}
-
-/* ─── GIPHY sub-component (must be a child of SearchContextManager) ──────── */
-
-interface GiphyPickerInnerProps {
-  palette: any;
-  typography: any;
-  spacing: any;
-  colorScheme: ResolvedColorScheme;
-  onGifSelect: (gifUrl: string) => void;
-}
-
-function GiphyPickerInner({ palette, typography, spacing, onGifSelect }: GiphyPickerInnerProps) {
-  const { fetchGifs, searchKey } = useContext(SearchContext);
-
-  return (
-    <div
-      style={{
-        width: 350,
-        height: 380,
-        display: "flex",
-        flexDirection: "column",
-        overflow: "hidden",
-        background: palette.backgroundPrimary,
-      }}
-    >
-      <div style={{ padding: `${spacing.unit}px ${spacing.unit * 1.5}px` }}>
-        <GiphySearchBar
-          placeholder="Search GIPHY"
-          autoFocus
-        />
-      </div>
-      <div style={{ flex: 1, overflow: "auto" }}>
-        <GiphyGrid
-          key={searchKey}
-          columns={3}
-          width={350}
-          gutter={6}
-          fetchGifs={fetchGifs}
-          hideAttribution
-          noLink
-          onGifClick={(gif, e) => {
-            e.preventDefault();
-            const url = gif.images?.original?.url ?? gif.images?.fixed_height?.url;
-            if (url) onGifSelect(url);
-          }}
-        />
-      </div>
-      <div
-        style={{
-          padding: `${spacing.unit * 0.5}px ${spacing.unit}px`,
-          textAlign: "right",
-          fontSize: typography.fontSizeSmall * 0.85,
-          color: palette.textSecondary,
-          opacity: 0.7,
-        }}
-      >
-        Powered by GIPHY
-      </div>
-    </div>
   );
 }
