@@ -5,9 +5,7 @@ import {
   useEffect,
   useLayoutEffect,
   useMemo,
-  type CSSProperties,
 } from "react";
-import { createPortal } from "react-dom";
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import type { Message, RoomMember } from "../types/matrix";
@@ -65,13 +63,15 @@ import {
   UPLOAD_HTTP_END,
   UPLOAD_STAGING_END,
 } from "../features/chat/composer/fileUpload";
-import GiphyPicker from "../features/chat/composer/GiphyPicker";
 import { useComposerTypingNotice } from "../features/chat/composer/useComposerTypingNotice";
 import ComposerContextBar from "../features/chat/composer/ComposerContextBar";
 import ComposerFormattingToolbar, {
   ComposerFormattingToggle,
   type ComposerFormatItem,
 } from "../features/chat/composer/ComposerFormattingToolbar";
+import ComposerMediaPickerPopover, {
+  type ComposerPickerTab,
+} from "../features/chat/composer/ComposerMediaPickerPopover";
 
 export interface EditingMessageRef {
   eventId: string;
@@ -124,15 +124,6 @@ function formatInvokeErr(err: unknown): string {
   }
 }
 
-function fixedPopoverStyle(bottom: number, right: number): CSSProperties {
-  return {
-    position: "fixed",
-    bottom,
-    right,
-    zIndex: COMPOSER_POPOVER_Z,
-  };
-}
-
 export default function MessageInput({
   roomId,
   roomName,
@@ -171,7 +162,7 @@ export default function MessageInput({
   const [sending, setSending] = useState(false);
   const [formatOpen, setFormatOpen] = useState(false);
   const [pickerOpen, setPickerOpen] = useState(false);
-  const [pickerTab, setPickerTab] = useState<"emoji" | "gif">("emoji");
+  const [pickerTab, setPickerTab] = useState<ComposerPickerTab>("emoji");
   const [activeFormats, setActiveFormats] = useState<Set<string>>(new Set());
   const editorRef = useRef<HTMLDivElement>(null);
   const rootRef = useRef<HTMLDivElement>(null);
@@ -1218,113 +1209,22 @@ export default function MessageInput({
       : "You don’t have permission to send messages in this channel."
     : defaultPlaceholder;
 
-  // ─── Picker portal (emoji + GIF tabs) ─────────────────────────────────────
-
-  const pickerPortal =
-    pickerOpen &&
-    popoverPos &&
-    createPortal(
-      <div
-        data-pax-composer-popover
-        style={{
-          ...fixedPopoverStyle(popoverPos.bottom, popoverPos.right),
-          borderRadius: spacing.unit * 2,
-          overflow: "hidden",
-          border: `1px solid ${palette.border}`,
-          boxShadow:
-            resolvedColorScheme === "light"
-              ? `0 8px 28px rgba(0,0,0,0.12), 0 0 0 1px ${palette.border} inset`
-              : `0 12px 44px rgba(0,0,0,0.55), 0 0 0 1px rgba(255,255,255,0.06) inset`,
-          backgroundColor: palette.bgTertiary,
-          display: "flex",
-          flexDirection: "column",
-          width: 352,
-        }}
-      >
-        {/* Tab bar */}
-        <div
-          style={{
-            display: "flex",
-            borderBottom: `1px solid ${palette.border}`,
-            flexShrink: 0,
-          }}
-        >
-          {(["emoji", "gif"] as const).map((tab) => {
-            const active = pickerTab === tab;
-            return (
-              <button
-                key={tab}
-                type="button"
-                onMouseDown={(e) => e.preventDefault()}
-                onClick={() => setPickerTab(tab)}
-                style={{
-                  flex: 1,
-                  padding: `${spacing.unit * 2}px 0`,
-                  border: "none",
-                  borderBottom: `2px solid ${active ? palette.textPrimary : "transparent"}`,
-                  backgroundColor: "transparent",
-                  color: active ? palette.textPrimary : palette.textSecondary,
-                  fontSize: typography.fontSizeSmall,
-                  fontWeight: active ? typography.fontWeightBold : typography.fontWeightNormal,
-                  fontFamily: typography.fontFamily,
-                  cursor: "pointer",
-                  letterSpacing: "0.03em",
-                  transition: "color 0.1s, border-color 0.1s",
-                }}
-                onMouseEnter={(e) => {
-                  if (!active) e.currentTarget.style.color = palette.textPrimary;
-                }}
-                onMouseLeave={(e) => {
-                  if (!active) e.currentTarget.style.color = palette.textSecondary;
-                }}
-              >
-                {tab === "emoji" ? "Emoji" : "GIF"}
-              </button>
-            );
-          })}
-        </div>
-
-        {/* Tab content — both always mounted to avoid React vs imperative DOM conflicts */}
-        <div ref={emojiPickerMountRef} style={{ display: pickerTab === "emoji" ? "block" : "none" }} />
-        <div style={{ display: pickerTab === "gif" ? "block" : "none" }}>
-          {giphyApiKey ? (
-            <GiphyPicker
-              palette={palette}
-              typography={typography}
-              spacing={spacing}
-              apiKey={giphyApiKey}
-              onGifSelect={(gifUrl) => {
-                const el = editorRef.current;
-                if (!el) return;
-                el.focus();
-                if (hrefLooksLikeDirectImageUrl(gifUrl)) {
-                  insertImageAtSelection(el, gifUrl, composerImgStyle, () => syncHeight());
-                } else {
-                  document.execCommand("insertText", false, gifUrl);
-                }
-                refreshComposerDomState();
-                setPickerOpen(false);
-                requestAnimationFrame(() => el.focus());
-              }}
-            />
-          ) : (
-            <div
-              style={{
-                padding: spacing.unit * 3,
-                color: palette.textSecondary,
-                fontSize: typography.fontSizeBase * 0.9,
-                lineHeight: typography.lineHeight,
-              }}
-            >
-              Add{" "}
-              <code style={{ color: palette.textPrimary }}>GIPHY_API_KEY</code> to your .env to
-              search GIPHY GIFs (free key from developers.giphy.com).
-            </div>
-          )}
-        </div>
-      </div>,
-      document.body,
-    );
+  const handleGifSelect = useCallback(
+    (gifUrl: string) => {
+      const el = editorRef.current;
+      if (!el) return;
+      el.focus();
+      if (hrefLooksLikeDirectImageUrl(gifUrl)) {
+        insertImageAtSelection(el, gifUrl, composerImgStyle, () => syncHeight());
+      } else {
+        document.execCommand("insertText", false, gifUrl);
+      }
+      refreshComposerDomState();
+      setPickerOpen(false);
+      requestAnimationFrame(() => el.focus());
+    },
+    [composerImgStyle, refreshComposerDomState, syncHeight],
+  );
 
   // ─── Render ───────────────────────────────────────────────────────────────
 
@@ -1762,7 +1662,20 @@ export default function MessageInput({
         />
       </div>
     </div>
-      {pickerPortal}
+      <ComposerMediaPickerPopover
+        open={pickerOpen}
+        popoverPos={popoverPos}
+        pickerTab={pickerTab}
+        emojiPickerMountRef={emojiPickerMountRef}
+        giphyApiKey={giphyApiKey}
+        palette={palette}
+        typography={typography}
+        spacing={spacing}
+        resolvedColorScheme={resolvedColorScheme}
+        zIndex={COMPOSER_POPOVER_Z}
+        onPickerTabChange={setPickerTab}
+        onGifSelect={handleGifSelect}
+      />
     </>
   );
 }
