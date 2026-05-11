@@ -29,6 +29,29 @@ export default function MessageMatrixVideo({
   const videoRef = useRef<HTMLVideoElement>(null);
 
   const requestKey = JSON.stringify(request);
+  const logVideoState = (eventName: string) => {
+    const video = videoRef.current;
+    if (!video) return;
+    const mediaError = video.error;
+    console.info("[matrix video]", eventName, {
+      currentSrc: video.currentSrc,
+      networkState: video.networkState,
+      readyState: video.readyState,
+      buffered:
+        video.buffered.length > 0
+          ? Array.from({ length: video.buffered.length }, (_, i) => [
+              video.buffered.start(i),
+              video.buffered.end(i),
+            ])
+          : [],
+      error: mediaError
+        ? {
+            code: mediaError.code,
+            message: mediaError.message,
+          }
+        : null,
+    });
+  };
 
   const loadingReserve =
     metaWidth != null &&
@@ -51,8 +74,14 @@ export default function MessageMatrixVideo({
       return;
     }
 
-    setSrc(`${MATRIX_MEDIA_URL_PREFIX}/download?request=${encodeURIComponent(requestKey)}`);
-  }, [requestKey]);
+    const ext =
+      mimeType === "video/webm"
+        ? "webm"
+        : mimeType === "video/quicktime"
+          ? "mov"
+          : "mp4";
+    setSrc(`${MATRIX_MEDIA_URL_PREFIX}/download.${ext}?request=${encodeURIComponent(requestKey)}`);
+  }, [mimeType, requestKey]);
 
   // Release video resources when src changes or component unmounts
   useEffect(() => {
@@ -147,13 +176,19 @@ export default function MessageMatrixVideo({
       playsInline
       preload="metadata"
       style={videoStyle}
+      onLoadStart={() => logVideoState("loadstart")}
+      onLoadedMetadata={() => logVideoState("loadedmetadata")}
+      onCanPlay={() => logVideoState("canplay")}
+      onWaiting={() => logVideoState("waiting")}
+      onStalled={() => logVideoState("stalled")}
+      onSuspend={() => logVideoState("suspend")}
       onError={() => {
+        logVideoState("error");
         setFailed(true);
         setErrorDetail("Video could not be played (unsupported format or file missing).");
         setSrc(null);
       }}
-    >
-      <source src={src} type={mimeType ?? "video/mp4"} />
-    </video>
+      src={src}
+    />
   );
 }
