@@ -72,6 +72,7 @@ import ComposerFormattingToolbar, {
 import ComposerMediaPickerPopover, {
   type ComposerPickerTab,
 } from "../features/chat/composer/ComposerMediaPickerPopover";
+import MentionAutocompleteMenu from "../features/chat/composer/MentionAutocompleteMenu";
 
 export interface EditingMessageRef {
   eventId: string;
@@ -1281,97 +1282,19 @@ export default function MessageInput({
         style={{ padding: `0 ${spacing.unit * 3}px ${spacing.unit * 3}px`, position: "relative" }}
       >
 
-      {/* ── Mention autocomplete menu ──────────────────────────────────────── */}
-      {mentionMenuOpen && mentionCandidates.length > 0 && (
-        <div
-          ref={mentionMenuRef}
-          role="listbox"
-          aria-label="Mention suggestions"
-          style={{
-            position: "absolute",
-            bottom: "100%",
-            // Match composer width (abs positioning uses the padding box; in-flow content is inset).
-            left: spacing.unit * 3,
-            right: spacing.unit * 3,
-            marginBottom: spacing.unit,
-            backgroundColor: palette.bgSecondary,
-            border: `1px solid ${palette.border}`,
-            borderRadius: spacing.unit * 1.5,
-            boxShadow:
-              resolvedColorScheme === "light"
-                ? "0 -2px 12px rgba(0,0,0,0.10)"
-                : "0 -2px 16px rgba(0,0,0,0.40)",
-            overflow: "hidden",
-            zIndex: COMPOSER_POPOVER_Z,
-          }}
-        >
-          {mentionCandidates.map((m, i) => {
-            const localpart = m.userId.startsWith("@")
-              ? m.userId.slice(1).split(":")[0]
-              : m.userId.split(":")[0];
-            const isSelected = i === mentionIndex;
-            const mentionRowFadePx = spacing.unit * 4;
-            const mentionRowMask = `linear-gradient(90deg, #000 0%, #000 calc(100% - ${mentionRowFadePx}px), transparent 100%)`;
-            return (
-              <div
-                key={m.userId}
-                role="option"
-                aria-selected={isSelected}
-                title={`${m.displayName ?? localpart} ${m.userId}`}
-                onMouseDown={(e) => {
-                  // mouseDown (not click) so it fires before the editor blur.
-                  e.preventDefault();
-                  completeMention(m);
-                }}
-                onMouseEnter={() => setMentionIndex(i)}
-                style={{
-                  display: "flex",
-                  alignItems: "center",
-                  minWidth: 0,
-                  padding: `${spacing.unit * 1.5}px ${spacing.unit * 2.5}px`,
-                  cursor: "pointer",
-                  backgroundColor: isSelected ? palette.bgHover : "transparent",
-                  transition: "background-color 60ms ease",
-                }}
-              >
-                <div
-                  style={{
-                    display: "flex",
-                    alignItems: "center",
-                    gap: spacing.unit * 2,
-                    minWidth: 0,
-                    flex: 1,
-                    overflow: "hidden",
-                    whiteSpace: "nowrap",
-                    maskImage: mentionRowMask,
-                    WebkitMaskImage: mentionRowMask,
-                  }}
-                >
-                  <span
-                    style={{
-                      fontWeight: typography.fontWeightMedium,
-                      color: palette.textPrimary,
-                      fontSize: typography.fontSizeBase,
-                      flexShrink: 0,
-                    }}
-                  >
-                    {m.displayName ?? localpart}
-                  </span>
-                  <span
-                    style={{
-                      fontSize: typography.fontSizeSmall,
-                      color: palette.textSecondary,
-                      flexShrink: 0,
-                    }}
-                  >
-                    {m.userId}
-                  </span>
-                </div>
-              </div>
-            );
-          })}
-        </div>
-      )}
+      <MentionAutocompleteMenu
+        open={mentionMenuOpen}
+        candidates={mentionCandidates}
+        selectedIndex={mentionIndex}
+        menuRef={mentionMenuRef}
+        palette={palette}
+        typography={typography}
+        spacing={spacing}
+        resolvedColorScheme={resolvedColorScheme}
+        zIndex={COMPOSER_POPOVER_Z}
+        onSelectIndex={setMentionIndex}
+        onCompleteMention={completeMention}
+      />
 
       <div
         style={{
