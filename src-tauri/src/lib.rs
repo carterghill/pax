@@ -406,7 +406,7 @@ pub fn run() {
             video_recv::handle_protocol_request(request)
         })
         .register_uri_scheme_protocol("paxmatrixmedia", |ctx, request| {
-            commands::messages::handle_matrix_media_protocol_request(ctx.app_handle().clone(), request)
+            commands::media_protocol::handle_matrix_media_protocol_request(ctx.app_handle().clone(), request)
         })
         .invoke_handler(tauri::generate_handler![
             commands::auth::logout,
@@ -443,8 +443,8 @@ pub fn run() {
             commands::room_discovery::resolve_room_alias,
             commands::room_discovery::get_room_parent_spaces,
             commands::messages::get_messages,
-            commands::messages::get_matrix_image_path,
-            commands::messages::clear_media_cache,
+            commands::media_files::get_matrix_image_path,
+            commands::media_files::clear_media_cache,
             commands::members::get_room_members,
             commands::members::get_room_management_members,
             commands::members::get_room_member_profile,
@@ -495,14 +495,14 @@ pub fn run() {
             commands::messages::get_messages_around_event,
             commands::messages::start_sync,
             commands::messages::send_typing_notice,
-            commands::messages::room_file_staging_reset,
-            commands::messages::room_file_staging_append_b64,
-            commands::messages::room_file_staging_byte_len,
-            commands::messages::room_file_staging_remove,
-            commands::messages::get_matrix_max_upload_bytes,
-            commands::messages::upload_room_file,
-            commands::messages::send_file_message,
-            commands::messages::upload_and_send_file,
+            commands::media_files::room_file_staging_reset,
+            commands::media_files::room_file_staging_append_b64,
+            commands::media_files::room_file_staging_byte_len,
+            commands::media_files::room_file_staging_remove,
+            commands::media_files::get_matrix_max_upload_bytes,
+            commands::media_files::upload_room_file,
+            commands::media_files::send_file_message,
+            commands::media_files::upload_and_send_file,
             commands::presence::set_presence,
             commands::presence::sync_presence,
             commands::presence::start_idle_monitor,

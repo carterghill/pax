@@ -12,7 +12,16 @@
       "Bash(Select-Object FullName, Length)",
       "Bash(Sort-Object FullName)",
       "Bash(awk -F: '$1 >= 1905')",
-      "Bash(awk -F: '$1 >= 1905 && $1 <= 3080')"
+      "Bash(awk -F: '$1 >= 1905 && $1 <= 3080')",
+      "Bash(sed -n '2822p' /home/carter/Documents/pax/src-tauri/src/commands/messages.rs)",
+      "Bash(sed -n '2823p' /home/carter/Documents/pax/src-tauri/src/commands/messages.rs)",
+      "Bash(sed -n '3471p' /home/carter/Documents/pax/src-tauri/src/commands/messages.rs)",
+      "Bash(sed -n '3472p' /home/carter/Documents/pax/src-tauri/src/commands/messages.rs)",
+      "Bash(sed -n '2453p' /home/carter/Documents/pax/src-tauri/src/commands/messages.rs)",
+      "Bash(sed -n '2454p' /home/carter/Documents/pax/src-tauri/src/commands/messages.rs)",
+      "Bash(sed -n '67p' /home/carter/Documents/pax/src-tauri/src/commands/messages.rs)",
+      "Bash(sed -n '68p' /home/carter/Documents/pax/src-tauri/src/commands/messages.rs)",
+      "Bash(sed -n '557p' /home/carter/Documents/pax/src-tauri/src/commands/messages.rs)"
     ]
   }
 }

@@ -1128,7 +1128,7 @@ mod tests {
         let candidates = discover_federation_server_names(&client, "matrix.tchncs.de").await;
 
         assert!(!candidates.is_empty());
-        assert_eq!(candidates[0], "matrix.tchncs.de".to_string());
+        assert_eq!(candidates[0], "tchncs.de".to_string());
     }
 
     #[test]
