@@ -18,6 +18,7 @@ import {
   getActiveFormats,
   serializeComposerEditor,
 } from "../../../utils/composerEditorDom";
+import { formatInvokeErr } from "../formatInvokeErr";
 
 export interface EditingMessageRef {
   eventId: string;
@@ -60,16 +61,6 @@ type UseComposerSubmitArgs = {
   refreshFormats: () => void;
   syncHeight: () => void;
 };
-
-function formatInvokeErr(err: unknown): string {
-  if (typeof err === "string") return err;
-  if (err instanceof Error) return err.message;
-  try {
-    return JSON.stringify(err);
-  } catch {
-    return String(err);
-  }
-}
 
 function restoreStickyInlineFormats(el: HTMLDivElement, prevFormats: Set<string>) {
   if (!prevFormats.has("bold") && !prevFormats.has("italic") && !prevFormats.has("strikethrough")) {

@@ -6,6 +6,7 @@ import type {
   ThemeSpacing,
   ThemeTypography,
 } from "../../../theme/types";
+import { localpartFromUserId } from "../../../utils/matrix";
 
 interface MentionAutocompleteMenuProps {
   open: boolean;
@@ -19,10 +20,6 @@ interface MentionAutocompleteMenuProps {
   zIndex: number;
   onSelectIndex: (index: number) => void;
   onCompleteMention: (member: RoomMember) => void;
-}
-
-function localpartFromUserId(userId: string): string {
-  return userId.startsWith("@") ? userId.slice(1).split(":")[0] : userId.split(":")[0];
 }
 
 export default function MentionAutocompleteMenu({

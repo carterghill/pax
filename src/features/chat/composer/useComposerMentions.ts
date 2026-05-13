@@ -10,11 +10,13 @@ import {
 import type { RoomMember } from "../../../types/matrix";
 import type { ThemePalette, ThemeTypography } from "../../../theme/types";
 import { useRoomMembers } from "../../../hooks/useRoomMembers";
+import { useResolveMemberLabel } from "../../../hooks/useResolveMemberLabel";
 import {
   createComposerMentionSpan,
   replaceBareMxidsWithPillsInComposer,
   type ComposerMentionPillStyle,
 } from "../../../utils/composerEditorDom";
+import { localpartFromUserId } from "../../../utils/matrix";
 
 type UseComposerMentionsArgs = {
   roomId: string;
@@ -25,10 +27,6 @@ type UseComposerMentionsArgs = {
   refreshComposerDomState: () => void;
 };
 
-function localpartFromUserId(userId: string): string {
-  return userId.startsWith("@") ? userId.slice(1).split(":")[0] : userId.split(":")[0];
-}
-
 export function useComposerMentions({
   roomId,
   selfUserId,
@@ -38,24 +36,7 @@ export function useComposerMentions({
   refreshComposerDomState,
 }: UseComposerMentionsArgs) {
   const { members: roomMembers } = useRoomMembers(roomId);
-
-  const memberLabelById = useMemo(() => {
-    const m = new Map<string, string>();
-    for (const mem of roomMembers) {
-      const label = (mem.displayName?.trim() || mem.userId).trim();
-      m.set(mem.userId.trim().toLowerCase(), label);
-    }
-    return m;
-  }, [roomMembers]);
-
-  const resolveMemberLabel = useCallback(
-    (uid: string) => {
-      const hit = memberLabelById.get(uid.trim().toLowerCase());
-      if (hit) return hit;
-      return uid;
-    },
-    [memberLabelById],
-  );
+  const { resolveMemberLabel } = useResolveMemberLabel(roomId);
 
   const getComposerMentionVisibleLabel = useCallback(
     (mxid: string) => {

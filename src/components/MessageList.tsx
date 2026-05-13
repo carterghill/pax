@@ -14,7 +14,7 @@ import { Picker } from "emoji-mart";
 import data from "@emoji-mart/data";
 import { ArrowDown } from "lucide-react";
 import { Message, MessageReaction, RoomRedactionPolicy } from "../types/matrix";
-import { useRoomMembers } from "../hooks/useRoomMembers";
+import { useResolveMemberLabel } from "../hooks/useResolveMemberLabel";
 import { useTheme } from "../theme/ThemeContext";
 import MediaViewerModal, {
   type MediaViewerOpenPayload,
@@ -128,24 +128,7 @@ const MessageList = forwardRef<MessageListHandle, MessageListProps>(function Mes
     [pinnedEventIds],
   );
 
-  const { members } = useRoomMembers(roomId);
-  const memberLabelById = useMemo(() => {
-    const m = new Map<string, string>();
-    for (const mem of members) {
-      const label = (mem.displayName?.trim() || mem.userId).trim();
-      m.set(mem.userId.trim().toLowerCase(), label);
-    }
-    return m;
-  }, [members]);
-
-  const resolveMemberLabel = useCallback(
-    (uid: string) => {
-      const hit = memberLabelById.get(uid.trim().toLowerCase());
-      if (hit) return hit;
-      return uid;
-    },
-    [memberLabelById],
-  );
+  const { resolveMemberLabel } = useResolveMemberLabel(roomId);
 
   /* ---- Refs ---- */
   const scrollContainerRef = useRef<HTMLDivElement>(null);
