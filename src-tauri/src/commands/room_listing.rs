@@ -112,6 +112,74 @@ async fn fetch_space_children_for_room(room: matrix_sdk::Room) -> (String, Vec<S
 const GET_ROOMS_SPACE_CHILD_CONCURRENCY: usize = 16;
 const GET_ROOMS_AVATAR_CONCURRENCY: usize = 24;
 
+async fn build_room_info(
+    room: &matrix_sdk::Room,
+    space_children: &HashMap<String, Vec<SpaceChildMeta>>,
+    avatar_cache: &Arc<AvatarDiskCache>,
+    presence_map: &Arc<Mutex<HashMap<String, String>>>,
+    status_msg_map: &Arc<Mutex<HashMap<String, String>>>,
+    membership: &str,
+) -> RoomInfo {
+    let room_id_str = room.room_id().to_string();
+
+    let mut parent_space_ids: Vec<String> = Vec::new();
+    let mut space_child_orders: HashMap<String, SpaceChildOrder> = HashMap::new();
+    for (space_id, children) in space_children.iter() {
+        if let Some(meta) = children.iter().find(|c| c.child_id == room_id_str) {
+            parent_space_ids.push(space_id.clone());
+            space_child_orders.insert(
+                space_id.clone(),
+                SpaceChildOrder {
+                    order: meta.order.clone(),
+                    origin_server_ts: meta.origin_server_ts,
+                },
+            );
+        }
+    }
+
+    let room_type_str = room.room_type().map(|rt| rt.to_string());
+    let topic = room.topic();
+
+    let mut name = room.name().unwrap_or_else(|| "Unnamed".to_string());
+    let mut avatar_url = get_or_fetch_avatar(
+        room.avatar_url().as_deref(),
+        room.avatar(matrix_sdk::media::MediaFormat::File),
+        avatar_cache,
+    )
+    .await;
+    let mut is_direct = false;
+    let mut dm_peer_user_id: Option<String> = None;
+    let mut dm_peer_presence: Option<String> = None;
+    let mut dm_peer_status_msg: Option<String> = None;
+
+    if let Some((dname, dav, pid, pres, smsg)) =
+        dm_one_to_one_peer_summary(room, avatar_cache, presence_map, status_msg_map).await
+    {
+        name = dname;
+        avatar_url = dav;
+        is_direct = true;
+        dm_peer_user_id = Some(pid);
+        dm_peer_presence = Some(pres);
+        dm_peer_status_msg = smsg;
+    }
+
+    RoomInfo {
+        id: room_id_str,
+        name,
+        avatar_url,
+        is_space: room.is_space(),
+        parent_space_ids,
+        space_child_orders,
+        room_type: room_type_str,
+        topic,
+        membership: membership.to_string(),
+        is_direct,
+        dm_peer_user_id,
+        dm_peer_presence,
+        dm_peer_status_msg,
+    }
+}
+
 /// 1:1 direct message: use peer display name, avatar, and presence (like Element).
 pub(super) async fn dm_one_to_one_peer_summary(
     room: &matrix_sdk::Room,
@@ -317,65 +385,7 @@ pub async fn get_rooms(state: State<'_, Arc<AppState>>) -> Result<Vec<RoomInfo>,
             let pm = presence_map.clone();
             let sm = status_msg_map_rooms.clone();
             async move {
-                let room_id_str = room.room_id().to_string();
-                // Walk each joined space's child list; for every parent that
-                // lists this room, record both the parent id and the ordering
-                // metadata from that parent's `m.space.child` event.
-                let mut parent_space_ids: Vec<String> = Vec::new();
-                let mut space_child_orders: HashMap<String, SpaceChildOrder> = HashMap::new();
-                for (space_id, children) in sc.iter() {
-                    if let Some(meta) = children.iter().find(|c| c.child_id == room_id_str) {
-                        parent_space_ids.push(space_id.clone());
-                        space_child_orders.insert(
-                            space_id.clone(),
-                            SpaceChildOrder {
-                                order: meta.order.clone(),
-                                origin_server_ts: meta.origin_server_ts,
-                            },
-                        );
-                    }
-                }
-                let room_type_str = room.room_type().map(|rt| rt.to_string());
-                let topic = room.topic();
-
-                let mut name = room.name().unwrap_or_else(|| "Unnamed".to_string());
-                let mut avatar_url = get_or_fetch_avatar(
-                    room.avatar_url().as_deref(),
-                    room.avatar(matrix_sdk::media::MediaFormat::File),
-                    &ac,
-                )
-                .await;
-                let mut is_direct = false;
-                let mut dm_peer_user_id: Option<String> = None;
-                let mut dm_peer_presence: Option<String> = None;
-                let mut dm_peer_status_msg: Option<String> = None;
-
-                if let Some((dname, dav, pid, pres, smsg)) =
-                    dm_one_to_one_peer_summary(&room, &ac, &pm, &sm).await
-                {
-                    name = dname;
-                    avatar_url = dav;
-                    is_direct = true;
-                    dm_peer_user_id = Some(pid);
-                    dm_peer_presence = Some(pres);
-                    dm_peer_status_msg = smsg;
-                }
-
-                let info = RoomInfo {
-                    id: room_id_str,
-                    name,
-                    avatar_url,
-                    is_space: room.is_space(),
-                    parent_space_ids,
-                    space_child_orders,
-                    room_type: room_type_str,
-                    topic,
-                    membership: "joined".to_string(),
-                    is_direct,
-                    dm_peer_user_id,
-                    dm_peer_presence,
-                    dm_peer_status_msg,
-                };
+                let info = build_room_info(&room, &sc, &ac, &pm, &sm, "joined").await;
                 (idx, info)
             }
         }))
@@ -394,62 +404,7 @@ pub async fn get_rooms(state: State<'_, Arc<AppState>>) -> Result<Vec<RoomInfo>,
             let pm = presence_map.clone();
             let sm = status_msg_map_rooms.clone();
             async move {
-                let room_id_str = room.room_id().to_string();
-                let mut parent_space_ids: Vec<String> = Vec::new();
-                let mut space_child_orders: HashMap<String, SpaceChildOrder> = HashMap::new();
-                for (space_id, children) in sc.iter() {
-                    if let Some(meta) = children.iter().find(|c| c.child_id == room_id_str) {
-                        parent_space_ids.push(space_id.clone());
-                        space_child_orders.insert(
-                            space_id.clone(),
-                            SpaceChildOrder {
-                                order: meta.order.clone(),
-                                origin_server_ts: meta.origin_server_ts,
-                            },
-                        );
-                    }
-                }
-                let room_type_str = room.room_type().map(|rt| rt.to_string());
-                let topic = room.topic();
-
-                let mut name = room.name().unwrap_or_else(|| "Unnamed".to_string());
-                let mut avatar_url = get_or_fetch_avatar(
-                    room.avatar_url().as_deref(),
-                    room.avatar(matrix_sdk::media::MediaFormat::File),
-                    &ac,
-                )
-                .await;
-                let mut is_direct = false;
-                let mut dm_peer_user_id: Option<String> = None;
-                let mut dm_peer_presence: Option<String> = None;
-                let mut dm_peer_status_msg: Option<String> = None;
-
-                if let Some((dname, dav, pid, pres, smsg)) =
-                    dm_one_to_one_peer_summary(&room, &ac, &pm, &sm).await
-                {
-                    name = dname;
-                    avatar_url = dav;
-                    is_direct = true;
-                    dm_peer_user_id = Some(pid);
-                    dm_peer_presence = Some(pres);
-                    dm_peer_status_msg = smsg;
-                }
-
-                let info = RoomInfo {
-                    id: room_id_str,
-                    name,
-                    avatar_url,
-                    is_space: room.is_space(),
-                    parent_space_ids,
-                    space_child_orders,
-                    room_type: room_type_str,
-                    topic,
-                    membership: "invited".to_string(),
-                    is_direct,
-                    dm_peer_user_id,
-                    dm_peer_presence,
-                    dm_peer_status_msg,
-                };
+                let info = build_room_info(&room, &sc, &ac, &pm, &sm, "invited").await;
                 (idx, info)
             }
         }))
