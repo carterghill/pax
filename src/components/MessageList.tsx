@@ -12,12 +12,7 @@ import { createPortal } from "react-dom";
 import { invoke } from "@tauri-apps/api/core";
 import { Picker } from "emoji-mart";
 import data from "@emoji-mart/data";
-import {
-  Pencil,
-  Pin,
-  Trash2,
-  ArrowDown,
-} from "lucide-react";
+import { ArrowDown } from "lucide-react";
 import { Message, MessageReaction, RoomRedactionPolicy } from "../types/matrix";
 import { useRoomMembers } from "../hooks/useRoomMembers";
 import { useTheme } from "../theme/ThemeContext";
@@ -27,6 +22,18 @@ import MediaViewerModal, {
 import { fileNameFromImageUrl } from "../utils/directImageUrl";
 import { useReadReceiptSender } from "../hooks/useReadReceiptSender";
 import MessageRow from "../features/chat/messages/MessageRow";
+import {
+  getMessageActionBarLeftEdge,
+  getMessageActionGroupRect,
+  clampFixedPopoverToViewport,
+  shouldShowHeader,
+  getReplyThreadPreview,
+  reactionHoverLines,
+  messageAllowsEdit,
+  messageAllowsDelete,
+} from "../features/chat/messages/messageListUtils";
+import LoadingSkeletons from "../features/chat/messages/LoadingSkeletons";
+import MessageActionMenu from "../features/chat/messages/MessageActionMenu";
 
 /* ------------------------------------------------------------------ */
 /*  Props                                                              */
@@ -81,239 +88,6 @@ const SKELETON_COUNT = 4;
 const MESSAGE_ACTIONS_MENU_Z = 10_000;
 const POPOVER_VIEWPORT_EPS_PX = 1;
 
-/* ------------------------------------------------------------------ */
-/*  Helpers                                                            */
-/* ------------------------------------------------------------------ */
-
-/** Viewport X of the left edge of the leftmost button in the message hover action bar (`anchor` is any button in that bar). */
-function getMessageActionBarLeftEdge(anchor: HTMLElement | null): number | null {
-  if (!anchor) return null;
-  const bar = anchor.closest(".pax-message-actions");
-  if (!bar) return null;
-  const firstBtn = bar.querySelector("button");
-  if (!firstBtn) return null;
-  return firstBtn.getBoundingClientRect().left;
-}
-
-/** Bordered segment row (Reply / react / overflow) in viewport coords; `anchor` is any button in that bar. */
-function getMessageActionGroupRect(anchor: HTMLElement | null): DOMRect | null {
-  if (!anchor) return null;
-  const bar = anchor.closest(".pax-message-actions");
-  if (!bar) return null;
-  const group = bar.firstElementChild;
-  if (!group || !(group instanceof HTMLElement)) return null;
-  return group.getBoundingClientRect();
-}
-
-/** Shift a `position: fixed` popover so it stays inside the viewport (by `margin` from each edge). */
-function clampFixedPopoverToViewport(
-  pop: DOMRect,
-  margin: number,
-): { top: number; right: number } {
-  const vw = window.innerWidth;
-  const vh = window.innerHeight;
-  let left = pop.left;
-  let top = pop.top;
-  if (left < margin) left = margin;
-  if (left + pop.width > vw - margin) {
-    left = Math.max(margin, vw - margin - pop.width);
-  }
-  if (top < margin) top = margin;
-  if (top + pop.height > vh - margin) {
-    top = Math.max(margin, vh - margin - pop.height);
-  }
-  return {
-    top,
-    right: vw - left - pop.width,
-  };
-}
-
-const NON_EDITABLE_BODIES = new Set([
-  "[File]",
-  "[Video]",
-  "[Audio]",
-  "[Unsupported message]",
-]);
-
-/** Matrix `msgtype` rows we show as `[Label] …` (must stay in sync with `bracket_label_for_unhandled_matrix_msgtype` in messages.rs). */
-const NON_EDITABLE_BRACKET_PREFIXES = [
-  "[Confetti]",
-  "[Fireworks]",
-  "[Rainfall]",
-  "[Snowfall]",
-  "[Space invaders]",
-  "[Hearts]",
-  "[Location]",
-  "[Server notice]",
-  "[Verification]",
-] as const;
-
-/** Hide redundant caption when Matrix body duplicates the attachment filename we already show on the chip. */
-function replySnippetForMessage(m: Message): string {
-  if (m.imageMediaRequest || m.localImagePreviewObjectUrl) return "Image";
-  if (m.videoMediaRequest) return "Video";
-  if (m.fileMediaRequest) return m.fileDisplayName?.trim() || "File";
-  const ty = m.unsupportedMatrixMsgtype?.trim();
-  if (ty) {
-    const t = m.body.trim();
-    const base = t || "Unsupported message";
-    return `${base} · ${ty}`;
-  }
-  const t = m.body.trim();
-  if (t.length > 120) return `${t.slice(0, 120)}…`;
-  return t || "Message";
-}
-
-function getReplyThreadPreview(
-  msg: Message,
-  byId: Map<string, Message>,
-): { targetEventId: string; senderLabel: string; text: string } | null {
-  const id = msg.replyTo?.eventId;
-  if (!id) return null;
-  const parent = byId.get(id);
-  if (parent) {
-    return {
-      targetEventId: id,
-      senderLabel: (parent.senderName?.trim() || parent.sender).trim(),
-      text: replySnippetForMessage(parent),
-    };
-  }
-  return {
-    targetEventId: id,
-    senderLabel: "…",
-    text: "Original message not in view",
-  };
-}
-
-function shouldShowHeader(msg: Message, prevMsg: Message | null): boolean {
-  if (!prevMsg) return true;
-  if (prevMsg.sender !== msg.sender) return true;
-  if (msg.timestamp - prevMsg.timestamp > 5 * 60 * 1000) return true;
-  return false;
-}
-
-function reactionHoverLines(
-  r: MessageReaction,
-  resolveLabel: (userId: string) => string,
-  currentUserId: string,
-): string[] {
-  if (r.reactedBy && r.reactedBy.length > 0) {
-    const labels = r.reactedBy.map((id) => resolveLabel(id));
-    return [...labels].sort((a, b) =>
-      a.localeCompare(b, undefined, { sensitivity: "base" }),
-    );
-  }
-  if (r.count === 1 && r.reactedByMe) {
-    return [resolveLabel(currentUserId)];
-  }
-  if (r.count > 0) {
-    return [`${r.count} reaction${r.count === 1 ? "" : "s"}`];
-  }
-  return [];
-}
-
-function messageAllowsEdit(msg: Message, userId: string): boolean {
-  if (msg.eventId.startsWith("local:")) return false;
-  if (msg.sender !== userId) return false;
-  if (msg.imageMediaRequest != null) return false;
-  if (msg.videoMediaRequest != null) return false;
-  if (msg.fileMediaRequest != null) return false;
-  const t = msg.body.trim();
-  if (NON_EDITABLE_BODIES.has(t)) return false;
-  if (
-    NON_EDITABLE_BRACKET_PREFIXES.some((p) => t === p || t.startsWith(`${p} `))
-  )
-    return false;
-  return true;
-}
-
-function messageAllowsDelete(
-  msg: Message,
-  userId: string,
-  policy: RoomRedactionPolicy,
-): boolean {
-  if (msg.sender === userId) return policy.canRedactOwn;
-  return policy.canRedactOther;
-}
-
-/* ------------------------------------------------------------------ */
-/*  Skeleton loading indicator                                         */
-/* ------------------------------------------------------------------ */
-
-function LoadingSkeletons({
-  count,
-  palette,
-  spacingUnit,
-}: {
-  count: number;
-  palette: ReturnType<typeof useTheme>["palette"];
-  spacingUnit: number;
-}) {
-  return (
-    <div
-      aria-hidden
-      style={{
-        padding: `${spacingUnit}px ${spacingUnit * 3}px ${spacingUnit * 2}px`,
-        display: "flex",
-        flexDirection: "column",
-        gap: spacingUnit * 2,
-      }}
-    >
-      {Array.from({ length: count }).map((_, idx) => (
-        <div
-          key={idx}
-          style={{
-            display: "flex",
-            alignItems: "flex-start",
-            gap: spacingUnit * 3,
-            paddingLeft: spacingUnit,
-            paddingRight: spacingUnit,
-          }}
-        >
-          <div
-            style={{
-              width: 36,
-              height: 36,
-              borderRadius: "50%",
-              flexShrink: 0,
-              backgroundColor: palette.bgActive,
-              opacity: 0.8,
-            }}
-          />
-          <div
-            style={{
-              flex: 1,
-              minWidth: 0,
-              display: "flex",
-              flexDirection: "column",
-              gap: spacingUnit * 1.5,
-            }}
-          >
-            <div
-              style={{
-                width: `${48 + idx * 10}%`,
-                maxWidth: 220,
-                height: 10,
-                borderRadius: 999,
-                backgroundColor: palette.bgActive,
-                opacity: 0.9,
-              }}
-            />
-            <div
-              style={{
-                width: `${72 + ((idx + 1) % 3) * 8}%`,
-                height: 12,
-                borderRadius: 999,
-                backgroundColor: palette.bgHover,
-                opacity: 0.9,
-              }}
-            />
-          </div>
-        </div>
-      ))}
-    </div>
-  );
-}
 
 /* ------------------------------------------------------------------ */
 /*  MessageList                                                        */
@@ -1355,222 +1129,63 @@ const MessageList = forwardRef<MessageListHandle, MessageListProps>(function Mes
       </div>
 
       {/* Context menu portal */}
-      {openMenuMsg &&
-        menuFixedPos &&
-        createPortal(
-          <div
-            ref={menuPortalRef}
-            data-message-actions-root
-            role="menu"
-            aria-label="Message actions"
-            style={{
-              position: "fixed",
-              top: menuFixedPos.top ?? undefined,
-              bottom: menuFixedPos.bottom ?? undefined,
-              right: menuFixedPos.right,
-              zIndex: MESSAGE_ACTIONS_MENU_Z,
-              minWidth: spacing.unit * 40,
-              maxHeight: `calc(100vh - ${Math.max(8, spacing.unit * 2) * 2}px)`,
-              overflowX: "hidden",
-              overflowY: "auto",
-              padding: spacing.unit * 1.5,
-              display: "flex",
-              flexDirection: "column",
-              gap: spacing.unit * 0.5,
-              backgroundColor: palette.bgTertiary,
-              border: `1px solid ${palette.border}`,
-              borderRadius: spacing.unit * 2,
-              boxShadow:
-                resolvedColorScheme === "light"
-                  ? "0 8px 24px rgba(0,0,0,0.12)"
-                  : "0 10px 36px rgba(0,0,0,0.45)",
-            }}
-          >
-            {messageAllowsEdit(openMenuMsg, userId) && (
-              <button
-                type="button"
-                role="menuitem"
-                onMouseDown={(e) => e.preventDefault()}
-                onClick={() => {
-                  setOpenMenuEventId(null);
-                  onRequestEdit(openMenuMsg);
-                }}
-                style={{
-                  display: "flex",
-                  alignItems: "center",
-                  gap: spacing.unit * 2.5,
-                  width: "100%",
-                  padding: `${spacing.unit * 2.25}px ${spacing.unit * 3}px`,
-                  border: "none",
-                  borderRadius: spacing.unit * 1.25,
-                  backgroundColor: "transparent",
-                  color: palette.textPrimary,
-                  fontSize: typography.fontSizeBase,
-                  fontFamily: typography.fontFamily,
-                  fontWeight: typography.fontWeightNormal,
-                  cursor: "pointer",
-                  textAlign: "left",
-                }}
-                onMouseEnter={(e) => {
-                  e.currentTarget.style.backgroundColor = palette.bgHover;
-                  e.currentTarget.style.color = palette.textHeading;
-                }}
-                onMouseLeave={(e) => {
-                  e.currentTarget.style.backgroundColor = "transparent";
-                  e.currentTarget.style.color = palette.textPrimary;
-                }}
-              >
-                <Pencil size={20} strokeWidth={2} color="currentColor" />
-                Edit
-              </button>
-            )}
-            {canPinMessages &&
-              openMenuMsg &&
-              !pinnedSet.has(openMenuMsg.eventId) && (
-                <button
-                  type="button"
-                  role="menuitem"
-                  onMouseDown={(e) => e.preventDefault()}
-                  onClick={async () => {
-                    setOpenMenuEventId(null);
-                    try {
-                      await invoke("pin_room_message", {
-                        roomId,
-                        eventId: openMenuMsg.eventId,
-                      });
-                      onPinnedStateChanged?.();
-                    } catch (e) {
-                      console.error("Failed to pin message:", e);
-                    }
-                  }}
-                  style={{
-                    display: "flex",
-                    alignItems: "center",
-                    gap: spacing.unit * 2.5,
-                    width: "100%",
-                    padding: `${spacing.unit * 2.25}px ${spacing.unit * 3}px`,
-                    border: "none",
-                    borderRadius: spacing.unit * 1.25,
-                    backgroundColor: "transparent",
-                    color: palette.textPrimary,
-                    fontSize: typography.fontSizeBase,
-                    fontFamily: typography.fontFamily,
-                    fontWeight: typography.fontWeightNormal,
-                    cursor: "pointer",
-                    textAlign: "left",
-                  }}
-                  onMouseEnter={(e) => {
-                    e.currentTarget.style.backgroundColor = palette.bgHover;
-                    e.currentTarget.style.color = palette.textHeading;
-                  }}
-                  onMouseLeave={(e) => {
-                    e.currentTarget.style.backgroundColor = "transparent";
-                    e.currentTarget.style.color = palette.textPrimary;
-                  }}
-                >
-                  <Pin size={20} strokeWidth={2} color="currentColor" />
-                  Pin message
-                </button>
-              )}
-            {canPinMessages &&
-              openMenuMsg &&
-              pinnedSet.has(openMenuMsg.eventId) && (
-                <button
-                  type="button"
-                  role="menuitem"
-                  onMouseDown={(e) => e.preventDefault()}
-                  onClick={async () => {
-                    setOpenMenuEventId(null);
-                    try {
-                      await invoke("unpin_room_message", {
-                        roomId,
-                        eventId: openMenuMsg.eventId,
-                      });
-                      onPinnedStateChanged?.();
-                    } catch (e) {
-                      console.error("Failed to unpin message:", e);
-                    }
-                  }}
-                  style={{
-                    display: "flex",
-                    alignItems: "center",
-                    gap: spacing.unit * 2.5,
-                    width: "100%",
-                    padding: `${spacing.unit * 2.25}px ${spacing.unit * 3}px`,
-                    border: "none",
-                    borderRadius: spacing.unit * 1.25,
-                    backgroundColor: "transparent",
-                    color: palette.textPrimary,
-                    fontSize: typography.fontSizeBase,
-                    fontFamily: typography.fontFamily,
-                    fontWeight: typography.fontWeightNormal,
-                    cursor: "pointer",
-                    textAlign: "left",
-                  }}
-                  onMouseEnter={(e) => {
-                    e.currentTarget.style.backgroundColor = palette.bgHover;
-                    e.currentTarget.style.color = palette.textHeading;
-                  }}
-                  onMouseLeave={(e) => {
-                    e.currentTarget.style.backgroundColor = "transparent";
-                    e.currentTarget.style.color = palette.textPrimary;
-                  }}
-                >
-                  <Pin size={20} strokeWidth={2} color="currentColor" />
-                  Unpin message
-                </button>
-              )}
-            {messageAllowsDelete(openMenuMsg, userId, redactionPolicy) && (
-              <button
-                type="button"
-                role="menuitem"
-                onMouseDown={(e) => e.preventDefault()}
-                onClick={async () => {
-                  setOpenMenuEventId(null);
-                  if (!window.confirm("Delete this message?")) return;
-                  try {
-                    await invoke("redact_message", {
-                      roomId,
-                      eventId: openMenuMsg.eventId,
-                    });
-                    onMessageRemoved(openMenuMsg.eventId);
-                    onMessagesMutated();
-                  } catch (e) {
-                    console.error("Failed to delete message:", e);
-                  }
-                }}
-                style={{
-                  display: "flex",
-                  alignItems: "center",
-                  gap: spacing.unit * 2.5,
-                  width: "100%",
-                  padding: `${spacing.unit * 2.25}px ${spacing.unit * 3}px`,
-                  border: "none",
-                  borderRadius: spacing.unit * 1.25,
-                  backgroundColor: "transparent",
-                  color: palette.textPrimary,
-                  fontSize: typography.fontSizeBase,
-                  fontFamily: typography.fontFamily,
-                  fontWeight: typography.fontWeightNormal,
-                  cursor: "pointer",
-                  textAlign: "left",
-                }}
-                onMouseEnter={(e) => {
-                  e.currentTarget.style.backgroundColor = palette.bgHover;
-                  e.currentTarget.style.color = palette.textHeading;
-                }}
-                onMouseLeave={(e) => {
-                  e.currentTarget.style.backgroundColor = "transparent";
-                  e.currentTarget.style.color = palette.textPrimary;
-                }}
-              >
-                <Trash2 size={20} strokeWidth={2} color="currentColor" />
-                Delete
-              </button>
-            )}
-          </div>,
-          document.body,
-        )}
+      {openMenuMsg && menuFixedPos && (
+        <MessageActionMenu
+          menuPortalRef={menuPortalRef}
+          menuFixedPos={menuFixedPos}
+          zIndex={MESSAGE_ACTIONS_MENU_Z}
+          canEdit={messageAllowsEdit(openMenuMsg, userId)}
+          canPin={canPinMessages}
+          isPinned={pinnedSet.has(openMenuMsg.eventId)}
+          canDelete={messageAllowsDelete(openMenuMsg, userId, redactionPolicy)}
+          onEdit={() => {
+            setOpenMenuEventId(null);
+            onRequestEdit(openMenuMsg);
+          }}
+          onPin={async () => {
+            setOpenMenuEventId(null);
+            try {
+              await invoke("pin_room_message", {
+                roomId,
+                eventId: openMenuMsg.eventId,
+              });
+              onPinnedStateChanged?.();
+            } catch (e) {
+              console.error("Failed to pin message:", e);
+            }
+          }}
+          onUnpin={async () => {
+            setOpenMenuEventId(null);
+            try {
+              await invoke("unpin_room_message", {
+                roomId,
+                eventId: openMenuMsg.eventId,
+              });
+              onPinnedStateChanged?.();
+            } catch (e) {
+              console.error("Failed to unpin message:", e);
+            }
+          }}
+          onDelete={async () => {
+            setOpenMenuEventId(null);
+            if (!window.confirm("Delete this message?")) return;
+            try {
+              await invoke("redact_message", {
+                roomId,
+                eventId: openMenuMsg.eventId,
+              });
+              onMessageRemoved(openMenuMsg.eventId);
+              onMessagesMutated();
+            } catch (e) {
+              console.error("Failed to delete message:", e);
+            }
+          }}
+          palette={palette}
+          typography={typography}
+          spacing={spacing}
+          resolvedColorScheme={resolvedColorScheme}
+        />
+      )}
 
       {/* Reaction emoji picker (portal) */}
       {openReactionEventId != null &&
