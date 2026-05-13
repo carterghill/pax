@@ -1,7 +1,6 @@
 import { memo } from "react";
 import {
   MoreVertical,
-  Video,
   Smile,
   Reply,
 } from "lucide-react";
@@ -10,12 +9,7 @@ import type { ResolvedColorScheme } from "../../../theme/types";
 import type { useTheme } from "../../../theme/ThemeContext";
 import type { MediaViewerOpenPayload } from "../../../components/MediaViewerModal";
 import UserAvatar from "../../../components/UserAvatar";
-import MessageMarkdown from "../../../components/MessageMarkdown";
-import MessageMatrixImage from "../../../components/MessageMatrixImage";
-import MessageMatrixVideo from "../../../components/MessageMatrixVideo";
-import MessageFileAttachment from "../../../components/MessageFileAttachment";
-import CircularUploadRing from "../../../components/CircularUploadRing";
-import { inferMediaViewerKind } from "../../../utils/mediaViewer";
+import MessageContent from "./MessageContent";
 
 /* ------------------------------------------------------------------ */
 /*  Helpers                                                            */
@@ -36,50 +30,6 @@ function formatTime(timestamp: number): string {
     return `Yesterday at ${time}`;
   return `${date.toLocaleDateString()} ${time}`;
 }
-
-function shouldShowCaptionBelowMedia(msg: Message): boolean {
-  const body = msg.body.trim();
-  if (!body) return false;
-  const fname = (msg.fileDisplayName ?? "").trim();
-  if (fname && body === fname) {
-    const hasAttachmentUi =
-      msg.localImagePreviewObjectUrl != null ||
-      msg.imageMediaRequest != null ||
-      msg.videoMediaRequest != null ||
-      msg.fileMediaRequest != null ||
-      msg.localFileUpload != null;
-    if (hasAttachmentUi) return false;
-  }
-  return true;
-}
-
-function LocalUploadFailedNote({
-  msg,
-  palette,
-  typography,
-  spacingUnit,
-}: {
-  msg: Message;
-  palette: ReturnType<typeof useTheme>["palette"];
-  typography: ReturnType<typeof useTheme>["typography"];
-  spacingUnit: number;
-}) {
-  if (msg.localFileUpload?.phase !== "failed") return null;
-  return (
-    <p
-      style={{
-        margin: `${spacingUnit}px 0 0`,
-        color: palette.textSecondary,
-        fontSize: typography.fontSizeSmall,
-      }}
-    >
-      {msg.localFileUpload.errorMessage ?? "Could not send file."}
-    </p>
-  );
-}
-
-const INLINE_UPLOAD_RING_SIZE = 16;
-const INLINE_UPLOAD_RING_STROKE = 2;
 
 /* ------------------------------------------------------------------ */
 /*  MessageRow                                                         */
@@ -328,289 +278,16 @@ const MessageRow = memo(function MessageRow({
           </button>
         ) : null}
 
-        {msg.localImagePreviewObjectUrl && msg.imageMediaRequest == null ? (
-          <>
-            <div
-              style={{
-                display: "inline-flex",
-                alignItems: "center",
-                gap: spacingUnit * 1.5,
-                maxWidth: "100%",
-                marginTop: spacingUnit,
-                marginBottom: spacingUnit,
-              }}
-            >
-              <img
-                src={msg.localImagePreviewObjectUrl}
-                alt=""
-                draggable={false}
-                style={{
-                  maxWidth: "100%",
-                  maxHeight: 400,
-                  height: "auto",
-                  objectFit: "contain",
-                  borderRadius: spacingUnit,
-                  display: "block",
-                }}
-              />
-              {msg.localFileUpload && msg.localFileUpload.phase !== "failed" ? (
-                <CircularUploadRing
-                  progress={msg.localFileUpload.progress}
-                  size={INLINE_UPLOAD_RING_SIZE}
-                  strokeWidth={INLINE_UPLOAD_RING_STROKE}
-                />
-              ) : null}
-            </div>
-            {shouldShowCaptionBelowMedia(msg) ? (
-              <MessageMarkdown
-                edited={Boolean(msg.edited)}
-                onOpenDirectImage={onOpenDirectImage}
-                mentionedUserIds={msg.mentionedUserIds}
-                resolveMemberLabel={resolveMemberLabel}
-                onMentionClick={onOpenSenderProfile}
-              >
-                {msg.body}
-              </MessageMarkdown>
-            ) : null}
-            <LocalUploadFailedNote
-              msg={msg}
-              palette={palette}
-              typography={typography}
-              spacingUnit={spacingUnit}
-            />
-          </>
-        ) : msg.imageMediaRequest != null ? (
-          <>
-            <MessageMatrixImage
-              request={msg.imageMediaRequest}
-              metaWidth={msg.imageWidth}
-              metaHeight={msg.imageHeight}
-              onExpand={() =>
-                onOpenMediaViewer({
-                  kind: "image",
-                  request: msg.imageMediaRequest,
-                  fileName: msg.body.trim() || "Image",
-                  mimeType: null,
-                })
-              }
-            />
-            {msg.body.trim().length > 0 ? (
-              <MessageMarkdown
-                edited={Boolean(msg.edited)}
-                onOpenDirectImage={onOpenDirectImage}
-                mentionedUserIds={msg.mentionedUserIds}
-                resolveMemberLabel={resolveMemberLabel}
-                onMentionClick={onOpenSenderProfile}
-              >
-                {msg.body}
-              </MessageMarkdown>
-            ) : null}
-          </>
-        ) : msg.fileMime?.startsWith("video/") &&
-          msg.localFileUpload &&
-          msg.videoMediaRequest == null ? (
-          <>
-            <div
-              style={{
-                display: "inline-flex",
-                alignItems: "center",
-                gap: spacingUnit * 1.5,
-                maxWidth: "100%",
-                marginTop: spacingUnit,
-                marginBottom: spacingUnit * 0.5,
-              }}
-            >
-              <div
-                style={{
-                  display: "inline-flex",
-                  alignItems: "center",
-                  gap: spacingUnit * 1.5,
-                  minWidth: 0,
-                  padding: `${spacingUnit * 1.25}px ${spacingUnit * 2}px`,
-                  borderRadius: spacingUnit * 1.5,
-                  border: `1px solid ${palette.border}`,
-                  backgroundColor: palette.bgTertiary,
-                  color: palette.textPrimary,
-                  fontFamily: typography.fontFamily,
-                  fontSize: typography.fontSizeSmall,
-                }}
-              >
-                <Video
-                  size={18}
-                  strokeWidth={2}
-                  style={{ flexShrink: 0, color: palette.textSecondary }}
-                  aria-hidden
-                />
-                <span
-                  style={{
-                    overflow: "hidden",
-                    textOverflow: "ellipsis",
-                    whiteSpace: "nowrap",
-                    minWidth: 0,
-                  }}
-                >
-                  {msg.fileDisplayName ?? "Video"}
-                </span>
-              </div>
-              {msg.localFileUpload.phase !== "failed" ? (
-                <CircularUploadRing
-                  progress={msg.localFileUpload.progress}
-                  size={INLINE_UPLOAD_RING_SIZE}
-                  strokeWidth={INLINE_UPLOAD_RING_STROKE}
-                />
-              ) : null}
-            </div>
-            {shouldShowCaptionBelowMedia(msg) ? (
-              <MessageMarkdown
-                edited={Boolean(msg.edited)}
-                onOpenDirectImage={onOpenDirectImage}
-                mentionedUserIds={msg.mentionedUserIds}
-                resolveMemberLabel={resolveMemberLabel}
-                onMentionClick={onOpenSenderProfile}
-              >
-                {msg.body}
-              </MessageMarkdown>
-            ) : null}
-            <LocalUploadFailedNote
-              msg={msg}
-              palette={palette}
-              typography={typography}
-              spacingUnit={spacingUnit}
-            />
-          </>
-        ) : msg.videoMediaRequest != null ? (
-          <>
-            <MessageMatrixVideo
-              request={msg.videoMediaRequest}
-              metaWidth={msg.videoWidth}
-              metaHeight={msg.videoHeight}
-              mimeType={msg.fileMime}
-            />
-            {shouldShowCaptionBelowMedia(msg) ? (
-              <MessageMarkdown
-                edited={Boolean(msg.edited)}
-                onOpenDirectImage={onOpenDirectImage}
-                mentionedUserIds={msg.mentionedUserIds}
-                resolveMemberLabel={resolveMemberLabel}
-                onMentionClick={onOpenSenderProfile}
-              >
-                {msg.body}
-              </MessageMarkdown>
-            ) : null}
-          </>
-        ) : msg.fileMediaRequest != null ? (
-          <>
-            <div
-              style={{
-                display: "inline-flex",
-                alignItems: "center",
-                gap: spacingUnit * 1.5,
-                maxWidth: "100%",
-              }}
-            >
-              <MessageFileAttachment
-                fileName={msg.fileDisplayName ?? "Attachment"}
-                mimeType={msg.fileMime}
-                disabled={Boolean(
-                  msg.localFileUpload && msg.localFileUpload.phase !== "failed",
-                )}
-                onOpen={() =>
-                  onOpenMediaViewer({
-                    kind: inferMediaViewerKind(
-                      msg.fileMime,
-                      msg.fileDisplayName ?? "",
-                    ),
-                    request: msg.fileMediaRequest,
-                    fileName: msg.fileDisplayName ?? "Attachment",
-                    mimeType: msg.fileMime ?? null,
-                  })
-                }
-              />
-              {msg.localFileUpload && msg.localFileUpload.phase !== "failed" ? (
-                <CircularUploadRing
-                  progress={msg.localFileUpload.progress}
-                  size={INLINE_UPLOAD_RING_SIZE}
-                  strokeWidth={INLINE_UPLOAD_RING_STROKE}
-                />
-              ) : null}
-            </div>
-            {shouldShowCaptionBelowMedia(msg) ? (
-              <MessageMarkdown
-                edited={Boolean(msg.edited)}
-                onOpenDirectImage={onOpenDirectImage}
-                mentionedUserIds={msg.mentionedUserIds}
-                resolveMemberLabel={resolveMemberLabel}
-                onMentionClick={onOpenSenderProfile}
-              >
-                {msg.body}
-              </MessageMarkdown>
-            ) : null}
-            <LocalUploadFailedNote
-              msg={msg}
-              palette={palette}
-              typography={typography}
-              spacingUnit={spacingUnit}
-            />
-          </>
-        ) : msg.localFileUpload &&
-          msg.fileDisplayName &&
-          msg.fileMediaRequest == null &&
-          !msg.localImagePreviewObjectUrl &&
-          !msg.fileMime?.startsWith("video/") ? (
-          <>
-            <div
-              style={{
-                display: "inline-flex",
-                alignItems: "center",
-                gap: spacingUnit * 1.5,
-                maxWidth: "100%",
-              }}
-            >
-              <MessageFileAttachment
-                fileName={msg.fileDisplayName}
-                mimeType={msg.fileMime}
-                disabled={msg.localFileUpload.phase !== "failed"}
-                onOpen={() => {}}
-              />
-              {msg.localFileUpload.phase !== "failed" ? (
-                <CircularUploadRing
-                  progress={msg.localFileUpload.progress}
-                  size={INLINE_UPLOAD_RING_SIZE}
-                  strokeWidth={INLINE_UPLOAD_RING_STROKE}
-                />
-              ) : null}
-            </div>
-            {shouldShowCaptionBelowMedia(msg) ? (
-              <MessageMarkdown
-                edited={Boolean(msg.edited)}
-                onOpenDirectImage={onOpenDirectImage}
-                mentionedUserIds={msg.mentionedUserIds}
-                resolveMemberLabel={resolveMemberLabel}
-                onMentionClick={onOpenSenderProfile}
-              >
-                {msg.body}
-              </MessageMarkdown>
-            ) : null}
-            <LocalUploadFailedNote
-              msg={msg}
-              palette={palette}
-              typography={typography}
-              spacingUnit={spacingUnit}
-            />
-          </>
-        ) : (
-          <MessageMarkdown
-            edited={Boolean(msg.edited)}
-            onOpenDirectImage={onOpenDirectImage}
-                mentionedUserIds={msg.mentionedUserIds}
-                resolveMemberLabel={resolveMemberLabel}
-                onMentionClick={onOpenSenderProfile}
-          >
-            {msg.unsupportedMatrixMsgtype?.trim()
-              ? `${msg.body} · ${msg.unsupportedMatrixMsgtype.trim()}`
-              : msg.body}
-          </MessageMarkdown>
-        )}
+        <MessageContent
+          msg={msg}
+          spacingUnit={spacingUnit}
+          palette={palette}
+          typography={typography}
+          onOpenMediaViewer={onOpenMediaViewer}
+          onOpenDirectImage={onOpenDirectImage}
+          onOpenSenderProfile={onOpenSenderProfile}
+          resolveMemberLabel={resolveMemberLabel}
+        />
         {msg.reactions && msg.reactions.length > 0 ? (
           <div
             style={{
