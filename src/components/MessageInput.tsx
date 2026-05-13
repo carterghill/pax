@@ -7,24 +7,7 @@ import {
   useMemo,
 } from "react";
 
-import { invoke } from "@tauri-apps/api/core";
 import type { Message } from "../types/matrix";
-import {
-  Bold,
-  Italic,
-  Strikethrough,
-  Code,
-  Braces,
-  Link,
-  List,
-  ListOrdered,
-  TextQuote,
-  Heading1,
-  Heading2,
-  Minus,
-} from "lucide-react";
-import { Picker } from "emoji-mart";
-import data from "@emoji-mart/data";
 import { useTheme } from "../theme/ThemeContext";
 import { paletteComposerOuterBorderStyle } from "../theme/paletteBorder";
 import { EMOJI_ONLY_DISPLAY_SCALE, isOnlyEmojisAndWhitespace } from "../utils/emojifyTwemoji";
@@ -35,10 +18,6 @@ import {
   insertPlainTextAtSelection,
   insertImageAtSelection,
   syncComposerHeightAfterImages,
-  getActiveFormats,
-  toggleInlineCode,
-  toggleCodeBlock,
-  toggleLink,
 } from "../utils/composerEditorDom";
 import { MODAL_LAYER_Z } from "./ModalLayer";
 import { useComposerFileUpload } from "../features/chat/composer/useComposerFileUpload";
@@ -49,13 +28,11 @@ import {
   type EditingMessageRef,
   type MessageFileSendBridge,
 } from "../features/chat/composer/useComposerSubmit";
+import { useComposerFormatting } from "../features/chat/composer/useComposerFormatting";
+import { useComposerPicker } from "../features/chat/composer/useComposerPicker";
 import ComposerContextBar from "../features/chat/composer/ComposerContextBar";
-import ComposerFormattingToolbar, {
-  type ComposerFormatItem,
-} from "../features/chat/composer/ComposerFormattingToolbar";
-import ComposerMediaPickerPopover, {
-  type ComposerPickerTab,
-} from "../features/chat/composer/ComposerMediaPickerPopover";
+import ComposerFormattingToolbar from "../features/chat/composer/ComposerFormattingToolbar";
+import ComposerMediaPickerPopover from "../features/chat/composer/ComposerMediaPickerPopover";
 import MentionAutocompleteMenu from "../features/chat/composer/MentionAutocompleteMenu";
 import ComposerInputRow from "../features/chat/composer/ComposerInputRow";
 
@@ -124,18 +101,10 @@ export default function MessageInput({
   /** True when the editor contains an embedded image (GIF, pasted image). Plain text alone is tracked in `plainText`. */
   const [hasComposerMedia, setHasComposerMedia] = useState(false);
   const [sending, setSending] = useState(false);
-  const [formatOpen, setFormatOpen] = useState(false);
-  const [pickerOpen, setPickerOpen] = useState(false);
-  const [pickerTab, setPickerTab] = useState<ComposerPickerTab>("emoji");
-  const [activeFormats, setActiveFormats] = useState<Set<string>>(new Set());
   const editorRef = useRef<HTMLDivElement>(null);
   const rootRef = useRef<HTMLDivElement>(null);
-  const pickerAnchorRef = useRef<HTMLButtonElement>(null);
-  const emojiPickerMountRef = useRef<HTMLDivElement>(null);
-  const [popoverPos, setPopoverPos] = useState<{ bottom: number; right: number } | null>(null);
-  const insertEmojiFromPickerRef = useRef<(native: string) => void>(() => {});
   const { palette, typography, spacing, resolvedColorScheme } = useTheme();
-  const [giphyApiKey, setGiphyApiKey] = useState("");
+
   const {
     fileInputRef,
     pendingFile,
@@ -144,6 +113,7 @@ export default function MessageInput({
     handleFileSelected,
     clearPendingFile,
   } = useComposerFileUpload({ roomId, interactionLocked, fileSendBridge });
+
   const { clearTypingTimeout, handleComposerActivity, sendTyping } = useComposerTypingNotice({
     roomId,
     draftDmPeerUserId,
@@ -153,9 +123,13 @@ export default function MessageInput({
     onLocalTypingActive,
   });
 
-  useEffect(() => {
-    invoke<string>("get_giphy_api_key").then(setGiphyApiKey).catch(() => {});
-  }, []);
+  const {
+    formatOpen,
+    setFormatOpen,
+    activeFormats,
+    refreshFormats,
+    formatGroups,
+  } = useComposerFormatting({ editorRef });
 
   const emojiOnlyComposer = useMemo(() => isOnlyEmojisAndWhitespace(plainText), [plainText]);
 
@@ -183,7 +157,6 @@ export default function MessageInput({
     const sh = el.scrollHeight;
     const capped = Math.min(sh, composerMaxHeightPx);
     el.style.height = `${capped}px`;
-    // `overflow-y: auto` always reserves a track in some hosts; only enable when we cap at max height.
     el.style.overflowY = sh > composerMaxHeightPx ? "auto" : "hidden";
   }, [composerMaxHeightPx]);
 
@@ -197,6 +170,28 @@ export default function MessageInput({
     setHasComposerMedia(media);
     syncHeight();
   }, [syncHeight]);
+
+  const {
+    pickerOpen,
+    setPickerOpen,
+    pickerTab,
+    setPickerTab,
+    popoverPos,
+    pickerAnchorRef,
+    emojiPickerMountRef,
+    giphyApiKey,
+    handlePickerToggle,
+    handleGifSelect,
+  } = useComposerPicker({
+    editorRef,
+    rootRef,
+    interactionLockedRef,
+    composerImgStyle,
+    refreshComposerDomState,
+    syncHeight,
+    resolvedColorScheme,
+    spacingUnit: spacing.unit,
+  });
 
   const {
     mentionMenuProps,
@@ -256,101 +251,6 @@ export default function MessageInput({
     [composerImgStyle, interactionLocked, refreshComposerDomState, syncHeight],
   );
 
-  const handlePickerToggle = useCallback(() => {
-    setPickerOpen((open) => !open);
-  }, []);
-
-  // ─── Active format tracking ───────────────────────────────────────────────
-
-  useEffect(() => {
-    const update = () => {
-      const el = editorRef.current;
-      if (!el) return;
-      setActiveFormats(getActiveFormats(el));
-    };
-    document.addEventListener("selectionchange", update);
-    const el = editorRef.current;
-    el?.addEventListener("keyup", update);
-    return () => {
-      document.removeEventListener("selectionchange", update);
-      el?.removeEventListener("keyup", update);
-    };
-  }, []);
-
-  // ─── Picker positioning ───────────────────────────────────────────────────
-
-  useLayoutEffect(() => {
-    const margin = spacing.unit * 2;
-    const update = () => {
-      const anchor = pickerAnchorRef.current;
-      if (!pickerOpen || !anchor) { setPopoverPos(null); return; }
-      const r = anchor.getBoundingClientRect();
-      setPopoverPos({
-        bottom: window.innerHeight - r.top + margin,
-        right: window.innerWidth - r.right,
-      });
-    };
-    update();
-    window.addEventListener("resize", update);
-    return () => window.removeEventListener("resize", update);
-  }, [pickerOpen, spacing.unit]);
-
-  // Close picker on outside click / Escape.
-  useEffect(() => {
-    if (!pickerOpen) return;
-    const onDocDown = (e: MouseEvent) => {
-      const t = e.target;
-      if (t instanceof Element && t.closest("[data-pax-composer-popover]")) return;
-      const root = rootRef.current;
-      if (root && e.composedPath().includes(root)) return;
-      setPickerOpen(false);
-    };
-    const onKey = (e: KeyboardEvent) => {
-      if (e.key === "Escape") setPickerOpen(false);
-    };
-    document.addEventListener("mousedown", onDocDown);
-    document.addEventListener("keydown", onKey);
-    return () => {
-      document.removeEventListener("mousedown", onDocDown);
-      document.removeEventListener("keydown", onKey);
-    };
-  }, [pickerOpen]);
-
-  // ─── Emoji picker mount ───────────────────────────────────────────────────
-
-  insertEmojiFromPickerRef.current = (native: string) => {
-    if (interactionLockedRef.current) return;
-    const el = editorRef.current;
-    if (!el) return;
-    el.focus();
-    document.execCommand("insertText", false, native);
-    setPickerOpen(false);
-  };
-
-  useLayoutEffect(() => {
-    if (!pickerOpen || pickerTab !== "emoji") return;
-    const mount = emojiPickerMountRef.current;
-    if (!mount) return;
-    mount.innerHTML = "";
-    const theme = resolvedColorScheme === "light" ? "light" : "dark";
-    new Picker({
-      parent: mount,
-      data,
-      theme,
-      set: "native",
-      maxFrequentRows: 4,
-      skinTonePosition: "search",
-      previewPosition: "bottom",
-      searchPosition: "sticky",
-      onEmojiSelect: (emoji: { native: string }) => {
-        insertEmojiFromPickerRef.current(emoji.native);
-      },
-    });
-    return () => {
-      mount.innerHTML = "";
-    };
-  }, [pickerOpen, pickerTab, popoverPos, resolvedColorScheme]);
-
   // ─── Edit message loading ─────────────────────────────────────────────────
 
   useEffect(() => {
@@ -383,48 +283,6 @@ export default function MessageInput({
     makeComposerMentionSpan,
     syncHeight,
   ]);
-
-  // ─── Format actions ───────────────────────────────────────────────────────
-
-  const refreshFormats = useCallback(() => {
-    const el = editorRef.current;
-    if (el) setActiveFormats(getActiveFormats(el));
-  }, []);
-
-  const execFormat = useCallback((cmd: string) => {
-    editorRef.current?.focus();
-    document.execCommand(cmd);
-    refreshFormats();
-  }, [refreshFormats]);
-
-  const toggleFormatBlock = useCallback((tag: string, key: string) => {
-    editorRef.current?.focus();
-    document.execCommand("formatBlock", false, activeFormats.has(key) ? "div" : tag);
-    refreshFormats();
-  }, [activeFormats, refreshFormats]);
-
-  const formatGroups: ComposerFormatItem[][] = [
-    [
-      { icon: Bold, label: "Bold", formatKey: "bold", run: () => execFormat("bold") },
-      { icon: Italic, label: "Italic", formatKey: "italic", run: () => execFormat("italic") },
-      { icon: Strikethrough, label: "Strikethrough", formatKey: "strikethrough", run: () => execFormat("strikeThrough") },
-    ],
-    [
-      { icon: Code, label: "Inline code", formatKey: "code", run: () => { editorRef.current?.focus(); toggleInlineCode(editorRef.current!); refreshFormats(); } },
-      { icon: Braces, label: "Code block", formatKey: "codeblock", run: () => { editorRef.current?.focus(); toggleCodeBlock(editorRef.current!); refreshFormats(); } },
-    ],
-    [{ icon: Link, label: "Link", formatKey: "link", run: () => { editorRef.current?.focus(); toggleLink(editorRef.current!); refreshFormats(); } }],
-    [
-      { icon: List, label: "Bullet list", formatKey: "ul", run: () => execFormat("insertUnorderedList") },
-      { icon: ListOrdered, label: "Numbered list", formatKey: "ol", run: () => execFormat("insertOrderedList") },
-      { icon: TextQuote, label: "Quote", formatKey: "quote", run: () => toggleFormatBlock("blockquote", "quote") },
-    ],
-    [
-      { icon: Heading1, label: "Heading 1", formatKey: "h1", run: () => toggleFormatBlock("h1", "h1") },
-      { icon: Heading2, label: "Heading 2", formatKey: "h2", run: () => toggleFormatBlock("h2", "h2") },
-    ],
-    [{ icon: Minus, label: "Horizontal rule", run: () => execFormat("insertHorizontalRule") }],
-  ];
 
   // ─── Send / key handling ──────────────────────────────────────────────────
 
@@ -495,7 +353,7 @@ export default function MessageInput({
     if (composerPermission !== "loading") return;
     setPickerOpen(false);
     setFormatOpen(false);
-  }, [composerPermission]);
+  }, [composerPermission, setPickerOpen, setFormatOpen]);
 
   useEffect(() => {
     if (draftDmPeerUserId) return;
@@ -515,7 +373,7 @@ export default function MessageInput({
     if (editingMessageRef.current && onCancelEditRef.current) {
       onCancelEditRef.current();
     }
-  }, [composerPermission, draftDmPeerUserId, clearPendingFile, syncHeight]);
+  }, [composerPermission, draftDmPeerUserId, setPickerOpen, setFormatOpen, clearPendingFile, syncHeight]);
 
   // ─── Layout constants ─────────────────────────────────────────────────────
 
@@ -539,25 +397,8 @@ export default function MessageInput({
   const placeholderText = interactionLocked
     ? composerPermission === "loading"
       ? "Loading…"
-      : "You don’t have permission to send messages in this channel."
+      : "You don't have permission to send messages in this channel."
     : defaultPlaceholder;
-
-  const handleGifSelect = useCallback(
-    (gifUrl: string) => {
-      const el = editorRef.current;
-      if (!el) return;
-      el.focus();
-      if (hrefLooksLikeDirectImageUrl(gifUrl)) {
-        insertImageAtSelection(el, gifUrl, composerImgStyle, () => syncHeight());
-      } else {
-        document.execCommand("insertText", false, gifUrl);
-      }
-      refreshComposerDomState();
-      setPickerOpen(false);
-      requestAnimationFrame(() => el.focus());
-    },
-    [composerImgStyle, refreshComposerDomState, syncHeight],
-  );
 
   // ─── Render ───────────────────────────────────────────────────────────────
 
