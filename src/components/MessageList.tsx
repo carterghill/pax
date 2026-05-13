@@ -23,9 +23,6 @@ import { fileNameFromImageUrl } from "../utils/directImageUrl";
 import { useReadReceiptSender } from "../hooks/useReadReceiptSender";
 import MessageRow from "../features/chat/messages/MessageRow";
 import {
-  getMessageActionBarLeftEdge,
-  getMessageActionGroupRect,
-  clampFixedPopoverToViewport,
   shouldShowHeader,
   getReplyThreadPreview,
   reactionHoverLines,
@@ -34,6 +31,7 @@ import {
 } from "../features/chat/messages/messageListUtils";
 import LoadingSkeletons from "../features/chat/messages/LoadingSkeletons";
 import MessageActionMenu from "../features/chat/messages/MessageActionMenu";
+import { useActionBarPopover } from "../features/chat/messages/useActionBarPopover";
 
 /* ------------------------------------------------------------------ */
 /*  Props                                                              */
@@ -86,7 +84,7 @@ interface MessageListProps {
 const AUTO_SCROLL_THRESHOLD_PX = 200;
 const SKELETON_COUNT = 4;
 const MESSAGE_ACTIONS_MENU_Z = 10_000;
-const POPOVER_VIEWPORT_EPS_PX = 1;
+const REACTION_POPOVER_IGNORE = ["[data-message-reaction-popover]"];
 
 
 /* ------------------------------------------------------------------ */
@@ -148,12 +146,7 @@ const MessageList = forwardRef<MessageListHandle, MessageListProps>(function Mes
     },
   }));
   const shouldAutoScrollRef = useRef(true);
-  const menuAnchorRef = useRef<HTMLButtonElement>(null);
-  const menuPortalRef = useRef<HTMLDivElement>(null);
-  const reactionPickerAnchorRef = useRef<HTMLButtonElement>(null);
-  const reactionPickerPortalRef = useRef<HTMLDivElement>(null);
   const reactionPickerMountRef = useRef<HTMLDivElement>(null);
-  /** Avoid tearing down emoji-mart when only the clamped position changes. */
   const reactionPickerMountKeyRef = useRef<string | null>(null);
 
   /**
@@ -164,21 +157,18 @@ const MessageList = forwardRef<MessageListHandle, MessageListProps>(function Mes
    */
   const [atBottom, setAtBottom] = useState(true);
 
+  /* ---- Popover hooks ---- */
+  const menu = useActionBarPopover({
+    scrollContainerRef,
+    spacingUnit: spacing.unit,
+  });
+  const reactionPicker = useActionBarPopover({
+    scrollContainerRef,
+    spacingUnit: spacing.unit,
+    ignoreSelectors: REACTION_POPOVER_IGNORE,
+  });
+
   /* ---- UI state ---- */
-  const [openMenuEventId, setOpenMenuEventId] = useState<string | null>(null);
-  const [openReactionEventId, setOpenReactionEventId] = useState<string | null>(
-    null,
-  );
-  const [menuFixedPos, setMenuFixedPos] = useState<{
-    right: number;
-    top: number | null;
-    bottom: number | null;
-  } | null>(null);
-  const [reactionPickerPos, setReactionPickerPos] = useState<{
-    right: number;
-    top: number | null;
-    bottom: number | null;
-  } | null>(null);
   const [mediaViewer, setMediaViewer] = useState<MediaViewerOpenPayload | null>(
     null,
   );
@@ -244,18 +234,20 @@ const MessageList = forwardRef<MessageListHandle, MessageListProps>(function Mes
   );
 
   const handleOpenMenu = useCallback((eventId: string) => {
-    setOpenReactionEventId(null);
-    setOpenMenuEventId((id) => (id === eventId ? null : eventId));
+    reactionPicker.setOpenId(null);
+    menu.setOpenId((id) => (id === eventId ? null : eventId));
+  // eslint-disable-next-line react-hooks/exhaustive-deps -- setOpenId is stable (useState setter)
   }, []);
 
   const handleToggleReactionPicker = useCallback((eventId: string) => {
-    setOpenMenuEventId(null);
-    setOpenReactionEventId((id) => (id === eventId ? null : eventId));
+    menu.setOpenId(null);
+    reactionPicker.setOpenId((id) => (id === eventId ? null : eventId));
+  // eslint-disable-next-line react-hooks/exhaustive-deps -- setOpenId is stable (useState setter)
   }, []);
 
   const handlePickReaction = useCallback(
     async (eventId: string, nativeEmoji: string) => {
-      setOpenReactionEventId(null);
+      reactionPicker.setOpenId(null);
       try {
         await invoke("send_room_reaction", {
           roomId,
@@ -320,11 +312,13 @@ const MessageList = forwardRef<MessageListHandle, MessageListProps>(function Mes
   useLayoutEffect(() => {
     shouldAutoScrollRef.current = true;
     setAtBottom(true);
-    setOpenMenuEventId(null);
-    setOpenReactionEventId(null);
+    menu.setOpenId(null);
+    reactionPicker.setOpenId(null);
     setMediaViewer(null);
     reactionTooltipAnchorRef.current = null;
     setReactionTooltip(null);
+  // menu.setOpenId / reactionPicker.setOpenId are stable useState setters
+  // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [roomId]);
 
   /* ================================================================ */
@@ -623,216 +617,27 @@ const MessageList = forwardRef<MessageListHandle, MessageListProps>(function Mes
   }, [initialLoading, roomId]);
 
   /* ================================================================ */
-  /*  Context menu: outside-click / escape                             */
-  /* ================================================================ */
-
-  useEffect(() => {
-    if (!openMenuEventId) return;
-    const onDocDown = (e: MouseEvent) => {
-      const el = e.target as HTMLElement;
-      if (el.closest?.("[data-message-actions-root]")) return;
-      setOpenMenuEventId(null);
-    };
-    const onKey = (e: KeyboardEvent) => {
-      if (e.key === "Escape") setOpenMenuEventId(null);
-    };
-    document.addEventListener("mousedown", onDocDown);
-    document.addEventListener("keydown", onKey);
-    return () => {
-      document.removeEventListener("mousedown", onDocDown);
-      document.removeEventListener("keydown", onKey);
-    };
-  }, [openMenuEventId]);
-
-  /* ================================================================ */
-  /*  Context menu: fixed positioning                                  */
+  /*  Reaction emoji picker mount                                      */
   /* ================================================================ */
 
   useLayoutEffect(() => {
-    if (!openMenuEventId) {
-      setMenuFixedPos(null);
-      return;
-    }
-    const placeFromAnchor = () => {
-      const btn = menuAnchorRef.current;
-      if (!btn) return;
-      const r = btn.getBoundingClientRect();
-      const gap = spacing.unit;
-      /** Breathing room between the popover and the action strip (horizontal when side-by-side). */
-      const menuEdgeGap = spacing.unit;
-      const g = getMessageActionGroupRect(btn);
-      const vh = window.innerHeight;
-      const openAbove = g
-        ? g.top + g.height / 2 > vh / 2
-        : r.top + r.height / 2 > vh / 2;
-      const alignLeft = getMessageActionBarLeftEdge(btn);
-      const right =
-        alignLeft != null
-          ? window.innerWidth - alignLeft + menuEdgeGap
-          : window.innerWidth - r.right + menuEdgeGap;
-      const topWhenBelow = g ? g.top : r.bottom + gap;
-      const bottomWhenAbove = g
-        ? vh - g.bottom
-        : vh - r.top + gap;
-      setMenuFixedPos({
-        right,
-        top: openAbove ? null : topWhenBelow,
-        bottom: openAbove ? bottomWhenAbove : null,
-      });
-    };
-    placeFromAnchor();
-
-    const ro = new ResizeObserver(placeFromAnchor);
-    const menuBar =
-      menuAnchorRef.current?.closest(".pax-message-actions") ?? null;
-    if (menuBar) ro.observe(menuBar);
-    else if (menuAnchorRef.current) ro.observe(menuAnchorRef.current);
-    window.addEventListener("resize", placeFromAnchor);
-    window.addEventListener("scroll", placeFromAnchor, true);
-    const cont = scrollContainerRef.current;
-    cont?.addEventListener("scroll", placeFromAnchor, { passive: true });
-
-    return () => {
-      ro.disconnect();
-      window.removeEventListener("resize", placeFromAnchor);
-      window.removeEventListener("scroll", placeFromAnchor, true);
-      cont?.removeEventListener("scroll", placeFromAnchor);
-    };
-  }, [openMenuEventId, spacing.unit]);
-
-  useLayoutEffect(() => {
-    if (!openMenuEventId || !menuFixedPos) return;
-    const el = menuPortalRef.current;
-    if (!el) return;
-    const margin = Math.max(8, spacing.unit * 2);
-
-    const applyClamp = () => {
-      const { top, right } = clampFixedPopoverToViewport(
-        el.getBoundingClientRect(),
-        margin,
-      );
-      setMenuFixedPos((prev) => {
-        if (!prev) return prev;
-        if (
-          prev.bottom == null &&
-          prev.top != null &&
-          Math.abs(prev.top - top) < POPOVER_VIEWPORT_EPS_PX &&
-          Math.abs(prev.right - right) < POPOVER_VIEWPORT_EPS_PX
-        ) {
-          return prev;
-        }
-        return { top, right, bottom: null };
-      });
-    };
-
-    applyClamp();
-    const ro = new ResizeObserver(applyClamp);
-    ro.observe(el);
-    return () => ro.disconnect();
-  }, [openMenuEventId, menuFixedPos, spacing.unit]);
-
-  /* ─── Reaction emoji picker: fixed position (matches message menu) ─── */
-  useLayoutEffect(() => {
-    if (!openReactionEventId) {
-      setReactionPickerPos(null);
-      return;
-    }
-    const placeFromAnchor = () => {
-      const btn = reactionPickerAnchorRef.current;
-      if (!btn) return;
-      const r = btn.getBoundingClientRect();
-      const gap = spacing.unit;
-      const menuEdgeGap = spacing.unit;
-      const g = getMessageActionGroupRect(btn);
-      const vh = window.innerHeight;
-      const openAbove = g
-        ? g.top + g.height / 2 > vh / 2
-        : r.top + r.height / 2 > vh / 2;
-      const alignLeft = getMessageActionBarLeftEdge(btn);
-      const right =
-        alignLeft != null
-          ? window.innerWidth - alignLeft + menuEdgeGap
-          : window.innerWidth - r.right + menuEdgeGap;
-      const topWhenBelow = g ? g.top : r.bottom + gap;
-      const bottomWhenAbove = g
-        ? vh - g.bottom
-        : vh - r.top + gap;
-      setReactionPickerPos({
-        right,
-        top: openAbove ? null : topWhenBelow,
-        bottom: openAbove ? bottomWhenAbove : null,
-      });
-    };
-    placeFromAnchor();
-
-    const ro = new ResizeObserver(placeFromAnchor);
-    const reactBar =
-      reactionPickerAnchorRef.current?.closest(".pax-message-actions") ?? null;
-    if (reactBar) ro.observe(reactBar);
-    else if (reactionPickerAnchorRef.current)
-      ro.observe(reactionPickerAnchorRef.current);
-    window.addEventListener("resize", placeFromAnchor);
-    window.addEventListener("scroll", placeFromAnchor, true);
-    const cont = scrollContainerRef.current;
-    cont?.addEventListener("scroll", placeFromAnchor, { passive: true });
-
-    return () => {
-      ro.disconnect();
-      window.removeEventListener("resize", placeFromAnchor);
-      window.removeEventListener("scroll", placeFromAnchor, true);
-      cont?.removeEventListener("scroll", placeFromAnchor);
-    };
-  }, [openReactionEventId, spacing.unit]);
-
-  useLayoutEffect(() => {
-    if (!openReactionEventId || !reactionPickerPos) return;
-    const el = reactionPickerPortalRef.current;
-    if (!el) return;
-    const margin = Math.max(8, spacing.unit * 2);
-
-    const applyClamp = () => {
-      const { top, right } = clampFixedPopoverToViewport(
-        el.getBoundingClientRect(),
-        margin,
-      );
-      setReactionPickerPos((prev) => {
-        if (!prev) return prev;
-        if (
-          prev.bottom == null &&
-          prev.top != null &&
-          Math.abs(prev.top - top) < POPOVER_VIEWPORT_EPS_PX &&
-          Math.abs(prev.right - right) < POPOVER_VIEWPORT_EPS_PX
-        ) {
-          return prev;
-        }
-        return { top, right, bottom: null };
-      });
-    };
-
-    applyClamp();
-    const ro = new ResizeObserver(applyClamp);
-    ro.observe(el);
-    return () => ro.disconnect();
-  }, [openReactionEventId, reactionPickerPos, spacing.unit]);
-
-  useLayoutEffect(() => {
-    if (!openReactionEventId) {
+    if (!reactionPicker.openId) {
       reactionPickerMountKeyRef.current = null;
       if (reactionPickerMountRef.current) {
         reactionPickerMountRef.current.innerHTML = "";
       }
       return;
     }
-    if (!reactionPickerPos) return;
+    if (!reactionPicker.fixedPos) return;
     const mount = reactionPickerMountRef.current;
     if (!mount) return;
-    const mountKey = `${openReactionEventId}\0${resolvedColorScheme}`;
+    const mountKey = `${reactionPicker.openId}\0${resolvedColorScheme}`;
     if (reactionPickerMountKeyRef.current === mountKey) {
       return;
     }
     reactionPickerMountKeyRef.current = mountKey;
     mount.innerHTML = "";
-    const targetId = openReactionEventId;
+    const targetId = reactionPicker.openId;
     const theme = resolvedColorScheme === "light" ? "light" : "dark";
     new Picker({
       parent: mount,
@@ -846,31 +651,12 @@ const MessageList = forwardRef<MessageListHandle, MessageListProps>(function Mes
         void handlePickReaction(targetId, emoji.native);
       },
     });
-  }, [openReactionEventId, reactionPickerPos, resolvedColorScheme, handlePickReaction]);
-
-  useEffect(() => {
-    if (!openReactionEventId) return;
-    const onDocDown = (e: MouseEvent) => {
-      const el = e.target as HTMLElement;
-      if (el.closest?.("[data-message-actions-root]")) return;
-      if (el.closest?.("[data-message-reaction-popover]")) return;
-      setOpenReactionEventId(null);
-    };
-    const onKey = (e: KeyboardEvent) => {
-      if (e.key === "Escape") setOpenReactionEventId(null);
-    };
-    document.addEventListener("mousedown", onDocDown);
-    document.addEventListener("keydown", onKey);
-    return () => {
-      document.removeEventListener("mousedown", onDocDown);
-      document.removeEventListener("keydown", onKey);
-    };
-  }, [openReactionEventId]);
+  }, [reactionPicker.openId, reactionPicker.fixedPos, resolvedColorScheme, handlePickReaction]);
 
   const openMenuMsg =
-    openMenuEventId === null
+    menu.openId === null
       ? undefined
-      : messages.find((m) => m.eventId === openMenuEventId);
+      : messages.find((m) => m.eventId === menu.openId);
 
   const messageByEventId = useMemo(() => {
     const map = new Map<string, Message>();
@@ -1011,15 +797,15 @@ const MessageList = forwardRef<MessageListHandle, MessageListProps>(function Mes
             showOverflowMenu={showOverflowMenu}
             showHoverActions={showHoverActions}
             canReact={canReact}
-            isMenuOpen={openMenuEventId === msg.eventId}
-            isReactionPickerOpen={openReactionEventId === msg.eventId}
+            isMenuOpen={menu.openId === msg.eventId}
+            isReactionPickerOpen={reactionPicker.openId === msg.eventId}
             onRequestReply={() => onRequestReply(msg)}
             onOpenMenu={handleOpenMenu}
             onToggleReactionPicker={handleToggleReactionPicker}
             onOpenMediaViewer={openMediaViewer}
             onOpenDirectImage={openDirectImage}
-            menuAnchorRef={menuAnchorRef}
-            reactionPickerAnchorRef={reactionPickerAnchorRef}
+            menuAnchorRef={menu.anchorRef}
+            reactionPickerAnchorRef={reactionPicker.anchorRef}
             onReactionChipClick={(key, reactedByMe) => {
               void handleReactionChipClick(msg.eventId, key, reactedByMe);
             }}
@@ -1112,21 +898,21 @@ const MessageList = forwardRef<MessageListHandle, MessageListProps>(function Mes
       </div>
 
       {/* Context menu portal */}
-      {openMenuMsg && menuFixedPos && (
+      {openMenuMsg && menu.fixedPos && (
         <MessageActionMenu
-          menuPortalRef={menuPortalRef}
-          menuFixedPos={menuFixedPos}
+          menuPortalRef={menu.portalRef}
+          menuFixedPos={menu.fixedPos}
           zIndex={MESSAGE_ACTIONS_MENU_Z}
           canEdit={messageAllowsEdit(openMenuMsg, userId)}
           canPin={canPinMessages}
           isPinned={pinnedSet.has(openMenuMsg.eventId)}
           canDelete={messageAllowsDelete(openMenuMsg, userId, redactionPolicy)}
           onEdit={() => {
-            setOpenMenuEventId(null);
+            menu.setOpenId(null);
             onRequestEdit(openMenuMsg);
           }}
           onPin={async () => {
-            setOpenMenuEventId(null);
+            menu.setOpenId(null);
             try {
               await invoke("pin_room_message", {
                 roomId,
@@ -1138,7 +924,7 @@ const MessageList = forwardRef<MessageListHandle, MessageListProps>(function Mes
             }
           }}
           onUnpin={async () => {
-            setOpenMenuEventId(null);
+            menu.setOpenId(null);
             try {
               await invoke("unpin_room_message", {
                 roomId,
@@ -1150,7 +936,7 @@ const MessageList = forwardRef<MessageListHandle, MessageListProps>(function Mes
             }
           }}
           onDelete={async () => {
-            setOpenMenuEventId(null);
+            menu.setOpenId(null);
             if (!window.confirm("Delete this message?")) return;
             try {
               await invoke("redact_message", {
@@ -1171,18 +957,18 @@ const MessageList = forwardRef<MessageListHandle, MessageListProps>(function Mes
       )}
 
       {/* Reaction emoji picker (portal) */}
-      {openReactionEventId != null &&
-        reactionPickerPos != null &&
+      {reactionPicker.openId != null &&
+        reactionPicker.fixedPos != null &&
         createPortal(
           <div
-            ref={reactionPickerPortalRef}
+            ref={reactionPicker.portalRef}
             data-message-reaction-popover
             onMouseDown={(e) => e.stopPropagation()}
             style={{
               position: "fixed",
-              top: reactionPickerPos.top ?? undefined,
-              bottom: reactionPickerPos.bottom ?? undefined,
-              right: reactionPickerPos.right,
+              top: reactionPicker.fixedPos.top ?? undefined,
+              bottom: reactionPicker.fixedPos.bottom ?? undefined,
+              right: reactionPicker.fixedPos.right,
               zIndex: MESSAGE_ACTIONS_MENU_Z,
               maxHeight: `calc(100vh - ${Math.max(8, spacing.unit * 2) * 2}px)`,
               overflowX: "hidden",

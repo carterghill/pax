@@ -1,12 +1,7 @@
 import { createPortal } from "react-dom";
 import { Pencil, Pin, Trash2 } from "lucide-react";
 import type { useTheme } from "../../../theme/ThemeContext";
-
-export type PopoverFixedPos = {
-  right: number;
-  top: number | null;
-  bottom: number | null;
-};
+import type { PopoverFixedPos } from "./useActionBarPopover";
 
 interface MessageActionMenuProps {
   menuPortalRef: React.RefObject<HTMLDivElement | null>;
