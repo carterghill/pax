@@ -1135,32 +1135,7 @@ pub async fn apply_space_settings(
         )
         .await?;
     } else if let (Some(data), Some(mime)) = (&patch.avatar_data, &patch.avatar_mime) {
-        let bytes = data_encoding::BASE64
-            .decode(data.as_bytes())
-            .map_err(|e| format!("Invalid base64 avatar data: {e}"))?;
-
-        let upload_url = format!("{}/_matrix/media/v3/upload", hs_trim);
-        let resp = http
-            .post(&upload_url)
-            .timeout(Duration::from_secs(30))
-            .bearer_auth(access_token.to_string())
-            .header("Content-Type", mime.as_str())
-            .body(bytes)
-            .send()
-            .await
-            .map_err(|e| format!("Avatar upload failed: {}", fmt_error_chain(&e)))?;
-        if !resp.status().is_success() {
-            let status = resp.status();
-            let text = resp.text().await.unwrap_or_default();
-            return Err(format!("Avatar upload failed ({}): {}", status, text));
-        }
-        let body: serde_json::Value = resp
-            .json()
-            .await
-            .map_err(|e| format!("Upload response parse: {e}"))?;
-        let mxc = body["content_uri"]
-            .as_str()
-            .ok_or("No content_uri in upload response")?;
+        let mxc = super::upload_media_b64(http, hs_trim, &access_token, data, mime).await?;
         http_put_room_state(
             http,
             hs_trim,

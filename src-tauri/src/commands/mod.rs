@@ -135,6 +135,50 @@ pub(crate) fn sniff_media_mime(bytes: &[u8]) -> &'static str {
     "application/octet-stream"
 }
 
+/// Upload base64-encoded media to the homeserver and return the MXC URI.
+pub(crate) async fn upload_media_b64(
+    http_client: &reqwest::Client,
+    homeserver: &str,
+    access_token: &str,
+    data_b64: &str,
+    mime: &str,
+) -> Result<String, String> {
+    let bytes = data_encoding::BASE64
+        .decode(data_b64.as_bytes())
+        .map_err(|e| format!("Invalid base64 data: {e}"))?;
+
+    let upload_url = format!(
+        "{}/_matrix/media/v3/upload",
+        homeserver.trim_end_matches('/')
+    );
+
+    let resp = http_client
+        .post(&upload_url)
+        .timeout(std::time::Duration::from_secs(30))
+        .bearer_auth(access_token)
+        .header("Content-Type", mime)
+        .body(bytes)
+        .send()
+        .await
+        .map_err(|e| format!("Media upload failed: {}", fmt_error_chain(&e)))?;
+
+    if !resp.status().is_success() {
+        let status = resp.status();
+        let text = resp.text().await.unwrap_or_default();
+        return Err(format!("Media upload failed ({}): {}", status, text));
+    }
+
+    let body: serde_json::Value = resp
+        .json()
+        .await
+        .map_err(|e| format!("Failed to parse upload response: {e}"))?;
+
+    body["content_uri"]
+        .as_str()
+        .map(|s| s.to_string())
+        .ok_or_else(|| "No content_uri in upload response".to_string())
+}
+
 fn mime_to_avatar_ext(mime: &str) -> &'static str {
     match mime {
         "image/jpeg" => "jpg",
