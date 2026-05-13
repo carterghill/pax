@@ -63,7 +63,7 @@ const SPACE_CHILDREN_FETCH_TIMEOUT: Duration = Duration::from_secs(10);
 /// so bulk queries can reuse the same scan.
 ///
 /// Matches the matrix-sdk idiom used in
-/// `commands::rooms::fetch_space_children_for_room` — raw
+/// `commands::room_listing::fetch_space_children_for_room` — raw
 /// `get_state_events(StateEventType::SpaceChild)` with `AnySyncOrStrippedState`
 /// deserialisation.  Tolerates per-space fetch failures so one misbehaving
 /// space doesn't break the whole pass.

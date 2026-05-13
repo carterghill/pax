@@ -32,7 +32,7 @@
 //!   - length in 1..=50
 //!   - bytes in 0x20..=0x7e
 //!
-//! matching the backend validation in `commands::rooms::set_space_child_order`.
+//! matching the backend validation in `commands::room_creation::set_space_child_order`.
 
 import type { Room, SpaceChildOrder } from "../types/matrix";
 
