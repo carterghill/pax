@@ -604,6 +604,7 @@ impl windows_capture::capture::GraphicsCaptureApiHandler for ScreenCaptureHandle
 }
 
 /// Libwebrtc DesktopCapturer path (macOS/Linux) or fallback on Windows.
+#[allow(dead_code)]
 #[cfg(any(target_os = "windows", target_os = "macos", target_os = "linux"))]
 async fn start_screen_capture_libwebrtc_or_fallback(
     room: Arc<livekit::Room>,
@@ -832,6 +833,7 @@ async fn start_screen_capture_libwebrtc_or_fallback(
 }
 
 /// Fallback screen capture using the screenshots crate when libwebrtc DesktopCapturer fails.
+#[allow(dead_code)]
 #[cfg(any(target_os = "windows", target_os = "macos", target_os = "linux"))]
 async fn start_screen_capture_screenshots_fallback(
     room: Arc<livekit::Room>,
@@ -1888,6 +1890,7 @@ pub fn is_window_handle_valid(hwnd: usize) -> bool {
     window.is_valid()
 }
 
+#[allow(dead_code)]
 #[cfg(not(target_os = "windows"))]
 pub fn is_window_handle_valid(_hwnd: usize) -> bool {
     false

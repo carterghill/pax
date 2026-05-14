@@ -18,6 +18,8 @@
 
 use std::sync::Arc;
 
+#[cfg(target_os = "android")]
+use tauri::Manager;
 use tauri::State;
 
 use crate::AppState;

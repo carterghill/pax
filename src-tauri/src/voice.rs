@@ -579,7 +579,6 @@ impl VoiceManager {
             window_title,
             window_handle
         );
-        let monitor_window_handle = window_handle.clone();
         let handle =
             crate::screen::start_screen_capture(room.clone(), mode, window_title, window_handle)
                 .await?;
@@ -609,9 +608,7 @@ impl VoiceManager {
             track_for_abr,
             abr_shutdown.clone(),
         ));
-        let share_generation = screen_share_generation
-            .fetch_add(1, Ordering::Relaxed)
-            .wrapping_add(1);
+        screen_share_generation.fetch_add(1, Ordering::Relaxed);
         {
             let mut handle_slot = screen_handle.lock();
             *handle_slot = Some(handle);
@@ -2049,6 +2046,7 @@ pub fn list_audio_devices() -> Result<AudioDeviceList, String> {
 }
 
 /// cpal-based device enumeration (Windows, macOS).
+#[cfg(not(target_os = "linux"))]
 fn list_audio_devices_cpal() -> Result<AudioDeviceList, String> {
     let host = cpal::default_host();
 
