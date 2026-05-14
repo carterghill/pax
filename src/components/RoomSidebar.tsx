@@ -21,6 +21,7 @@ import {
 import { Room, VoiceParticipant } from "../types/matrix";
 import { useTheme } from "../theme/ThemeContext";
 import StatusDropdown from "./StatusDropdown";
+import ActiveCallBar from "./ActiveCallBar";
 import VolumeContextMenu from "./VolumeContextMenu";
 import RoomContextMenu from "./RoomContextMenu";
 import RoomSettingsDialog from "./RoomSettingsDialog";
@@ -213,6 +214,7 @@ interface RoomSidebarProps {
   >;
   onSetParticipantVolume: (identity: string, volume: number, source: string) => void;
   audioControls: AudioControls;
+  onDisconnectVoice: () => void;
   /** Called after successfully leaving a room from the context menu */
   onLeftRoom?: (roomId: string) => void;
   /** Active space (for moderation scope in room settings when the room is in its tree). */
@@ -694,6 +696,7 @@ export default function RoomSidebar({
   voiceParticipantStatesByRoom,
   onSetParticipantVolume,
   audioControls,
+  onDisconnectVoice,
   onLeftRoom,
   activeSpaceId,
   roomsBySpace,
@@ -1818,8 +1821,16 @@ export default function RoomSidebar({
         )}
       </div>
 
-      {/* User status at bottom — flexShrink: 0 so it stays full width */}
+      {/* Active call + user status at bottom */}
       <div style={{ flexShrink: 0 }}>
+        {(connectedVoiceRoomId || disconnectingFromRoomId) && (
+          <ActiveCallBar
+            roomName={getRoom(connectedVoiceRoomId ?? disconnectingFromRoomId!)?.name ?? "Voice Channel"}
+            isConnecting={isVoiceConnecting}
+            isDisconnecting={disconnectingFromRoomId !== null}
+            onDisconnect={onDisconnectVoice}
+          />
+        )}
         <StatusDropdown
           displayName={displayName}
           avatarUrl={userAvatarUrl}

@@ -1266,6 +1266,7 @@ export default function MainLayout({
         voiceParticipantStatesByRoom={voiceParticipantStatesByRoom}
         onSetParticipantVolume={voiceCall.setParticipantVolume}
         audioControls={audioControls}
+        onDisconnectVoice={voiceCall.disconnect}
         onLeftRoom={handleLeftRoom}
         activeSpaceId={activeSpaceId}
         roomsBySpace={roomsBySpace}
