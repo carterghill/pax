@@ -26,7 +26,7 @@ use super::media_protocol::{
     MATRIX_IMAGE_FULL_FETCH_TIMEOUT, MATRIX_IMAGE_THUMB_FETCH_TIMEOUT,
 };
 use super::message_display::mime_to_file_ext;
-use super::{fmt_error_chain, get_client, resolve_room, sniff_media_mime};
+use super::{fmt_error_chain, get_authed_client, get_client, resolve_room, sniff_media_mime};
 
 #[tauri::command]
 pub async fn get_matrix_image_path(
@@ -376,7 +376,7 @@ async fn upload_room_file_from_staging_path(
     mime_type: &str,
     staging_path: &std::path::Path,
 ) -> Result<(String, u64), String> {
-    let client = get_client(state).await?;
+    let ac = get_authed_client(state).await?;
 
     let meta = tokio::fs::metadata(staging_path)
         .await
@@ -384,7 +384,7 @@ async fn upload_room_file_from_staging_path(
     let total = meta.len();
 
     if total > 0 {
-        if let Some(max_b) = matrix_reported_max_upload_bytes(&client).await {
+        if let Some(max_b) = matrix_reported_max_upload_bytes(&ac.client).await {
             if total > max_b {
                 return Err(format!(
                     "This file is {} but your homeserver only allows {} per upload (Matrix m.upload.size). \
@@ -415,12 +415,9 @@ async fn upload_room_file_from_staging_path(
         total
     );
 
-    let homeserver = client.homeserver().to_string();
-    let access_token = client.access_token().ok_or("No access token")?;
-
     let upload_url = format!(
         "{}/_matrix/media/v3/upload?filename={}",
-        homeserver.trim_end_matches('/'),
+        ac.homeserver,
         urlencoding::encode(file_name),
     );
 
@@ -488,7 +485,7 @@ async fn upload_room_file_from_staging_path(
             .post(&upload_url)
             .version(Version::HTTP_11)
             .timeout(Duration::from_secs(timeout_secs))
-            .bearer_auth(access_token.to_string())
+            .bearer_auth(&ac.access_token)
             .header("Content-Type", content_type.to_string())
             .header(CONTENT_LENGTH, content_length)
             .body(stream_body)

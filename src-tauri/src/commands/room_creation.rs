@@ -6,7 +6,7 @@ use tauri::State;
 use crate::AppState;
 
 use super::room_settings::build_chat_room_creation_content;
-use super::upload_media_b64;
+use super::{get_authed_client, upload_media_b64};
 
 /// Shared parameters for creating a Matrix space (used by both top-level and sub-space creation).
 struct SpaceCreationParams<'a> {
@@ -196,24 +196,21 @@ async fn link_space_child(
 /// `M_FORBIDDEN` if the server disallows it, and we surface that error in the UI.
 #[tauri::command]
 pub async fn can_create_rooms(state: State<'_, Arc<AppState>>) -> Result<bool, String> {
-    let client = super::get_client(&state).await?;
+    let ac = get_authed_client(&state).await?;
 
     // The capabilities endpoint doesn't expose room creation directly, but if
     // we can reach it we know the session is valid. Room creation is almost
     // universally enabled, so default to true.
-    let homeserver = client.homeserver().to_string();
-    let access_token = client.access_token().ok_or("No access token")?;
-
     let url = format!(
         "{}/_matrix/client/v3/capabilities",
-        homeserver.trim_end_matches('/')
+        ac.homeserver
     );
 
     let resp = state
         .http_client
         .get(&url)
         .timeout(Duration::from_secs(10))
-        .bearer_auth(access_token.to_string())
+        .bearer_auth(&ac.access_token)
         .send()
         .await;
 
@@ -244,22 +241,19 @@ pub async fn create_space(
     guest_access: Option<String>,
     join_rule: Option<String>,
 ) -> Result<String, String> {
-    let client = super::get_client(&state).await?;
-    let homeserver = client.homeserver().to_string();
-    let access_token = client.access_token().ok_or("No access token")?;
-    let hs = homeserver.trim_end_matches('/');
+    let ac = get_authed_client(&state).await?;
 
     let avatar_mxc = match (&avatar_data, &avatar_mime) {
         (Some(data), Some(mime)) => {
-            Some(upload_media_b64(&state.http_client, hs, &access_token, data, mime).await?)
+            Some(upload_media_b64(&state.http_client, &ac.homeserver, &ac.access_token, data, mime).await?)
         }
         _ => None,
     };
 
     let room_id = create_space_room(
         &state.http_client,
-        hs,
-        &access_token,
+        &ac.homeserver,
+        &ac.access_token,
         SpaceCreationParams {
             name: &name,
             topic: topic.as_deref(),
@@ -312,10 +306,7 @@ pub async fn create_sub_space(
         );
     }
 
-    let client = super::get_client(&state).await?;
-    let homeserver = client.homeserver().to_string();
-    let access_token = client.access_token().ok_or("No access token")?;
-    let hs = homeserver.trim_end_matches('/');
+    let ac = get_authed_client(&state).await?;
 
     let server_name = parent_space_id
         .split(':')
@@ -325,7 +316,7 @@ pub async fn create_sub_space(
 
     let avatar_mxc = match (&avatar_data, &avatar_mime) {
         (Some(data), Some(mime)) => {
-            Some(upload_media_b64(&state.http_client, hs, &access_token, data, mime).await?)
+            Some(upload_media_b64(&state.http_client, &ac.homeserver, &ac.access_token, data, mime).await?)
         }
         _ => None,
     };
@@ -341,8 +332,8 @@ pub async fn create_sub_space(
 
     let room_id = create_space_room(
         &state.http_client,
-        hs,
-        &access_token,
+        &ac.homeserver,
+        &ac.access_token,
         SpaceCreationParams {
             name: &name,
             topic: topic.as_deref(),
@@ -360,8 +351,8 @@ pub async fn create_sub_space(
 
     link_space_child(
         &state.http_client,
-        hs,
-        &access_token,
+        &ac.homeserver,
+        &ac.access_token,
         &parent_space_id,
         &room_id,
         &server_name,
@@ -387,15 +378,13 @@ async fn can_manage_space_children_for_user(
     state: &AppState,
     space_id: &str,
 ) -> Result<bool, String> {
-    let client = super::get_client(state).await?;
-    let user_id = client.user_id().ok_or("No user ID")?.to_owned();
-    let homeserver = client.homeserver().to_string();
-    let access_token = client.access_token().ok_or("No access token")?;
+    let ac = get_authed_client(state).await?;
+    let user_id = ac.client.user_id().ok_or("No user ID")?.to_owned();
 
     // Fetch m.room.power_levels from the space
     let pl_url = format!(
         "{}/_matrix/client/v3/rooms/{}/state/m.room.power_levels/",
-        homeserver.trim_end_matches('/'),
+        ac.homeserver,
         urlencoding::encode(space_id),
     );
 
@@ -403,7 +392,7 @@ async fn can_manage_space_children_for_user(
         .http_client
         .get(&pl_url)
         .timeout(Duration::from_secs(10))
-        .bearer_auth(access_token.to_string())
+        .bearer_auth(&ac.access_token)
         .send()
         .await
         .map_err(|e| {
@@ -488,9 +477,7 @@ pub async fn create_room_in_space(
         );
     }
 
-    let client = super::get_client(&state).await?;
-    let homeserver = client.homeserver().to_string();
-    let access_token = client.access_token().ok_or("No access token")?;
+    let ac = get_authed_client(&state).await?;
 
     // Derive the server name from the space ID (e.g. "!abc:matrix.example.com" → "matrix.example.com")
     let server_name = space_id
@@ -587,14 +574,14 @@ pub async fn create_room_in_space(
     // Create the room
     let create_url = format!(
         "{}/_matrix/client/v3/createRoom",
-        homeserver.trim_end_matches('/')
+        ac.homeserver
     );
 
     let resp = state
         .http_client
         .post(&create_url)
         .timeout(Duration::from_secs(30))
-        .bearer_auth(access_token.to_string())
+        .bearer_auth(&ac.access_token)
         .json(&body)
         .send()
         .await
@@ -619,8 +606,8 @@ pub async fn create_room_in_space(
 
     link_space_child(
         &state.http_client,
-        homeserver.trim_end_matches('/'),
-        &access_token,
+        &ac.homeserver,
+        &ac.access_token,
         &space_id,
         &new_room_id,
         &server_name,
@@ -654,9 +641,7 @@ pub async fn create_standalone_room(
     history_visibility: Option<String>,
     federate: bool,
 ) -> Result<String, String> {
-    let client = super::get_client(&state).await?;
-    let homeserver = client.homeserver().to_string();
-    let access_token = client.access_token().ok_or("No access token")?;
+    let ac = get_authed_client(&state).await?;
 
     let mut initial_state: Vec<serde_json::Value> = Vec::new();
 
@@ -709,14 +694,14 @@ pub async fn create_standalone_room(
 
     let create_url = format!(
         "{}/_matrix/client/v3/createRoom",
-        homeserver.trim_end_matches('/')
+        ac.homeserver
     );
 
     let resp = state
         .http_client
         .post(&create_url)
         .timeout(Duration::from_secs(30))
-        .bearer_auth(access_token.to_string())
+        .bearer_auth(&ac.access_token)
         .json(&body)
         .send()
         .await
@@ -771,9 +756,7 @@ pub async fn link_room_to_space(
         );
     }
 
-    let client = super::get_client(&state).await?;
-    let homeserver = client.homeserver().to_string();
-    let access_token = client.access_token().ok_or("No access token")?;
+    let ac = get_authed_client(&state).await?;
 
     let server_name = parent_space_id
         .split(':')
@@ -784,7 +767,7 @@ pub async fn link_room_to_space(
     // 1) Child points to parent (same shape as create_room_in_space / create_sub_space)
     let parent_state_url = format!(
         "{}/_matrix/client/v3/rooms/{}/state/m.space.parent/{}",
-        homeserver.trim_end_matches('/'),
+        ac.homeserver,
         urlencoding::encode(&child_room_id),
         urlencoding::encode(&parent_space_id),
     );
@@ -798,7 +781,7 @@ pub async fn link_room_to_space(
         .http_client
         .put(&parent_state_url)
         .timeout(Duration::from_secs(15))
-        .bearer_auth(access_token.to_string())
+        .bearer_auth(&ac.access_token)
         .json(&parent_content)
         .send()
         .await
@@ -820,8 +803,8 @@ pub async fn link_room_to_space(
 
     link_space_child(
         &state.http_client,
-        homeserver.trim_end_matches('/'),
-        &access_token,
+        &ac.homeserver,
+        &ac.access_token,
         &parent_space_id,
         &child_room_id,
         &server_name,
@@ -884,9 +867,7 @@ pub async fn set_space_child_order(
         );
     }
 
-    let client = super::get_client(&state).await?;
-    let homeserver = client.homeserver().to_string();
-    let access_token = client.access_token().ok_or("No access token")?;
+    let ac = get_authed_client(&state).await?;
 
     // Read the existing `m.space.child` event so we preserve `via` and
     // `suggested` — both are load-bearing and not ours to clobber.  A 404
@@ -894,7 +875,7 @@ pub async fn set_space_child_order(
     // nothing to reorder.
     let read_url = format!(
         "{}/_matrix/client/v3/rooms/{}/state/m.space.child/{}",
-        homeserver.trim_end_matches('/'),
+        ac.homeserver,
         urlencoding::encode(&space_id),
         urlencoding::encode(&child_room_id),
     );
@@ -903,7 +884,7 @@ pub async fn set_space_child_order(
         .http_client
         .get(&read_url)
         .timeout(Duration::from_secs(15))
-        .bearer_auth(access_token.to_string())
+        .bearer_auth(&ac.access_token)
         .send()
         .await
         .map_err(|e| {
@@ -964,7 +945,7 @@ and tombstone the child relationship."
 
     let write_url = format!(
         "{}/_matrix/client/v3/rooms/{}/state/m.space.child/{}",
-        homeserver.trim_end_matches('/'),
+        ac.homeserver,
         urlencoding::encode(&space_id),
         urlencoding::encode(&child_room_id),
     );
@@ -973,7 +954,7 @@ and tombstone the child relationship."
         .http_client
         .put(&write_url)
         .timeout(Duration::from_secs(15))
-        .bearer_auth(access_token.to_string())
+        .bearer_auth(&ac.access_token)
         .json(&new_content)
         .send()
         .await

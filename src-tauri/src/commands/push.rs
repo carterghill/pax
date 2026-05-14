@@ -48,13 +48,11 @@ pub async fn register_pusher(
     let gateway_url = push_gateway_url()
         .ok_or("No push gateway URL configured (PAX_PUSH_GATEWAY_URL not set at build time)")?;
 
-    let client = super::get_client(&state).await?;
-    let homeserver = client.homeserver().to_string();
-    let access_token = client.access_token().ok_or("No access token")?;
+    let ac = super::get_authed_client(&state).await?;
 
     let url = format!(
         "{}/_matrix/client/v3/pushers/set",
-        homeserver.trim_end_matches('/')
+        ac.homeserver
     );
 
     // Omit `format` / skip `event_id_only` so the homeserver sends the full
@@ -77,7 +75,7 @@ pub async fn register_pusher(
     let resp = state
         .http_client
         .post(&url)
-        .bearer_auth(&access_token)
+        .bearer_auth(&ac.access_token)
         .json(&body)
         .send()
         .await
@@ -103,13 +101,11 @@ pub async fn unregister_pusher(
     state: State<'_, Arc<AppState>>,
     push_key: String,
 ) -> Result<(), String> {
-    let client = super::get_client(&state).await?;
-    let homeserver = client.homeserver().to_string();
-    let access_token = client.access_token().ok_or("No access token")?;
+    let ac = super::get_authed_client(&state).await?;
 
     let url = format!(
         "{}/_matrix/client/v3/pushers/set",
-        homeserver.trim_end_matches('/')
+        ac.homeserver
     );
 
     let body = serde_json::json!({
@@ -123,7 +119,7 @@ pub async fn unregister_pusher(
     let resp = state
         .http_client
         .post(&url)
-        .bearer_auth(&access_token)
+        .bearer_auth(&ac.access_token)
         .json(&body)
         .send()
         .await

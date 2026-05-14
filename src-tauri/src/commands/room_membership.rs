@@ -55,18 +55,15 @@ pub async fn join_room(
 
 #[tauri::command]
 pub async fn leave_room(state: State<'_, Arc<AppState>>, room_id: String) -> Result<(), String> {
-    let client = super::get_client(&state).await?;
-    let access_token = client.access_token().ok_or("No access token")?;
-    let homeserver = client.homeserver().to_string();
-    let hs = homeserver.trim_end_matches('/');
+    let ac = super::get_authed_client(&state).await?;
     let encoded_room = urlencoding::encode(&room_id);
 
-    let url = format!("{}/_matrix/client/v3/rooms/{}/leave", hs, encoded_room);
+    let url = format!("{}/_matrix/client/v3/rooms/{}/leave", ac.homeserver, encoded_room);
     let resp = state
         .http_client
         .post(&url)
         .timeout(Duration::from_secs(30))
-        .bearer_auth(access_token)
+        .bearer_auth(&ac.access_token)
         .json(&serde_json::json!({}))
         .send()
         .await
@@ -87,13 +84,10 @@ pub async fn knock_room(
     reason: Option<String>,
     via_servers: Option<Vec<String>>,
 ) -> Result<String, String> {
-    let client = super::get_client(&state).await?;
-    let access_token = client.access_token().ok_or("No access token")?;
-    let homeserver = client.homeserver().to_string();
-    let hs_trim = homeserver.trim_end_matches('/');
+    let ac = super::get_authed_client(&state).await?;
 
     let encoded = urlencoding::encode(&room_id);
-    let mut url = format!("{}/_matrix/client/v3/knock/{}", hs_trim, encoded);
+    let mut url = format!("{}/_matrix/client/v3/knock/{}", ac.homeserver, encoded);
 
     // Add via servers as query params
     let mut via_parts = Vec::new();
@@ -130,7 +124,7 @@ pub async fn knock_room(
         .http_client
         .post(&url)
         .timeout(std::time::Duration::from_secs(30))
-        .bearer_auth(access_token)
+        .bearer_auth(&ac.access_token)
         .json(&body)
         .send()
         .await

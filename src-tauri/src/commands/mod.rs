@@ -74,6 +74,27 @@ pub(crate) async fn get_client(state: &AppState) -> Result<Client, String> {
         .cloned()
 }
 
+pub(crate) struct AuthedClient {
+    pub client: Client,
+    pub homeserver: String,
+    pub access_token: String,
+}
+
+pub(crate) async fn get_authed_client(state: &AppState) -> Result<AuthedClient, String> {
+    let client = get_client(state).await?;
+    let homeserver = client.homeserver().to_string();
+    let homeserver = homeserver.trim_end_matches('/').to_string();
+    let access_token = client
+        .access_token()
+        .ok_or("No access token")?
+        .to_string();
+    Ok(AuthedClient {
+        client,
+        homeserver,
+        access_token,
+    })
+}
+
 /// Parse a room ID string and look it up on the client.
 pub(crate) fn resolve_room(client: &Client, room_id: &str) -> Result<Room, String> {
     let parsed =

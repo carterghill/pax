@@ -6,7 +6,7 @@ use tauri::{Emitter, State};
 use crate::types::PresencePayload;
 use crate::{idle, AppState};
 
-use super::{fmt_error_chain, get_client};
+use super::{fmt_error_chain, get_authed_client, get_client};
 
 #[tauri::command]
 pub async fn set_presence(
@@ -86,12 +86,12 @@ pub async fn sync_presence(
     state: State<'_, Arc<AppState>>,
     app: tauri::AppHandle,
 ) -> Result<(), String> {
-    let client = get_client(&state).await?;
-    let self_id = client.user_id().ok_or("No user ID")?.to_string();
+    let ac = get_authed_client(&state).await?;
+    let self_id = ac.client.user_id().ok_or("No user ID")?.to_string();
 
     // Collect unique user IDs across all joined rooms.
     let mut user_ids = HashSet::new();
-    for room in client.joined_rooms() {
+    for room in ac.client.joined_rooms() {
         if let Ok(members) = room.members(matrix_sdk::RoomMemberships::JOIN).await {
             for m in members {
                 let uid = m.user_id().to_string();
@@ -102,19 +102,15 @@ pub async fn sync_presence(
         }
     }
 
-    let access_token = client.access_token().ok_or("No access token")?;
-    let homeserver = client.homeserver().to_string();
-    let hs = homeserver.trim_end_matches('/');
-
     // Fetch presence for each user via the Matrix CS API.
     // Fire-and-forget individual failures — a single user 403 shouldn't block the rest.
     for uid in &user_ids {
         let encoded = urlencoding::encode(uid);
-        let url = format!("{}/_matrix/client/v3/presence/{}/status", hs, encoded);
+        let url = format!("{}/_matrix/client/v3/presence/{}/status", ac.homeserver, encoded);
         let resp = match state
             .http_client
             .get(&url)
-            .bearer_auth(&access_token)
+            .bearer_auth(&ac.access_token)
             .timeout(std::time::Duration::from_secs(5))
             .send()
             .await

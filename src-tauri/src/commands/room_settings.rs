@@ -9,7 +9,7 @@ use crate::AppState;
 
 use super::room_discovery::discover_client_base_urls;
 use super::room_listing::dm_one_to_one_peer_summary;
-use super::{fmt_error_chain, get_or_fetch_avatar};
+use super::{fmt_error_chain, get_authed_client, get_or_fetch_avatar};
 
 /// Convert an MXC URI to an unauthenticated thumbnail URL.
 fn mxc_to_thumbnail_url(base_url: &str, mxc: &str, width: u32, height: u32) -> Option<String> {
@@ -55,11 +55,11 @@ pub async fn get_space_info(
     state: State<'_, Arc<AppState>>,
     space_id: String,
 ) -> Result<SpaceInfo, String> {
-    let client = super::get_client(&state).await?;
+    let ac = get_authed_client(&state).await?;
     let parsed =
         matrix_sdk::ruma::RoomId::parse(&space_id).map_err(|e| format!("Invalid room ID: {e}"))?;
 
-    let space = client.get_room(&parsed).ok_or("Space not found")?;
+    let space = ac.client.get_room(&parsed).ok_or("Space not found")?;
 
     let avatar_cache = state.avatar_cache.clone();
     let space_avatar = get_or_fetch_avatar(
@@ -73,11 +73,9 @@ pub async fn get_space_info(
     let space_topic = space.topic();
 
     // Call the room hierarchy API to discover child rooms (including ones not yet joined)
-    let session = client.matrix_auth().session().ok_or("Not logged in")?;
-    let homeserver = client.homeserver().to_string();
     let url = format!(
         "{}/_matrix/client/v1/rooms/{}/hierarchy?limit=50",
-        homeserver.trim_end_matches('/'),
+        ac.homeserver,
         space_id,
     );
 
@@ -85,10 +83,7 @@ pub async fn get_space_info(
         .http_client
         .get(&url)
         .timeout(Duration::from_secs(15))
-        .header(
-            "Authorization",
-            format!("Bearer {}", session.tokens.access_token),
-        )
+        .bearer_auth(&ac.access_token)
         .send()
         .await
         .map_err(|e| format!("Hierarchy request failed: {}", fmt_error_chain(&e)))?;
@@ -173,7 +168,7 @@ pub async fn get_space_info(
 
             // Determine this user's membership in the child room
             let membership = if let Ok(rid) = matrix_sdk::ruma::RoomId::parse(&child_id) {
-                if let Some(r) = client.get_room(&rid) {
+                if let Some(r) = ac.client.get_room(&rid) {
                     match r.state() {
                         matrix_sdk::RoomState::Joined => "joined",
                         matrix_sdk::RoomState::Invited => "invited",
@@ -190,7 +185,7 @@ pub async fn get_space_info(
             // Avatar: use cache for joined rooms, convert MXC thumbnail URL for others
             let mut avatar_url = if membership == "joined" {
                 if let Ok(rid) = matrix_sdk::ruma::RoomId::parse(&child_id) {
-                    if let Some(r) = client.get_room(&rid) {
+                    if let Some(r) = ac.client.get_room(&rid) {
                         get_or_fetch_avatar(
                             r.avatar_url().as_deref(),
                             r.avatar(matrix_sdk::media::MediaFormat::File),
@@ -226,7 +221,7 @@ pub async fn get_space_info(
 
             if membership == "joined" {
                 if let Ok(rid) = matrix_sdk::ruma::RoomId::parse(&child_id) {
-                    if let Some(r) = client.get_room(&rid) {
+                    if let Some(r) = ac.client.get_room(&rid) {
                         if let Some((dname, dav, pid, pres, smsg)) = dm_one_to_one_peer_summary(
                             &r,
                             &avatar_cache,
@@ -276,15 +271,13 @@ pub async fn get_history_visibility(
     state: State<'_, Arc<AppState>>,
     room_id: String,
 ) -> Result<String, String> {
-    let client = super::get_client(&state).await?;
+    let ac = get_authed_client(&state).await?;
     // Validate the room exists
-    let _ = super::resolve_room(&client, &room_id)?;
+    let _ = super::resolve_room(&ac.client, &room_id)?;
 
-    let homeserver = client.homeserver().to_string();
-    let access_token = client.access_token().ok_or("No access token")?;
     let state_url = format!(
         "{}/_matrix/client/v3/rooms/{}/state/m.room.history_visibility/",
-        homeserver.trim_end_matches('/'),
+        ac.homeserver,
         urlencoding::encode(&room_id),
     );
 
@@ -292,7 +285,7 @@ pub async fn get_history_visibility(
         .http_client
         .get(&state_url)
         .timeout(Duration::from_secs(15))
-        .bearer_auth(access_token.to_string())
+        .bearer_auth(&ac.access_token)
         .send()
         .await
         .map_err(|e| {
@@ -334,19 +327,17 @@ pub async fn set_history_visibility(
         ));
     }
 
-    let client = super::get_client(&state).await?;
+    let ac = get_authed_client(&state).await?;
     // Validate the room exists
-    let _ = super::resolve_room(&client, &room_id)?;
+    let _ = super::resolve_room(&ac.client, &room_id)?;
 
     let content = serde_json::json!({
         "history_visibility": visibility,
     });
 
-    let homeserver = client.homeserver().to_string();
-    let access_token = client.access_token().ok_or("No access token")?;
     let state_url = format!(
         "{}/_matrix/client/v3/rooms/{}/state/m.room.history_visibility/",
-        homeserver.trim_end_matches('/'),
+        ac.homeserver,
         urlencoding::encode(&room_id),
     );
 
@@ -354,7 +345,7 @@ pub async fn set_history_visibility(
         .http_client
         .put(&state_url)
         .timeout(Duration::from_secs(15))
-        .bearer_auth(access_token.to_string())
+        .bearer_auth(&ac.access_token)
         .json(&content)
         .send()
         .await
@@ -590,20 +581,17 @@ pub async fn get_room_general_settings(
     state: State<'_, Arc<AppState>>,
     room_id: String,
 ) -> Result<RoomGeneralSettingsData, String> {
-    let client = super::get_client(&state).await?;
+    let ac = get_authed_client(&state).await?;
     let parsed =
         matrix_sdk::ruma::RoomId::parse(&room_id).map_err(|e| format!("Invalid room ID: {e}"))?;
-    let _ = client.get_room(&parsed).ok_or("Room not found")?;
+    let _ = ac.client.get_room(&parsed).ok_or("Room not found")?;
 
-    let user_id = client.user_id().ok_or("No user ID")?.to_string();
-    let homeserver = client.homeserver().to_string();
-    let access_token = client.access_token().ok_or("No access token")?;
-    let hs_trim = homeserver.trim_end_matches('/');
+    let user_id = ac.client.user_id().ok_or("No user ID")?.to_string();
 
     let pl_body = http_get_room_state(
         &state.http_client,
-        hs_trim,
-        &access_token,
+        &ac.homeserver,
+        &ac.access_token,
         &room_id,
         "m.room.power_levels/",
     )
@@ -620,8 +608,8 @@ pub async fn get_room_general_settings(
 
     let create_body = http_get_room_state(
         &state.http_client,
-        hs_trim,
-        &access_token,
+        &ac.homeserver,
+        &ac.access_token,
         &room_id,
         "m.room.create/",
     )
@@ -634,8 +622,8 @@ pub async fn get_room_general_settings(
 
     let join_body = http_get_room_state(
         &state.http_client,
-        hs_trim,
-        &access_token,
+        &ac.homeserver,
+        &ac.access_token,
         &room_id,
         "m.room.join_rules/",
     )
@@ -649,8 +637,8 @@ pub async fn get_room_general_settings(
 
     let canon_body = http_get_room_state(
         &state.http_client,
-        hs_trim,
-        &access_token,
+        &ac.homeserver,
+        &ac.access_token,
         &room_id,
         "m.room.canonical_alias/",
     )
@@ -684,14 +672,11 @@ pub async fn apply_room_general_settings(
     room_id: String,
     patch: ApplyRoomGeneralSettingsPatch,
 ) -> Result<(), String> {
-    let client = super::get_client(&state).await?;
+    let ac = get_authed_client(&state).await?;
     let parsed =
         matrix_sdk::ruma::RoomId::parse(&room_id).map_err(|e| format!("Invalid room ID: {e}"))?;
-    client.get_room(&parsed).ok_or("Room not found")?;
+    ac.client.get_room(&parsed).ok_or("Room not found")?;
 
-    let homeserver = client.homeserver().to_string();
-    let access_token = client.access_token().ok_or("No access token")?;
-    let hs_trim = homeserver.trim_end_matches('/');
     let http = &state.http_client;
 
     if let Some(local_raw) = &patch.room_alias_local {
@@ -703,12 +688,12 @@ pub async fn apply_room_general_settings(
 
             let alias_url = format!(
                 "{}/_matrix/client/v3/directory/room/{}",
-                hs_trim, encoded_alias
+                ac.homeserver, encoded_alias
             );
             let alias_resp = http
                 .put(&alias_url)
                 .timeout(Duration::from_secs(15))
-                .bearer_auth(access_token.to_string())
+                .bearer_auth(&ac.access_token)
                 .json(&serde_json::json!({ "room_id": room_id }))
                 .send()
                 .await
@@ -721,8 +706,8 @@ pub async fn apply_room_general_settings(
 
             http_put_room_state(
                 http,
-                hs_trim,
-                &access_token,
+                &ac.homeserver,
+                &ac.access_token,
                 &room_id,
                 "m.room.canonical_alias/",
                 &serde_json::json!({ "alias": alias }),
@@ -750,20 +735,17 @@ pub async fn get_room_power_levels_settings(
     state: State<'_, Arc<AppState>>,
     room_id: String,
 ) -> Result<RoomPowerLevelsSettings, String> {
-    let client = super::get_client(&state).await?;
+    let ac = get_authed_client(&state).await?;
     let parsed =
         matrix_sdk::ruma::RoomId::parse(&room_id).map_err(|e| format!("Invalid room ID: {e}"))?;
-    let _ = client.get_room(&parsed).ok_or("Room not found")?;
+    let _ = ac.client.get_room(&parsed).ok_or("Room not found")?;
 
-    let user_id = client.user_id().ok_or("No user ID")?.to_string();
-    let homeserver = client.homeserver().to_string();
-    let access_token = client.access_token().ok_or("No access token")?;
-    let hs_trim = homeserver.trim_end_matches('/');
+    let user_id = ac.client.user_id().ok_or("No user ID")?.to_string();
 
     let create_body = http_get_room_state(
         &state.http_client,
-        hs_trim,
-        &access_token,
+        &ac.homeserver,
+        &ac.access_token,
         &room_id,
         "m.room.create/",
     )
@@ -776,8 +758,8 @@ pub async fn get_room_power_levels_settings(
 
     let pl_body = http_get_room_state(
         &state.http_client,
-        hs_trim,
-        &access_token,
+        &ac.homeserver,
+        &ac.access_token,
         &room_id,
         "m.room.power_levels/",
     )
@@ -802,20 +784,17 @@ pub async fn set_room_power_levels(
     room_id: String,
     content: serde_json::Value,
 ) -> Result<(), String> {
-    let client = super::get_client(&state).await?;
+    let ac = get_authed_client(&state).await?;
     let parsed =
         matrix_sdk::ruma::RoomId::parse(&room_id).map_err(|e| format!("Invalid room ID: {e}"))?;
-    client.get_room(&parsed).ok_or("Room not found")?;
+    ac.client.get_room(&parsed).ok_or("Room not found")?;
 
-    let user_id = client.user_id().ok_or("No user ID")?.to_string();
-    let homeserver = client.homeserver().to_string();
-    let access_token = client.access_token().ok_or("No access token")?;
-    let hs_trim = homeserver.trim_end_matches('/');
+    let user_id = ac.client.user_id().ok_or("No user ID")?.to_string();
 
     let pl_body = http_get_room_state(
         &state.http_client,
-        hs_trim,
-        &access_token,
+        &ac.homeserver,
+        &ac.access_token,
         &room_id,
         "m.room.power_levels/",
     )
@@ -834,8 +813,8 @@ pub async fn set_room_power_levels(
 
     http_put_room_state(
         &state.http_client,
-        hs_trim,
-        &access_token,
+        &ac.homeserver,
+        &ac.access_token,
         &room_id,
         "m.room.power_levels/",
         &content,
@@ -849,20 +828,17 @@ pub async fn get_space_settings(
     state: State<'_, Arc<AppState>>,
     space_id: String,
 ) -> Result<SpaceSettingsData, String> {
-    let client = super::get_client(&state).await?;
+    let ac = get_authed_client(&state).await?;
     let parsed =
         matrix_sdk::ruma::RoomId::parse(&space_id).map_err(|e| format!("Invalid room ID: {e}"))?;
-    let room = client.get_room(&parsed).ok_or("Space not found")?;
+    let room = ac.client.get_room(&parsed).ok_or("Space not found")?;
 
-    let user_id = client.user_id().ok_or("No user ID")?.to_string();
-    let homeserver = client.homeserver().to_string();
-    let access_token = client.access_token().ok_or("No access token")?;
-    let hs_trim = homeserver.trim_end_matches('/');
+    let user_id = ac.client.user_id().ok_or("No user ID")?.to_string();
 
     let pl_body = http_get_room_state(
         &state.http_client,
-        hs_trim,
-        &access_token,
+        &ac.homeserver,
+        &ac.access_token,
         &space_id,
         "m.room.power_levels/",
     )
@@ -873,8 +849,8 @@ pub async fn get_space_settings(
         let join_editable = {
             let jr = http_get_room_state(
                 &state.http_client,
-                hs_trim,
-                &access_token,
+                &ac.homeserver,
+                &ac.access_token,
                 &space_id,
                 "m.room.join_rules/",
             )
@@ -921,8 +897,8 @@ pub async fn get_space_settings(
 
     let name_state = http_get_room_state(
         &state.http_client,
-        hs_trim,
-        &access_token,
+        &ac.homeserver,
+        &ac.access_token,
         &space_id,
         "m.room.name/",
     )
@@ -937,8 +913,8 @@ pub async fn get_space_settings(
 
     let topic_state = http_get_room_state(
         &state.http_client,
-        hs_trim,
-        &access_token,
+        &ac.homeserver,
+        &ac.access_token,
         &space_id,
         "m.room.topic/",
     )
@@ -952,8 +928,8 @@ pub async fn get_space_settings(
 
     let avatar_state = http_get_room_state(
         &state.http_client,
-        hs_trim,
-        &access_token,
+        &ac.homeserver,
+        &ac.access_token,
         &space_id,
         "m.room.avatar/",
     )
@@ -965,7 +941,7 @@ pub async fn get_space_settings(
         .filter(|s| !s.is_empty());
 
     let avatar_url = if let Some(mxc) = avatar_mxc {
-        mxc_to_thumbnail_url(hs_trim, mxc, 96, 96)
+        mxc_to_thumbnail_url(&ac.homeserver, mxc, 96, 96)
     } else {
         get_or_fetch_avatar(
             room.avatar_url().as_deref(),
@@ -977,8 +953,8 @@ pub async fn get_space_settings(
 
     let join_body = http_get_room_state(
         &state.http_client,
-        hs_trim,
-        &access_token,
+        &ac.homeserver,
+        &ac.access_token,
         &space_id,
         "m.room.join_rules/",
     )
@@ -992,8 +968,8 @@ pub async fn get_space_settings(
 
     let guest_body = http_get_room_state(
         &state.http_client,
-        hs_trim,
-        &access_token,
+        &ac.homeserver,
+        &ac.access_token,
         &space_id,
         "m.room.guest_access/",
     )
@@ -1007,8 +983,8 @@ pub async fn get_space_settings(
 
     let history_body = http_get_room_state(
         &state.http_client,
-        hs_trim,
-        &access_token,
+        &ac.homeserver,
+        &ac.access_token,
         &space_id,
         "m.room.history_visibility/",
     )
@@ -1022,14 +998,14 @@ pub async fn get_space_settings(
 
     let dir_url = format!(
         "{}/_matrix/client/v3/directory/list/room/{}",
-        hs_trim,
+        ac.homeserver,
         urlencoding::encode(&space_id)
     );
     let listed_in_directory = match state
         .http_client
         .get(&dir_url)
         .timeout(Duration::from_secs(15))
-        .bearer_auth(access_token.to_string())
+        .bearer_auth(&ac.access_token)
         .send()
         .await
     {
@@ -1048,8 +1024,8 @@ pub async fn get_space_settings(
 
     let canon_body = http_get_room_state(
         &state.http_client,
-        hs_trim,
-        &access_token,
+        &ac.homeserver,
+        &ac.access_token,
         &space_id,
         "m.room.canonical_alias/",
     )
@@ -1086,14 +1062,11 @@ pub async fn apply_space_settings(
     space_id: String,
     patch: ApplySpaceSettingsPatch,
 ) -> Result<(), String> {
-    let client = super::get_client(&state).await?;
+    let ac = get_authed_client(&state).await?;
     let parsed =
         matrix_sdk::ruma::RoomId::parse(&space_id).map_err(|e| format!("Invalid room ID: {e}"))?;
-    client.get_room(&parsed).ok_or("Space not found")?;
+    ac.client.get_room(&parsed).ok_or("Space not found")?;
 
-    let homeserver = client.homeserver().to_string();
-    let access_token = client.access_token().ok_or("No access token")?;
-    let hs_trim = homeserver.trim_end_matches('/');
     let http = &state.http_client;
 
     if let Some(name) = &patch.name {
@@ -1103,8 +1076,8 @@ pub async fn apply_space_settings(
         }
         http_put_room_state(
             http,
-            hs_trim,
-            &access_token,
+            &ac.homeserver,
+            &ac.access_token,
             &space_id,
             "m.room.name/",
             &serde_json::json!({ "name": t }),
@@ -1115,8 +1088,8 @@ pub async fn apply_space_settings(
     if let Some(topic) = &patch.topic {
         http_put_room_state(
             http,
-            hs_trim,
-            &access_token,
+            &ac.homeserver,
+            &ac.access_token,
             &space_id,
             "m.room.topic/",
             &serde_json::json!({ "topic": topic }),
@@ -1127,19 +1100,19 @@ pub async fn apply_space_settings(
     if patch.remove_avatar {
         http_put_room_state(
             http,
-            hs_trim,
-            &access_token,
+            &ac.homeserver,
+            &ac.access_token,
             &space_id,
             "m.room.avatar/",
             &serde_json::json!({}),
         )
         .await?;
     } else if let (Some(data), Some(mime)) = (&patch.avatar_data, &patch.avatar_mime) {
-        let mxc = super::upload_media_b64(http, hs_trim, &access_token, data, mime).await?;
+        let mxc = super::upload_media_b64(http, &ac.homeserver, &ac.access_token, data, mime).await?;
         http_put_room_state(
             http,
-            hs_trim,
-            &access_token,
+            &ac.homeserver,
+            &ac.access_token,
             &space_id,
             "m.room.avatar/",
             &serde_json::json!({ "url": mxc }),
@@ -1158,8 +1131,8 @@ pub async fn apply_space_settings(
         }
         http_put_room_state(
             http,
-            hs_trim,
-            &access_token,
+            &ac.homeserver,
+            &ac.access_token,
             &space_id,
             "m.room.join_rules/",
             &serde_json::json!({ "join_rule": jr }),
@@ -1178,8 +1151,8 @@ pub async fn apply_space_settings(
         }
         http_put_room_state(
             http,
-            hs_trim,
-            &access_token,
+            &ac.homeserver,
+            &ac.access_token,
             &space_id,
             "m.room.guest_access/",
             &serde_json::json!({ "guest_access": ga }),
@@ -1201,12 +1174,12 @@ pub async fn apply_space_settings(
             // Create the alias mapping in the room directory first
             let alias_url = format!(
                 "{}/_matrix/client/v3/directory/room/{}",
-                hs_trim, encoded_alias
+                ac.homeserver, encoded_alias
             );
             let alias_resp = http
                 .put(&alias_url)
                 .timeout(Duration::from_secs(15))
-                .bearer_auth(access_token.to_string())
+                .bearer_auth(&ac.access_token)
                 .json(&serde_json::json!({ "room_id": space_id }))
                 .send()
                 .await
@@ -1221,8 +1194,8 @@ pub async fn apply_space_settings(
             // Now set it as canonical
             http_put_room_state(
                 http,
-                hs_trim,
-                &access_token,
+                &ac.homeserver,
+                &ac.access_token,
                 &space_id,
                 "m.room.canonical_alias/",
                 &serde_json::json!({ "alias": alias }),
@@ -1234,14 +1207,14 @@ pub async fn apply_space_settings(
     if let Some(listed) = patch.listed_in_directory {
         let dir_url = format!(
             "{}/_matrix/client/v3/directory/list/room/{}",
-            hs_trim,
+            ac.homeserver,
             urlencoding::encode(&space_id)
         );
         if !listed {
             let resp = http
                 .delete(&dir_url)
                 .timeout(Duration::from_secs(30))
-                .bearer_auth(access_token.to_string())
+                .bearer_auth(&ac.access_token)
                 .send()
                 .await
                 .map_err(|e| format!("Directory DELETE failed: {}", fmt_error_chain(&e)))?;
@@ -1255,7 +1228,7 @@ pub async fn apply_space_settings(
             let resp = http
                 .put(&dir_url)
                 .timeout(Duration::from_secs(30))
-                .bearer_auth(access_token.to_string())
+                .bearer_auth(&ac.access_token)
                 .json(&body)
                 .send()
                 .await

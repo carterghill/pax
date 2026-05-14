@@ -13,8 +13,8 @@ use crate::types::{
 use crate::AppState;
 
 use super::{
-    encode_bytes_data_url, fmt_error_chain, get_client, get_or_fetch_avatar, resolve_room,
-    sniff_image_mime, AvatarDiskCache,
+    encode_bytes_data_url, fmt_error_chain, get_authed_client, get_client, get_or_fetch_avatar,
+    resolve_room, sniff_image_mime, AvatarDiskCache, AuthedClient,
 };
 use matrix_sdk::media::{MediaFormat, MediaRequestParameters};
 use matrix_sdk::ruma::api::client::profile::get_profile::v3::Request as GetProfileRequest;
@@ -144,8 +144,8 @@ pub async fn get_room_management_members(
     state: State<'_, Arc<AppState>>,
     room_id: String,
 ) -> Result<RoomManagementMembersResponse, String> {
-    let client = get_client(&state).await?;
-    let room = resolve_room(&client, &room_id)?;
+    let ac = get_authed_client(&state).await?;
+    let room = resolve_room(&ac.client, &room_id)?;
 
     let joined_members = room
         .members(matrix_sdk::RoomMemberships::JOIN)
@@ -156,7 +156,7 @@ pub async fn get_room_management_members(
     let status_msg_snapshot = state.status_msg_map.lock().await.clone();
     let avatar_snapshot = state.avatar_cache.snapshot().await;
 
-    let my_id = client.user_id().ok_or("Not logged in")?;
+    let my_id = ac.client.user_id().ok_or("Not logged in")?;
     let self_member_opt = room
         .get_member(my_id)
         .await
@@ -199,21 +199,17 @@ pub async fn get_room_management_members(
             }
         })
         .collect();
-
-    let access_token = client.access_token().ok_or("No access token")?;
-    let homeserver = client.homeserver().to_string();
-    let hs = homeserver.trim_end_matches('/');
     let encoded_room = urlencoding::encode(&room_id);
     let members_url = format!(
         "{}/_matrix/client/v3/rooms/{}/members?membership=ban",
-        hs, encoded_room
+        ac.homeserver, encoded_room
     );
 
     let resp = state
         .http_client
         .get(&members_url)
         .timeout(Duration::from_secs(15))
-        .bearer_auth(access_token)
+        .bearer_auth(&ac.access_token)
         .send()
         .await
         .map_err(|e| format!("Failed to fetch banned members: {}", fmt_error_chain(&e)))?;
@@ -529,23 +525,20 @@ pub async fn get_knock_members(
     state: State<'_, Arc<AppState>>,
     room_id: String,
 ) -> Result<KnockMembersResponse, String> {
-    let client = get_client(&state).await?;
-    let access_token = client.access_token().ok_or("No access token")?;
-    let homeserver = client.homeserver().to_string();
-    let hs = homeserver.trim_end_matches('/');
+    let ac = get_authed_client(&state).await?;
     let encoded_room = urlencoding::encode(&room_id);
-    let user_id = client.user_id().ok_or("Not logged in")?.to_string();
+    let user_id = ac.client.user_id().ok_or("Not logged in")?.to_string();
 
     // Fetch knock members via CS API
     let members_url = format!(
         "{}/_matrix/client/v3/rooms/{}/members?membership=knock",
-        hs, encoded_room
+        ac.homeserver, encoded_room
     );
     let resp = state
         .http_client
         .get(&members_url)
         .timeout(Duration::from_secs(15))
-        .bearer_auth(access_token.to_string())
+        .bearer_auth(&ac.access_token)
         .send()
         .await
         .map_err(|e| format!("Failed to fetch knock members: {}", fmt_error_chain(&e)))?;
@@ -590,7 +583,7 @@ pub async fn get_knock_members(
                         .map(|(server, media_id)| {
                             format!(
                                 "{}/_matrix/media/v3/thumbnail/{}/{}?width=64&height=64&method=crop",
-                                hs, server, media_id
+                                ac.homeserver, server, media_id
                             )
                         });
                     if let Some(thumb_url) = thumb {
@@ -635,13 +628,13 @@ pub async fn get_knock_members(
     // Fetch power levels to determine permissions
     let pl_url = format!(
         "{}/_matrix/client/v3/rooms/{}/state/m.room.power_levels/",
-        hs, encoded_room
+        ac.homeserver, encoded_room
     );
     let (can_invite, can_kick) = match state
         .http_client
         .get(&pl_url)
         .timeout(Duration::from_secs(10))
-        .bearer_auth(access_token.to_string())
+        .bearer_auth(&ac.access_token)
         .send()
         .await
     {
@@ -686,19 +679,16 @@ pub async fn preview_leave_space(
     state: State<'_, Arc<AppState>>,
     room_id: String,
 ) -> Result<PreviewLeaveSpaceResponse, String> {
-    let client = get_client(&state).await?;
-    let room = resolve_room(&client, &room_id)?;
+    let ac = get_authed_client(&state).await?;
+    let room = resolve_room(&ac.client, &room_id)?;
     if !room.is_space() {
         return Ok(PreviewLeaveSpaceResponse {
             is_only_admin: false,
         });
     }
 
-    let user_id = client.user_id().ok_or("Not logged in")?.to_string();
+    let user_id = ac.client.user_id().ok_or("Not logged in")?.to_string();
 
-    let access_token = client.access_token().ok_or("No access token")?;
-    let homeserver = client.homeserver().to_string();
-    let hs = homeserver.trim_end_matches('/');
     let encoded_room = urlencoding::encode(&room_id);
 
     let members = room
@@ -708,13 +698,13 @@ pub async fn preview_leave_space(
 
     let pl_url = format!(
         "{}/_matrix/client/v3/rooms/{}/state/m.room.power_levels/",
-        hs, encoded_room
+        ac.homeserver, encoded_room
     );
     let pl_resp = state
         .http_client
         .get(&pl_url)
         .timeout(Duration::from_secs(10))
-        .bearer_auth(access_token.to_string())
+        .bearer_auth(&ac.access_token)
         .send()
         .await
         .map_err(|e| format!("Failed to load power levels: {}", fmt_error_chain(&e)))?;
@@ -777,12 +767,9 @@ pub async fn search_user_directory(
         return Ok(vec![]);
     }
 
-    let client = get_client(&state).await?;
-    let access_token = client.access_token().ok_or("No access token")?;
-    let homeserver = client.homeserver().to_string();
-    let hs = homeserver.trim_end_matches('/');
+    let ac = get_authed_client(&state).await?;
 
-    let target_room = resolve_room(&client, &room_id)?;
+    let target_room = resolve_room(&ac.client, &room_id)?;
     let target_members: HashSet<String> = target_room
         .members(matrix_sdk::RoomMemberships::JOIN)
         .await
@@ -791,15 +778,15 @@ pub async fn search_user_directory(
         .map(|m| m.user_id().to_string())
         .collect();
 
-    let self_id = client.user_id().ok_or("Not logged in")?.to_string();
+    let self_id = ac.client.user_id().ok_or("Not logged in")?.to_string();
 
-    let url = format!("{}/_matrix/client/v3/user_directory/search", hs);
+    let url = format!("{}/_matrix/client/v3/user_directory/search", ac.homeserver);
     let cap = limit.clamp(1, 50);
     let resp = state
         .http_client
         .post(&url)
         .timeout(Duration::from_secs(20))
-        .bearer_auth(access_token)
+        .bearer_auth(&ac.access_token)
         .json(&serde_json::json!({
             "search_term": trimmed,
             "limit": cap,
@@ -838,7 +825,7 @@ pub async fn search_user_directory(
             continue;
         }
         let avatar_url = if let Some(ref mxc) = hit.avatar_url {
-            resolve_mxc_avatar_data_url(&state.http_client, hs, mxc, &avatar_cache).await
+            resolve_mxc_avatar_data_url(&state.http_client, &ac.homeserver, mxc, &avatar_cache).await
         } else {
             None
         };
@@ -859,8 +846,8 @@ pub async fn get_invite_suggestions(
     room_id: String,
     limit: usize,
 ) -> Result<Vec<InviteUserCandidate>, String> {
-    let client = get_client(&state).await?;
-    let target_room = resolve_room(&client, &room_id)?;
+    let ac = get_authed_client(&state).await?;
+    let target_room = resolve_room(&ac.client, &room_id)?;
     let target_members: HashSet<String> = target_room
         .members(matrix_sdk::RoomMemberships::JOIN)
         .await
@@ -869,9 +856,9 @@ pub async fn get_invite_suggestions(
         .map(|m| m.user_id().to_string())
         .collect();
 
-    let self_id = client.user_id().ok_or("Not logged in")?.to_string();
+    let self_id = ac.client.user_id().ok_or("Not logged in")?.to_string();
 
-    let rooms: Vec<matrix_sdk::Room> = client
+    let rooms: Vec<matrix_sdk::Room> = ac.client
         .joined_rooms()
         .into_iter()
         .filter(|r| r.room_id().as_str() != room_id)
@@ -924,14 +911,12 @@ pub async fn get_invite_suggestions(
     });
 
     let cap = limit.max(1).min(40);
-    let homeserver = client.homeserver().to_string();
-    let hs = homeserver.trim_end_matches('/');
     let avatar_cache = state.avatar_cache.clone();
 
     let mut out = Vec::new();
     for (user_id, (_, display_name, mxc)) in pairs.into_iter().take(cap) {
         let avatar_url = if let Some(ref uri) = mxc {
-            resolve_mxc_avatar_data_url(&state.http_client, hs, uri, &avatar_cache).await
+            resolve_mxc_avatar_data_url(&state.http_client, &ac.homeserver, uri, &avatar_cache).await
         } else {
             None
         };
@@ -986,39 +971,53 @@ async fn resolve_mxc_avatar_data_url(
     None
 }
 
-/// Invite a user to a room. Used to accept knock requests.
+async fn room_membership_action(
+    http_client: &reqwest::Client,
+    homeserver: &str,
+    access_token: &str,
+    room_id: &str,
+    action: &str,
+    user_id: &str,
+    reason: Option<&str>,
+) -> Result<(), String> {
+    let url = format!(
+        "{}/_matrix/client/v3/rooms/{}/{}",
+        homeserver.trim_end_matches('/'),
+        urlencoding::encode(room_id),
+        action,
+    );
+    let mut body = serde_json::json!({ "user_id": user_id });
+    if let Some(r) = reason {
+        body["reason"] = serde_json::json!(r);
+    }
+
+    let resp = http_client
+        .post(&url)
+        .timeout(Duration::from_secs(15))
+        .bearer_auth(access_token)
+        .json(&body)
+        .send()
+        .await
+        .map_err(|e| format!("{action} failed: {}", fmt_error_chain(&e)))?;
+
+    if !resp.status().is_success() {
+        let status = resp.status();
+        let text = resp.text().await.unwrap_or_default();
+        return Err(format!("{action} failed ({status}): {text}"));
+    }
+    Ok(())
+}
+
 #[tauri::command]
 pub async fn invite_user(
     state: State<'_, Arc<AppState>>,
     room_id: String,
     user_id: String,
 ) -> Result<(), String> {
-    let client = get_client(&state).await?;
-    let access_token = client.access_token().ok_or("No access token")?;
-    let homeserver = client.homeserver().to_string();
-    let hs = homeserver.trim_end_matches('/');
-    let encoded_room = urlencoding::encode(&room_id);
-
-    let url = format!("{}/_matrix/client/v3/rooms/{}/invite", hs, encoded_room);
-    let resp = state
-        .http_client
-        .post(&url)
-        .timeout(Duration::from_secs(15))
-        .bearer_auth(access_token)
-        .json(&serde_json::json!({ "user_id": user_id }))
-        .send()
-        .await
-        .map_err(|e| format!("Invite failed: {}", fmt_error_chain(&e)))?;
-
-    if !resp.status().is_success() {
-        let status = resp.status();
-        let text = resp.text().await.unwrap_or_default();
-        return Err(format!("Invite failed ({status}): {text}"));
-    }
-    Ok(())
+    let ac = get_authed_client(&state).await?;
+    room_membership_action(&state.http_client, &ac.homeserver, &ac.access_token, &room_id, "invite", &user_id, None).await
 }
 
-/// Kick a user from a room. Used to deny knock requests.
 #[tauri::command]
 pub async fn kick_user(
     state: State<'_, Arc<AppState>>,
@@ -1026,34 +1025,8 @@ pub async fn kick_user(
     user_id: String,
     reason: Option<String>,
 ) -> Result<(), String> {
-    let client = get_client(&state).await?;
-    let access_token = client.access_token().ok_or("No access token")?;
-    let homeserver = client.homeserver().to_string();
-    let hs = homeserver.trim_end_matches('/');
-    let encoded_room = urlencoding::encode(&room_id);
-
-    let url = format!("{}/_matrix/client/v3/rooms/{}/kick", hs, encoded_room);
-    let mut body = serde_json::json!({ "user_id": user_id });
-    if let Some(r) = reason {
-        body["reason"] = serde_json::json!(r);
-    }
-
-    let resp = state
-        .http_client
-        .post(&url)
-        .timeout(Duration::from_secs(15))
-        .bearer_auth(access_token)
-        .json(&body)
-        .send()
-        .await
-        .map_err(|e| format!("Kick failed: {}", fmt_error_chain(&e)))?;
-
-    if !resp.status().is_success() {
-        let status = resp.status();
-        let text = resp.text().await.unwrap_or_default();
-        return Err(format!("Kick failed ({status}): {text}"));
-    }
-    Ok(())
+    let ac = get_authed_client(&state).await?;
+    room_membership_action(&state.http_client, &ac.homeserver, &ac.access_token, &room_id, "kick", &user_id, reason.as_deref()).await
 }
 
 /// Whether the current user may kick or ban `member_user_id` in this room (power levels + membership).
@@ -1121,7 +1094,6 @@ pub async fn get_member_moderation_permissions(
     Ok(MemberModerationPermissions { can_kick, can_ban })
 }
 
-/// Ban a user from a room or space.
 #[tauri::command]
 pub async fn ban_user(
     state: State<'_, Arc<AppState>>,
@@ -1129,34 +1101,8 @@ pub async fn ban_user(
     user_id: String,
     reason: Option<String>,
 ) -> Result<(), String> {
-    let client = get_client(&state).await?;
-    let access_token = client.access_token().ok_or("No access token")?;
-    let homeserver = client.homeserver().to_string();
-    let hs = homeserver.trim_end_matches('/');
-    let encoded_room = urlencoding::encode(&room_id);
-
-    let url = format!("{}/_matrix/client/v3/rooms/{}/ban", hs, encoded_room);
-    let mut body = serde_json::json!({ "user_id": user_id });
-    if let Some(r) = reason {
-        body["reason"] = serde_json::json!(r);
-    }
-
-    let resp = state
-        .http_client
-        .post(&url)
-        .timeout(Duration::from_secs(15))
-        .bearer_auth(access_token)
-        .json(&body)
-        .send()
-        .await
-        .map_err(|e| format!("Ban failed: {}", fmt_error_chain(&e)))?;
-
-    if !resp.status().is_success() {
-        let status = resp.status();
-        let text = resp.text().await.unwrap_or_default();
-        return Err(format!("Ban failed ({status}): {text}"));
-    }
-    Ok(())
+    let ac = get_authed_client(&state).await?;
+    room_membership_action(&state.http_client, &ac.homeserver, &ac.access_token, &room_id, "ban", &user_id, reason.as_deref()).await
 }
 
 #[tauri::command]
@@ -1165,52 +1111,25 @@ pub async fn unban_user(
     room_id: String,
     user_id: String,
 ) -> Result<(), String> {
-    let client = get_client(&state).await?;
-    let access_token = client.access_token().ok_or("No access token")?;
-    let homeserver = client.homeserver().to_string();
-    let hs = homeserver.trim_end_matches('/');
-    let encoded_room = urlencoding::encode(&room_id);
-
-    let url = format!("{}/_matrix/client/v3/rooms/{}/unban", hs, encoded_room);
-    let body = serde_json::json!({ "user_id": user_id });
-
-    let resp = state
-        .http_client
-        .post(&url)
-        .timeout(Duration::from_secs(15))
-        .bearer_auth(access_token)
-        .json(&body)
-        .send()
-        .await
-        .map_err(|e| format!("Unban failed: {}", fmt_error_chain(&e)))?;
-
-    if !resp.status().is_success() {
-        let status = resp.status();
-        let text = resp.text().await.unwrap_or_default();
-        return Err(format!("Unban failed ({status}): {text}"));
-    }
-    Ok(())
+    let ac = get_authed_client(&state).await?;
+    room_membership_action(&state.http_client, &ac.homeserver, &ac.access_token, &room_id, "unban", &user_id, None).await
 }
 
 async fn get_space_tree_room_ids(
-    state: &Arc<AppState>,
-    client: &matrix_sdk::Client,
+    http_client: &reqwest::Client,
+    ac: &AuthedClient,
     space_id: &str,
 ) -> Result<Vec<String>, String> {
-    let access_token = client.access_token().ok_or("No access token")?;
-    let homeserver = client.homeserver().to_string();
-    let hs = homeserver.trim_end_matches('/');
     let encoded_room = urlencoding::encode(space_id);
     let url = format!(
         "{}/_matrix/client/v1/rooms/{}/hierarchy?limit=200",
-        hs, encoded_room
+        ac.homeserver, encoded_room
     );
 
-    let resp = state
-        .http_client
+    let resp = http_client
         .get(&url)
         .timeout(Duration::from_secs(15))
-        .bearer_auth(access_token)
+        .bearer_auth(&ac.access_token)
         .send()
         .await
         .map_err(|e| format!("Hierarchy request failed: {}", fmt_error_chain(&e)))?;
@@ -1246,34 +1165,15 @@ pub async fn unban_user_from_space_tree(
     space_id: String,
     user_id: String,
 ) -> Result<(), String> {
-    let client = get_client(&state).await?;
-    let room_ids = get_space_tree_room_ids(&state, &client, &space_id).await?;
-    let access_token = client.access_token().ok_or("No access token")?;
-    let homeserver = client.homeserver().to_string();
-    let hs = homeserver.trim_end_matches('/');
+    let ac = get_authed_client(&state).await?;
+    let room_ids = get_space_tree_room_ids(&state.http_client, &ac, &space_id).await?;
 
     let mut failures = Vec::new();
     for room_id in room_ids {
-        let encoded_room = urlencoding::encode(&room_id);
-        let url = format!("{}/_matrix/client/v3/rooms/{}/unban", hs, encoded_room);
-        let body = serde_json::json!({ "user_id": user_id });
-
-        match state
-            .http_client
-            .post(&url)
-            .timeout(Duration::from_secs(15))
-            .bearer_auth(access_token.clone())
-            .json(&body)
-            .send()
-            .await
-        {
-            Ok(resp) if resp.status().is_success() => {}
-            Ok(resp) => {
-                let status = resp.status();
-                let text = resp.text().await.unwrap_or_default();
-                failures.push(format!("{room_id} ({status}): {text}"));
-            }
-            Err(e) => failures.push(format!("{room_id}: {}", fmt_error_chain(&e))),
+        if let Err(e) = room_membership_action(
+            &state.http_client, &ac.homeserver, &ac.access_token, &room_id, "unban", &user_id, None,
+        ).await {
+            failures.push(format!("{room_id}: {e}"));
         }
     }
 

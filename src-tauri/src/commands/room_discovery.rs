@@ -627,13 +627,11 @@ pub async fn resolve_room_alias(
     state: State<'_, Arc<AppState>>,
     alias: String,
 ) -> Result<serde_json::Value, String> {
-    let client = super::get_client(&state).await?;
-    let homeserver = client.homeserver().to_string();
-    let access_token = client.access_token().ok_or("No access token")?;
+    let ac = super::get_authed_client(&state).await?;
 
     let url = format!(
         "{}/_matrix/client/v3/directory/room/{}",
-        homeserver.trim_end_matches('/'),
+        ac.homeserver,
         urlencoding::encode(&alias),
     );
 
@@ -641,7 +639,7 @@ pub async fn resolve_room_alias(
         .http_client
         .get(&url)
         .timeout(Duration::from_secs(10))
-        .bearer_auth(access_token.to_string())
+        .bearer_auth(&ac.access_token)
         .send()
         .await
         .map_err(|e| format!("Failed to resolve alias: {}", super::fmt_error_chain(&e)))?;
@@ -667,26 +665,22 @@ pub async fn get_room_parent_spaces(
     state: State<'_, Arc<AppState>>,
     room_id: String,
 ) -> Result<Vec<ParentSpaceInfo>, String> {
-    let client = super::get_client(&state).await?;
+    let ac = super::get_authed_client(&state).await?;
     let parsed =
         matrix_sdk::ruma::RoomId::parse(&room_id).map_err(|e| format!("Invalid room ID: {e}"))?;
-    let _ = client.get_room(&parsed).ok_or("Room not found")?;
-
-    let homeserver = client.homeserver().to_string();
-    let access_token = client.access_token().ok_or("No access token")?;
-    let hs = homeserver.trim_end_matches('/');
+    let _ = ac.client.get_room(&parsed).ok_or("Room not found")?;
 
     // Fetch all room state and filter for m.space.parent events
     let state_url = format!(
         "{}/_matrix/client/v3/rooms/{}/state",
-        hs,
+        ac.homeserver,
         urlencoding::encode(&room_id),
     );
     let resp = state
         .http_client
         .get(&state_url)
         .timeout(Duration::from_secs(15))
-        .bearer_auth(access_token.to_string())
+        .bearer_auth(&ac.access_token)
         .send()
         .await
         .map_err(|e| format!("State fetch failed: {}", fmt_error_chain(&e)))?;
@@ -733,7 +727,7 @@ pub async fn get_room_parent_spaces(
         // Check if user is already a member via the SDK
         let local_room = matrix_sdk::ruma::RoomId::parse(space_id.as_str())
             .ok()
-            .and_then(|rid| client.get_room(&rid));
+            .and_then(|rid| ac.client.get_room(&rid));
 
         if let Some(room) = &local_room {
             let membership = match room.state() {
@@ -758,8 +752,8 @@ pub async fn get_room_parent_spaces(
             // Try to get join_rule from state
             let join_rule = http_get_room_state(
                 &state.http_client,
-                hs,
-                &access_token,
+                &ac.homeserver,
+                &ac.access_token,
                 space_id,
                 "m.room.join_rules/",
             )
@@ -786,14 +780,14 @@ pub async fn get_room_parent_spaces(
             // Not joined — try the hierarchy API to peek at the space
             let hierarchy_url = format!(
                 "{}/_matrix/client/v1/rooms/{}/hierarchy?limit=1",
-                hs,
+                ac.homeserver,
                 urlencoding::encode(space_id),
             );
             let hierarchy_resp = state
                 .http_client
                 .get(&hierarchy_url)
                 .timeout(Duration::from_secs(10))
-                .bearer_auth(access_token.to_string())
+                .bearer_auth(&ac.access_token)
                 .send()
                 .await;
 
