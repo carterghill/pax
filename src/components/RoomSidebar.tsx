@@ -31,6 +31,7 @@ import ParentSpacesDialog from "./ParentSpacesDialog";
 import CreateRoomDialog from "./CreateRoomDialog";
 import type { RoomsChangedPayload } from "../types/roomsChanged";
 import { useUserVolume } from "../hooks/useUserVolume";
+import type { AudioControls } from "../hooks/useAudioControls";
 import { dmPresenceDotColor, effectiveDmTitle, isDmChatUi } from "../utils/dmDisplay";
 import { resolvePresenceWithDnd, parseStatusMsg } from "../utils/statusMessage";
 import {
@@ -211,6 +212,7 @@ interface RoomSidebarProps {
     Record<string, { isMuted: boolean; isDeafened: boolean; isSpeaking: boolean }>
   >;
   onSetParticipantVolume: (identity: string, volume: number, source: string) => void;
+  audioControls: AudioControls;
   /** Called after successfully leaving a room from the context menu */
   onLeftRoom?: (roomId: string) => void;
   /** Active space (for moderation scope in room settings when the room is in its tree). */
@@ -691,6 +693,7 @@ export default function RoomSidebar({
   screenSharingOwners,
   voiceParticipantStatesByRoom,
   onSetParticipantVolume,
+  audioControls,
   onLeftRoom,
   activeSpaceId,
   roomsBySpace,
@@ -1817,7 +1820,12 @@ export default function RoomSidebar({
 
       {/* User status at bottom — flexShrink: 0 so it stays full width */}
       <div style={{ flexShrink: 0 }}>
-        <StatusDropdown displayName={displayName} avatarUrl={userAvatarUrl} userId={userId} />
+        <StatusDropdown
+          displayName={displayName}
+          avatarUrl={userAvatarUrl}
+          userId={userId}
+          audioControls={audioControls}
+        />
       </div>
 
       {/* Volume context menu */}

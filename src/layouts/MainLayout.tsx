@@ -11,6 +11,7 @@ import type { Room } from "../types/matrix";
 import { usePresence } from "../hooks/usePresence";
 import { useVoiceParticipants } from "../hooks/useVoiceParticipants";
 import { useVoiceCall } from "../hooks/useVoiceCall";
+import { useAudioControls } from "../hooks/useAudioControls";
 import { useUnreadRooms, useSpaceUnreadRollup } from "../hooks/useUnreadRooms";
 import {
   useNotificationSettings,
@@ -139,6 +140,7 @@ export default function MainLayout({
 
   const { manualStatus, setManualStatus, effectivePresence, statusMessage, setStatusMessage } = usePresence();
   const voiceCall = useVoiceCall();
+  const audioControls = useAudioControls(voiceCall);
   // Unread state for every joined room, used by the sidebar to paint rooms in
   // the primary colour when they have unread activity.  The hook is scoped to
   // MainLayout so one subscription serves both the sidebar today and future
@@ -1263,6 +1265,7 @@ export default function MainLayout({
         screenSharingOwners={voiceCall.screenSharingOwners}
         voiceParticipantStatesByRoom={voiceParticipantStatesByRoom}
         onSetParticipantVolume={voiceCall.setParticipantVolume}
+        audioControls={audioControls}
         onLeftRoom={handleLeftRoom}
         activeSpaceId={activeSpaceId}
         roomsBySpace={roomsBySpace}
