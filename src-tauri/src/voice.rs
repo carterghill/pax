@@ -2322,13 +2322,8 @@ fn setup_speaker_output_linux(
 
 // ─── Linux: GStreamer pulsesrc mic capture ───────────────────────────────────
 
-/// Find a real, non-Bluetooth microphone source when the default is unsuitable.
+/// Find a real microphone source when the default is a `.monitor` loopback.
 /// Returns the PulseAudio source name to use, or None to let pulsesrc pick.
-///
-/// Avoids two categories of bad defaults:
-///   1. `.monitor` loopback sources (captures desktop audio, not mic)
-///   2. `bluez_` Bluetooth sources — using these forces PipeWire to switch the
-///      BT profile from A2DP (high-quality stereo) to HSP/HFP (low-quality mono)
 #[cfg(target_os = "linux")]
 fn find_best_default_source() -> Option<String> {
     use std::process::Command;
@@ -2345,18 +2340,9 @@ fn find_best_default_source() -> Option<String> {
         .strip_prefix("Default Source:")?
         .trim();
 
-    let is_monitor = current.ends_with(".monitor");
-    let is_bluetooth = current.starts_with("bluez_");
-
-    if !is_monitor && !is_bluetooth {
+    if !current.ends_with(".monitor") {
         return None;
     }
-
-    let reason = if is_bluetooth {
-        "a Bluetooth device"
-    } else {
-        "a monitor"
-    };
 
     let list = Command::new("pactl")
         .args(["list", "sources", "short"])
@@ -2366,14 +2352,10 @@ fn find_best_default_source() -> Option<String> {
 
     for line in list.lines() {
         let parts: Vec<&str> = line.split_whitespace().collect();
-        if parts.len() >= 2
-            && !parts[1].ends_with(".monitor")
-            && !parts[1].starts_with("bluez_")
-        {
+        if parts.len() >= 2 && !parts[1].ends_with(".monitor") {
             log::info!(
-                "Linux mic: default source '{}' is {}, using '{}' instead",
+                "Linux mic: default source '{}' is a monitor, using '{}' instead",
                 current,
-                reason,
                 parts[1]
             );
             return Some(parts[1].to_string());
@@ -2381,11 +2363,28 @@ fn find_best_default_source() -> Option<String> {
     }
 
     log::warn!(
-        "Linux mic: default source '{}' is {} but no alternative mic found",
-        current,
-        reason
+        "Linux mic: default source '{}' is a monitor but no real mic found",
+        current
     );
     None
+}
+
+/// Check whether the PulseAudio default source is a Bluetooth device.
+#[cfg(target_os = "linux")]
+fn is_default_source_bluetooth() -> bool {
+    use std::process::Command;
+
+    Command::new("pactl")
+        .args(["info"])
+        .output()
+        .ok()
+        .and_then(|o| String::from_utf8(o.stdout).ok())
+        .and_then(|info| {
+            info.lines()
+                .find(|l| l.trim().starts_with("Default Source:"))
+                .map(|l| l.trim().trim_start_matches("Default Source:").trim().starts_with("bluez_"))
+        })
+        .unwrap_or(false)
 }
 
 /// Snapshot current Bluetooth card profiles so we can restore them after
@@ -2464,13 +2463,12 @@ fn setup_mic_input_linux(
             .map(AudioStream::Cpal);
     }
 
-    let saved_bt_profiles = snapshot_bluetooth_profiles();
-
     // Determine which PulseAudio source to use
-    let device_prop = match preferred_device_id {
+    let (device_prop, using_bt_source) = match preferred_device_id {
         Some(id) if !id.is_empty() => {
             log::info!("Linux mic: using user-selected source '{}'", id);
-            format!(" device=\"{}\"", id)
+            let is_bt = id.starts_with("bluez_");
+            (format!(" device=\"{}\"", id), is_bt)
         }
         _ => {
             match find_best_default_source() {
@@ -2479,14 +2477,22 @@ fn setup_mic_input_linux(
                         "Linux mic: auto-selected source '{}'",
                         source
                     );
-                    format!(" device=\"{}\"", source)
+                    let is_bt = source.starts_with("bluez_");
+                    (format!(" device=\"{}\"", source), is_bt)
                 }
                 None => {
+                    let is_bt = is_default_source_bluetooth();
                     log::info!("Linux mic: using PulseAudio default source");
-                    String::new() // pulsesrc with no device= uses @DEFAULT_SOURCE@
+                    (String::new(), is_bt)
                 }
             }
         }
+    };
+
+    let saved_bt_profiles = if using_bt_source {
+        Vec::new()
+    } else {
+        snapshot_bluetooth_profiles()
     };
 
     let pipeline_str = format!(
@@ -2516,14 +2522,17 @@ fn setup_mic_input_linux(
         .downcast::<gstreamer::Pipeline>()
         .map_err(|_| "Failed to cast mic pipeline")?;
 
-    // Prevent PipeWire from auto-switching Bluetooth headphones to HSP/HFP
-    // when this recording stream opens. media.role=game is not in the default
+    // When recording from a non-BT source, prevent PipeWire from auto-switching
+    // Bluetooth headphones to HSP/HFP. media.role=game is not in the default
     // autoswitch-roles list, so bluetooth-policy leaves A2DP alone.
-    if let Some(pulsesrc) = pipeline.by_name("paxsrc") {
-        let props = gstreamer::Structure::builder("props")
-            .field("media.role", "game")
-            .build();
-        pulsesrc.set_property("stream-properties", &props);
+    // When recording FROM a BT source, let the HSP/HFP switch happen — the mic needs it.
+    if !using_bt_source {
+        if let Some(pulsesrc) = pipeline.by_name("paxsrc") {
+            let props = gstreamer::Structure::builder("props")
+                .field("media.role", "game")
+                .build();
+            pulsesrc.set_property("stream-properties", &props);
+        }
     }
 
     let appsink = pipeline
