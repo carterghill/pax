@@ -406,11 +406,17 @@ pub fn run() {
         .register_uri_scheme_protocol("paxvideo", |_app, request| {
             video_recv::handle_protocol_request(request)
         })
-        .register_uri_scheme_protocol("paxmatrixmedia", |ctx, request| {
-            commands::media_protocol::handle_matrix_media_protocol_request(
-                ctx.app_handle().clone(),
-                request,
-            )
+        // Asynchronous so slow federation downloads and compat transcodes
+        // never block the webview's protocol thread (other media requests
+        // keep flowing while a video converts).
+        .register_asynchronous_uri_scheme_protocol("paxmatrixmedia", |ctx, request, responder| {
+            let app = ctx.app_handle().clone();
+            tauri::async_runtime::spawn(async move {
+                responder.respond(
+                    commands::media_protocol::handle_matrix_media_protocol_request(app, request)
+                        .await,
+                );
+            });
         })
         .invoke_handler(tauri::generate_handler![
             commands::auth::logout,

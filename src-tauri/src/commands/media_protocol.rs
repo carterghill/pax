@@ -24,9 +24,9 @@ pub(super) const MATRIX_IMAGE_FULL_FETCH_TIMEOUT: Duration = Duration::from_secs
 const MATRIX_MEDIA_RANGE_WINDOW: u64 = 2 * 1024 * 1024;
 
 #[derive(Clone, Copy)]
-struct MediaByteRange {
-    start: u64,
-    end: u64,
+pub(super) struct MediaByteRange {
+    pub(super) start: u64,
+    pub(super) end: u64,
 }
 
 impl MediaByteRange {
@@ -117,7 +117,7 @@ pub(super) async fn get_plain_matrix_file_bytes_direct(
     Err(last_err)
 }
 
-fn media_protocol_response(
+pub(super) fn media_protocol_response(
     status: u16,
     body: impl Into<Vec<u8>>,
 ) -> tauri::http::Response<Vec<u8>> {
@@ -144,7 +144,7 @@ fn query_param(query: Option<&str>, key: &str) -> Option<String> {
     })
 }
 
-fn parse_media_byte_range(range_header: &str) -> Option<MediaByteRange> {
+pub(super) fn parse_media_byte_range(range_header: &str) -> Option<MediaByteRange> {
     let range = range_header.strip_prefix("bytes=")?;
     let first_range = range.split(',').next()?.trim();
     let (start, end) = first_range.split_once('-')?;
@@ -184,6 +184,34 @@ fn sniff_iso_bmff_brand(bytes: &[u8]) -> Option<String> {
     }
 
     Some(format!("major={major} compatible={}", compatible.join(",")))
+}
+
+/// Best-effort scan for ISO-BMFF `stsd` sample entries so the log shows the
+/// actual codec fourCCs (`vp09`, `hvc1`, `avc1`, `mp4a`, …) of streamed
+/// videos — exactly the information needed to explain a WebKitGTK refusal.
+/// Only works when the buffered bytes include (part of) a leading `moov`.
+fn sniff_mp4_sample_codecs(bytes: &[u8]) -> Option<String> {
+    let mut found: Vec<String> = Vec::new();
+    for i in 4..bytes.len().saturating_sub(4) {
+        if &bytes[i..i + 4] != b"stsd" {
+            continue;
+        }
+        // Box start is i-4; first sample entry's format fourCC sits at
+        // start+20 (size, 'stsd', version+flags, entry_count, entry size).
+        let fourcc_at = i + 16;
+        if fourcc_at + 4 > bytes.len() {
+            continue;
+        }
+        let cc = String::from_utf8_lossy(&bytes[fourcc_at..fourcc_at + 4]).to_string();
+        if cc.chars().all(|c| c.is_ascii_graphic() || c == ' ') && !found.contains(&cc) {
+            found.push(cc);
+        }
+    }
+    if found.is_empty() {
+        None
+    } else {
+        Some(found.join(","))
+    }
 }
 
 fn normalize_stream_content_type(content_type: &str, body: &[u8]) -> String {
@@ -235,7 +263,7 @@ async fn collect_upstream_range(
     Ok(collected)
 }
 
-async fn handle_matrix_media_protocol_request_async(
+pub async fn handle_matrix_media_protocol_request(
     app: AppHandle,
     request: tauri::http::Request<Vec<u8>>,
 ) -> tauri::http::Response<Vec<u8>> {
@@ -277,6 +305,26 @@ async fn handle_matrix_media_protocol_request_async(
             return media_protocol_response(401, e);
         }
     };
+
+    // Compat mode: the webview failed to play the original (unsupported
+    // codec/container combo), so serve a rewrapped/transcoded copy instead.
+    if query_param(request.uri().query(), "compat").as_deref() == Some("1") {
+        #[cfg(target_os = "linux")]
+        {
+            return super::media_compat::serve_compat_media(
+                state.inner(),
+                &client,
+                &params,
+                inbound_range.as_deref(),
+            )
+            .await;
+        }
+        #[cfg(not(target_os = "linux"))]
+        {
+            log::warn!("[matrix media stream] reject: compat conversion only available on linux");
+            return media_protocol_response(404, "compat conversion only available on linux");
+        }
+    }
     let access_token = match client.access_token() {
         Some(token) => token.to_string(),
         None => {
@@ -404,7 +452,7 @@ async fn handle_matrix_media_protocol_request_async(
         let normalized_content_type = normalize_stream_content_type(&content_type, &body);
 
         log::info!(
-            "[matrix media stream] matrix response endpoint={} status={} content_type={} normalized_content_type={} content_length={} content_range={} accept_ranges={} content_disposition={} emulated_range={} iso_bmff={} body_bytes={} elapsed_ms={}",
+            "[matrix media stream] matrix response endpoint={} status={} content_type={} normalized_content_type={} content_length={} content_range={} accept_ranges={} content_disposition={} emulated_range={} iso_bmff={} codecs={} body_bytes={} elapsed_ms={}",
             endpoint,
             status,
             content_type,
@@ -417,6 +465,7 @@ async fn handle_matrix_media_protocol_request_async(
                 .map(|r| format!("{}-{}", r.start, r.end))
                 .unwrap_or_else(|| "<none>".to_string()),
             sniff_iso_bmff_brand(&body).unwrap_or_else(|| "<none>".to_string()),
+            sniff_mp4_sample_codecs(&body).unwrap_or_else(|| "<none>".to_string()),
             body.len(),
             started_at.elapsed().as_millis(),
         );
@@ -497,11 +546,4 @@ async fn handle_matrix_media_protocol_request_async(
         started_at.elapsed().as_millis(),
     );
     media_protocol_response(last_status, last_body)
-}
-
-pub fn handle_matrix_media_protocol_request(
-    app: AppHandle,
-    request: tauri::http::Request<Vec<u8>>,
-) -> tauri::http::Response<Vec<u8>> {
-    tauri::async_runtime::block_on(handle_matrix_media_protocol_request_async(app, request))
 }

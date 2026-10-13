@@ -7,6 +7,7 @@ import {
 } from "../api";
 import {
   formatBinaryBytes,
+  extractImagePreviewMeta,
   streamFileToStaging,
   type PendingAttachment,
   UPLOAD_HTTP_END,
@@ -162,6 +163,9 @@ export function useComposerFileUpload({
             contentUri: null,
             byteSize: null,
             previewUrl,
+            blurhash: null,
+            imageWidth: null,
+            imageHeight: null,
             phase: "error",
             progress01: 0,
             errorMessage: `This file is ${formatBinaryBytes(file.size)} but your homeserver only allows ${formatBinaryBytes(maxBytes)} per upload (Matrix media limit).`,
@@ -179,12 +183,32 @@ export function useComposerFileUpload({
           contentUri: null,
           byteSize: null,
           previewUrl,
+          blurhash: null,
+          imageWidth: null,
+          imageHeight: null,
           phase: "reading",
           progress01: 0,
         };
         pendingFileRef.current = next;
         setPendingFile(next);
         void prepareAttachment(uploadId);
+
+        if (previewUrl) {
+          void extractImagePreviewMeta(previewUrl).then((meta) => {
+            if (!meta) return;
+            const patch: Partial<PendingAttachment> = {
+              blurhash: meta.blurhash,
+              imageWidth: meta.width,
+              imageHeight: meta.height,
+            };
+            setPendingFile((p) =>
+              p?.uploadId === uploadId ? { ...p, ...patch } : p,
+            );
+            if (pendingFileRef.current?.uploadId === uploadId) {
+              pendingFileRef.current = { ...pendingFileRef.current, ...patch };
+            }
+          });
+        }
       } catch (err) {
         console.error("Failed to read file:", err);
       }

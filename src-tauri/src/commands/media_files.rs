@@ -185,6 +185,9 @@ fn build_file_room_message(
     content_type: mime::Mime,
     file_size: Option<UInt>,
     caption: Option<String>,
+    blurhash: Option<String>,
+    image_width: Option<u32>,
+    image_height: Option<u32>,
 ) -> RoomMessageEventContent {
     use matrix_sdk::ruma::events::room::message::MessageType;
     use matrix_sdk::ruma::events::room::MediaSource;
@@ -203,6 +206,9 @@ fn build_file_room_message(
         let mut info = ImageInfo::new();
         info.mimetype = Some(content_type.to_string());
         info.size = file_size;
+        info.blurhash = blurhash;
+        info.width = image_width.and_then(|n| UInt::try_from(u64::from(n)).ok());
+        info.height = image_height.and_then(|n| UInt::try_from(u64::from(n)).ok());
 
         let mut img = ImageMessageEventContent::new(body_text, MediaSource::Plain(mxc_uri));
         img.info = Some(Box::new(info));
@@ -564,6 +570,9 @@ async fn send_file_message_impl(
     mime_type: &str,
     file_size_bytes: Option<u64>,
     caption: Option<&str>,
+    blurhash: Option<&str>,
+    image_width: Option<u32>,
+    image_height: Option<u32>,
 ) -> Result<String, String> {
     let client = get_client(state).await?;
     let room = resolve_room(&client, room_id)?;
@@ -580,6 +589,9 @@ async fn send_file_message_impl(
         content_type,
         file_size,
         caption.map(|s| s.to_string()),
+        blurhash.map(|s| s.to_string()),
+        image_width,
+        image_height,
     );
 
     let response = room
@@ -614,6 +626,9 @@ pub async fn send_file_message(
     mime_type: String,
     file_size: Option<u64>,
     caption: Option<String>,
+    blurhash: Option<String>,
+    image_width: Option<u32>,
+    image_height: Option<u32>,
 ) -> Result<String, String> {
     send_file_message_impl(
         &state,
@@ -623,6 +638,9 @@ pub async fn send_file_message(
         &mime_type,
         file_size,
         caption.as_deref(),
+        blurhash.as_deref(),
+        image_width,
+        image_height,
     )
     .await
 }
@@ -670,6 +688,9 @@ pub async fn upload_and_send_file(
         &mime_type,
         Some(byte_size),
         caption.as_deref(),
+        None,
+        None,
+        None,
     )
     .await?;
 

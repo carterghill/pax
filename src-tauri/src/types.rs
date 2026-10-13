@@ -83,6 +83,9 @@ pub struct MessageInfo {
     pub image_width: Option<u32>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub image_height: Option<u32>,
+    /// Blurhash placeholder string for `m.image` (MSC2448 `xyz.amorgan.blurhash`).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub image_blurhash: Option<String>,
     /// When set, the message is a video; same download path as images (`get_matrix_image_path`).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub video_media_request: Option<serde_json::Value>,
@@ -238,6 +241,7 @@ pub struct MessageEditPayload {
     pub file_display_name: serde_json::Value,
     pub image_width: serde_json::Value,
     pub image_height: serde_json::Value,
+    pub image_blurhash: serde_json::Value,
     pub video_width: serde_json::Value,
     pub video_height: serde_json::Value,
     /// `null` when the edited event is not an unsupported `msgtype` row.

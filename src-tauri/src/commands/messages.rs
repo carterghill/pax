@@ -244,6 +244,7 @@ pub async fn get_messages(
         file_display_name: Option<String>,
         image_width: Option<u32>,
         image_height: Option<u32>,
+        image_blurhash: Option<String>,
         video_width: Option<u32>,
         video_height: Option<u32>,
         unsupported_matrix_msgtype: Option<String>,
@@ -265,6 +266,7 @@ pub async fn get_messages(
             Option<String>,
             Option<u32>,
             Option<u32>,
+            Option<String>,
             Option<u32>,
             Option<u32>,
             Option<String>,
@@ -370,7 +372,7 @@ pub async fn get_messages(
                     let ts: u64 = original.origin_server_ts.0.into();
                     let replace = match latest_replacement.get(&target) {
                         None => true,
-                        Some((_, _, _, _, _, _, _, _, _, _, _, prev_ts)) => ts >= *prev_ts,
+                        Some((_, _, _, _, _, _, _, _, _, _, _, _, prev_ts)) => ts >= *prev_ts,
                     };
                     if replace {
                         latest_replacement.insert(
@@ -384,6 +386,7 @@ pub async fn get_messages(
                                 ext.file_display_name.clone(),
                                 ext.image_width,
                                 ext.image_height,
+                                ext.image_blurhash.clone(),
                                 ext.video_width,
                                 ext.video_height,
                                 ext.unsupported_matrix_msgtype.clone(),
@@ -414,6 +417,7 @@ pub async fn get_messages(
                     file_display_name: ext.file_display_name,
                     image_width: ext.image_width,
                     image_height: ext.image_height,
+                    image_blurhash: ext.image_blurhash,
                     video_width: ext.video_width,
                     video_height: ext.video_height,
                     unsupported_matrix_msgtype: ext.unsupported_matrix_msgtype,
@@ -481,12 +485,13 @@ pub async fn get_messages(
                 file_display_name,
                 image_width,
                 image_height,
+                image_blurhash,
                 video_width,
                 video_height,
                 unsupported_matrix_msgtype,
             ) = latest_replacement
                 .get(&m.event_id)
-                .map(|(b, img, vid, file, fm, fd, iw, ih, vw, vh, unsup, _ts)| {
+                .map(|(b, img, vid, file, fm, fd, iw, ih, ibh, vw, vh, unsup, _ts)| {
                     (
                         b.clone(),
                         img.clone(),
@@ -496,6 +501,7 @@ pub async fn get_messages(
                         fd.clone(),
                         *iw,
                         *ih,
+                        ibh.clone(),
                         *vw,
                         *vh,
                         unsup.clone(),
@@ -511,6 +517,7 @@ pub async fn get_messages(
                         m.file_display_name.clone(),
                         m.image_width,
                         m.image_height,
+                        m.image_blurhash.clone(),
                         m.video_width,
                         m.video_height,
                         m.unsupported_matrix_msgtype.clone(),
@@ -529,6 +536,7 @@ pub async fn get_messages(
                 image_media_request,
                 image_width,
                 image_height,
+                image_blurhash,
                 video_media_request,
                 video_width,
                 video_height,
@@ -705,6 +713,7 @@ async fn build_message_infos_from_timeline_events(
         file_display_name: Option<String>,
         image_width: Option<u32>,
         image_height: Option<u32>,
+        image_blurhash: Option<String>,
         video_width: Option<u32>,
         video_height: Option<u32>,
         unsupported_matrix_msgtype: Option<String>,
@@ -724,6 +733,7 @@ async fn build_message_infos_from_timeline_events(
             Option<String>,
             Option<u32>,
             Option<u32>,
+            Option<String>,
             Option<u32>,
             Option<u32>,
             Option<String>,
@@ -754,7 +764,7 @@ async fn build_message_infos_from_timeline_events(
                         let ts: u64 = original.origin_server_ts.0.into();
                         let replace = match latest_replacement.get(&target) {
                             None => true,
-                            Some((_, _, _, _, _, _, _, _, _, _, _, prev_ts)) => ts >= *prev_ts,
+                            Some((_, _, _, _, _, _, _, _, _, _, _, _, prev_ts)) => ts >= *prev_ts,
                         };
                         if replace {
                             latest_replacement.insert(
@@ -768,6 +778,7 @@ async fn build_message_infos_from_timeline_events(
                                     ext.file_display_name.clone(),
                                     ext.image_width,
                                     ext.image_height,
+                                    ext.image_blurhash.clone(),
                                     ext.video_width,
                                     ext.video_height,
                                     ext.unsupported_matrix_msgtype.clone(),
@@ -798,6 +809,7 @@ async fn build_message_infos_from_timeline_events(
                         file_display_name: ext.file_display_name,
                         image_width: ext.image_width,
                         image_height: ext.image_height,
+                        image_blurhash: ext.image_blurhash,
                         video_width: ext.video_width,
                         video_height: ext.video_height,
                         unsupported_matrix_msgtype: ext.unsupported_matrix_msgtype,
@@ -843,12 +855,13 @@ async fn build_message_infos_from_timeline_events(
                 file_display_name,
                 image_width,
                 image_height,
+                image_blurhash,
                 video_width,
                 video_height,
                 unsupported_matrix_msgtype,
             ) = latest_replacement
                 .get(&m.event_id)
-                .map(|(b, img, vid, file, fm, fd, iw, ih, vw, vh, unsup, _ts)| {
+                .map(|(b, img, vid, file, fm, fd, iw, ih, ibh, vw, vh, unsup, _ts)| {
                     (
                         b.clone(),
                         img.clone(),
@@ -858,6 +871,7 @@ async fn build_message_infos_from_timeline_events(
                         fd.clone(),
                         *iw,
                         *ih,
+                        ibh.clone(),
                         *vw,
                         *vh,
                         unsup.clone(),
@@ -873,6 +887,7 @@ async fn build_message_infos_from_timeline_events(
                         m.file_display_name.clone(),
                         m.image_width,
                         m.image_height,
+                        m.image_blurhash.clone(),
                         m.video_width,
                         m.video_height,
                         m.unsupported_matrix_msgtype.clone(),
@@ -891,6 +906,7 @@ async fn build_message_infos_from_timeline_events(
                 image_media_request,
                 image_width,
                 image_height,
+                image_blurhash,
                 video_media_request,
                 video_width,
                 video_height,
@@ -1335,6 +1351,11 @@ pub async fn start_sync(
                     .clone()
                     .map(serde_json::Value::String)
                     .unwrap_or(serde_json::Value::Null);
+                let image_blurhash = ext
+                    .image_blurhash
+                    .clone()
+                    .map(serde_json::Value::String)
+                    .unwrap_or(serde_json::Value::Null);
                 let payload = MessageEditPayload {
                     room_id,
                     target_event_id: repl.event_id.to_string(),
@@ -1346,6 +1367,7 @@ pub async fn start_sync(
                     file_display_name,
                     image_width: json_u32(ext.image_width),
                     image_height: json_u32(ext.image_height),
+                    image_blurhash,
                     video_width: json_u32(ext.video_width),
                     video_height: json_u32(ext.video_height),
                     unsupported_matrix_msgtype,
@@ -1438,6 +1460,7 @@ pub async fn start_sync(
                     image_media_request: ext.image_media_request,
                     image_width: ext.image_width,
                     image_height: ext.image_height,
+                    image_blurhash: ext.image_blurhash,
                     video_media_request: ext.video_media_request,
                     video_width: ext.video_width,
                     video_height: ext.video_height,

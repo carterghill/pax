@@ -64,6 +64,9 @@ export interface SendFileMessageRequest {
   mimeType: string;
   fileSize?: number | null;
   caption?: string | null;
+  blurhash?: string | null;
+  imageWidth?: number | null;
+  imageHeight?: number | null;
 }
 
 export interface UploadAndSendFileRequest {
@@ -197,6 +200,9 @@ export function sendFileMessage(request: SendFileMessageRequest): Promise<string
     mimeType: request.mimeType,
     fileSize: request.fileSize ?? null,
     caption: request.caption ?? null,
+    blurhash: request.blurhash ?? null,
+    imageWidth: request.imageWidth ?? null,
+    imageHeight: request.imageHeight ?? null,
   });
 }
 

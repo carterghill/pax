@@ -24,6 +24,7 @@ interface MessageEditPayload {
   fileDisplayName: unknown | null;
   imageWidth: unknown | null;
   imageHeight: unknown | null;
+  imageBlurhash: unknown | null;
   videoWidth: unknown | null;
   videoHeight: unknown | null;
   unsupportedMatrixMsgtype: unknown | null;
@@ -304,6 +305,7 @@ function applyMessageEdit(arr: Message[], payload: MessageEditPayload): Message[
     fileDisplayName: _ofd,
     imageWidth: _oiw,
     imageHeight: _oih,
+    imageBlurhash: _oibh,
     videoWidth: _ovw,
     videoHeight: _ovh,
     unsupportedMatrixMsgtype: _ou,
@@ -325,6 +327,10 @@ function applyMessageEdit(arr: Message[], payload: MessageEditPayload): Message[
       imageMediaRequest,
       imageWidth: editPayloadDimension(payload.imageWidth),
       imageHeight: editPayloadDimension(payload.imageHeight),
+      imageBlurhash:
+        typeof payload.imageBlurhash === "string"
+          ? payload.imageBlurhash
+          : undefined,
     };
   } else if (videoMediaRequest != null) {
     nextMessage = {

@@ -74,6 +74,8 @@ export interface Message {
   /** From Matrix `m.image` `info` when present (inline layout / loading placeholder). */
   imageWidth?: number;
   imageHeight?: number;
+  /** Blurhash placeholder string from `m.image` `info` (MSC2448). */
+  imageBlurhash?: string;
   /** Matrix `m.video` payload: serialized `MediaRequestParameters` for authenticated download. */
   videoMediaRequest?: unknown;
   videoWidth?: number;

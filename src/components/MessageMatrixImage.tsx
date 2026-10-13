@@ -1,10 +1,12 @@
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { Loader2 } from "lucide-react";
 import { convertFileSrc, invoke } from "@tauri-apps/api/core";
+import { decode } from "blurhash";
 import { useTheme } from "../theme/ThemeContext";
-import { inlineMediaAspectBoxStyle } from "../utils/inlineMediaLayout";
 
 const INLINE_IMAGE_MAX_HEIGHT = 400;
+const BLURHASH_W = 32;
+const BLURHASH_H = 32;
 
 function formatInvokeError(err: unknown): string {
   if (typeof err === "string") return err;
@@ -16,12 +18,32 @@ function formatInvokeError(err: unknown): string {
   }
 }
 
+function decodeBlurhashToDataUrl(
+  hash: string,
+  width: number,
+  height: number,
+): string | null {
+  try {
+    const pixels = decode(hash, width, height);
+    const canvas = document.createElement("canvas");
+    canvas.width = width;
+    canvas.height = height;
+    const ctx = canvas.getContext("2d");
+    if (!ctx) return null;
+    const imageData = ctx.createImageData(width, height);
+    imageData.data.set(pixels);
+    ctx.putImageData(imageData, 0, 0);
+    return canvas.toDataURL();
+  } catch {
+    return null;
+  }
+}
+
 interface MessageMatrixImageProps {
   request: unknown;
-  /** Matrix `m.image` `info` dimensions when known (layout / placeholder). */
   metaWidth?: number;
   metaHeight?: number;
-  /** Opens the full-screen media viewer (Discord-style lightbox). */
+  blurhash?: string;
   onExpand?: () => void;
 }
 
@@ -29,24 +51,27 @@ export default function MessageMatrixImage({
   request,
   metaWidth,
   metaHeight,
+  blurhash,
   onExpand,
 }: MessageMatrixImageProps) {
   const { palette, typography, spacing } = useTheme();
   const [src, setSrc] = useState<string | null>(null);
+  const [loaded, setLoaded] = useState(false);
   const [failed, setFailed] = useState(false);
   const [errorDetail, setErrorDetail] = useState<string | null>(null);
   const imgRef = useRef<HTMLImageElement>(null);
 
   const requestKey = JSON.stringify(request);
 
-  const reserve =
-    metaWidth != null && metaHeight != null
-      ? inlineMediaAspectBoxStyle(metaWidth, metaHeight, INLINE_IMAGE_MAX_HEIGHT)
-      : null;
+  const blurhashDataUrl = useMemo(
+    () => (blurhash ? decodeBlurhashToDataUrl(blurhash, BLURHASH_W, BLURHASH_H) : null),
+    [blurhash],
+  );
 
   useEffect(() => {
     let cancelled = false;
     setSrc(null);
+    setLoaded(false);
     setFailed(false);
     setErrorDetail(null);
 
@@ -81,24 +106,12 @@ export default function MessageMatrixImage({
     };
   }, [requestKey]);
 
-  // Release decoded image data when src changes or component unmounts
   useEffect(() => {
     const img = imgRef.current;
     return () => {
       if (img) img.src = "";
     };
   }, [src]);
-
-  const imgStyle: React.CSSProperties = {
-    width: "auto" as const,
-    maxWidth: "100%",
-    maxHeight: INLINE_IMAGE_MAX_HEIGHT,
-    height: "auto" as const,
-    borderRadius: spacing.unit,
-    display: "block" as const,
-    marginTop: spacing.unit,
-    marginBottom: spacing.unit,
-  };
 
   if (failed) {
     return (
@@ -130,38 +143,11 @@ export default function MessageMatrixImage({
     );
   }
 
-  if (!src) {
-    return (
-      <div
-        style={{
-          marginTop: spacing.unit,
-          marginBottom: spacing.unit,
-        }}
-      >
-        <div
-          style={{
-            ...reserve,
-            minHeight: reserve ? undefined : spacing.unit * 10,
-            borderRadius: spacing.unit,
-            backgroundColor: palette.bgTertiary,
-            display: "flex",
-            alignItems: "center",
-            justifyContent: "center",
-            color: palette.textSecondary,
-          }}
-          aria-busy
-          aria-label="Loading image"
-        >
-          <Loader2
-            size={22}
-            strokeWidth={2}
-            style={{ animation: "spin 0.9s linear infinite" }}
-            aria-hidden
-          />
-        </div>
-      </div>
-    );
-  }
+  const hasMeta =
+    metaWidth != null &&
+    metaHeight != null &&
+    metaWidth > 0 &&
+    metaHeight > 0;
 
   const handleError = () => {
     setFailed(true);
@@ -169,68 +155,126 @@ export default function MessageMatrixImage({
     setSrc(null);
   };
 
-  const hasMeta =
-    metaWidth != null &&
-    metaHeight != null &&
-    metaWidth > 0 &&
-    metaHeight > 0;
-
-  if (!onExpand) {
-    return (
-      <img
-        ref={imgRef}
-        src={src}
-        alt=""
-        width={hasMeta ? metaWidth : undefined}
-        height={hasMeta ? metaHeight : undefined}
-        loading="lazy"
-        decoding="async"
-        draggable={false}
-        style={imgStyle}
-        onError={handleError}
-      />
-    );
+  let placeholderW: number;
+  let placeholderH: number;
+  if (hasMeta) {
+    if (metaHeight > INLINE_IMAGE_MAX_HEIGHT) {
+      placeholderH = INLINE_IMAGE_MAX_HEIGHT;
+      placeholderW = (metaWidth / metaHeight) * INLINE_IMAGE_MAX_HEIGHT;
+    } else {
+      placeholderW = metaWidth;
+      placeholderH = metaHeight;
+    }
+  } else {
+    placeholderW = INLINE_IMAGE_MAX_HEIGHT;
+    placeholderH = INLINE_IMAGE_MAX_HEIGHT;
   }
 
+  const imgProps = {
+    ref: imgRef,
+    src: src ?? undefined,
+    alt: "",
+    width: hasMeta ? metaWidth : undefined,
+    height: hasMeta ? metaHeight : undefined,
+    decoding: "async" as const,
+    draggable: false,
+    onLoad: () => setLoaded(true),
+    onError: handleError,
+  };
+
+  const imgStyle: React.CSSProperties = {
+    width: "auto",
+    maxWidth: "100%",
+    maxHeight: INLINE_IMAGE_MAX_HEIGHT,
+    height: "auto",
+    borderRadius: spacing.unit,
+    display: "block",
+  };
+
+  const Wrapper = onExpand ? "span" : "div";
+  const wrapperProps = onExpand
+    ? {
+        role: "button" as const,
+        tabIndex: 0,
+        onClick: onExpand,
+        onKeyDown: (e: React.KeyboardEvent) => {
+          if (e.key === "Enter" || e.key === " ") {
+            e.preventDefault();
+            onExpand();
+          }
+        },
+      }
+    : {};
+
   return (
-    <span
-      role="button"
-      tabIndex={0}
-      onClick={onExpand}
-      onKeyDown={(e) => {
-        if (e.key === "Enter" || e.key === " ") {
-          e.preventDefault();
-          onExpand();
-        }
-      }}
+    <Wrapper
+      {...wrapperProps}
       style={{
         display: "inline-block",
-        cursor: "pointer",
         marginTop: spacing.unit,
         marginBottom: spacing.unit,
         borderRadius: spacing.unit,
         outline: "none",
+        position: "relative",
+        cursor: onExpand ? "pointer" : undefined,
       }}
     >
-      <img
-        ref={imgRef}
-        src={src}
-        alt=""
-        width={hasMeta ? metaWidth : undefined}
-        height={hasMeta ? metaHeight : undefined}
-        loading="lazy"
-        decoding="async"
-        draggable={false}
-        style={{
-          width: "auto",
-          maxWidth: "100%",
-          maxHeight: INLINE_IMAGE_MAX_HEIGHT,
-          height: "auto",
-          borderRadius: spacing.unit,
-          display: "block",
-        }}
-        onError={handleError}
-      />
-    </span>
+      {!loaded && (
+        <div
+          style={{
+            width: placeholderW,
+            height: placeholderH,
+            maxWidth: "100%",
+            maxHeight: INLINE_IMAGE_MAX_HEIGHT,
+            borderRadius: spacing.unit,
+            overflow: "hidden",
+            backgroundColor: palette.bgTertiary,
+            display: "flex",
+            alignItems: "center",
+            justifyContent: "center",
+            color: palette.textSecondary,
+            position: "relative",
+          }}
+          aria-busy
+          aria-label="Loading image"
+        >
+          {blurhashDataUrl && (
+            <img
+              src={blurhashDataUrl}
+              alt=""
+              aria-hidden
+              style={{
+                position: "absolute",
+                inset: 0,
+                width: "100%",
+                height: "100%",
+                objectFit: "cover",
+                borderRadius: spacing.unit,
+              }}
+            />
+          )}
+          <Loader2
+            size={22}
+            strokeWidth={2}
+            style={{
+              animation: "spin 0.9s linear infinite",
+              position: "relative",
+            }}
+            aria-hidden
+          />
+        </div>
+      )}
+      {src && (
+        <img
+          {...imgProps}
+          style={{
+            ...imgStyle,
+            ...(loaded
+              ? {}
+              : { position: "absolute", opacity: 0, pointerEvents: "none" }),
+          }}
+        />
+      )}
+    </Wrapper>
   );
 }

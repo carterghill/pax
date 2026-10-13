@@ -114,7 +114,8 @@ fn cleanup_temp_files(app: &mut tauri::App) {
             let is_proxy_video = name_str.starts_with("pax_media_") && name_str.ends_with(".mp4");
             let is_matrix_img = name_str.starts_with("pax_matrix_media_");
             let is_avatar = name_str.starts_with("pax_avatar_");
-            if is_proxy_video || is_matrix_img || is_avatar {
+            let is_compat_video = name_str.starts_with("pax_video_compat_");
+            if is_proxy_video || is_matrix_img || is_avatar || is_compat_video {
                 if std::fs::remove_file(entry.path()).is_ok() {
                     count += 1;
                 }
