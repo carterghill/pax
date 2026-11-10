@@ -4,6 +4,7 @@ import { listen } from "@tauri-apps/api/event";
 import { Check, X, Loader2 } from "lucide-react";
 import { useTheme } from "../theme/ThemeContext";
 import { useRoomMembers } from "../hooks/useRoomMembers";
+import type { RoomMembersChangedPayload } from "../types/matrix";
 import type { MemberModerationPermissions, RoomMember } from "../types/matrix";
 import { usePresenceContext } from "../hooks/PresenceContext";
 import { resolvePresenceWithDnd, parseStatusMsg, composeStatusMsg } from "../utils/statusMessage";
@@ -288,9 +289,11 @@ export default function UserMenu({
   }, [memberContextMenu, roomId, userId]);
 
   useEffect(() => {
-    const unlisten = listen("rooms-changed", () => { fetchKnocks(); });
+    const unlisten = listen<RoomMembersChangedPayload>("room-members-changed", (event) => {
+      if (event.payload.roomId === roomId && event.payload.membershipChanged) fetchKnocks();
+    });
     return () => { unlisten.then((fn) => fn()); };
-  }, [fetchKnocks]);
+  }, [roomId, fetchKnocks]);
 
   const handleAccept = useCallback(async (knockUserId: string) => {
     setActionInProgress(knockUserId);

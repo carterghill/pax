@@ -136,6 +136,13 @@ export interface RoomMember {
   statusMsg: string | null;
 }
 
+/** A room-scoped membership or member display-name update from Matrix sync. */
+export interface RoomMembersChangedPayload {
+  roomId: string;
+  /** False for display-name edits, which do not affect join requests. */
+  membershipChanged: boolean;
+}
+
 export interface RoomManagementMember extends RoomMember {
   role: "creator" | "administrator" | "moderator" | "user" | "banned";
   /** Present for joined members; whether the current user may kick. */

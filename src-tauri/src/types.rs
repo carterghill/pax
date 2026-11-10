@@ -146,6 +146,13 @@ pub struct RoomMemberInfo {
 
 #[derive(Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
+pub struct RoomMembersChangedPayload {
+    pub room_id: String,
+    pub membership_changed: bool,
+}
+
+#[derive(Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
 pub struct RoomManagementMemberInfo {
     pub user_id: String,
     pub display_name: Option<String>,

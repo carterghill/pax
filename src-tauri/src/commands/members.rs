@@ -16,6 +16,7 @@ use super::{fmt_error_chain, get_authed_client, get_client, resolve_room, Authed
 use matrix_sdk::ruma::api::client::profile::get_profile::v3::Request as GetProfileRequest;
 use matrix_sdk::ruma::api::client::profile::{AvatarUrl, DisplayName};
 use matrix_sdk::ruma::events::room::member::MembershipState;
+use matrix_sdk::ruma::events::room::member::OriginalSyncRoomMemberEvent;
 use matrix_sdk::ruma::events::room::power_levels::UserPowerLevel;
 
 /// True when `own` has strictly higher power than `target` (Matrix kick/ban rules).
@@ -41,6 +42,19 @@ fn room_member_role_label(member: &matrix_sdk::room::RoomMember) -> String {
     .to_string()
 }
 
+
+/// Avatar changes are handled independently by the avatar service. Membership
+/// and display-name changes invalidate only this room's member resource.
+pub(super) fn member_list_changed(event: &OriginalSyncRoomMemberEvent) -> bool {
+    match event.unsigned.prev_content.as_ref() {
+        Some(previous) => {
+            previous.membership != event.content.membership
+                || previous.displayname != event.content.displayname
+        }
+        None => true,
+    }
+}
+
 #[tauri::command]
 pub async fn get_room_members(
     state: State<'_, Arc<AppState>>,
@@ -49,10 +63,13 @@ pub async fn get_room_members(
     let client = get_client(&state).await?;
     let room = resolve_room(&client, &room_id)?;
 
-    let members = room
-        .members(matrix_sdk::RoomMemberships::JOIN)
-        .await
-        .map_err(|e| format!("Failed to get members: {}", fmt_error_chain(&e)))?;
+    let members = tokio::time::timeout(
+        Duration::from_secs(15),
+        room.members(matrix_sdk::RoomMemberships::JOIN),
+    )
+    .await
+    .map_err(|_| "Room member lookup timed out".to_string())?
+    .map_err(|e| format!("Failed to get members: {}", fmt_error_chain(&e)))?;
 
     let presence_map = state.presence_map.lock().await.clone();
     let status_msg_snapshot = state.status_msg_map.lock().await.clone();
@@ -664,7 +681,8 @@ pub async fn search_user_directory(
             continue;
         }
         let avatar_url = if let Some(ref mxc) = hit.avatar_url {
-            avatar_request.load(&ac.client, mxc.as_str().into())
+            avatar_request
+                .load(&ac.client, mxc.as_str().into())
                 .await
                 .ok()
         } else {
@@ -758,7 +776,8 @@ pub async fn get_invite_suggestions(
     let mut out = Vec::new();
     for (user_id, (_, display_name, mxc)) in pairs.into_iter().take(cap) {
         let avatar_url = if let Some(ref uri) = mxc {
-            avatar_request.load(&ac.client, uri.as_str().into())
+            avatar_request
+                .load(&ac.client, uri.as_str().into())
                 .await
                 .ok()
         } else {
@@ -1032,5 +1051,70 @@ pub async fn unban_user_from_space_tree(
             failures.len(),
             failures.join(" | ")
         ))
+    }
+}
+
+#[cfg(test)]
+mod member_update_tests {
+    use super::member_list_changed;
+    use matrix_sdk::ruma::events::room::member::OriginalSyncRoomMemberEvent;
+    use serde_json::{json, Value};
+
+    fn event(previous: Value, content: Value) -> OriginalSyncRoomMemberEvent {
+        serde_json::from_value(json!({
+            "type": "m.room.member", "event_id": "$member", "sender": "@alice:server",
+            "state_key": "@alice:server", "origin_server_ts": 1,
+            "content": content, "unsigned": { "prev_content": previous },
+        }))
+        .unwrap()
+    }
+
+    #[test]
+    fn emits_for_membership_transitions_and_unknown_previous_state() {
+        for (before, after) in [
+            ("invite", "join"),
+            ("join", "leave"),
+            ("knock", "invite"),
+            ("join", "ban"),
+        ] {
+            assert!(member_list_changed(&event(
+                json!({ "membership": before }),
+                json!({ "membership": after })
+            )));
+        }
+        assert!(member_list_changed(&event(
+            Value::Null,
+            json!({ "membership": "join" })
+        )));
+    }
+
+    #[test]
+    fn emits_for_display_name_changes() {
+        assert!(member_list_changed(&event(
+            json!({ "membership": "join", "displayname": "Alice" }),
+            json!({ "membership": "join", "displayname": "Alicia" }),
+        )));
+    }
+
+    #[test]
+    fn avatar_only_changes_do_not_reload_member_lists() {
+        assert!(!member_list_changed(&event(
+            json!({ "membership": "join", "displayname": "Alice", "avatar_url": "mxc://server/old" }),
+            json!({ "membership": "join", "displayname": "Alice", "avatar_url": "mxc://server/new" }),
+        )));
+    }
+
+    #[test]
+    fn unchanged_member_events_do_not_reload_member_lists() {
+        let content = json!({ "membership": "join", "displayname": "Alice" });
+        assert!(!member_list_changed(&event(content.clone(), content)));
+        let payload = crate::types::RoomMembersChangedPayload {
+            room_id: "!one:server".into(),
+            membership_changed: true,
+        };
+        assert_eq!(
+            serde_json::to_value(payload).unwrap(),
+            json!({ "roomId": "!one:server", "membershipChanged": true })
+        );
     }
 }

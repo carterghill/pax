@@ -10,7 +10,6 @@ import {
 import type { RoomMember } from "../../../types/matrix";
 import type { ThemePalette, ThemeTypography } from "../../../theme/types";
 import { useRoomMembers } from "../../../hooks/useRoomMembers";
-import { useResolveMemberLabel } from "../../../hooks/useResolveMemberLabel";
 import {
   createComposerMentionSpan,
   replaceBareMxidsWithPillsInComposer,
@@ -35,8 +34,7 @@ export function useComposerMentions({
   typography,
   refreshComposerDomState,
 }: UseComposerMentionsArgs) {
-  const { members: roomMembers } = useRoomMembers(roomId);
-  const { resolveMemberLabel } = useResolveMemberLabel(roomId);
+  const { members: roomMembers, resolveMemberLabel } = useRoomMembers(roomId);
 
   const getComposerMentionVisibleLabel = useCallback(
     (mxid: string) => {

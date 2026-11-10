@@ -40,8 +40,8 @@ use tauri::{Emitter, State};
 use crate::types::{
     MessageBatch, MessageEditPayload, MessageInfo, MessageReactionDeltaPayload,
     MessageReactionSummary, MessageRedactedPayload, MessageReplyTo, PinnedMessagePreview,
-    PresencePayload, RoomMessagePayload, RoomPinPermission, RoomRedactionPolicy,
-    RoomSendPermission, TypingPayload, VoiceParticipantsChangedPayload,
+    PresencePayload, RoomMembersChangedPayload, RoomMessagePayload, RoomPinPermission,
+    RoomRedactionPolicy, RoomSendPermission, TypingPayload, VoiceParticipantsChangedPayload,
 };
 use crate::AppState;
 
@@ -1635,28 +1635,30 @@ pub async fn start_sync(
         });
     }
 
-    // Watch m.room.member events for an avatar MXC change and tell the
-    // frontend to drop its cached entry for that user. We do NOT prefetch
-    // bytes here: initial sync delivers hundreds of member events and
-    // prefetching all of them swamps the homeserver (and the UI thread)
-    // — a freeze of several seconds on the home space was traced back
-    // to exactly this. The frontend store refetches lazily through the
-    // batched `get_user_avatars` command when a visible `<UserAvatar>`
-    // actually needs the user.
-    //
-    // We also require `prev_content` to exist so we only react to real
-    // changes, not to the initial-state firehose. A brand-new member we
-    // see for the first time will be resolved on demand the moment a
-    // component mounts for them.
+    // Scoped member updates replace broad room-list invalidation for other
+    // users' joins, departures, and name edits. Avatar changes keep their own
+    // event; neither path downloads data in the sync handler. Initial replay
+    // is covered by the stores' sync-ready refresh.
     {
         let app_h = app.clone();
         let gate_h = reconcile_gate.clone();
-        client.add_event_handler(move |ev: OriginalSyncRoomMemberEvent, _room: Room| {
+        client.add_event_handler(move |ev: OriginalSyncRoomMemberEvent, room: Room| {
             let app = app_h.clone();
             let gate = gate_h.clone();
             async move {
                 if !gate.load(Ordering::Relaxed) {
                     return;
+                }
+                if super::members::member_list_changed(&ev) {
+                    let _ = app.emit(
+                        "room-members-changed",
+                        RoomMembersChangedPayload {
+                            room_id: room.room_id().to_string(),
+                            membership_changed: ev.unsigned.prev_content.as_ref()
+                                .map(|previous| previous.membership != ev.content.membership)
+                                .unwrap_or(true),
+                        },
+                    );
                 }
                 if ev.content.membership != MembershipState::Join {
                     return;

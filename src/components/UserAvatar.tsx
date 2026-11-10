@@ -60,7 +60,7 @@ export default function UserAvatar({
   // `avatarUrlHint` taking precedence in `effectiveUrl` below.
   useEffect(() => {
     if (!avatarUrlHint) return;
-    store.prime(userId, avatarUrlHint);
+    store.primeHint(userId, avatarUrlHint);
   }, [userId, avatarUrlHint, store]);
 
   // Subscribe to this user's slot only — other users' updates do not

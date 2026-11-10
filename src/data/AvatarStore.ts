@@ -84,8 +84,15 @@ export class AvatarStore {
   primeMany(entries: Iterable<{ userId?: string | null; avatarUrl?: string | null }>): void {
     for (const entry of entries) {
       // List responses omit unresolved avatars; only explicit lookups confirm absence.
-      if (entry.userId && entry.avatarUrl) this.prime(entry.userId, entry.avatarUrl);
+      if (entry.userId && entry.avatarUrl) this.primeHint(entry.userId, entry.avatarUrl);
     }
+  }
+
+  /** Cached list rows can bootstrap an unknown identity, but cannot roll back
+   * a resolved avatar or resurrect a path invalidated while the list loaded. */
+  primeHint(id: string, path: string): void {
+    const key = keyFor(id);
+    if (!this.entries.has(key) && !this.revisions.has(key)) this.prime(key, path);
   }
 
   invalidate(id: string): void {

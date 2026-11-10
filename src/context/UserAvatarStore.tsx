@@ -66,7 +66,7 @@ export function useRoomAvatar(roomId: string | null, hint?: string | null): stri
   const store = useUserAvatarStore();
   const value = useUserAvatar(roomId ?? "");
   useEffect(() => {
-    if (roomId && hint && store.lookup(roomId) === undefined) store.prime(roomId, hint);
+    if (roomId && hint) store.primeHint(roomId, hint);
   }, [roomId, hint, store]);
   useEffect(() => {
     if (roomId && value === undefined) store.requestFetch([roomId]);

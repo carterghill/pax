@@ -20,6 +20,7 @@ import {
 } from "lucide-react";
 import { useTheme } from "../theme/ThemeContext";
 import { Room } from "../types/matrix";
+import type { RoomMembersChangedPayload } from "../types/matrix";
 import type { RoomsChangedPayload } from "../types/roomsChanged";
 import { dmPresenceDotColor, effectiveDmTitle } from "../utils/dmDisplay";
 import { resolvePresenceWithDnd } from "../utils/statusMessage";
@@ -375,9 +376,11 @@ export default function SpaceHomeView({
 
   // Refetch knocks on membership changes
   useEffect(() => {
-    const unlisten = listen("rooms-changed", () => { fetchKnocks(); });
+    const unlisten = listen<RoomMembersChangedPayload>("room-members-changed", (event) => {
+      if (event.payload.roomId === space.id && event.payload.membershipChanged) fetchKnocks();
+    });
     return () => { unlisten.then((fn) => fn()); };
-  }, [fetchKnocks]);
+  }, [space.id, fetchKnocks]);
 
   useEffect(() => {
     if (!addRoomMenuOpen && !addSpaceMenuOpen) return;

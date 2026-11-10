@@ -87,6 +87,18 @@ test("late requests cannot overwrite a more recent authoritative avatar", async 
   assert.equal(store.lookup("@alice:server"), "/new.png");
 });
 
+test("cached member hints cannot replace a resolved or invalidated avatar", (t) => {
+  const store = storeFor(t, async () => ({}));
+  store.primeMany([{ userId: "@alice:server", avatarUrl: "/bootstrap.png" }]);
+  assert.equal(store.lookup("@alice:server"), "/bootstrap.png");
+  store.prime("@alice:server", "/current.png");
+  store.primeMany([{ userId: "@alice:server", avatarUrl: "/old-member-row.png" }]);
+  assert.equal(store.lookup("@alice:server"), "/current.png");
+  store.invalidate("@alice:server");
+  store.primeHint("@alice:server", "/old-member-row.png");
+  assert.equal(store.lookup("@alice:server"), undefined);
+});
+
 test("disposed sessions reject late results and allow development remounts", async (t) => {
   const response = deferred();
   let calls = 0;
