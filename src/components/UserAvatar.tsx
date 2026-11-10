@@ -85,6 +85,14 @@ export default function UserAvatar({
     fromStore !== undefined ? fromStore : avatarUrlHint || null;
   const [imageFailed, setImageFailed] = useState(false);
   const failedUrlRef = useRef<string | null>(null);
+  const retriedUrlRef = useRef<string | null>(null);
+  useEffect(() => {
+    // Cache repair can recreate a deleted file at its original path.
+    if (fromStore) {
+      failedUrlRef.current = null;
+      setImageFailed(false);
+    }
+  }, [fromStore]);
   useEffect(() => {
     if (!effectiveUrl) return;
     if (effectiveUrl === failedUrlRef.current) return;
@@ -168,7 +176,10 @@ export default function UserAvatar({
             setImageFailed(true);
             // The on-disk temp file probably got cleaned up — drop the
             // entry so the next mount re-fetches through the store.
-            store.invalidate(userId);
+            if (retriedUrlRef.current !== effectiveUrl) {
+              retriedUrlRef.current = effectiveUrl;
+              store.invalidate(userId);
+            }
           }}
           style={{ width: "100%", height: "100%", objectFit: "cover" }}
         />

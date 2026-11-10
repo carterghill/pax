@@ -13,7 +13,7 @@ pub fn setup(app: &mut tauri::App) -> Result<(), Box<dyn std::error::Error>> {
 
     if let Ok(cache_root) = app.path().app_cache_dir() {
         let avatar_dir = cache_root.join("avatars");
-        let avatar_cache = app.state::<Arc<AppState>>().avatar_cache.clone();
+        let avatar_cache = app.state::<Arc<AppState>>().file_cache.clone();
         if let Err(e) = tauri::async_runtime::block_on(avatar_cache.init_with_dir(avatar_dir)) {
             log::warn!("[avatar_cache] init failed: {e}; avatars will not persist this session");
         }

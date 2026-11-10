@@ -49,7 +49,7 @@ use super::message_display::{
     extract_mentioned_user_ids, extract_message_display, reply_to_from_message_relation,
 };
 use super::voice_matrix::collect_voice_participants_for_joined_voice_rooms;
-use super::{fmt_error_chain, get_client, get_or_fetch_avatar, resolve_room};
+use super::{fmt_error_chain, get_client, resolve_room};
 /// Matrix user IDs are compared case-insensitively; event `sender` and `client.user_id()` can differ in casing.
 fn user_id_strings_equal(a: &str, b: &str) -> bool {
     a == b || a.to_lowercase() == b.to_lowercase()
@@ -229,7 +229,7 @@ pub async fn get_messages(
     let client = get_client(&state).await?;
     let room = resolve_room(&client, &room_id)?;
 
-    let avatar_cache = state.avatar_cache.clone();
+    let avatars = state.avatars.clone();
 
     // First pass: extract message data and collect unique senders
     struct RawMsg {
@@ -456,12 +456,7 @@ pub async fn get_messages(
         let meta = match room.get_member_no_sync(uid).await {
             Ok(Some(member)) => {
                 let name = member.display_name().map(|n| n.to_string());
-                let avatar = get_or_fetch_avatar(
-                    member.avatar_url(),
-                    member.avatar(matrix_sdk::media::MediaFormat::File),
-                    &avatar_cache,
-                )
-                .await;
+                let avatar = avatars.cached(member.avatar_url()).await;
                 (name, avatar)
             }
             _ => (None, None),
@@ -699,7 +694,7 @@ async fn current_pinned_event_ids(room: &Room) -> Result<Vec<OwnedEventId>, Stri
 async fn build_message_infos_from_timeline_events(
     room: &Room,
     timeline_events: Vec<TimelineEvent>,
-    avatar_cache: &std::sync::Arc<crate::commands::avatar_cache::AvatarDiskCache>,
+    avatars: &std::sync::Arc<crate::avatars::AvatarService>,
 ) -> Result<Vec<MessageInfo>, String> {
     struct RawMsg {
         event_id: String,
@@ -827,12 +822,7 @@ async fn build_message_infos_from_timeline_events(
         let meta = match room.get_member_no_sync(uid).await {
             Ok(Some(member)) => {
                 let name = member.display_name().map(|n| n.to_string());
-                let avatar = get_or_fetch_avatar(
-                    member.avatar_url(),
-                    member.avatar(matrix_sdk::media::MediaFormat::File),
-                    avatar_cache,
-                )
-                .await;
+                let avatar = avatars.cached(member.avatar_url()).await;
                 (name, avatar)
             }
             _ => (None, None),
@@ -1107,9 +1097,8 @@ pub async fn get_messages_around_event(
     }
     ordered.extend(response.events_after);
 
-    let avatar_cache = state.avatar_cache.clone();
-    let mut messages =
-        build_message_infos_from_timeline_events(&room, ordered, &avatar_cache).await?;
+    let avatars = state.avatars.clone();
+    let mut messages = build_message_infos_from_timeline_events(&room, ordered, &avatars).await?;
     messages.sort_by(|a, b| b.timestamp.cmp(&a.timestamp));
 
     Ok(MessageBatch {
@@ -1289,12 +1278,12 @@ pub async fn start_sync(
 
     // Handler for incoming room messages
     let app_handle = app.clone();
-    let avatar_cache = state.avatar_cache.clone();
+    let avatars = state.avatars.clone();
     let raw_unread_for_msg = state.raw_unread_messages.clone();
     let self_user_id_for_msg = client.user_id().map(|u| u.to_owned());
     client.add_event_handler(move |ev: OriginalSyncRoomMessageEvent, room: Room| {
         let app = app_handle.clone();
-        let avatar_cache = avatar_cache.clone();
+        let avatars = avatars.clone();
         let raw_unread = raw_unread_for_msg.clone();
         let self_uid = self_user_id_for_msg.clone();
         async move {
@@ -1384,12 +1373,7 @@ pub async fn start_sync(
             let (sender_name, avatar_url) = match room.get_member_no_sync(&ev.sender).await {
                 Ok(Some(member)) => {
                     let name = member.display_name().map(|n| n.to_string());
-                    let avatar = get_or_fetch_avatar(
-                        member.avatar_url(),
-                        member.avatar(matrix_sdk::media::MediaFormat::File),
-                        &avatar_cache,
-                    )
-                    .await;
+                    let avatar = avatars.cached(member.avatar_url()).await;
                     (name, avatar)
                 }
                 _ => (None, None),
@@ -1743,6 +1727,24 @@ pub async fn start_sync(
         });
     }
 
+    {
+        let app_h = app.clone();
+        client.add_event_handler(
+            move |_ev: OriginalSyncStateEvent<
+                matrix_sdk::ruma::events::room::avatar::RoomAvatarEventContent,
+            >,
+                  room: Room| {
+                let app = app_h.clone();
+                async move {
+                    let _ = app.emit(
+                        "room-avatar-invalidated",
+                        serde_json::json!({ "roomId": room.room_id() }),
+                    );
+                }
+            },
+        );
+    }
+
     // Read-receipt handler — clears the raw-message counter for a room
     // whenever a receipt for our MXID arrives.  This covers two paths:
     //
@@ -1786,7 +1788,7 @@ pub async fn start_sync(
     // Clone shared state needed inside the sync loop.
     let presence_map = state.presence_map.clone();
     let status_msg_map = state.status_msg_map.clone();
-    let avatar_cache = state.avatar_cache.clone();
+    let avatars = state.avatars.clone();
     let voice_client = client.clone();
     let desired_presence = state.desired_presence.clone();
     let unread_cache = state.unread_cache.clone();
@@ -1922,7 +1924,7 @@ pub async fn start_sync(
             // Push voice participants from a spawned task so we
             // don't block the sync loop with avatar fetches.
             let vc = voice_client.clone();
-            let ac = avatar_cache.clone();
+            let ac = avatars.clone();
             let ap = app.clone();
             tokio::spawn(async move {
                 let participants_by_room =

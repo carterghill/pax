@@ -133,7 +133,8 @@ pub async fn logout(state: State<'_, Arc<AppState>>, app: tauri::AppHandle) -> R
         m.clear();
     }
     *state.client.lock().await = None;
-    state.avatar_cache.clear().await;
+    state.avatars.reset();
+    state.file_cache.clear().await;
     crate::commands::unread::clear_unread_cache(state.inner()).await;
     state.presence_map.lock().await.clear();
     *state.sync_running.lock().await = false;
@@ -536,7 +537,8 @@ async fn finish_registration(
 
     *state.client.lock().await = Some(client);
     *state.sync_running.lock().await = false;
-    state.avatar_cache.clear().await;
+    state.avatars.reset();
+    state.file_cache.clear().await;
     log::info!("register: done — user_id={}", user_id);
     Ok(user_id)
 }
@@ -594,7 +596,8 @@ pub async fn login(
 
     *state.client.lock().await = Some(client);
     *state.sync_running.lock().await = false;
-    state.avatar_cache.clear().await;
+    state.avatars.reset();
+    state.file_cache.clear().await;
     log::info!("login: done — user_id={}", user_id);
     Ok(user_id)
 }
@@ -693,6 +696,7 @@ pub async fn restore_session(
 
     log::info!("restore_session: valid — user_id={}", user_id);
 
+    state.avatars.reset();
     *state.client.lock().await = Some(client);
     *state.sync_running.lock().await = false;
     Ok(user_id.to_string())

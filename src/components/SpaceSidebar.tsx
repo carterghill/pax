@@ -13,7 +13,7 @@ import SpaceContextMenu from "./SpaceContextMenu";
 import SpaceSettingsDialog from "./SpaceSettingsDialog";
 import InviteDialog from "./InviteDialog";
 import LeaveConfirmDialog, { fetchLeaveSpacePreview } from "./LeaveConfirmDialog";
-import { avatarSrc } from "../utils/avatarSrc";
+import RoomAvatar from "./RoomAvatar";
 
 type RoomsChangedPayload = {
   joinedRoomId?: string;
@@ -175,21 +175,14 @@ function SpaceAvatar({ space }: { space: Room }) {
           fontWeight: 600,
         }}
       >
-        {space.avatarUrl ? (
-          <img
-            src={avatarSrc(space.avatarUrl)}
-            alt={space.name}
-            draggable={false}
-            style={{
-              display: "block",
-              width: "100%",
-              height: "100%",
-              objectFit: "cover",
-            }}
-          />
-        ) : (
-          initials
-        )}
+        <RoomAvatar
+          roomId={space.id}
+          avatarUrlHint={space.avatarUrl}
+          fallback={initials}
+          alt={space.name}
+          draggable={false}
+          style={{ display: "block", width: "100%", height: "100%", objectFit: "cover" }}
+        />
       </div>
     </SpaceSidebarSquircleClip>
   );

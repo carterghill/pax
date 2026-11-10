@@ -368,7 +368,7 @@ function App() {
     // component so hooks run in the right context.
     return (
       <>
-        <UserAvatarStoreProvider>
+        <UserAvatarStoreProvider key={userId} userId={userId}>
           <RoomDownloadsProvider>
             <AuthedApp
               userId={userId}

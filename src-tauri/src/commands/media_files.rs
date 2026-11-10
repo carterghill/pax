@@ -39,13 +39,13 @@ pub async fn get_matrix_image_path(
 
     let cache_key = format!("mmedia:{}", params.unique_key());
 
-    if let Some(existing) = state.avatar_cache.get(&cache_key).await {
+    if let Some(existing) = state.file_cache.get(&cache_key).await {
         if existing.starts_with("data:") {
-            state.avatar_cache.remove(&cache_key).await;
+            state.file_cache.remove(&cache_key).await;
         } else if std::path::Path::new(&existing).is_file() {
             return Ok(existing);
         } else {
-            state.avatar_cache.remove(&cache_key).await;
+            state.file_cache.remove(&cache_key).await;
         }
     }
 
@@ -120,7 +120,7 @@ pub async fn get_matrix_image_path(
         .ok_or("Temp file path is not valid UTF-8")?
         .to_string();
 
-    state.avatar_cache.insert(cache_key, path_str.clone()).await;
+    state.file_cache.insert(cache_key, path_str.clone()).await;
 
     Ok(path_str)
 }
@@ -144,7 +144,7 @@ pub async fn clear_media_cache(state: State<'_, Arc<AppState>>) -> Result<u32, S
     // tiny, shared across every view) are deliberately preserved so
     // we don't cascade 404s into every on-screen `<img>` the moment
     // the user switches rooms.
-    let evicted = state.avatar_cache.remove_by_prefix("mmedia:").await.len();
+    let evicted = state.file_cache.remove_by_prefix("mmedia:").await.len();
 
     let temp_dir = super::temp_dir();
     let mut deleted = 0u32;

@@ -11,7 +11,7 @@ use tokio::sync::Mutex;
 use crate::types::{RoomInfo, SpaceChildOrder};
 use crate::AppState;
 
-use super::{fmt_error_chain, get_or_fetch_avatar, AvatarDiskCache};
+use super::fmt_error_chain;
 
 /// One child entry from a space's `m.space.child` state: the child room id
 /// plus the `order` string (when present) and `origin_server_ts` of the
@@ -108,14 +108,14 @@ async fn fetch_space_children_for_room(room: matrix_sdk::Room) -> (String, Vec<S
     (room_id, children)
 }
 
-/// Concurrent local space-child reads + avatars; sequential was very slow with many spaces/rooms.
+/// Concurrent local space-child and summary reads; sequential was very slow with many spaces/rooms.
 const GET_ROOMS_SPACE_CHILD_CONCURRENCY: usize = 16;
-const GET_ROOMS_AVATAR_CONCURRENCY: usize = 24;
+const GET_ROOMS_INFO_CONCURRENCY: usize = 24;
 
 async fn build_room_info(
     room: &matrix_sdk::Room,
     space_children: &HashMap<String, Vec<SpaceChildMeta>>,
-    avatar_cache: &Arc<AvatarDiskCache>,
+    avatars: &Arc<crate::avatars::AvatarService>,
     presence_map: &Arc<Mutex<HashMap<String, String>>>,
     status_msg_map: &Arc<Mutex<HashMap<String, String>>>,
     membership: &str,
@@ -141,19 +141,14 @@ async fn build_room_info(
     let topic = room.topic();
 
     let mut name = room.name().unwrap_or_else(|| "Unnamed".to_string());
-    let mut avatar_url = get_or_fetch_avatar(
-        room.avatar_url().as_deref(),
-        room.avatar(matrix_sdk::media::MediaFormat::File),
-        avatar_cache,
-    )
-    .await;
+    let mut avatar_url = avatars.cached(room.avatar_url().as_deref()).await;
     let mut is_direct = false;
     let mut dm_peer_user_id: Option<String> = None;
     let mut dm_peer_presence: Option<String> = None;
     let mut dm_peer_status_msg: Option<String> = None;
 
     if let Some((dname, dav, pid, pres, smsg)) =
-        dm_one_to_one_peer_summary(room, avatar_cache, presence_map, status_msg_map).await
+        dm_one_to_one_peer_summary(room, avatars, presence_map, status_msg_map).await
     {
         name = dname;
         avatar_url = dav;
@@ -183,7 +178,7 @@ async fn build_room_info(
 /// 1:1 direct message: use peer display name, avatar, and presence (like Element).
 pub(super) async fn dm_one_to_one_peer_summary(
     room: &matrix_sdk::Room,
-    avatar_cache: &Arc<AvatarDiskCache>,
+    avatars: &Arc<crate::avatars::AvatarService>,
     presence_map: &Arc<Mutex<HashMap<String, String>>>,
     status_msg_map: &Arc<Mutex<HashMap<String, String>>>,
 ) -> Option<(String, Option<String>, String, String, Option<String>)> {
@@ -198,7 +193,7 @@ pub(super) async fn dm_one_to_one_peer_summary(
     let me = client.user_id()?;
     // Include invited members so 1:1 DMs still resolve the peer before they accept (we're joined, they're invited).
     let members = room
-        .members(RoomMemberships::JOIN | RoomMemberships::INVITE)
+        .members_no_sync(RoomMemberships::JOIN | RoomMemberships::INVITE)
         .await
         .ok()?;
     let others: Vec<_> = members.into_iter().filter(|m| m.user_id() != me).collect();
@@ -211,50 +206,7 @@ pub(super) async fn dm_one_to_one_peer_summary(
         .display_name()
         .map(|s| s.to_string())
         .unwrap_or_else(|| peer_id.clone());
-    let mut avatar = get_or_fetch_avatar(
-        m.avatar_url(),
-        m.avatar(matrix_sdk::media::MediaFormat::File),
-        avatar_cache,
-    )
-    .await;
-    // Fallback: when the room member has no known avatar MXC yet (freshly
-    // synced DM, peer hasn't federated their profile into our room state),
-    // ask the homeserver directly via the profile API. Short timeout so
-    // slow federation does not block `get_rooms`.
-    if avatar.is_none() {
-        if let Some(uid) = matrix_sdk::ruma::UserId::parse(&peer_id).ok() {
-            let profile_req =
-                matrix_sdk::ruma::api::client::profile::get_profile::v3::Request::new(uid);
-            let profile_fut = client.send(profile_req);
-            if let Ok(Ok(resp)) =
-                tokio::time::timeout(std::time::Duration::from_secs(5), profile_fut).await
-            {
-                let owned_mxc = resp
-                    .get_static::<matrix_sdk::ruma::api::client::profile::AvatarUrl>()
-                    .ok()
-                    .flatten();
-                if let Some(owned_mxc) = owned_mxc {
-                    let mxc_ref = Some(owned_mxc.as_ref());
-                    let client_clone = client.clone();
-                    let owned_for_fetch = owned_mxc.clone();
-                    let fetch_bytes = async move {
-                        let request = matrix_sdk::media::MediaRequestParameters {
-                            source: matrix_sdk::ruma::events::room::MediaSource::Plain(
-                                owned_for_fetch,
-                            ),
-                            format: matrix_sdk::media::MediaFormat::File,
-                        };
-                        client_clone
-                            .media()
-                            .get_media_content(&request, true)
-                            .await
-                            .map(Some)
-                    };
-                    avatar = get_or_fetch_avatar(mxc_ref, fetch_bytes, avatar_cache).await;
-                }
-            }
-        }
-    }
+    let avatar = avatars.cached(m.avatar_url()).await;
     let presence = presence_map
         .lock()
         .await
@@ -271,7 +223,7 @@ pub async fn get_rooms(state: State<'_, Arc<AppState>>) -> Result<Vec<RoomInfo>,
 
     let joined_rooms = client.joined_rooms();
     let invited_rooms = client.invited_rooms();
-    let avatar_cache = state.avatar_cache.clone();
+    let avatars = state.avatars.clone();
     let presence_map = state.presence_map.clone();
     let status_msg_map_rooms = state.status_msg_map.clone();
 
@@ -377,11 +329,11 @@ pub async fn get_rooms(state: State<'_, Arc<AppState>>) -> Result<Vec<RoomInfo>,
 
     let space_children = Arc::new(space_children);
 
-    // Joined rooms: parallel avatars, preserve sidebar order via index sort.
+    // Joined rooms: project cached metadata, preserving sidebar order via index sort.
     let mut joined_parts: Vec<(usize, RoomInfo)> =
         stream::iter(joined_rooms.into_iter().enumerate().map(|(idx, room)| {
             let sc = space_children.clone();
-            let ac = avatar_cache.clone();
+            let ac = avatars.clone();
             let pm = presence_map.clone();
             let sm = status_msg_map_rooms.clone();
             async move {
@@ -389,7 +341,7 @@ pub async fn get_rooms(state: State<'_, Arc<AppState>>) -> Result<Vec<RoomInfo>,
                 (idx, info)
             }
         }))
-        .buffer_unordered(GET_ROOMS_AVATAR_CONCURRENCY)
+        .buffer_unordered(GET_ROOMS_INFO_CONCURRENCY)
         .collect()
         .await;
 
@@ -400,7 +352,7 @@ pub async fn get_rooms(state: State<'_, Arc<AppState>>) -> Result<Vec<RoomInfo>,
     let mut invited_parts: Vec<(usize, RoomInfo)> =
         stream::iter(invited_rooms.into_iter().enumerate().map(|(idx, room)| {
             let sc = space_children.clone();
-            let ac = avatar_cache.clone();
+            let ac = avatars.clone();
             let pm = presence_map.clone();
             let sm = status_msg_map_rooms.clone();
             async move {
@@ -408,7 +360,7 @@ pub async fn get_rooms(state: State<'_, Arc<AppState>>) -> Result<Vec<RoomInfo>,
                 (idx, info)
             }
         }))
-        .buffer_unordered(GET_ROOMS_AVATAR_CONCURRENCY)
+        .buffer_unordered(GET_ROOMS_INFO_CONCURRENCY)
         .collect()
         .await;
 

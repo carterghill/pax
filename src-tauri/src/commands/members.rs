@@ -4,7 +4,7 @@ use std::time::Duration;
 
 use futures_util::future::join_all;
 use serde::Deserialize;
-use tauri::{Emitter, State};
+use tauri::State;
 
 use crate::types::{
     MatrixUserProfile, RoomManagementMemberInfo, RoomManagementMembersResponse, RoomMemberInfo,
@@ -12,16 +12,11 @@ use crate::types::{
 };
 use crate::AppState;
 
-use super::{
-    encode_bytes_data_url, fmt_error_chain, get_authed_client, get_client, get_or_fetch_avatar,
-    resolve_room, sniff_image_mime, AvatarDiskCache, AuthedClient,
-};
-use matrix_sdk::media::{MediaFormat, MediaRequestParameters};
+use super::{fmt_error_chain, get_authed_client, get_client, resolve_room, AuthedClient};
 use matrix_sdk::ruma::api::client::profile::get_profile::v3::Request as GetProfileRequest;
 use matrix_sdk::ruma::api::client::profile::{AvatarUrl, DisplayName};
 use matrix_sdk::ruma::events::room::member::MembershipState;
 use matrix_sdk::ruma::events::room::power_levels::UserPowerLevel;
-use matrix_sdk::ruma::events::room::MediaSource;
 
 /// True when `own` has strictly higher power than `target` (Matrix kick/ban rules).
 fn user_power_outranks(own: UserPowerLevel, target: UserPowerLevel) -> bool {
@@ -48,7 +43,6 @@ fn room_member_role_label(member: &matrix_sdk::room::RoomMember) -> String {
 
 #[tauri::command]
 pub async fn get_room_members(
-    app: tauri::AppHandle,
     state: State<'_, Arc<AppState>>,
     room_id: String,
 ) -> Result<Vec<RoomMemberInfo>, String> {
@@ -60,79 +54,20 @@ pub async fn get_room_members(
         .await
         .map_err(|e| format!("Failed to get members: {}", fmt_error_chain(&e)))?;
 
-    let avatar_cache = state.avatar_cache.clone();
     let presence_map = state.presence_map.lock().await.clone();
     let status_msg_snapshot = state.status_msg_map.lock().await.clone();
-
-    // Cache-only avatar lookup — no HTTP, returns instantly.
-    let cache_snapshot = avatar_cache.snapshot().await;
-    let mut missing_avatars: Vec<(String, matrix_sdk::room::RoomMember)> = Vec::new();
-
-    let result: Vec<RoomMemberInfo> = members
-        .iter()
-        .map(|member| {
-            let user_id_str = member.user_id().to_string();
-            let presence = presence_map
-                .get(&user_id_str)
+    let mut result = Vec::with_capacity(members.len());
+    for member in members {
+        let user_id = member.user_id().to_string();
+        result.push(RoomMemberInfo {
+            avatar_url: state.avatars.cached(member.avatar_url()).await,
+            presence: presence_map
+                .get(&user_id)
                 .cloned()
-                .unwrap_or_else(|| "offline".to_string());
-            let status_msg = status_msg_snapshot.get(&user_id_str).cloned();
-            let avatar_url = member
-                .avatar_url()
-                .and_then(|mxc| cache_snapshot.get(&mxc.to_string()).cloned());
-            if avatar_url.is_none() && member.avatar_url().is_some() {
-                missing_avatars.push((user_id_str.clone(), member.clone()));
-            }
-            RoomMemberInfo {
-                user_id: user_id_str,
-                display_name: member.display_name().map(|n| n.to_string()),
-                avatar_url,
-                presence,
-                status_msg,
-            }
-        })
-        .collect();
-    drop(cache_snapshot);
-
-    // Background task: fetch uncached avatars and push updates to the frontend.
-    if !missing_avatars.is_empty() {
-        let cache = avatar_cache.clone();
-        let rid = room_id.clone();
-        tauri::async_runtime::spawn(async move {
-            // Process in small batches to avoid hammering the homeserver.
-            for chunk in missing_avatars.chunks(10) {
-                let futs: Vec<_> = chunk
-                    .iter()
-                    .map(|(uid, member)| {
-                        let cache = cache.clone();
-                        let uid = uid.clone();
-                        let member = member.clone();
-                        async move {
-                            let url = get_or_fetch_avatar(
-                                member.avatar_url(),
-                                member.avatar(matrix_sdk::media::MediaFormat::File),
-                                &cache,
-                            )
-                            .await;
-                            (uid, url)
-                        }
-                    })
-                    .collect();
-
-                let results = join_all(futs).await;
-                for (uid, url) in results {
-                    if let Some(data_url) = url {
-                        let _ = app.emit(
-                            "member-avatar-updated",
-                            serde_json::json!({
-                                "roomId": rid,
-                                "userId": uid,
-                                "avatarUrl": data_url,
-                            }),
-                        );
-                    }
-                }
-            }
+                .unwrap_or_else(|| "offline".into()),
+            status_msg: status_msg_snapshot.get(&user_id).cloned(),
+            display_name: member.display_name().map(str::to_owned),
+            user_id,
         });
     }
 
@@ -154,7 +89,7 @@ pub async fn get_room_management_members(
 
     let presence_map = state.presence_map.lock().await.clone();
     let status_msg_snapshot = state.status_msg_map.lock().await.clone();
-    let avatar_snapshot = state.avatar_cache.snapshot().await;
+    let avatar_snapshot = state.file_cache.snapshot().await;
 
     let my_id = ac.client.user_id().ok_or("Not logged in")?;
     let self_member_opt = room
@@ -259,6 +194,7 @@ pub async fn get_room_member_profile(
     room_id: String,
     member_user_id: String,
 ) -> Result<RoomMemberProfile, String> {
+    let avatar_request = state.avatars.session();
     use matrix_sdk::ruma::events::room::power_levels::UserPowerLevel;
 
     let client = get_client(&state).await?;
@@ -274,12 +210,10 @@ pub async fn get_room_member_profile(
         return Err("Member not found in this room".into());
     };
 
-    let avatar_url = get_or_fetch_avatar(
-        member.avatar_url(),
-        member.avatar(matrix_sdk::media::MediaFormat::File),
-        &state.avatar_cache,
-    )
-    .await;
+    let avatar_url = match member.avatar_url() {
+        Some(mxc) => avatar_request.load(&client, mxc).await.ok(),
+        None => None,
+    };
 
     let presence = state
         .presence_map
@@ -336,6 +270,7 @@ pub async fn get_matrix_user_profile(
     state: State<'_, Arc<AppState>>,
     user_id: String,
 ) -> Result<MatrixUserProfile, String> {
+    let avatar_request = state.avatars.session();
     let client = get_client(&state).await?;
     let uid =
         matrix_sdk::ruma::UserId::parse(&user_id).map_err(|e| format!("Invalid user ID: {e}"))?;
@@ -351,26 +286,10 @@ pub async fn get_matrix_user_profile(
     let owned_mxc = response
         .get_static::<AvatarUrl>()
         .map_err(|e| format!("Profile avatar_url: {}", e))?;
-    let mxc_ref = owned_mxc.as_deref();
-
-    let client_clone = client.clone();
-    let owned_mxc_for_fetch = owned_mxc.clone();
-    let fetch_bytes = async move {
-        let Some(u) = owned_mxc_for_fetch else {
-            return Ok(None);
-        };
-        let request = MediaRequestParameters {
-            source: MediaSource::Plain(u),
-            format: MediaFormat::File,
-        };
-        client_clone
-            .media()
-            .get_media_content(&request, true)
-            .await
-            .map(Some)
+    let avatar_url = match owned_mxc {
+        Some(mxc) => avatar_request.load(&client, &mxc).await.ok(),
+        None => None,
     };
-
-    let avatar_url = get_or_fetch_avatar(mxc_ref, fetch_bytes, &state.avatar_cache).await;
 
     Ok(MatrixUserProfile {
         display_name,
@@ -378,124 +297,86 @@ pub async fn get_matrix_user_profile(
     })
 }
 
-/// Batched avatar resolver for arbitrary users via the profile API.
-///
-/// Returns a `userId → fileSystemPath | null` map for every requested user.
-/// Hits the homeserver profile endpoint in parallel, then funnels bytes
-/// through the shared `avatar_cache` so every other command (messages,
-/// members, DM peer summary) sees the same file.
-///
-/// Used by the frontend `userAvatarStore` to back `<UserAvatar userId=…>`.
-/// Keeping it batched means sidebars with N users do one round-trip, not N.
+/// Visible users share the avatar service. Missing map keys mean a transient
+/// failure; null is reserved for a successfully confirmed absent avatar.
 #[tauri::command]
 pub async fn get_user_avatars(
     state: State<'_, Arc<AppState>>,
     user_ids: Vec<String>,
 ) -> Result<HashMap<String, Option<String>>, String> {
+    use futures_util::stream::{self, StreamExt};
     let client = get_client(&state).await?;
-    let avatar_cache = state.avatar_cache.clone();
-
-    // Dedupe the request (same user appearing across multiple rooms, etc.).
-    let mut seen: HashSet<String> = HashSet::new();
-    let mut unique_ids: Vec<String> = Vec::new();
-    for uid in user_ids {
-        let trimmed = uid.trim().to_string();
-        if trimmed.is_empty() {
-            continue;
-        }
-        if seen.insert(trimmed.clone()) {
-            unique_ids.push(trimmed);
-        }
-    }
-
-    // Pre-compute the set of joined rooms once; we scan these per user to
-    // find an avatar MXC from local state, which is effectively free.
-    let joined_rooms = client.joined_rooms();
-
-    let futs = unique_ids.into_iter().map(|uid| {
-        let client = client.clone();
-        let cache = avatar_cache.clone();
-        let joined = joined_rooms.clone();
-        async move {
-            let Ok(parsed) = matrix_sdk::ruma::UserId::parse(&uid) else {
-                return (uid, None);
-            };
-
-            // Fast path: every Matrix client already has this user's avatar
-            // MXC locally if we share any joined room with them (sync state
-            // carries m.room.member for every joined user). Walk joined
-            // rooms and take the first hit — no network required.
-            let mut owned_mxc: Option<matrix_sdk::ruma::OwnedMxcUri> = None;
-            for room in &joined {
-                if let Ok(Some(member)) = room.get_member_no_sync(&parsed).await {
-                    if let Some(mxc) = member.avatar_url() {
-                        owned_mxc = Some(mxc.to_owned());
-                        break;
-                    }
+    let ids: HashSet<_> = user_ids
+        .into_iter()
+        .map(|id| id.trim().to_string())
+        .collect();
+    state
+        .avatars
+        .in_session(async {
+            stream::iter(ids.into_iter().map(|id| {
+                let client = &client;
+                let avatars = &state.avatars;
+                async move {
+                    avatars
+                        .user_avatar(client, &id)
+                        .await
+                        .ok()
+                        .map(|path| (id, path))
                 }
-            }
+            }))
+            .buffer_unordered(8)
+            .filter_map(|result| async { result })
+            .collect()
+            .await
+        })
+        .await
+}
 
-            // Fallback: hit the profile API only when we genuinely do not
-            // share a room with this user (rare for our UI — most callers
-            // are sidebars/DM headers/message lists for users we already
-            // share state with). Short timeout keeps the batch responsive.
-            if owned_mxc.is_none() {
-                let profile_fut = client.send(GetProfileRequest::new(parsed));
-                if let Ok(Ok(resp)) =
-                    tokio::time::timeout(Duration::from_secs(5), profile_fut).await
-                {
-                    owned_mxc = resp.get_static::<AvatarUrl>().ok().flatten();
+#[tauri::command]
+pub async fn get_room_avatars(
+    state: State<'_, Arc<AppState>>,
+    room_ids: Vec<String>,
+) -> Result<HashMap<String, Option<String>>, String> {
+    use futures_util::stream::{self, StreamExt};
+    let client = get_client(&state).await?;
+    let ids: HashSet<_> = room_ids.into_iter().collect();
+    state
+        .avatars
+        .in_session(async {
+            stream::iter(ids.into_iter().map(|id| {
+                let client = &client;
+                let avatars = &state.avatars;
+                async move {
+                    let room = resolve_room(client, &id).ok()?;
+                    let path = match room.avatar_url() {
+                        Some(mxc) => Some(avatars.load(client, &mxc).await.ok()?),
+                        None => None,
+                    };
+                    Some((id, path))
                 }
-            }
-
-            let Some(owned_mxc) = owned_mxc else {
-                return (uid, None);
-            };
-            let mxc_ref = Some(owned_mxc.as_ref());
-
-            let client_clone = client.clone();
-            let owned_for_fetch = owned_mxc.clone();
-            let fetch_bytes = async move {
-                let request = MediaRequestParameters {
-                    source: MediaSource::Plain(owned_for_fetch),
-                    format: MediaFormat::File,
-                };
-                client_clone
-                    .media()
-                    .get_media_content(&request, true)
-                    .await
-                    .map(Some)
-            };
-            let path = get_or_fetch_avatar(mxc_ref, fetch_bytes, &cache).await;
-            (uid, path)
-        }
-    });
-
-    let results = join_all(futs).await;
-    let mut map: HashMap<String, Option<String>> = HashMap::new();
-    for (uid, path) in results {
-        map.insert(uid, path);
-    }
-    Ok(map)
+            }))
+            .buffer_unordered(8)
+            .filter_map(|result| async { result })
+            .collect()
+            .await
+        })
+        .await
 }
 
 /// Fetch the logged-in user's own avatar as a data URL.
 #[tauri::command]
 pub async fn get_user_avatar(state: State<'_, Arc<AppState>>) -> Result<Option<String>, String> {
+    let avatar_request = state.avatars.session();
     let client = get_client(&state).await?;
     let mxc = client
         .account()
         .get_avatar_url()
         .await
         .map_err(|e| format!("Failed to get avatar URL: {}", fmt_error_chain(&e)))?;
-    let avatar = get_or_fetch_avatar(
-        mxc.as_deref(),
-        client
-            .account()
-            .get_avatar(matrix_sdk::media::MediaFormat::File),
-        &state.avatar_cache,
-    )
-    .await;
+    let avatar = match mxc {
+        Some(mxc) => avatar_request.load(&client, &mxc).await.ok(),
+        None => None,
+    };
     Ok(avatar)
 }
 
@@ -525,6 +406,7 @@ pub async fn get_knock_members(
     state: State<'_, Arc<AppState>>,
     room_id: String,
 ) -> Result<KnockMembersResponse, String> {
+    let avatar_request = state.avatars.session();
     let ac = get_authed_client(&state).await?;
     let encoded_room = urlencoding::encode(&room_id);
     let user_id = ac.client.user_id().ok_or("Not logged in")?.to_string();
@@ -555,7 +437,6 @@ pub async fn get_knock_members(
         .map_err(|e| format!("Failed to parse knock members: {e}"))?;
 
     let chunk = body["chunk"].as_array();
-    let avatar_cache = state.avatar_cache.clone();
 
     let mut members = Vec::new();
     if let Some(events) = chunk {
@@ -569,51 +450,9 @@ pub async fn get_knock_members(
                 .map(|s| s.to_string());
             let mxc = content["avatar_url"].as_str();
 
-            // Resolve avatar to data URL if available
-            let avatar_url = if let Some(mxc_uri) = mxc {
-                // Check cache first
-                let cached = avatar_cache.get(mxc_uri).await;
-                if let Some(data_url) = cached {
-                    Some(data_url)
-                } else {
-                    // Build thumbnail URL and fetch
-                    let thumb = mxc_uri
-                        .strip_prefix("mxc://")
-                        .and_then(|stripped| stripped.split_once('/'))
-                        .map(|(server, media_id)| {
-                            format!(
-                                "{}/_matrix/media/v3/thumbnail/{}/{}?width=64&height=64&method=crop",
-                                ac.homeserver, server, media_id
-                            )
-                        });
-                    if let Some(thumb_url) = thumb {
-                        match state
-                            .http_client
-                            .get(&thumb_url)
-                            .timeout(Duration::from_secs(10))
-                            .send()
-                            .await
-                        {
-                            Ok(r) if r.status().is_success() => {
-                                if let Ok(bytes) = r.bytes().await {
-                                    let mime = sniff_image_mime(&bytes);
-                                    let data_url = encode_bytes_data_url(&bytes, mime);
-                                    avatar_cache
-                                        .insert(mxc_uri.to_string(), data_url.clone())
-                                        .await;
-                                    Some(data_url)
-                                } else {
-                                    None
-                                }
-                            }
-                            _ => None,
-                        }
-                    } else {
-                        None
-                    }
-                }
-            } else {
-                None
+            let avatar_url = match mxc {
+                Some(uri) => avatar_request.load(&ac.client, uri.into()).await.ok(),
+                None => None,
             };
 
             members.push(KnockMemberInfo {
@@ -762,6 +601,7 @@ pub async fn search_user_directory(
     search_term: String,
     limit: u32,
 ) -> Result<Vec<InviteUserCandidate>, String> {
+    let avatar_request = state.avatars.session();
     let trimmed = search_term.trim();
     if trimmed.is_empty() {
         return Ok(vec![]);
@@ -817,7 +657,6 @@ pub async fn search_user_directory(
         .await
         .map_err(|e| format!("Failed to parse user search: {e}"))?;
 
-    let avatar_cache = state.avatar_cache.clone();
     let mut out = Vec::new();
 
     for hit in body.results {
@@ -825,7 +664,9 @@ pub async fn search_user_directory(
             continue;
         }
         let avatar_url = if let Some(ref mxc) = hit.avatar_url {
-            resolve_mxc_avatar_data_url(&state.http_client, &ac.homeserver, mxc, &avatar_cache).await
+            avatar_request.load(&ac.client, mxc.as_str().into())
+                .await
+                .ok()
         } else {
             None
         };
@@ -846,6 +687,7 @@ pub async fn get_invite_suggestions(
     room_id: String,
     limit: usize,
 ) -> Result<Vec<InviteUserCandidate>, String> {
+    let avatar_request = state.avatars.session();
     let ac = get_authed_client(&state).await?;
     let target_room = resolve_room(&ac.client, &room_id)?;
     let target_members: HashSet<String> = target_room
@@ -858,7 +700,8 @@ pub async fn get_invite_suggestions(
 
     let self_id = ac.client.user_id().ok_or("Not logged in")?.to_string();
 
-    let rooms: Vec<matrix_sdk::Room> = ac.client
+    let rooms: Vec<matrix_sdk::Room> = ac
+        .client
         .joined_rooms()
         .into_iter()
         .filter(|r| r.room_id().as_str() != room_id)
@@ -911,12 +754,13 @@ pub async fn get_invite_suggestions(
     });
 
     let cap = limit.max(1).min(40);
-    let avatar_cache = state.avatar_cache.clone();
 
     let mut out = Vec::new();
     for (user_id, (_, display_name, mxc)) in pairs.into_iter().take(cap) {
         let avatar_url = if let Some(ref uri) = mxc {
-            resolve_mxc_avatar_data_url(&state.http_client, &ac.homeserver, uri, &avatar_cache).await
+            avatar_request.load(&ac.client, uri.as_str().into())
+                .await
+                .ok()
         } else {
             None
         };
@@ -928,47 +772,6 @@ pub async fn get_invite_suggestions(
     }
 
     Ok(out)
-}
-
-async fn resolve_mxc_avatar_data_url(
-    http: &reqwest::Client,
-    homeserver: &str,
-    mxc_uri: &str,
-    avatar_cache: &Arc<AvatarDiskCache>,
-) -> Option<String> {
-    if let Some(cached) = avatar_cache.get(mxc_uri).await {
-        return Some(cached);
-    }
-
-    let thumb = mxc_uri
-        .strip_prefix("mxc://")
-        .and_then(|stripped| stripped.split_once('/'))
-        .map(|(server, media_id)| {
-            format!(
-                "{}/_matrix/media/v3/thumbnail/{}/{}?width=64&height=64&method=crop",
-                homeserver, server, media_id
-            )
-        })?;
-
-    match http
-        .get(&thumb)
-        .timeout(Duration::from_secs(10))
-        .send()
-        .await
-    {
-        Ok(r) if r.status().is_success() => {
-            if let Ok(bytes) = r.bytes().await {
-                let mime = sniff_image_mime(&bytes);
-                let data_url = encode_bytes_data_url(&bytes, mime);
-                avatar_cache
-                    .insert(mxc_uri.to_string(), data_url.clone())
-                    .await;
-                return Some(data_url);
-            }
-        }
-        _ => {}
-    }
-    None
 }
 
 async fn room_membership_action(
@@ -1015,7 +818,16 @@ pub async fn invite_user(
     user_id: String,
 ) -> Result<(), String> {
     let ac = get_authed_client(&state).await?;
-    room_membership_action(&state.http_client, &ac.homeserver, &ac.access_token, &room_id, "invite", &user_id, None).await
+    room_membership_action(
+        &state.http_client,
+        &ac.homeserver,
+        &ac.access_token,
+        &room_id,
+        "invite",
+        &user_id,
+        None,
+    )
+    .await
 }
 
 #[tauri::command]
@@ -1026,7 +838,16 @@ pub async fn kick_user(
     reason: Option<String>,
 ) -> Result<(), String> {
     let ac = get_authed_client(&state).await?;
-    room_membership_action(&state.http_client, &ac.homeserver, &ac.access_token, &room_id, "kick", &user_id, reason.as_deref()).await
+    room_membership_action(
+        &state.http_client,
+        &ac.homeserver,
+        &ac.access_token,
+        &room_id,
+        "kick",
+        &user_id,
+        reason.as_deref(),
+    )
+    .await
 }
 
 /// Whether the current user may kick or ban `member_user_id` in this room (power levels + membership).
@@ -1102,7 +923,16 @@ pub async fn ban_user(
     reason: Option<String>,
 ) -> Result<(), String> {
     let ac = get_authed_client(&state).await?;
-    room_membership_action(&state.http_client, &ac.homeserver, &ac.access_token, &room_id, "ban", &user_id, reason.as_deref()).await
+    room_membership_action(
+        &state.http_client,
+        &ac.homeserver,
+        &ac.access_token,
+        &room_id,
+        "ban",
+        &user_id,
+        reason.as_deref(),
+    )
+    .await
 }
 
 #[tauri::command]
@@ -1112,7 +942,16 @@ pub async fn unban_user(
     user_id: String,
 ) -> Result<(), String> {
     let ac = get_authed_client(&state).await?;
-    room_membership_action(&state.http_client, &ac.homeserver, &ac.access_token, &room_id, "unban", &user_id, None).await
+    room_membership_action(
+        &state.http_client,
+        &ac.homeserver,
+        &ac.access_token,
+        &room_id,
+        "unban",
+        &user_id,
+        None,
+    )
+    .await
 }
 
 async fn get_space_tree_room_ids(
@@ -1171,8 +1010,16 @@ pub async fn unban_user_from_space_tree(
     let mut failures = Vec::new();
     for room_id in room_ids {
         if let Err(e) = room_membership_action(
-            &state.http_client, &ac.homeserver, &ac.access_token, &room_id, "unban", &user_id, None,
-        ).await {
+            &state.http_client,
+            &ac.homeserver,
+            &ac.access_token,
+            &room_id,
+            "unban",
+            &user_id,
+            None,
+        )
+        .await
+        {
             failures.push(format!("{room_id}: {e}"));
         }
     }

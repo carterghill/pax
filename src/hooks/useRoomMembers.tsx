@@ -17,11 +17,6 @@ interface PresencePayload {
   statusMsg: string | null;
 }
 
-interface AvatarPayload {
-  roomId: string;
-  userId: string;
-  avatarUrl: string;
-}
 
 function dedupeMembers(members: RoomMember[]): RoomMember[] {
   const byId = new Map<string, RoomMember>();
@@ -43,9 +38,6 @@ export function useRoomMembers(roomId: string) {
   // ── Members state (triggers sort/filter pipeline — only changes on fetch or presence) ──
   const [members, setMembers] = useState<RoomMember[]>([]);
   const [loading, setLoading] = useState(true);
-
-  // ── Avatar overrides (cheap to update — does NOT trigger sort/filter) ──
-  const [avatarOverrides, setAvatarOverrides] = useState<Map<string, string>>(new Map());
 
   // Every member row we fetch feeds the global user-avatar store so
   // sidebars and banners render the same image without re-fetching.
@@ -99,7 +91,6 @@ export function useRoomMembers(roomId: string) {
       setLoading(true);
       memberIdsRef.current = new Set();
     }
-    setAvatarOverrides(new Map());
     hasFetched.current = false;
   }, [roomId]);
 
@@ -161,49 +152,8 @@ export function useRoomMembers(roomId: string) {
     };
   }, []);
 
-  // ── Avatar backfill (does NOT affect sort → separate state, cheap updates) ──
-  const pendingAvatars = useRef<Map<string, string>>(new Map());
-  const avatarRaf = useRef<number | null>(null);
-
-  useEffect(() => {
-    const unlisten = listen<AvatarPayload>("member-avatar-updated", (event) => {
-      const { roomId: rid, userId, avatarUrl } = event.payload;
-      if (rid !== activeRoomIdRef.current) return;
-      pendingAvatars.current.set(userId, avatarUrl);
-
-      if (avatarRaf.current == null) {
-        avatarRaf.current = requestAnimationFrame(() => {
-          avatarRaf.current = null;
-          const patches = new Map(pendingAvatars.current);
-          pendingAvatars.current.clear();
-          if (patches.size === 0) return;
-
-          setAvatarOverrides((prev) => {
-            const next = new Map(prev);
-            for (const [uid, url] of patches) next.set(uid, url);
-            return next;
-          });
-          // The global store has its own `member-avatar-updated` listener,
-          // so this path only needs to update the per-room override map.
-        });
-      }
-    });
-    return () => {
-      unlisten.then((fn) => fn());
-      if (avatarRaf.current != null) cancelAnimationFrame(avatarRaf.current);
-    };
-  }, []);
-
-  // Cleanup on unmount
-  useEffect(() => {
-    return () => {
-      if (presenceRaf.current != null) cancelAnimationFrame(presenceRaf.current);
-      if (avatarRaf.current != null) cancelAnimationFrame(avatarRaf.current);
-    };
-  }, []);
-
   // Sort only re-runs when members change (fetch or presence), NOT on avatar updates.
   const sorted = useMemo(() => sortMembersForDisplay(members), [members]);
 
-  return { members: sorted, loading, avatarOverrides };
+  return { members: sorted, loading };
 }

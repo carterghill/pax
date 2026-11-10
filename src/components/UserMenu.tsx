@@ -170,7 +170,7 @@ export default function UserMenu({
   onStartDirectMessage,
 }: UserMenuProps) {
   const { palette, typography, spacing } = useTheme();
-  const { members, loading, avatarOverrides } = useRoomMembers(roomId);
+  const { members, loading } = useRoomMembers(roomId);
   const { effectivePresence, statusMessage: localStatusMessage, manualStatus } = usePresenceContext();
 
   // ── Knock requests state ──
@@ -579,7 +579,7 @@ export default function UserMenu({
                 );
               }
 
-              const resolvedAvatar = avatarOverrides.get(row.member.userId) ?? row.member.avatarUrl;
+              const resolvedAvatar = row.member.avatarUrl;
 
               return (
                 <div key={row.key} style={{ position: "absolute", top, left: 0, right: 0, height: MEMBER_HEIGHT }}>

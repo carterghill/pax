@@ -9,7 +9,7 @@ use crate::AppState;
 
 use super::room_discovery::discover_client_base_urls;
 use super::room_listing::dm_one_to_one_peer_summary;
-use super::{fmt_error_chain, get_authed_client, get_or_fetch_avatar};
+use super::{fmt_error_chain, get_authed_client};
 
 /// Convert an MXC URI to an unauthenticated thumbnail URL.
 fn mxc_to_thumbnail_url(base_url: &str, mxc: &str, width: u32, height: u32) -> Option<String> {
@@ -61,13 +61,8 @@ pub async fn get_space_info(
 
     let space = ac.client.get_room(&parsed).ok_or("Space not found")?;
 
-    let avatar_cache = state.avatar_cache.clone();
-    let space_avatar = get_or_fetch_avatar(
-        space.avatar_url().as_deref(),
-        space.avatar(matrix_sdk::media::MediaFormat::File),
-        &avatar_cache,
-    )
-    .await;
+    let avatars = state.avatars.clone();
+    let space_avatar = avatars.cached(space.avatar_url().as_deref()).await;
 
     let space_name = space.name().unwrap_or_else(|| "Unnamed".to_string());
     let space_topic = space.topic();
@@ -75,8 +70,7 @@ pub async fn get_space_info(
     // Call the room hierarchy API to discover child rooms (including ones not yet joined)
     let url = format!(
         "{}/_matrix/client/v1/rooms/{}/hierarchy?limit=50",
-        ac.homeserver,
-        space_id,
+        ac.homeserver, space_id,
     );
 
     let resp = state
@@ -186,12 +180,7 @@ pub async fn get_space_info(
             let mut avatar_url = if membership == "joined" {
                 if let Ok(rid) = matrix_sdk::ruma::RoomId::parse(&child_id) {
                     if let Some(r) = ac.client.get_room(&rid) {
-                        get_or_fetch_avatar(
-                            r.avatar_url().as_deref(),
-                            r.avatar(matrix_sdk::media::MediaFormat::File),
-                            &avatar_cache,
-                        )
-                        .await
+                        avatars.cached(r.avatar_url().as_deref()).await
                     } else {
                         None
                     }
@@ -224,7 +213,7 @@ pub async fn get_space_info(
                     if let Some(r) = ac.client.get_room(&rid) {
                         if let Some((dname, dav, pid, pres, smsg)) = dm_one_to_one_peer_summary(
                             &r,
-                            &avatar_cache,
+                            &avatars,
                             &state.presence_map,
                             &state.status_msg_map,
                         )
@@ -828,6 +817,7 @@ pub async fn get_space_settings(
     state: State<'_, Arc<AppState>>,
     space_id: String,
 ) -> Result<SpaceSettingsData, String> {
+    let avatar_request = state.avatars.session();
     let ac = get_authed_client(&state).await?;
     let parsed =
         matrix_sdk::ruma::RoomId::parse(&space_id).map_err(|e| format!("Invalid room ID: {e}"))?;
@@ -943,12 +933,10 @@ pub async fn get_space_settings(
     let avatar_url = if let Some(mxc) = avatar_mxc {
         mxc_to_thumbnail_url(&ac.homeserver, mxc, 96, 96)
     } else {
-        get_or_fetch_avatar(
-            room.avatar_url().as_deref(),
-            room.avatar(matrix_sdk::media::MediaFormat::File),
-            &state.avatar_cache,
-        )
-        .await
+        match room.avatar_url() {
+            Some(mxc) => avatar_request.load(&ac.client, &mxc).await.ok(),
+            None => None,
+        }
     };
 
     let join_body = http_get_room_state(
@@ -1108,7 +1096,8 @@ pub async fn apply_space_settings(
         )
         .await?;
     } else if let (Some(data), Some(mime)) = (&patch.avatar_data, &patch.avatar_mime) {
-        let mxc = super::upload_media_b64(http, &ac.homeserver, &ac.access_token, data, mime).await?;
+        let mxc =
+            super::upload_media_b64(http, &ac.homeserver, &ac.access_token, data, mime).await?;
         http_put_room_state(
             http,
             &ac.homeserver,

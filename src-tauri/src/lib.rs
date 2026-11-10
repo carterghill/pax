@@ -1,6 +1,8 @@
 #![recursion_limit = "256"]
 
 pub mod codec;
+mod avatars;
+mod file_cache;
 mod commands;
 mod idle;
 pub mod native_overlay;
@@ -54,7 +56,8 @@ pub struct AppState {
     pub http_client: reqwest::Client,
     pub presence_map: Arc<Mutex<HashMap<String, String>>>,
     pub status_msg_map: Arc<Mutex<HashMap<String, String>>>,
-    pub avatar_cache: Arc<commands::avatar_cache::AvatarDiskCache>,
+    pub file_cache: Arc<file_cache::FileCache>,
+    pub avatars: Arc<avatars::AvatarService>,
     pub sync_running: Arc<Mutex<bool>>,
     /// Background `sync_with_callback` task — must be aborted before deleting the SQLite store
     /// or replacing `client`, otherwise the DB stays locked (especially on Windows).
@@ -303,6 +306,7 @@ pub fn run() {
     #[cfg(desktop)]
     detect_codec_early();
 
+    let file_cache = Arc::new(file_cache::FileCache::new());
     let state = Arc::new(AppState {
         client: Mutex::new(None),
         http_client: reqwest::Client::builder()
@@ -311,7 +315,8 @@ pub fn run() {
             .unwrap_or_else(|_| reqwest::Client::new()),
         presence_map: Arc::new(Mutex::new(HashMap::new())),
         status_msg_map: Arc::new(Mutex::new(HashMap::new())),
-        avatar_cache: Arc::new(commands::avatar_cache::AvatarDiskCache::new()),
+        avatars: Arc::new(avatars::AvatarService::new(file_cache.clone())),
+        file_cache,
         sync_running: Arc::new(Mutex::new(false)),
         sync_join: Mutex::new(None),
         display_server,
@@ -461,6 +466,7 @@ pub fn run() {
             commands::members::get_matrix_user_profile,
             commands::members::get_user_avatar,
             commands::members::get_user_avatars,
+            commands::members::get_room_avatars,
             commands::members::get_knock_members,
             commands::members::preview_leave_space,
             commands::members::invite_user,

@@ -29,6 +29,8 @@ import CreateRoomDialog from "../components/CreateRoomDialog";
 import CreateSpaceDialog from "../components/CreateSpaceDialog";
 import LinkExistingToSpaceDialog from "../components/LinkExistingToSpaceDialog";
 import UserAvatar from "../components/UserAvatar";
+import RoomAvatar from "../components/RoomAvatar";
+import { useRoomAvatar } from "../context/UserAvatarStore";
 import type { SpaceChildInfo, SpaceInfo } from "../utils/spaceHomeCache";
 import { getCachedSpaceInfo, setCachedSpaceInfo } from "../utils/spaceHomeCache";
 import { avatarSrc } from "../utils/avatarSrc";
@@ -705,19 +707,10 @@ export default function SpaceHomeView({
           marginBottom: spacing.unit * 8,
           paddingTop: spacing.unit * 4,
         }}>
-          {info.avatarUrl ? (
-            <img
-              src={avatarSrc(info.avatarUrl)}
-              alt={info.name}
-              style={{
-                width: 72,
-                height: 72,
-                borderRadius: 20,
-                objectFit: "cover",
-              }}
-            />
-          ) : (
-            <div style={{
+          <RoomAvatar
+            roomId={space.id}
+            avatarUrlHint={info.avatarUrl}
+            fallback={<div style={{
               width: 72,
               height: 72,
               borderRadius: 20,
@@ -730,8 +723,15 @@ export default function SpaceHomeView({
               fontWeight: typography.fontWeightBold,
             }}>
               {initials}
-            </div>
-          )}
+            </div>}
+            alt={info.name}
+            style={{
+              width: 72,
+              height: 72,
+              borderRadius: 20,
+              objectFit: "cover",
+            }}
+          />
           <div style={{
             fontSize: typography.fontSizeLarge + 4,
             fontWeight: typography.fontWeightBold,
@@ -1045,19 +1045,19 @@ export default function SpaceHomeView({
                     }}
                   >
                     <ChevronIcon size={18} strokeWidth={2} style={{ flexShrink: 0, color: palette.textSecondary }} aria-hidden />
-                    {sub.avatarUrl ? (
-                      <img
-                        src={avatarSrc(sub.avatarUrl)}
-                        alt=""
-                        style={{
-                          width: 28,
-                          height: 28,
-                          borderRadius: 8,
-                          objectFit: "cover",
-                          flexShrink: 0,
-                        }}
-                      />
-                    ) : null}
+                    <RoomAvatar
+                      roomId={sub.id}
+                      avatarUrlHint={sub.avatarUrl}
+                      fallback={null}
+                      alt=""
+                      style={{
+                        width: 28,
+                        height: 28,
+                        borderRadius: 8,
+                        objectFit: "cover",
+                        flexShrink: 0,
+                      }}
+                    />
                     <span style={{
                       flex: 1,
                       minWidth: 0,
@@ -1229,20 +1229,10 @@ export default function SpaceHomeView({
                       }}
                     >
                       <ChevronIcon size={16} strokeWidth={2} style={{ flexShrink: 0, color: palette.textSecondary }} aria-hidden />
-                      {sub.avatarUrl ? (
-                        <img
-                          src={avatarSrc(sub.avatarUrl)}
-                          alt=""
-                          style={{
-                            width: 36,
-                            height: 36,
-                            borderRadius: 10,
-                            objectFit: "cover",
-                            flexShrink: 0,
-                          }}
-                        />
-                      ) : (
-                        <div style={{
+                      <RoomAvatar
+                        roomId={sub.membership === "joined" ? sub.id : null}
+                        avatarUrlHint={sub.avatarUrl}
+                        fallback={<div style={{
                           width: 36,
                           height: 36,
                           borderRadius: 10,
@@ -1256,8 +1246,16 @@ export default function SpaceHomeView({
                           flexShrink: 0,
                         }}>
                           {subInitials}
-                        </div>
-                      )}
+                        </div>}
+                        alt=""
+                        style={{
+                          width: 36,
+                          height: 36,
+                          borderRadius: 10,
+                          objectFit: "cover",
+                          flexShrink: 0,
+                        }}
+                      />
                       <div style={{ flex: 1, minWidth: 0 }}>
                         <div style={{
                           fontSize: typography.fontSizeBase,
@@ -1589,7 +1587,7 @@ function RoomRow({
   // Non-DM rooms still use the room avatar (keyed by room id, separate
   // concept from user avatars). DM rows delegate to <UserAvatar>, which
   // handles its own loading / fallback / on-error invalidation.
-  const nonDmAvatar = !isDm ? room.avatarUrl : null;
+  const nonDmAvatar = useRoomAvatar(!isDm && isJoined ? room.id : null, !isDm ? room.avatarUrl : null);
   useEffect(() => {
     setImageFailed(false);
   }, [room.id, nonDmAvatar]);

@@ -7,6 +7,7 @@
     "dev": "vite",
     "start": "concurrently \"vite\" \"tauri dev\"",
     "build": "tsc && vite build",
+    "test:avatars": "node --test src/data/AvatarStore.test.mjs",
     "android:icons": "python scripts/gen_android_icons.py",
     "preview": "vite preview",
     "tauri": "tauri"

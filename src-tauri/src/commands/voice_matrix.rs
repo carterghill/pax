@@ -13,7 +13,7 @@ use tauri::{Emitter, State};
 use crate::types::{LivekitVoiceParticipantInfo, VoiceJoinResult, VoiceParticipant};
 use crate::{screen, voice, AppState, LivekitConfig};
 
-use super::{fmt_error_chain, get_or_fetch_avatar, AvatarDiskCache};
+use super::fmt_error_chain;
 
 /// Matrix room type for voice channels (MSC3417).
 /// Also defined in the frontend at `src/utils/matrix.ts` — keep both in sync.
@@ -109,7 +109,7 @@ async fn collect_active_call_users(room: &Room) -> Vec<String> {
 
 async fn collect_room_voice_participants(
     room: &Room,
-    avatar_cache: &Arc<AvatarDiskCache>,
+    avatars: &Arc<crate::avatars::AvatarService>,
 ) -> Vec<VoiceParticipant> {
     let active_user_ids = collect_active_call_users(room).await;
     let mut participants = Vec::new();
@@ -119,12 +119,7 @@ async fn collect_room_voice_participants(
             match room.get_member_no_sync(&uid).await {
                 Ok(Some(member)) => {
                     let name = member.display_name().map(|n| n.to_string());
-                    let avatar = get_or_fetch_avatar(
-                        member.avatar_url(),
-                        member.avatar(matrix_sdk::media::MediaFormat::File),
-                        avatar_cache,
-                    )
-                    .await;
+                    let avatar = avatars.cached(member.avatar_url()).await;
                     (name, avatar)
                 }
                 _ => (None, None),
@@ -145,7 +140,7 @@ async fn collect_room_voice_participants(
 
 pub(crate) async fn collect_voice_participants_for_joined_voice_rooms(
     client: &Client,
-    avatar_cache: &Arc<AvatarDiskCache>,
+    avatars: &Arc<crate::avatars::AvatarService>,
 ) -> HashMap<String, Vec<VoiceParticipant>> {
     let mut participants_by_room: HashMap<String, Vec<VoiceParticipant>> = HashMap::new();
 
@@ -159,7 +154,7 @@ pub(crate) async fn collect_voice_participants_for_joined_voice_rooms(
         }
 
         let room_id = room.room_id().to_string();
-        let participants = collect_room_voice_participants(&room, avatar_cache).await;
+        let participants = collect_room_voice_participants(&room, avatars).await;
         participants_by_room.insert(room_id, participants);
     }
 
@@ -172,7 +167,7 @@ pub async fn get_all_voice_participants(
 ) -> Result<HashMap<String, Vec<VoiceParticipant>>, String> {
     let client = super::get_client(&state).await?;
 
-    Ok(collect_voice_participants_for_joined_voice_rooms(&client, &state.avatar_cache).await)
+    Ok(collect_voice_participants_for_joined_voice_rooms(&client, &state.avatars).await)
 }
 
 /// Result of [discover_livekit_service_url]: URL and whether it came from room state (may be stale).
@@ -389,8 +384,8 @@ pub async fn get_voice_participants(
     let client = super::get_client(&state).await?;
     let room = super::resolve_room(&client, &room_id)?;
 
-    let avatar_cache = state.avatar_cache.clone();
-    let participants = collect_room_voice_participants(&room, &avatar_cache).await;
+    let avatars = state.avatars.clone();
+    let participants = collect_room_voice_participants(&room, &avatars).await;
 
     Ok(participants)
 }
@@ -590,11 +585,11 @@ async fn send_or_fallback_leave(
 /// without waiting for the next sync response.
 pub(crate) async fn force_emit_voice_participants(
     client: &Client,
-    avatar_cache: &Arc<AvatarDiskCache>,
+    avatars: &Arc<crate::avatars::AvatarService>,
     app_handle: &tauri::AppHandle,
 ) {
     let participants_by_room =
-        collect_voice_participants_for_joined_voice_rooms(client, avatar_cache).await;
+        collect_voice_participants_for_joined_voice_rooms(client, avatars).await;
     let _ = app_handle.emit(
         "voice-participants-changed",
         crate::types::VoiceParticipantsChangedPayload {
@@ -1353,10 +1348,10 @@ pub async fn voice_connect(
 
     // 6. Force-emit participant update so sidebar refreshes immediately
     let emit_client = client.clone();
-    let emit_avatar_cache = state_arc.avatar_cache.clone();
+    let emit_avatars = state_arc.avatars.clone();
     tokio::spawn(async move {
         tokio::time::sleep(Duration::from_millis(500)).await;
-        force_emit_voice_participants(&emit_client, &emit_avatar_cache, &app_handle_for_emit).await;
+        force_emit_voice_participants(&emit_client, &emit_avatars, &app_handle_for_emit).await;
     });
 
     Ok(())
