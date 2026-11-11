@@ -194,6 +194,17 @@ export interface LivekitVoiceParticipantInfo {
   isSpeaking: boolean;
 }
 
+export interface VoiceMembershipSnapshot {
+  roomIds: string[];
+  participantsByRoom: Record<string, VoiceParticipant[]>;
+  expiresAtByRoom: Record<string, number>;
+}
+
+export interface LivekitVoiceSnapshot {
+  available: boolean;
+  participantsByRoom: Record<string, LivekitVoiceParticipantInfo[]>;
+}
+
 export interface VoiceJoinResult {
   jwt: string;
   livekitUrl: string;

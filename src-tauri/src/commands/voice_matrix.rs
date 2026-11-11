@@ -1,4 +1,3 @@
-use std::collections::HashMap;
 use std::sync::atomic::Ordering;
 use std::sync::Arc;
 use std::time::Duration;
@@ -11,13 +10,12 @@ use serde::Serialize;
 use tauri::{Emitter, State};
 
 use crate::types::{LivekitVoiceParticipantInfo, VoiceJoinResult, VoiceParticipant};
+use crate::voice_presence::{
+    self, LivekitRoomRead, LivekitVoiceSnapshot, VoiceMembershipSnapshot, VoicePresenceSession,
+};
 use crate::{screen, voice, AppState, LivekitConfig};
 
 use super::fmt_error_chain;
-
-/// Matrix room type for voice channels (MSC3417).
-/// Also defined in the frontend at `src/utils/matrix.ts` — keep both in sync.
-const VOICE_ROOM_TYPE: &str = "org.matrix.msc3417.call";
 
 /// `m.call.member` `expires` field (ms). 4 hours, matching matrix-js-sdk DEFAULT_EXPIRE_DURATION.
 const VOICE_CALL_MEMBER_EXPIRES_MS: u64 = 4 * 60 * 60 * 1000;
@@ -35,139 +33,21 @@ const HEARTBEAT_INTERVAL_SECS: u64 = 15;
 /// 3.5 hours = 12 600 s, matching matrix-js-sdk's membershipExpiryTimeout pattern.
 const MEMBERSHIP_REFRESH_INTERVAL_SECS: u64 = 3 * 60 * 60 + 30 * 60;
 
-/// Check whether a call.member state event JSON represents an active participant.
-/// Handles both MSC4143 (per-device content) and MSC3401 (memberships array) formats,
-/// and filters out expired sessions.
-fn is_call_member_active(json: &serde_json::Value) -> bool {
-    let content = json.get("content");
-
-    // MSC4143: active if content has "application" field (empty content = left)
-    let active_new = content.and_then(|c| c.get("application")).is_some();
-
-    // MSC3401: active if non-empty "memberships" array
-    let active_old = content
-        .and_then(|c| c.get("memberships"))
-        .and_then(|m| m.as_array())
-        .map(|arr| !arr.is_empty())
-        .unwrap_or(false);
-
-    if !active_new && !active_old {
-        return false;
-    }
-
-    // Check expiry
-    let origin_ts = json
-        .get("origin_server_ts")
-        .and_then(|t| t.as_u64())
-        .unwrap_or(0);
-    let expires_ms = content
-        .and_then(|c| c.get("expires"))
-        .and_then(|e| e.as_u64())
-        .unwrap_or(0);
-
-    if origin_ts > 0 && expires_ms > 0 {
-        let now_ms = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap_or_default()
-            .as_millis() as u64;
-        if origin_ts + expires_ms < now_ms {
-            return false; // expired
-        }
-    }
-
-    true
-}
-
-/// Scan a room's call.member state events and return the user IDs of active participants.
-async fn collect_active_call_users(room: &Room) -> Vec<String> {
-    let mut seen = std::collections::HashSet::new();
-
-    for event_type_str in &["org.matrix.msc3401.call.member", "m.call.member"] {
-        let event_type: StateEventType = event_type_str.to_string().into();
-        if let Ok(events) = room.get_state_events(event_type).await {
-            for event in &events {
-                let json = match serde_json::to_value(event) {
-                    Ok(v) => v,
-                    Err(_) => continue,
-                };
-
-                let sender = json
-                    .get("sender")
-                    .and_then(|s| s.as_str())
-                    .unwrap_or_default()
-                    .to_string();
-
-                if !sender.is_empty() && is_call_member_active(&json) {
-                    seen.insert(sender);
-                }
-            }
-        }
-    }
-
-    seen.into_iter().collect()
-}
-
-async fn collect_room_voice_participants(
-    room: &Room,
-    avatars: &Arc<crate::avatars::AvatarService>,
-) -> Vec<VoiceParticipant> {
-    let active_user_ids = collect_active_call_users(room).await;
-    let mut participants = Vec::new();
-
-    for user_id in &active_user_ids {
-        let (display_name, avatar_url) = if let Ok(uid) = matrix_sdk::ruma::UserId::parse(user_id) {
-            match room.get_member_no_sync(&uid).await {
-                Ok(Some(member)) => {
-                    let name = member.display_name().map(|n| n.to_string());
-                    let avatar = avatars.cached(member.avatar_url()).await;
-                    (name, avatar)
-                }
-                _ => (None, None),
-            }
-        } else {
-            (None, None)
-        };
-
-        participants.push(VoiceParticipant {
-            user_id: user_id.clone(),
-            display_name,
-            avatar_url,
-        });
-    }
-
-    participants
-}
-
-pub(crate) async fn collect_voice_participants_for_joined_voice_rooms(
-    client: &Client,
-    avatars: &Arc<crate::avatars::AvatarService>,
-) -> HashMap<String, Vec<VoiceParticipant>> {
-    let mut participants_by_room: HashMap<String, Vec<VoiceParticipant>> = HashMap::new();
-
-    for room in client.joined_rooms() {
-        let is_voice_room = room
-            .room_type()
-            .map(|rt| rt.to_string() == VOICE_ROOM_TYPE)
-            .unwrap_or(false);
-        if !is_voice_room {
-            continue;
-        }
-
-        let room_id = room.room_id().to_string();
-        let participants = collect_room_voice_participants(&room, avatars).await;
-        participants_by_room.insert(room_id, participants);
-    }
-
-    participants_by_room
-}
-
+/// A scoped read also returns the joined voice-room catalog. Failed rooms are
+/// omitted so consumers can retain their last successful snapshot.
 #[tauri::command]
 pub async fn get_all_voice_participants(
     state: State<'_, Arc<AppState>>,
-) -> Result<HashMap<String, Vec<VoiceParticipant>>, String> {
-    let client = super::get_client(&state).await?;
-
-    Ok(collect_voice_participants_for_joined_voice_rooms(&client, &state.avatars).await)
+    room_ids: Option<Vec<String>>,
+) -> Result<VoiceMembershipSnapshot, String> {
+    let session = state.voice_presence.session();
+    session
+        .run(async {
+            let _guard = session.matrix_read.lock().await;
+            let client = super::get_client(&state).await?;
+            Ok(voice_presence::read_memberships(&client, &state.avatars, room_ids).await)
+        })
+        .await
 }
 
 /// Result of [discover_livekit_service_url]: URL and whether it came from room state (may be stale).
@@ -381,13 +261,17 @@ pub async fn get_voice_participants(
     state: State<'_, Arc<AppState>>,
     room_id: String,
 ) -> Result<Vec<VoiceParticipant>, String> {
-    let client = super::get_client(&state).await?;
-    let room = super::resolve_room(&client, &room_id)?;
-
-    let avatars = state.avatars.clone();
-    let participants = collect_room_voice_participants(&room, &avatars).await;
-
-    Ok(participants)
+    let session = state.voice_presence.session();
+    session
+        .run(async {
+            let _guard = session.matrix_read.lock().await;
+            let client = super::get_client(&state).await?;
+            let room = super::resolve_room(&client, &room_id)?;
+            voice_presence::read_room(&room, &state.avatars)
+                .await
+                .map(|(participants, _)| participants)
+        })
+        .await
 }
 
 // ─── MSC4140 Delayed Events API ─────────────────────────────────────────────
@@ -579,23 +463,6 @@ async fn send_or_fallback_leave(
 
     // Fallback: clear all memberships manually (same as before)
     matrix_voice_clear_my_memberships_in_room(client, http, room_id, None).await
-}
-
-/// Force-emit a `voice-participants-changed` event so the sidebar updates immediately
-/// without waiting for the next sync response.
-pub(crate) async fn force_emit_voice_participants(
-    client: &Client,
-    avatars: &Arc<crate::avatars::AvatarService>,
-    app_handle: &tauri::AppHandle,
-) {
-    let participants_by_room =
-        collect_voice_participants_for_joined_voice_rooms(client, avatars).await;
-    let _ = app_handle.emit(
-        "voice-participants-changed",
-        crate::types::VoiceParticipantsChangedPayload {
-            participants_by_room,
-        },
-    );
 }
 
 /// PUT `org.matrix.msc3401.call.member` for this device using a validated JWT service base URL.
@@ -1003,7 +870,8 @@ async fn kick_other_devices_from_livekit(
 
         let participants =
             match livekit_list_participants_for_room(http, lk_url, &room_jwt, room_name).await {
-                Ok(p) => p,
+                Ok(LivekitRoomRead::Participants(p)) => p,
+                Ok(LivekitRoomRead::Missing) => continue,
                 Err(e) => {
                     log::warn!("kick: {e}");
                     continue;
@@ -1233,6 +1101,7 @@ pub async fn voice_connect(
 ) -> Result<(), String> {
     log::debug!("voice_connect called for room {}", room_id);
     let state_arc: Arc<AppState> = (*state).clone();
+    let presence_session = state_arc.voice_presence.session();
     state_arc.stop_heartbeat_loop();
     if let Ok(mut g) = state_arc.voice_livekit_jwt_service_url.lock() {
         *g = None;
@@ -1341,24 +1210,28 @@ pub async fn voice_connect(
     );
 
     if let Some((mid, lk_name)) = voice_mgr.current_matrix_room_and_livekit_sfu_name() {
-        if let Ok(mut m) = state_arc.livekit_matrix_to_sfu_room.lock() {
+        if let Ok(mut m) = presence_session.sfu_rooms.lock() {
             m.insert(mid, lk_name);
         }
     }
 
-    // 6. Force-emit participant update so sidebar refreshes immediately
-    let emit_client = client.clone();
-    let emit_avatars = state_arc.avatars.clone();
-    tokio::spawn(async move {
-        tokio::time::sleep(Duration::from_millis(500)).await;
-        force_emit_voice_participants(&emit_client, &emit_avatars, &app_handle_for_emit).await;
-    });
+    // The shared store refreshes this room; sync supplies the authoritative
+    // membership echo. No delayed task can publish a stale full-room scan.
+    if presence_session.is_active() {
+        let _ = app_handle_for_emit.emit(
+            "voice-participants-invalidated",
+            crate::types::VoiceParticipantsInvalidatedPayload {
+                room_ids: vec![room_id],
+            },
+        );
+    }
 
     Ok(())
 }
 
 #[tauri::command]
 pub async fn voice_disconnect(
+    app_handle: tauri::AppHandle,
     state: State<'_, Arc<AppState>>,
     voice_mgr: State<'_, voice::VoiceManager>,
     room_id: String,
@@ -1381,16 +1254,26 @@ pub async fn voice_disconnect(
 
     // 4. Fire the delayed leave immediately (graceful) or fall back to manual PUT
     let state_clone = state.inner().clone();
+    let presence_session = state.voice_presence.session();
     tauri::async_runtime::spawn(async move {
-        let guard = state_clone.client.lock().await;
-        if let Some(client) = guard.as_ref() {
+        // Clone before awaiting the leave request; presence reads must not wait
+        // on the global client lock while the homeserver is slow.
+        if let Ok(client) = super::get_client(&state_clone).await {
             let _ = send_or_fallback_leave(
-                client,
+                &client,
                 &state_clone.http_client,
                 &room_id,
                 delay_id.as_deref(),
             )
             .await;
+            if presence_session.is_active() {
+                let _ = app_handle.emit(
+                    "voice-participants-invalidated",
+                    crate::types::VoiceParticipantsInvalidatedPayload {
+                        room_ids: vec![room_id],
+                    },
+                );
+            }
         }
     });
 
@@ -1538,29 +1421,6 @@ fn pick_livekit_room_name(rooms: &[serde_json::Value], matrix_room_id: &str) -> 
         if !metadata.is_empty() && cands.iter().any(|c| metadata.contains(c.as_str())) {
             return Some(name.to_string());
         }
-    }
-
-    // 4. Fallback: if there is exactly one active room (num_participants > 0), use it.
-    //    lk-jwt-service hashes the room name so we can't reverse-match, but with a
-    //    single active room the mapping is unambiguous.
-    let active: Vec<&str> = rooms
-        .iter()
-        .filter_map(|r| {
-            let name = r.get("name").and_then(|n| n.as_str()).unwrap_or("");
-            let count = r
-                .get("numParticipants")
-                .or_else(|| r.get("num_participants"))
-                .and_then(|n| n.as_u64())
-                .unwrap_or(0);
-            if !name.is_empty() && count > 0 {
-                Some(name)
-            } else {
-                None
-            }
-        })
-        .collect();
-    if active.len() == 1 {
-        return Some(active[0].to_string());
     }
 
     None
@@ -1721,7 +1581,7 @@ async fn livekit_list_participants_for_room(
     lk_url: &str,
     room_admin_jwt: &str,
     livekit_room_name: &str,
-) -> Result<Vec<LivekitVoiceParticipantInfo>, String> {
+) -> Result<LivekitRoomRead, String> {
     let list_url = format!(
         "{}/twirp/livekit.RoomService/ListParticipants",
         lk_url.trim_end_matches('/')
@@ -1734,6 +1594,9 @@ async fn livekit_list_participants_for_room(
         .send()
         .await
         .map_err(|e| format!("ListParticipants: {}", fmt_error_chain(&e)))?;
+    if resp.status() == reqwest::StatusCode::NOT_FOUND {
+        return Ok(LivekitRoomRead::Missing);
+    }
     if !resp.status().is_success() {
         return Err(format!("ListParticipants status {}", resp.status()));
     }
@@ -1746,175 +1609,219 @@ async fn livekit_list_participants_for_room(
         .and_then(|p| p.as_array())
         .cloned()
         .unwrap_or_default();
-    Ok(parts
-        .iter()
-        .filter_map(|p| parse_livekit_participant_json(p))
-        .collect())
+    Ok(LivekitRoomRead::Participants(
+        parts
+            .iter()
+            .filter_map(|p| parse_livekit_participant_json(p))
+            .collect(),
+    ))
 }
 
-/// Second value: SFU room name to persist when it was discovered (not read from cache).
-async fn fetch_livekit_voice_snapshot_for_matrix_room(
-    http: &reqwest::Client,
-    config: &LivekitConfig,
-    matrix_room_id: &str,
-    cached_sfu_room_name: Option<&str>,
-) -> Result<(Vec<LivekitVoiceParticipantInfo>, Option<String>), String> {
-    let (api_key, api_secret, lk_url) = match livekit_credentials(config) {
-        Some(creds) => creds,
-        _ => return Ok((vec![], None)),
-    };
-
-    let (lk_room, discovered_sfu_name) = if let Some(name) = cached_sfu_room_name
-        .map(str::trim)
-        .filter(|s| !s.is_empty())
-    {
-        (name.to_string(), None)
-    } else {
-        let admin_jwt = make_livekit_admin_jwt(api_key, api_secret, "")?;
-        let rooms = livekit_list_rooms(http, lk_url, &admin_jwt).await?;
-        let Some(picked) = pick_livekit_room_name(&rooms, matrix_room_id) else {
-            log::debug!(
-                "LiveKit snapshot ({}): no SFU room matched among {} rooms",
-                matrix_room_id,
-                rooms.len()
-            );
-            return Ok((vec![], None));
-        };
-        log::debug!(
-            "LiveKit snapshot ({}): resolved SFU room '{}'",
-            matrix_room_id,
-            picked
-        );
-        (picked.clone(), Some(picked))
-    };
-
-    let room_jwt = make_livekit_admin_jwt(api_key, api_secret, &lk_room)?;
-    let participants =
-        livekit_list_participants_for_room(http, lk_url, &room_jwt, &lk_room).await?;
-    Ok((participants, discovered_sfu_name))
-}
-
-/// Best-effort LiveKit participant mute/deafen/speaking (requires `LIVEKIT_*` admin env vars).
-/// Returns an empty list when credentials are missing or the SFU room name cannot be matched.
+/// Both command forms use the same bounded batch path and session lifetime.
 #[tauri::command]
 pub async fn get_livekit_voice_room_snapshot(
     state: State<'_, Arc<AppState>>,
     room_id: String,
 ) -> Result<Vec<LivekitVoiceParticipantInfo>, String> {
-    let cached = state
-        .livekit_matrix_to_sfu_room
-        .lock()
-        .ok()
-        .and_then(|g| g.get(&room_id).cloned());
-    let cached_ref = cached.as_deref();
-    match fetch_livekit_voice_snapshot_for_matrix_room(
-        &state.http_client,
-        &state.livekit,
-        &room_id,
-        cached_ref,
-    )
-    .await
-    {
-        Ok((participants, discovered)) => {
-            if cached_ref.is_none() {
-                if let Some(sfu) = discovered {
-                    if let Ok(mut g) = state.livekit_matrix_to_sfu_room.lock() {
-                        g.insert(room_id.clone(), sfu);
-                    }
-                }
-            }
-            Ok(participants)
-        }
-        Err(e) => {
-            log::debug!("LiveKit voice snapshot ({}): {}", room_id, e);
-            Ok(vec![])
-        }
-    }
+    let session = state.voice_presence.session();
+    session
+        .run(async {
+            let _guard = session.livekit_read.lock().await;
+            let mut snapshot =
+                read_livekit_snapshots(&state, &session, vec![room_id.clone()]).await?;
+            snapshot
+                .participants_by_room
+                .remove(&room_id)
+                .ok_or_else(|| "LiveKit snapshot unavailable".into())
+        })
+        .await
 }
 
-/// Batched version: fetch LiveKit participant state for multiple Matrix voice rooms
-/// in a single call. Calls `ListRooms` once and `ListParticipants` per matched room.
 #[tauri::command]
 pub async fn get_all_livekit_voice_snapshots(
     state: State<'_, Arc<AppState>>,
     room_ids: Vec<String>,
-) -> Result<HashMap<String, Vec<LivekitVoiceParticipantInfo>>, String> {
+) -> Result<LivekitVoiceSnapshot, String> {
+    let session = state.voice_presence.session();
+    session
+        .run(async {
+            let _guard = session.livekit_read.lock().await;
+            read_livekit_snapshots(&state, &session, room_ids).await
+        })
+        .await
+}
+
+async fn read_livekit_snapshots(
+    state: &AppState,
+    session: &VoicePresenceSession,
+    room_ids: Vec<String>,
+) -> Result<LivekitVoiceSnapshot, String> {
+    let client = super::get_client(state).await?;
+    let mut room_ids = room_ids;
+    room_ids.sort();
+    room_ids.dedup();
     let (api_key, api_secret, lk_url) = match livekit_credentials(&state.livekit) {
         Some(creds) => creds,
-        _ => {
-            // No credentials — return empty for all rooms
-            return Ok(room_ids.into_iter().map(|id| (id, vec![])).collect());
+        None => {
+            return Ok(LivekitVoiceSnapshot {
+                available: false,
+                participants_by_room: room_ids.into_iter().map(|id| (id, vec![])).collect(),
+            })
         }
     };
-
-    // Read the SFU room name cache
-    let sfu_cache: HashMap<String, String> = state
-        .livekit_matrix_to_sfu_room
-        .lock()
-        .ok()
-        .map(|g| g.clone())
-        .unwrap_or_default();
-
-    // Figure out which rooms need a ListRooms lookup (not in cache)
-    let needs_discovery: Vec<&String> = room_ids
-        .iter()
-        .filter(|id| !sfu_cache.contains_key(id.as_str()))
+    let joined: std::collections::HashSet<_> = client
+        .joined_rooms()
+        .into_iter()
+        .map(|room| room.room_id().to_string())
         .collect();
-
-    // Only call ListRooms if at least one room needs discovery
-    let discovered_rooms: Vec<serde_json::Value> = if needs_discovery.is_empty() {
-        vec![]
-    } else {
-        let admin_jwt = make_livekit_admin_jwt(api_key, api_secret, "")?;
-        livekit_list_rooms(&state.http_client, lk_url, &admin_jwt)
-            .await
-            .unwrap_or_default()
+    let mut snapshot = LivekitVoiceSnapshot {
+        available: true,
+        ..Default::default()
     };
-
-    let mut result: HashMap<String, Vec<LivekitVoiceParticipantInfo>> = HashMap::new();
-
-    for matrix_room_id in &room_ids {
-        // Resolve SFU room name: cache first, then discovery
-        let sfu_room_name = if let Some(cached) = sfu_cache.get(matrix_room_id) {
-            Some(cached.clone())
+    room_ids.retain(|id| {
+        if joined.contains(id) {
+            true
         } else {
-            pick_livekit_room_name(&discovered_rooms, matrix_room_id)
-        };
-
-        let Some(sfu_name) = sfu_room_name else {
-            result.insert(matrix_room_id.clone(), vec![]);
-            continue;
-        };
-
-        // Cache newly discovered SFU room names
-        if !sfu_cache.contains_key(matrix_room_id) {
-            if let Ok(mut g) = state.livekit_matrix_to_sfu_room.lock() {
-                g.insert(matrix_room_id.clone(), sfu_name.clone());
+            snapshot.participants_by_room.insert(id.clone(), vec![]);
+            false
+        }
+    });
+    let cache = session.sfu_rooms.lock().unwrap().clone();
+    let discovery = if room_ids.iter().any(|id| !cache.contains_key(id)) {
+        let jwt = make_livekit_admin_jwt(api_key, api_secret, "")?;
+        match livekit_list_rooms(&state.http_client, lk_url, &jwt).await {
+            Ok(rooms) => Some(rooms),
+            Err(error) => {
+                log::debug!("LiveKit discovery: {error}");
+                None
             }
         }
-
-        // Fetch participants for this room
-        let room_jwt = match make_livekit_admin_jwt(api_key, api_secret, &sfu_name) {
-            Ok(t) => t,
-            Err(e) => {
-                log::debug!("LiveKit snapshot JWT for {}: {}", matrix_room_id, e);
-                result.insert(matrix_room_id.clone(), vec![]);
-                continue;
+    } else {
+        None
+    };
+    let mut targets = Vec::new();
+    for id in room_ids {
+        let name = cache.get(&id).cloned().or_else(|| {
+            discovery
+                .as_ref()
+                .and_then(|rooms| pick_livekit_room_name(rooms, &id))
+        });
+        match name {
+            Some(name) => {
+                targets.push((id, name));
             }
-        };
-
-        match livekit_list_participants_for_room(&state.http_client, lk_url, &room_jwt, &sfu_name)
-            .await
-        {
-            Ok(participants) => {
-                result.insert(matrix_room_id.clone(), participants);
+            None if discovery.is_some() => {
+                snapshot.participants_by_room.insert(id, vec![]);
             }
-            Err(e) => {
-                log::debug!("LiveKit snapshot for {}: {}", matrix_room_id, e);
-                result.insert(matrix_room_id.clone(), vec![]);
-            }
+            None => {} // Discovery failed; preserve last known state.
         }
     }
+    let completed = voice_presence::collect_livekit_reads(
+        targets,
+        Duration::from_secs(12),
+        |name| async move {
+            let jwt = make_livekit_admin_jwt(api_key, api_secret, &name)?;
+            livekit_list_participants_for_room(&state.http_client, lk_url, &jwt, &name).await
+        },
+    )
+    .await;
+    for (id, name, result) in completed {
+        apply_livekit_read(session, &mut snapshot, id, name, result);
+    }
+    Ok(snapshot)
+}
 
-    Ok(result)
+fn apply_livekit_read(
+    session: &VoicePresenceSession,
+    snapshot: &mut LivekitVoiceSnapshot,
+    id: String,
+    name: String,
+    result: Result<LivekitRoomRead, String>,
+) {
+    match result {
+        Ok(LivekitRoomRead::Participants(participants)) => {
+            session.sfu_rooms.lock().unwrap().insert(id.clone(), name);
+            snapshot.participants_by_room.insert(id, participants);
+        }
+        Ok(LivekitRoomRead::Missing) => {
+            // Confirmed removal permits discovery of a recreated SFU room.
+            session.sfu_rooms.lock().unwrap().remove(&id);
+            snapshot.participants_by_room.insert(id, vec![]);
+        }
+        Err(error) => {
+            // A timeout must not discard a learned mapping or become empty state.
+            log::debug!("LiveKit snapshot {id}: {error}");
+        }
+    }
+}
+
+#[cfg(test)]
+mod presence_tests {
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn the_only_busy_sfu_room_is_not_assigned_to_unrelated_matrix_rooms() {
+        let rooms = vec![json!({"name":"unrelated-sfu-room", "numParticipants":4})];
+        assert_eq!(pick_livekit_room_name(&rooms, "!other:example.org"), None);
+    }
+
+    #[test]
+    fn transient_failures_preserve_mapping_but_confirmed_removal_clears_it() {
+        let service = crate::voice_presence::VoicePresenceService::default();
+        service.start_session();
+        let session = service.session();
+        session
+            .sfu_rooms
+            .lock()
+            .unwrap()
+            .insert("!room:server".into(), "sfu".into());
+        let mut snapshot = LivekitVoiceSnapshot::default();
+        apply_livekit_read(
+            &session,
+            &mut snapshot,
+            "!room:server".into(),
+            "sfu".into(),
+            Err("timeout".into()),
+        );
+        assert_eq!(
+            session
+                .sfu_rooms
+                .lock()
+                .unwrap()
+                .get("!room:server")
+                .map(String::as_str),
+            Some("sfu")
+        );
+        assert!(!snapshot.participants_by_room.contains_key("!room:server"));
+        apply_livekit_read(
+            &session,
+            &mut snapshot,
+            "!room:server".into(),
+            "sfu".into(),
+            Ok(LivekitRoomRead::Missing),
+        );
+        assert!(!session
+            .sfu_rooms
+            .lock()
+            .unwrap()
+            .contains_key("!room:server"));
+        assert!(snapshot.participants_by_room["!room:server"].is_empty());
+    }
+
+    #[test]
+    fn exact_and_metadata_room_mappings_are_still_discoverable() {
+        let rooms = vec![
+            json!({"name":"!direct:example.org"}),
+            json!({"name":"hashed-sfu", "metadata":"!metadata:example.org"}),
+        ];
+        assert_eq!(
+            pick_livekit_room_name(&rooms, "!direct:example.org"),
+            Some("!direct:example.org".into())
+        );
+        assert_eq!(
+            pick_livekit_room_name(&rooms, "!metadata:example.org"),
+            Some("hashed-sfu".into())
+        );
+    }
 }

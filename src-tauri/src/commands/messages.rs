@@ -41,14 +41,13 @@ use crate::types::{
     MessageBatch, MessageEditPayload, MessageInfo, MessageReactionDeltaPayload,
     MessageReactionSummary, MessageRedactedPayload, MessageReplyTo, PinnedMessagePreview,
     PresencePayload, RoomMembersChangedPayload, RoomMessagePayload, RoomPinPermission,
-    RoomRedactionPolicy, RoomSendPermission, TypingPayload, VoiceParticipantsChangedPayload,
+    RoomRedactionPolicy, RoomSendPermission, TypingPayload, VoiceParticipantsInvalidatedPayload,
 };
 use crate::AppState;
 
 use super::message_display::{
     extract_mentioned_user_ids, extract_message_display, reply_to_from_message_relation,
 };
-use super::voice_matrix::collect_voice_participants_for_joined_voice_rooms;
 use super::{fmt_error_chain, get_client, resolve_room};
 /// Matrix user IDs are compared case-insensitively; event `sender` and `client.user_id()` can differ in casing.
 fn user_id_strings_equal(a: &str, b: &str) -> bool {
@@ -1766,8 +1765,6 @@ pub async fn start_sync(
     // Clone shared state needed inside the sync loop.
     let presence_map = state.presence_map.clone();
     let status_msg_map = state.status_msg_map.clone();
-    let avatars = state.avatars.clone();
-    let voice_client = client.clone();
     let desired_presence = state.desired_presence.clone();
     let unread_cache = state.unread_cache.clone();
     let raw_unread = state.raw_unread_messages.clone();
@@ -1893,21 +1890,13 @@ pub async fn start_sync(
             )
             .await;
 
-            // Push voice participants from a spawned task so we
-            // don't block the sync loop with avatar fetches.
-            let vc = voice_client.clone();
-            let ac = avatars.clone();
-            let ap = app.clone();
-            tokio::spawn(async move {
-                let participants_by_room =
-                    collect_voice_participants_for_joined_voice_rooms(&vc, &ac).await;
-                let _ = ap.emit(
-                    "voice-participants-changed",
-                    VoiceParticipantsChangedPayload {
-                        participants_by_room,
-                    },
+            let voice_rooms = crate::voice_presence::changed_rooms(&client, &response);
+            if !voice_rooms.is_empty() {
+                let _ = app.emit(
+                    "voice-participants-invalidated",
+                    VoiceParticipantsInvalidatedPayload { room_ids: voice_rooms },
                 );
-            });
+            }
         }
     });
 

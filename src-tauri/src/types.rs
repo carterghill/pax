@@ -298,8 +298,8 @@ pub struct LivekitVoiceParticipantInfo {
 
 #[derive(Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
-pub struct VoiceParticipantsChangedPayload {
-    pub participants_by_room: HashMap<String, Vec<VoiceParticipant>>,
+pub struct VoiceParticipantsInvalidatedPayload {
+    pub room_ids: Vec<String>,
 }
 
 #[derive(Serialize)]

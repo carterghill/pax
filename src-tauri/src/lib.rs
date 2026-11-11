@@ -13,6 +13,7 @@ mod setup;
 mod types;
 pub mod video_recv;
 mod voice;
+mod voice_presence;
 
 use std::collections::HashMap;
 use std::io::Write;
@@ -60,6 +61,7 @@ pub struct AppState {
     pub file_cache: Arc<file_cache::FileCache>,
     pub avatars: Arc<avatars::AvatarService>,
     pub notifications: commands::reconciler::NotificationService,
+    pub voice_presence: voice_presence::VoicePresenceService,
     pub sync_running: Arc<Mutex<bool>>,
     /// Background `sync_with_callback` task — must be aborted before deleting the SQLite store
     /// or replacing `client`, otherwise the DB stays locked (especially on Windows).
@@ -68,8 +70,6 @@ pub struct AppState {
     pub livekit: LivekitConfig,
     pub giphy_api_key: Option<String>,
     pub auth_config: AuthConfig,
-    /// Matrix voice room id → LiveKit SFU room name (learned on connect; used for admin ListParticipants).
-    pub livekit_matrix_to_sfu_room: StdMutex<HashMap<String, String>>,
     /// Stops the MSC4140 heartbeat task that restarts the delayed leave event.
     pub heartbeat_stop: Arc<AtomicBool>,
     pub heartbeat_task: StdMutex<Option<tauri::async_runtime::JoinHandle<()>>>,
@@ -319,6 +319,7 @@ pub fn run() {
         status_msg_map: Arc::new(Mutex::new(HashMap::new())),
         avatars: Arc::new(avatars::AvatarService::new(file_cache.clone())),
         notifications: commands::reconciler::NotificationService::default(),
+        voice_presence: voice_presence::VoicePresenceService::default(),
         file_cache,
         sync_running: Arc::new(Mutex::new(false)),
         sync_join: Mutex::new(None),
@@ -326,7 +327,6 @@ pub fn run() {
         livekit,
         giphy_api_key,
         auth_config,
-        livekit_matrix_to_sfu_room: StdMutex::new(HashMap::new()),
         heartbeat_stop: Arc::new(AtomicBool::new(true)),
         heartbeat_task: StdMutex::new(None),
         delayed_leave_id: StdMutex::new(None),
