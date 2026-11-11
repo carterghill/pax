@@ -19,12 +19,8 @@
 //! `notification_levels` and `reconciler` can use them without going
 //! through the Tauri State layer.
 //!
-//! ### Rule ID namespacing
-//!
-//! Pax-managed rules are prefixed `pax.*` (e.g. `pax.room_mute.!foo:server`).
-//! The reconciler filters to that namespace so it won't touch user-authored
-//! rules or rules Element installed.  Not enforced at this layer — this
-//! module will PUT/DELETE whatever it's asked to — but worth stating.
+//! The notification projection manages room-kind rules keyed by room ID.
+//! These helpers preserve the raw CRUD surface for explicit rule editing.
 
 use std::sync::Arc;
 
@@ -34,20 +30,11 @@ use tauri::State;
 
 use crate::AppState;
 
-use super::{fmt_error_chain, get_client};
+use super::{fmt_error_chain, get_authed_client, AuthedClient};
+
+const REQUEST_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
 
 // ---------- Helpers ----------
-
-/// Return `(homeserver_base, access_token)` for the current session.
-async fn hs_auth(state: &AppState) -> Result<(String, String), String> {
-    let client = get_client(state).await?;
-    let access_token = client
-        .access_token()
-        .ok_or_else(|| "No access token".to_string())?;
-    let hs = client.homeserver().to_string();
-    let hs = hs.trim_end_matches('/').to_string();
-    Ok((hs, access_token))
-}
 
 /// Validate a push-rule kind against the five kinds the spec defines.
 fn validate_kind(kind: &str) -> Result<&str, String> {
@@ -63,12 +50,21 @@ fn validate_kind(kind: &str) -> Result<&str, String> {
 /// user as raw JSON.  Exposed to sibling modules so the synthesis layer and
 /// reconciler can classify rules without double-layered command dispatch.
 pub(super) async fn load_push_rules_raw(state: &AppState) -> Result<Value, String> {
-    let (hs, token) = hs_auth(state).await?;
+    let auth = get_authed_client(state).await?;
+    load_push_rules_for_client(&state.http_client, &auth).await
+}
+
+pub(super) async fn load_push_rules_for_client(
+    http: &reqwest::Client,
+    auth: &AuthedClient,
+) -> Result<Value, String> {
+    let hs = &auth.homeserver;
+    let token = &auth.access_token;
     let url = format!("{hs}/_matrix/client/v3/pushrules/");
-    let resp = state
-        .http_client
+    let resp = http
         .get(&url)
         .bearer_auth(&token)
+        .timeout(REQUEST_TIMEOUT)
         .send()
         .await
         .map_err(|e| format!("Failed to fetch push rules: {}", fmt_error_chain(&e)))?;
@@ -95,12 +91,35 @@ pub(super) async fn put_push_rule_raw(
     before: Option<&str>,
     after: Option<&str>,
 ) -> Result<(), String> {
+    let auth = get_authed_client(state).await?;
+    put_push_rule_for_client(
+        &state.http_client,
+        &auth,
+        kind,
+        rule_id,
+        body,
+        before,
+        after,
+    )
+    .await
+}
+
+pub(super) async fn put_push_rule_for_client(
+    http: &reqwest::Client,
+    auth: &AuthedClient,
+    kind: &str,
+    rule_id: &str,
+    body: &Value,
+    before: Option<&str>,
+    after: Option<&str>,
+) -> Result<(), String> {
     let kind = validate_kind(kind)?;
-    let (hs, token) = hs_auth(state).await?;
+    let hs = &auth.homeserver;
+    let token = &auth.access_token;
     let encoded_rule = urlencoding::encode(rule_id);
     let url = format!("{hs}/_matrix/client/v3/pushrules/global/{kind}/{encoded_rule}");
 
-    let mut req = state.http_client.put(&url).bearer_auth(&token).json(body);
+    let mut req = http.put(&url).bearer_auth(&token).json(body);
     if let Some(b) = before {
         req = req.query(&[("before", b)]);
     }
@@ -109,6 +128,7 @@ pub(super) async fn put_push_rule_raw(
     }
 
     let resp = req
+        .timeout(REQUEST_TIMEOUT)
         .send()
         .await
         .map_err(|e| format!("Failed to PUT push rule: {}", fmt_error_chain(&e)))?;
@@ -130,15 +150,26 @@ pub(super) async fn delete_push_rule_raw(
     kind: &str,
     rule_id: &str,
 ) -> Result<(), String> {
+    let auth = get_authed_client(state).await?;
+    delete_push_rule_for_client(&state.http_client, &auth, kind, rule_id).await
+}
+
+pub(super) async fn delete_push_rule_for_client(
+    http: &reqwest::Client,
+    auth: &AuthedClient,
+    kind: &str,
+    rule_id: &str,
+) -> Result<(), String> {
     let kind = validate_kind(kind)?;
-    let (hs, token) = hs_auth(state).await?;
+    let hs = &auth.homeserver;
+    let token = &auth.access_token;
     let encoded_rule = urlencoding::encode(rule_id);
     let url = format!("{hs}/_matrix/client/v3/pushrules/global/{kind}/{encoded_rule}");
 
-    let resp = state
-        .http_client
+    let resp = http
         .delete(&url)
         .bearer_auth(&token)
+        .timeout(REQUEST_TIMEOUT)
         .send()
         .await
         .map_err(|e| format!("Failed to DELETE push rule: {}", fmt_error_chain(&e)))?;
@@ -159,16 +190,28 @@ async fn do_set_push_rule_enabled(
     rule_id: &str,
     enabled: bool,
 ) -> Result<(), String> {
+    let auth = get_authed_client(state).await?;
+    set_push_rule_enabled_for_client(&state.http_client, &auth, kind, rule_id, enabled).await
+}
+
+pub(super) async fn set_push_rule_enabled_for_client(
+    http: &reqwest::Client,
+    auth: &AuthedClient,
+    kind: &str,
+    rule_id: &str,
+    enabled: bool,
+) -> Result<(), String> {
     let kind = validate_kind(kind)?;
-    let (hs, token) = hs_auth(state).await?;
+    let hs = &auth.homeserver;
+    let token = &auth.access_token;
     let encoded_rule = urlencoding::encode(rule_id);
     let url = format!("{hs}/_matrix/client/v3/pushrules/global/{kind}/{encoded_rule}/enabled");
 
-    let resp = state
-        .http_client
+    let resp = http
         .put(&url)
         .bearer_auth(&token)
         .json(&serde_json::json!({ "enabled": enabled }))
+        .timeout(REQUEST_TIMEOUT)
         .send()
         .await
         .map_err(|e| format!("Failed to PUT push rule enabled: {}", fmt_error_chain(&e)))?;
@@ -280,7 +323,9 @@ pub async fn set_push_rule_actions(
     actions: Vec<Value>,
 ) -> Result<(), String> {
     let kind = validate_kind(&kind)?;
-    let (hs, token) = hs_auth(&state).await?;
+    let auth = get_authed_client(&state).await?;
+    let hs = &auth.homeserver;
+    let token = &auth.access_token;
     let encoded_rule = urlencoding::encode(&rule_id);
     let url = format!("{hs}/_matrix/client/v3/pushrules/global/{kind}/{encoded_rule}/actions");
 
@@ -289,6 +334,7 @@ pub async fn set_push_rule_actions(
         .put(&url)
         .bearer_auth(&token)
         .json(&serde_json::json!({ "actions": actions }))
+        .timeout(REQUEST_TIMEOUT)
         .send()
         .await
         .map_err(|e| format!("Failed to PUT push rule actions: {}", fmt_error_chain(&e)))?;

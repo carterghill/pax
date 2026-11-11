@@ -1,9 +1,7 @@
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
-use std::time::Duration;
 
 use futures_util::stream::{self, StreamExt};
-use matrix_sdk::ruma::events::StateEventType;
 use matrix_sdk::RoomMemberships;
 use tauri::State;
 use tokio::sync::Mutex;
@@ -11,101 +9,16 @@ use tokio::sync::Mutex;
 use crate::types::{RoomInfo, SpaceChildOrder};
 use crate::AppState;
 
-use super::fmt_error_chain;
-
-/// One child entry from a space's `m.space.child` state: the child room id
-/// plus the `order` string (when present) and `origin_server_ts` of the
-/// `m.space.child` event.  Used by `get_rooms` to propagate per-parent
-/// ordering metadata into each `RoomInfo`.
-#[derive(Clone)]
-struct SpaceChildMeta {
-    child_id: String,
-    order: Option<String>,
-    origin_server_ts: u64,
-}
+use crate::room_relationships::{
+    index_parent_spaces, load_space_children, ParentSpaces, SpaceChildMeta,
+};
 
 async fn fetch_space_children_for_room(room: matrix_sdk::Room) -> (String, Vec<SpaceChildMeta>) {
-    let room_id = room.room_id().to_string();
-    let mut children: Vec<SpaceChildMeta> = Vec::new();
-    match tokio::time::timeout(
-        Duration::from_secs(10),
-        room.get_state_events(StateEventType::SpaceChild),
-    )
-    .await
-    {
-        Ok(Ok(events)) => {
-            for event in events {
-                // `RawAnySyncOrStrippedState` is an enum wrapping a `Raw<T>` —
-                // the lazy-deserialization wrapper.  The enum itself doesn't
-                // expose `.json()`; that lives on the inner `Raw<T>`.  We
-                // match on the variant and deserialize the inner JSON as a
-                // `serde_json::Value` so we can read `content.order` and
-                // `origin_server_ts` directly without going through a typed
-                // event struct (which would require keeping up with
-                // matrix-sdk enum variant churn).
-                let value: serde_json::Value = match &event {
-                    matrix_sdk::deserialized_responses::RawAnySyncOrStrippedState::Sync(raw) => {
-                        match raw.deserialize_as::<serde_json::Value>() {
-                            Ok(v) => v,
-                            Err(_) => continue,
-                        }
-                    }
-                    matrix_sdk::deserialized_responses::RawAnySyncOrStrippedState::Stripped(
-                        raw,
-                    ) => match raw.deserialize_as::<serde_json::Value>() {
-                        Ok(v) => v,
-                        Err(_) => continue,
-                    },
-                };
-                let Some(child_id) = value.get("state_key").and_then(|v| v.as_str()) else {
-                    continue;
-                };
-                // Per MSC1772, a missing / empty `via` on `m.space.child` means
-                // the parent/child relationship is tombstoned and the child
-                // must not be displayed.
-                let has_via = value
-                    .get("content")
-                    .and_then(|c| c.get("via"))
-                    .and_then(|v| v.as_array())
-                    .map(|arr| !arr.is_empty())
-                    .unwrap_or(false);
-                if !has_via {
-                    continue;
-                }
-                let order = value
-                    .get("content")
-                    .and_then(|c| c.get("order"))
-                    .and_then(|v| v.as_str())
-                    .map(String::from);
-                // Stripped state events (invited rooms) don't carry
-                // origin_server_ts; fall back to 0 so they still participate
-                // in the sort with a stable tiebreaker.
-                let origin_server_ts = value
-                    .get("origin_server_ts")
-                    .and_then(|v| v.as_u64())
-                    .unwrap_or(0);
-                children.push(SpaceChildMeta {
-                    child_id: child_id.to_string(),
-                    order,
-                    origin_server_ts,
-                });
-            }
-        }
-        Ok(Err(e)) => {
-            log::warn!(
-                "get_rooms: failed to fetch m.space.child events for {}: {}",
-                room_id,
-                fmt_error_chain(&e)
-            );
-        }
-        Err(_) => {
-            log::warn!(
-                "get_rooms: timed out fetching m.space.child events for {}",
-                room_id
-            );
-        }
-    }
-    (room_id, children)
+    let children = load_space_children(&room).await.unwrap_or_else(|error| {
+        log::warn!("get_rooms: {error}");
+        Vec::new()
+    });
+    (room.room_id().to_string(), children)
 }
 
 /// Concurrent local space-child and summary reads; sequential was very slow with many spaces/rooms.
@@ -114,7 +27,7 @@ const GET_ROOMS_INFO_CONCURRENCY: usize = 24;
 
 async fn build_room_info(
     room: &matrix_sdk::Room,
-    space_children: &HashMap<String, Vec<SpaceChildMeta>>,
+    parents: &ParentSpaces,
     avatars: &Arc<crate::avatars::AvatarService>,
     presence_map: &Arc<Mutex<HashMap<String, String>>>,
     status_msg_map: &Arc<Mutex<HashMap<String, String>>>,
@@ -124,8 +37,8 @@ async fn build_room_info(
 
     let mut parent_space_ids: Vec<String> = Vec::new();
     let mut space_child_orders: HashMap<String, SpaceChildOrder> = HashMap::new();
-    for (space_id, children) in space_children.iter() {
-        if let Some(meta) = children.iter().find(|c| c.child_id == room_id_str) {
+    if let Some(spaces) = parents.get(&room_id_str) {
+        for (space_id, meta) in spaces {
             parent_space_ids.push(space_id.clone());
             space_child_orders.insert(
                 space_id.clone(),
@@ -327,12 +240,12 @@ pub async fn get_rooms(state: State<'_, Arc<AppState>>) -> Result<Vec<RoomInfo>,
         }
     }
 
-    let space_children = Arc::new(space_children);
+    let parent_spaces = Arc::new(index_parent_spaces(&space_children));
 
     // Joined rooms: project cached metadata, preserving sidebar order via index sort.
     let mut joined_parts: Vec<(usize, RoomInfo)> =
         stream::iter(joined_rooms.into_iter().enumerate().map(|(idx, room)| {
-            let sc = space_children.clone();
+            let sc = parent_spaces.clone();
             let ac = avatars.clone();
             let pm = presence_map.clone();
             let sm = status_msg_map_rooms.clone();
@@ -351,7 +264,7 @@ pub async fn get_rooms(state: State<'_, Arc<AppState>>) -> Result<Vec<RoomInfo>,
     // Invited rooms (same pattern).
     let mut invited_parts: Vec<(usize, RoomInfo)> =
         stream::iter(invited_rooms.into_iter().enumerate().map(|(idx, room)| {
-            let sc = space_children.clone();
+            let sc = parent_spaces.clone();
             let ac = avatars.clone();
             let pm = presence_map.clone();
             let sm = status_msg_map_rooms.clone();

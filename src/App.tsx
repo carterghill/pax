@@ -3,6 +3,7 @@ import { useState, useEffect, useRef, useMemo, useCallback } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import MainLayout from "./layouts/MainLayout";
 import { UserAvatarStoreProvider } from "./context/UserAvatarStore";
+import { NotificationSettingsProvider } from "./context/NotificationSettingsContext";
 import { RoomMemberStoreProvider } from "./context/RoomMemberStore";
 import { RoomDownloadsProvider } from "./context/RoomDownloadsContext";
 import { useTheme } from "./theme/ThemeContext";
@@ -370,15 +371,17 @@ function App() {
     return (
       <>
         <UserAvatarStoreProvider key={userId} userId={userId}>
-          <RoomMemberStoreProvider>
-            <RoomDownloadsProvider>
-              <AuthedApp
-                userId={userId}
-                onSignOut={handleSignOut}
-                loadingStyles={authStyles}
-              />
-            </RoomDownloadsProvider>
-          </RoomMemberStoreProvider>
+          <NotificationSettingsProvider>
+            <RoomMemberStoreProvider>
+              <RoomDownloadsProvider>
+                <AuthedApp
+                  userId={userId}
+                  onSignOut={handleSignOut}
+                  loadingStyles={authStyles}
+                />
+              </RoomDownloadsProvider>
+            </RoomMemberStoreProvider>
+          </NotificationSettingsProvider>
         </UserAvatarStoreProvider>
         {quitOverlay}
       </>

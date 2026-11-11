@@ -1479,11 +1479,24 @@ pub async fn start_sync(
         },
     );
 
+    let state_arc: Arc<AppState> = (*state).clone();
+    let reconcile_gate = Arc::new(AtomicBool::new(false));
+
     // Redactions (e.g. deleted messages): drop the target from the client timeline
     let app_handle = app.clone();
+    let redaction_state = state_arc.clone();
+    let redaction_gate = reconcile_gate.clone();
     client.add_event_handler(move |ev: OriginalSyncRoomRedactionEvent, room: Room| {
         let app = app_handle.clone();
+        let state = redaction_state.clone();
+        let gate = redaction_gate.clone();
         async move {
+            // A redaction can remove a space-child event without replaying it
+            // through the SpaceChild handler. The old target may be unavailable.
+            if room.is_space() && gate.load(Ordering::Relaxed) {
+                let _ = app.emit("rooms-changed", ());
+                state.notifications.schedule(&state, &app, super::reconciler::ReconcileScope::all());
+            }
             let room_id = room.room_id().to_string();
             let redacted = ev
                 .content
@@ -1555,30 +1568,8 @@ pub async fn start_sync(
         }
     });
 
-    // --- Auto-reconcile triggers ------------------------------------------
-    //
-    // Keep per-room push rules in sync with the user's notification intent
-    // without relying on the frontend to manually poke the reconciler:
-    //
-    //   - Self-join a room     → reconcile_room for that room (so new rooms
-    //                             pick up the global/space default).
-    //   - m.space.child changes → reconcile_rooms_for_space for the space
-    //                             that emitted (so rooms newly under a
-    //                             levelled space get that level applied).
-    //   - m.direct changes      → reconcile_all (DMs vs group rooms have
-    //                             different Element defaults, and the
-    //                             resolver consults m.direct).
-    //
-    // Everything runs gated on `reconcile_gate`, which only flips true
-    // after the first `sync_once` completes.  Without that gate, matrix-sdk
-    // fires handlers for the state-event replay during initial sync — on a
-    // fresh login that would spawn a reconcile_room per joined room in
-    // addition to the startup `reconcile_all` below, thrashing the
-    // homeserver for nothing since initial `reconcile_all` already covers
-    // them.
-    let state_arc: Arc<AppState> = (*state).clone();
-    let reconcile_gate = Arc::new(AtomicBool::new(false));
-
+    // Derived notification work runs in one session worker. Initial state
+    // replay is covered by a single full pass after the first sync completes.
     {
         let state_h = state_arc.clone();
         let app_h = app.clone();
@@ -1616,21 +1607,14 @@ pub async fn start_sync(
                 let room_id = room.room_id().to_string();
                 let _ = app.emit("rooms-changed", ());
 
-                if ev.content.membership != MembershipState::Join {
-                    return;
-                }
-                if prev_membership
-                    .as_ref()
-                    .map(|prev| prev == &MembershipState::Join)
-                    .unwrap_or(false)
-                {
-                    return;
-                }
-
-                log::info!("[pax reconcile] self-joined {room_id}; reconciling");
-                if let Err(e) = super::reconciler::reconcile_room(&state, &app, &room_id).await {
-                    log::warn!("[pax reconcile] room-join reconcile failed {room_id}: {e}");
-                }
+                let scope = if room.is_space() {
+                    // Joining/leaving a space changes inheritance for its old
+                    // and new children, including edges no longer in the store.
+                    super::reconciler::ReconcileScope::all()
+                } else {
+                    super::reconciler::ReconcileScope::room(room_id)
+                };
+                state.notifications.schedule(&state, &app, scope);
             }
         });
     }
@@ -1685,7 +1669,7 @@ pub async fn start_sync(
         let app_h = app.clone();
         let gate_h = reconcile_gate.clone();
         client.add_event_handler(
-            move |_ev: OriginalSyncStateEvent<SpaceChildEventContent>, room: Room| {
+            move |ev: matrix_sdk::ruma::events::SyncStateEvent<SpaceChildEventContent>, _room: Room| {
                 let state = state_h.clone();
                 let app = app_h.clone();
                 let gate = gate_h.clone();
@@ -1693,16 +1677,11 @@ pub async fn start_sync(
                     if !gate.load(Ordering::Relaxed) {
                         return;
                     }
-                    let space_id = room.room_id().to_string();
                     let _ = app.emit("rooms-changed", ());
-                    log::info!(
-                        "[pax reconcile] m.space.child changed in {space_id}; reconciling children"
-                    );
-                    if let Err(e) =
-                        super::reconciler::reconcile_rooms_for_space(&state, &app, &space_id).await
-                    {
-                        log::warn!("[pax reconcile] space-child reconcile failed {space_id}: {e}");
-                    }
+                    // The event's target must be reconciled even when the link
+                    // was removed/redacted and is absent from the new graph.
+                    state.notifications.schedule(&state, &app,
+                        super::reconciler::ReconcileScope::room(ev.state_key().to_string()));
                 }
             },
         );
@@ -1721,10 +1700,7 @@ pub async fn start_sync(
                     return;
                 }
                 let _ = app.emit("rooms-changed", ());
-                log::info!("[pax reconcile] m.direct changed; reconciling all rooms");
-                if let Err(e) = super::reconciler::reconcile_all(&state, &app).await {
-                    log::warn!("[pax reconcile] m.direct reconcile failed: {e}");
-                }
+                state.notifications.schedule(&state, &app, super::reconciler::ReconcileScope::all());
             }
         });
     }
@@ -1851,21 +1827,15 @@ pub async fn start_sync(
                 first_sync_done = true;
                 let _ = app.emit("sync-ready", ());
 
-                // Initial reconcile — catches drift from other clients
-                // since we last synced, plus applies global/space defaults
-                // to rooms that existed before join-event tracking started.
-                // Flip the gate BEFORE spawning so any join/space-child/
-                // m.direct events landing during the reconcile also fire
-                // their handlers.  Both paths running concurrently is fine
-                // — reconciles are idempotent.
                 reconcile_gate_for_loop.store(true, Ordering::Release);
-                let s = reconcile_state_arc.clone();
-                let a = app.clone();
-                tokio::spawn(async move {
-                    if let Err(e) = super::reconciler::reconcile_all(&s, &a).await {
-                        log::warn!("[pax reconcile] initial sync-ready reconcile failed: {e}");
-                    }
-                });
+                reconcile_state_arc.notifications.schedule(&reconcile_state_arc, &app,
+                    super::reconciler::ReconcileScope::all());
+            }
+
+            for event in &response.account_data {
+                if let Ok(value) = event.deserialize_as::<serde_json::Value>() {
+                    super::pax_settings::process_synced_settings(&reconcile_state_arc, &app, &value);
+                }
             }
 
             // Extract presence updates from the sync response.

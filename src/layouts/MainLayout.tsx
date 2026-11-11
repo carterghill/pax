@@ -148,35 +148,12 @@ export default function MainLayout({
   const roomUnread = useUnreadRooms(userId);
   const { isUnread } = roomUnread;
 
-  // Notification settings drive DM-badge muting: a DM explicitly set to
-  // `none` (or inheriting `none` from a parent space / global default)
-  // should not contribute unread messages to the red badge.  Reading this
-  // here costs one React subscription across all rendered sidebar rows —
-  // the hook itself caches and only re-renders on `pax-notification-settings-changed`.
-  const { notificationSettings } = useNotificationSettings();
-
-  // Does this room effectively resolve to "none"?  We reproduce the
-  // resolver's precedence chain here (room → space → global → Element
-  // default).  For DMs, Element defaults to `all`, so the terminal branch
-  // below returns `false` — only an explicit/ancestor "none" mutes.
+  // Badges use the same resolved levels as desktop notifications and server
+  // rule maintenance, including direct-parent inheritance and link removal.
+  const { notificationSettings, effectiveLevels } = useNotificationSettings();
   const isRoomEffectivelyMuted = useCallback(
-    (roomId: string): boolean => {
-      const explicit = notificationSettings.rooms[roomId];
-      if (explicit) return explicit === "none";
-      // Walk any parent space that has a level set.
-      const room = getRoom(roomId);
-      if (room) {
-        for (const parentId of room.parentSpaceIds) {
-          const spaceLevel = notificationSettings.spaces[parentId];
-          if (spaceLevel) return spaceLevel === "none";
-        }
-      }
-      if (notificationSettings.globalDefault) {
-        return notificationSettings.globalDefault === "none";
-      }
-      return false;
-    },
-    [notificationSettings, getRoom],
+    (roomId: string) => effectiveLevels[roomId] === "none",
+    [effectiveLevels],
   );
 
   // Space-level rollup.  Spaces don't have unread state of their own — we walk

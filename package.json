@@ -8,6 +8,7 @@
     "start": "concurrently \"vite\" \"tauri dev\"",
     "build": "tsc && vite build",
     "test:avatars": "node --test src/data/AvatarStore.test.mjs",
+    "test:notifications": "node --test src/data/NotificationStore.test.mjs",
     "test:members": "node --test src/data/RoomMemberStore.test.mjs",
     "android:icons": "python scripts/gen_android_icons.py",
     "preview": "vite preview",

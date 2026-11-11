@@ -125,6 +125,7 @@ pub async fn logout(state: State<'_, Arc<AppState>>, app: tauri::AppHandle) -> R
     }
 
     state.stop_sync_task().await;
+    state.notifications.reset();
     state.stop_heartbeat_loop();
     if let Ok(mut g) = state.voice_livekit_jwt_service_url.lock() {
         *g = None;
@@ -493,6 +494,7 @@ async fn finish_registration(
     // Registration succeeded — now do a normal SDK login so we get a fully
     // initialised Client with crypto store, sync, etc.
     state.stop_sync_task().await;
+    state.notifications.reset();
     *state.client.lock().await = None;
 
     let (client, store_rel) = login_password_into_new_store(
@@ -536,6 +538,7 @@ async fn finish_registration(
         .to_string();
 
     *state.client.lock().await = Some(client);
+    state.notifications.start_session();
     *state.sync_running.lock().await = false;
     state.avatars.reset();
     state.file_cache.clear().await;
@@ -553,6 +556,7 @@ pub async fn login(
     persist_session: bool,
 ) -> Result<String, String> {
     state.stop_sync_task().await;
+    state.notifications.reset();
     *state.client.lock().await = None;
 
     log::info!("login: password auth for {}", homeserver);
@@ -595,6 +599,7 @@ pub async fn login(
         .to_string();
 
     *state.client.lock().await = Some(client);
+    state.notifications.start_session();
     *state.sync_running.lock().await = false;
     state.avatars.reset();
     state.file_cache.clear().await;
@@ -695,9 +700,11 @@ pub async fn restore_session(
     }
 
     log::info!("restore_session: valid — user_id={}", user_id);
+    state.notifications.reset();
 
     state.avatars.reset();
     *state.client.lock().await = Some(client);
+    state.notifications.start_session();
     *state.sync_running.lock().await = false;
     Ok(user_id.to_string())
 }

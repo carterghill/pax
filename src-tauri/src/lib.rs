@@ -7,6 +7,7 @@ mod commands;
 mod idle;
 pub mod native_overlay;
 pub mod platform;
+mod room_relationships;
 mod screen;
 mod setup;
 mod types;
@@ -58,6 +59,7 @@ pub struct AppState {
     pub status_msg_map: Arc<Mutex<HashMap<String, String>>>,
     pub file_cache: Arc<file_cache::FileCache>,
     pub avatars: Arc<avatars::AvatarService>,
+    pub notifications: commands::reconciler::NotificationService,
     pub sync_running: Arc<Mutex<bool>>,
     /// Background `sync_with_callback` task — must be aborted before deleting the SQLite store
     /// or replacing `client`, otherwise the DB stays locked (especially on Windows).
@@ -316,6 +318,7 @@ pub fn run() {
         presence_map: Arc::new(Mutex::new(HashMap::new())),
         status_msg_map: Arc::new(Mutex::new(HashMap::new())),
         avatars: Arc::new(avatars::AvatarService::new(file_cache.clone())),
+        notifications: commands::reconciler::NotificationService::default(),
         file_cache,
         sync_running: Arc::new(Mutex::new(false)),
         sync_join: Mutex::new(None),

@@ -45,7 +45,10 @@ use tauri::{AppHandle, Emitter, State};
 
 use crate::AppState;
 
-use super::{fmt_error_chain, get_client};
+use super::reconciler::{NotificationSession, ReconcileScope};
+use super::{fmt_error_chain, get_authed_client, AuthedClient};
+
+const REQUEST_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
 
 // ---------- Constants ----------
 
@@ -138,7 +141,7 @@ pub enum NotificationLevel {
     None,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct NotificationSettings {
     #[serde(default = "default_schema_version")]
@@ -182,16 +185,18 @@ async fn fetch_account_data_raw(
     state: &AppState,
     event_type: &str,
 ) -> Result<Option<Value>, String> {
-    let client = get_client(state).await?;
-    let user_id = client
-        .user_id()
-        .ok_or_else(|| "No user ID".to_string())?
-        .to_string();
-    let access_token = client
-        .access_token()
-        .ok_or_else(|| "No access token".to_string())?;
-    let hs = client.homeserver().to_string();
-    let hs = hs.trim_end_matches('/');
+    let auth = get_authed_client(state).await?;
+    fetch_account_data_for_client(&state.http_client, &auth, event_type).await
+}
+
+async fn fetch_account_data_for_client(
+    http: &reqwest::Client,
+    auth: &AuthedClient,
+    event_type: &str,
+) -> Result<Option<Value>, String> {
+    let user_id = auth.client.user_id().ok_or("No user ID")?.to_string();
+    let access_token = &auth.access_token;
+    let hs = &auth.homeserver;
 
     let url = format!(
         "{hs}/_matrix/client/v3/user/{}/account_data/{}",
@@ -199,10 +204,10 @@ async fn fetch_account_data_raw(
         urlencoding::encode(event_type),
     );
 
-    let resp = state
-        .http_client
+    let resp = http
         .get(&url)
         .bearer_auth(&access_token)
+        .timeout(REQUEST_TIMEOUT)
         .send()
         .await
         .map_err(|e| format!("Failed to fetch account data: {}", fmt_error_chain(&e)))?;
@@ -229,16 +234,19 @@ async fn put_account_data_raw(
     event_type: &str,
     body: &Value,
 ) -> Result<(), String> {
-    let client = get_client(state).await?;
-    let user_id = client
-        .user_id()
-        .ok_or_else(|| "No user ID".to_string())?
-        .to_string();
-    let access_token = client
-        .access_token()
-        .ok_or_else(|| "No access token".to_string())?;
-    let hs = client.homeserver().to_string();
-    let hs = hs.trim_end_matches('/');
+    let auth = get_authed_client(state).await?;
+    put_account_data_for_client(&state.http_client, &auth, event_type, body).await
+}
+
+async fn put_account_data_for_client(
+    http: &reqwest::Client,
+    auth: &AuthedClient,
+    event_type: &str,
+    body: &Value,
+) -> Result<(), String> {
+    let user_id = auth.client.user_id().ok_or("No user ID")?.to_string();
+    let access_token = &auth.access_token;
+    let hs = &auth.homeserver;
 
     let url = format!(
         "{hs}/_matrix/client/v3/user/{}/account_data/{}",
@@ -246,11 +254,11 @@ async fn put_account_data_raw(
         urlencoding::encode(event_type),
     );
 
-    let resp = state
-        .http_client
+    let resp = http
         .put(&url)
         .bearer_auth(&access_token)
         .json(body)
+        .timeout(REQUEST_TIMEOUT)
         .send()
         .await
         .map_err(|e| format!("Failed to PUT account data: {}", fmt_error_chain(&e)))?;
@@ -288,53 +296,144 @@ async fn save_unread_settings(
     Ok(())
 }
 
-/// Exposed to sibling modules so the reconciler can read current intent
-/// without going through the Tauri command layer.
+/// Read through the session cache; concurrent readers share the first GET.
 pub(super) async fn load_notification_settings_inner(
     state: &AppState,
 ) -> Result<NotificationSettings, String> {
-    match fetch_account_data_raw(state, NOTIFICATION_SETTINGS_TYPE).await? {
+    let session = state.notifications.session();
+    load_settings_for_session(state, &session).await
+}
+
+pub(super) async fn load_settings_for_session(
+    state: &AppState,
+    session: &NotificationSession,
+) -> Result<NotificationSettings, String> {
+    session
+        .run(async {
+            let _guard = session.settings_load.lock().await;
+            loop {
+                let (revision, cached) = session.settings();
+                if let Some(settings) = cached {
+                    return Ok(settings);
+                }
+                if let Some(error) = session.settings_error() {
+                    return Err(error);
+                }
+                let auth = get_authed_client(state).await?;
+                match fetch_notification_settings(&state.http_client, &auth).await {
+                    Ok(settings) => {
+                        if session.cache_settings(revision, settings.clone()) {
+                            return Ok(settings);
+                        }
+                    }
+                    Err(error) => {
+                        if session.fail_settings(revision, error.clone()) {
+                            return Err(error);
+                        }
+                    }
+                }
+            }
+        })
+        .await
+}
+
+async fn fetch_notification_settings(
+    http: &reqwest::Client,
+    auth: &AuthedClient,
+) -> Result<NotificationSettings, String> {
+    match fetch_account_data_for_client(http, auth, NOTIFICATION_SETTINGS_TYPE).await? {
         None => Ok(NotificationSettings::default()),
-        Some(v) => serde_json::from_value::<NotificationSettings>(v)
+        Some(value) => serde_json::from_value(value)
             .map_err(|e| format!("Bad notification_settings JSON: {e}")),
     }
 }
 
-async fn save_notification_settings(
-    state: &AppState,
+/// Explicit edits still use a fresh serialized read-modify-write. Cached
+/// resolution must not overwrite fields another device has recently saved.
+async fn update_notification_settings(
+    state: &Arc<AppState>,
     app: &AppHandle,
-    settings: &NotificationSettings,
-) -> Result<(), String> {
-    let body = serde_json::to_value(settings)
-        .map_err(|e| format!("Serialise notification_settings: {e}"))?;
-    put_account_data_raw(state, NOTIFICATION_SETTINGS_TYPE, &body).await?;
-    let _ = app.emit("pax-notification-settings-changed", settings.clone());
-    Ok(())
+    update: impl FnOnce(&mut NotificationSettings),
+) -> Result<NotificationSettings, String> {
+    let session = state.notifications.session();
+    session
+        .run(async {
+            let _guard = PAX_SETTINGS_LOCK.lock().await;
+            let auth = get_authed_client(state).await?;
+            let mut settings = fetch_notification_settings(&state.http_client, &auth).await?;
+            let original = settings.clone();
+            update(&mut settings);
+            if settings != original {
+                let body = serde_json::to_value(&settings).map_err(|e| e.to_string())?;
+                put_account_data_for_client(
+                    &state.http_client,
+                    &auth,
+                    NOTIFICATION_SETTINGS_TYPE,
+                    &body,
+                )
+                .await?;
+            }
+            let scope = session.set_settings(settings.clone());
+            let _ = app.emit("pax-notification-settings-changed", &settings);
+            if !scope.is_empty() {
+                session.schedule(state, app, scope);
+            }
+            Ok(settings)
+        })
+        .await
 }
 
-/// Write (or clear) a per-room level override.  `None` removes the
-/// room's entry entirely, so the room re-inherits from its space / global
-/// default / Element default.
-///
-/// Exposed to `commands::notification_levels` so the per-room commands
-/// can mutate the settings atomically without duplicating the
-/// read-modify-write dance.
 pub(super) async fn set_room_level_inner(
-    state: &AppState,
+    state: &Arc<AppState>,
     app: &AppHandle,
     room_id: &str,
     level: Option<NotificationLevel>,
 ) -> Result<(), String> {
-    let _guard = PAX_SETTINGS_LOCK.lock().await;
-    let mut settings = load_notification_settings_inner(state).await?;
-    let changed = match level {
-        Some(l) => settings.rooms.insert(room_id.to_string(), l) != Some(l),
-        None => settings.rooms.remove(room_id).is_some(),
-    };
-    if !changed {
-        return Ok(());
+    update_notification_settings(state, app, |settings| match level {
+        Some(level) => {
+            settings.rooms.insert(room_id.to_owned(), level);
+        }
+        None => {
+            settings.rooms.remove(room_id);
+        }
+    })
+    .await
+    .map(|_| ())
+}
+
+/// Called after sync_once has applied account data. No server requests are
+/// awaited here. Re-fetch differing settings rather than trusting an old echo
+/// that could arrive after a more recent local save.
+pub(super) fn process_synced_settings(state: &Arc<AppState>, app: &AppHandle, event: &Value) {
+    match event.get("type").and_then(Value::as_str) {
+        Some(NOTIFICATION_SETTINGS_TYPE) => {
+            let Some(content) = event.get("content") else {
+                return;
+            };
+            match serde_json::from_value::<NotificationSettings>(content.clone()) {
+                Ok(settings) => {
+                    let session = state.notifications.session();
+                    if session.invalidate_settings_if_different(&settings) {
+                        let _ = app.emit("pax-notification-settings-invalidated", ());
+                        session.schedule(state, app, ReconcileScope::all());
+                    }
+                }
+                Err(error) => log::warn!("Invalid synced notification settings: {error}"),
+            }
+        }
+        Some(UNREAD_SETTINGS_TYPE) => {
+            if let Some(content) = event.get("content") {
+                if let Ok(settings) = serde_json::from_value::<UnreadSettings>(content.clone()) {
+                    let _ = app.emit("pax-unread-settings-changed", settings);
+                }
+            }
+        }
+        Some("m.push_rules") => state
+            .notifications
+            .session()
+            .schedule_projection(state, app),
+        _ => {}
     }
-    save_notification_settings(state, app, &settings).await
 }
 
 // ---------- Commands: unread settings ----------
@@ -416,11 +515,10 @@ pub async fn set_tray_unread_indicator_mode(
     app: AppHandle,
     mode: TrayUnreadIndicatorMode,
 ) -> Result<NotificationSettings, String> {
-    let _guard = PAX_SETTINGS_LOCK.lock().await;
-    let mut settings = load_notification_settings_inner(&state).await?;
-    settings.tray_unread_indicator = mode;
-    save_notification_settings(&state, &app, &settings).await?;
-    Ok(settings)
+    update_notification_settings(&state, &app, |settings| {
+        settings.tray_unread_indicator = mode
+    })
+    .await
 }
 
 /// Set the global default notification level.  Triggers a full reconcile
@@ -432,17 +530,9 @@ pub async fn set_global_default_notification_level(
     app: AppHandle,
     level: Option<NotificationLevel>,
 ) -> Result<NotificationSettings, String> {
-    let updated = {
-        let _guard = PAX_SETTINGS_LOCK.lock().await;
-        let mut settings = load_notification_settings_inner(&state).await?;
-        settings.global_default = level;
-        save_notification_settings(&state, &app, &settings).await?;
-        settings
-    };
-
-    if let Err(e) = super::reconciler::reconcile_all(&state, &app).await {
-        log::warn!("[pax] reconcile_all after set_global_default failed: {e}");
-    }
+    let updated =
+        update_notification_settings(&state, &app, |settings| settings.global_default = level)
+            .await?;
     Ok(updated)
 }
 
@@ -456,25 +546,14 @@ pub async fn set_space_notification_level(
     space_id: String,
     level: Option<NotificationLevel>,
 ) -> Result<NotificationSettings, String> {
-    let updated = {
-        let _guard = PAX_SETTINGS_LOCK.lock().await;
-        let mut settings = load_notification_settings_inner(&state).await?;
-        match level {
-            Some(l) => {
-                settings.spaces.insert(space_id.clone(), l);
-            }
-            None => {
-                settings.spaces.remove(&space_id);
-            }
+    let updated = update_notification_settings(&state, &app, |settings| match level {
+        Some(level) => {
+            settings.spaces.insert(space_id.clone(), level);
         }
-        save_notification_settings(&state, &app, &settings).await?;
-        settings
-    };
-
-    if let Err(e) = super::reconciler::reconcile_rooms_for_space(&state, &app, &space_id).await {
-        log::warn!(
-            "[pax] reconcile_rooms_for_space({space_id}) after set_space_notification_level failed: {e}"
-        );
-    }
+        None => {
+            settings.spaces.remove(&space_id);
+        }
+    })
+    .await?;
     Ok(updated)
 }
