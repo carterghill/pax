@@ -2,6 +2,7 @@
 
 pub mod codec;
 mod avatars;
+mod attachments;
 mod file_cache;
 mod commands;
 mod idle;
@@ -60,6 +61,7 @@ pub struct AppState {
     pub status_msg_map: Arc<Mutex<HashMap<String, String>>>,
     pub file_cache: Arc<file_cache::FileCache>,
     pub avatars: Arc<avatars::AvatarService>,
+    pub attachments: Arc<attachments::AttachmentCache>,
     pub notifications: commands::reconciler::NotificationService,
     pub voice_presence: voice_presence::VoicePresenceService,
     pub sync_running: Arc<Mutex<bool>>,
@@ -318,6 +320,7 @@ pub fn run() {
         presence_map: Arc::new(Mutex::new(HashMap::new())),
         status_msg_map: Arc::new(Mutex::new(HashMap::new())),
         avatars: Arc::new(avatars::AvatarService::new(file_cache.clone())),
+        attachments: Arc::new(attachments::AttachmentCache::new(attachments::RETAINED_BYTES)),
         notifications: commands::reconciler::NotificationService::default(),
         voice_presence: voice_presence::VoicePresenceService::default(),
         file_cache,
@@ -462,6 +465,7 @@ pub fn run() {
             commands::room_discovery::get_room_parent_spaces,
             commands::messages::get_messages,
             commands::media_files::get_matrix_image_path,
+            commands::media_files::release_matrix_media,
             commands::media_files::clear_media_cache,
             commands::members::get_room_members,
             commands::members::get_room_management_members,

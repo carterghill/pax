@@ -7,6 +7,7 @@
     "dev": "vite",
     "start": "concurrently \"vite\" \"tauri dev\"",
     "build": "tsc && vite build",
+    "test:attachments": "node --test src/data/AttachmentLease.test.mjs",
     "test:avatars": "node --test src/data/AvatarStore.test.mjs",
     "test:notifications": "node --test src/data/NotificationStore.test.mjs",
     "test:voice-presence": "node --test src/data/VoicePresenceStore.test.mjs",

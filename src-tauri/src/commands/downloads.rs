@@ -121,9 +121,10 @@ pub async fn start_room_download(
             let source_canon = source
                 .canonicalize()
                 .map_err(|e| format!("Invalid source path: {e}"))?;
-            if !source_is_under_app_temp(&source_canon) {
+            let attachment_pin = state.attachments.pin_path(&source_canon).await?;
+            if attachment_pin.is_none() && !source_is_under_app_temp(&source_canon) {
                 return Err(
-                    "Refusing to copy files from outside the application temp directory"
+                    "Refusing to copy files from outside application-managed media storage"
                         .to_string(),
                 );
             }
@@ -139,6 +140,7 @@ pub async fn start_room_download(
             let dest_for_complete = dest.clone();
 
             tauri::async_runtime::spawn(async move {
+                let _attachment_pin = attachment_pin;
                 emit_progress(
                     &app2,
                     RoomDownloadProgressEvent {

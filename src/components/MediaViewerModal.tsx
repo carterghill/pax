@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useRef, useState, type CSSProperties } from "react";
 import { createPortal } from "react-dom";
-import { convertFileSrc, invoke } from "@tauri-apps/api/core";
+import { convertFileSrc } from "@tauri-apps/api/core";
 import {
   ChevronLeft,
   ChevronRight,
@@ -10,6 +10,7 @@ import {
   X,
 } from "lucide-react";
 import { useTheme } from "../theme/ThemeContext";
+import { acquireMatrixMedia } from "../features/chat/media";
 import { useRoomDownloads } from "../context/RoomDownloadsContext";
 import { inferMediaViewerKind, type MediaViewerKind } from "../utils/mediaViewer";
 import {
@@ -57,7 +58,7 @@ export default function MediaViewerModal({
   const { palette, typography, spacing, resolvedColorScheme } = useTheme();
   const { startDownload } = useRoomDownloads();
   const [fileUrl, setFileUrl] = useState<string | null>(null);
-  /** Local temp path from `get_matrix_image_path` — used for saving to Downloads (asset URLs are not fetchable). */
+  /** Leased local path from `get_matrix_image_path` — used for saving to Downloads (asset URLs are not fetchable). */
   const [sourceDiskPath, setSourceDiskPath] = useState<string | null>(null);
   const [loadError, setLoadError] = useState<string | null>(null);
   const [loadingPath, setLoadingPath] = useState(false);
@@ -131,7 +132,8 @@ export default function MediaViewerModal({
       };
     }
 
-    invoke<string>("get_matrix_image_path", { request: parsed })
+    const media = acquireMatrixMedia(parsed);
+    media.path
       .then((path) => {
         if (!cancelled) {
           setSourceDiskPath(path);
@@ -149,6 +151,7 @@ export default function MediaViewerModal({
 
     return () => {
       cancelled = true;
+      media.dispose();
     };
   }, [open, payload, resetState]);
 

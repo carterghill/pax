@@ -155,8 +155,12 @@ export function sendTypingNotice(request: TypingNoticeRequest): Promise<void> {
   return invoke("send_typing_notice", invokeArgs(request));
 }
 
-export function getMatrixImagePath(request: unknown): Promise<string> {
-  return invoke<string>("get_matrix_image_path", { request });
+export function getMatrixImagePath(request: unknown, leaseId: string): Promise<string> {
+  return invoke<string>("get_matrix_image_path", { request, leaseId });
+}
+
+export function releaseMatrixMedia(leaseId: string): Promise<void> {
+  return invoke("release_matrix_media", { leaseId });
 }
 
 export function clearMediaCache(): Promise<number> {
@@ -234,6 +238,7 @@ export const chatApi = {
   unpinRoomMessage,
   sendTypingNotice,
   getMatrixImagePath,
+  releaseMatrixMedia,
   clearMediaCache,
   getMatrixMaxUploadBytes,
   roomFileStagingReset,

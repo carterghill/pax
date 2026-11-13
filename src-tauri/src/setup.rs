@@ -11,6 +11,16 @@ pub fn setup(app: &mut tauri::App) -> Result<(), Box<dyn std::error::Error>> {
         let _ = commands::TAURI_TEMP_DIR.set(tauri_temp);
     }
 
+    let attachments = app.state::<Arc<AppState>>().attachments.clone();
+    let attachment_dir = app
+        .path()
+        .app_cache_dir()
+        .map(|root| root.join("attachments"))
+        .unwrap_or_else(|_| commands::temp_dir().join("pax_attachments"));
+    if let Err(error) = tauri::async_runtime::block_on(attachments.init(attachment_dir)) {
+        log::warn!("Attachment cache initialization failed: {error}");
+    }
+
     if let Ok(cache_root) = app.path().app_cache_dir() {
         let avatar_dir = cache_root.join("avatars");
         let avatar_cache = app.state::<Arc<AppState>>().file_cache.clone();

@@ -72,15 +72,8 @@ export default function UserAvatar({
     }
   }, [userId, fromStore, store]);
 
-  // The STORE is authoritative once it has resolved. The hint is only a
-  // bootstrap value for the first paint (before the store answers), so a
-  // list-provided path that's been invalidated behind our back — e.g. a
-  // `room.avatarUrl` that pointed into the avatar temp dir before
-  // `clear_media_cache` wiped it on room switch — cannot permanently
-  // override a freshly-written path that messages / member sync just
-  // primed into the store. Without this, the sidebar / DM banner sit on
-  // initials forever after `clear_media_cache`, even though the chat
-  // timeline (which has a fresh hint from `get_messages`) renders fine.
+  // The store is authoritative after resolution. A stale list-provided hint
+  // must not override a refreshed avatar or a confirmed absence.
   const effectiveUrl =
     fromStore !== undefined ? fromStore : avatarUrlHint || null;
   const [imageFailed, setImageFailed] = useState(false);

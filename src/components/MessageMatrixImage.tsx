@@ -1,7 +1,8 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { Loader2 } from "lucide-react";
-import { convertFileSrc, invoke } from "@tauri-apps/api/core";
+import { convertFileSrc } from "@tauri-apps/api/core";
 import { decode } from "blurhash";
+import { acquireMatrixMedia } from "../features/chat/media";
 import { useTheme } from "../theme/ThemeContext";
 
 const INLINE_IMAGE_MAX_HEIGHT = 400;
@@ -88,7 +89,8 @@ export default function MessageMatrixImage({
       };
     }
 
-    invoke<string>("get_matrix_image_path", { request: parsed })
+    const media = acquireMatrixMedia(parsed);
+    media.path
       .then((path) => {
         if (!cancelled) setSrc(convertFileSrc(path));
       })
@@ -103,6 +105,7 @@ export default function MessageMatrixImage({
 
     return () => {
       cancelled = true;
+      media.dispose();
     };
   }, [requestKey]);
 

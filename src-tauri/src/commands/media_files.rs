@@ -10,14 +10,14 @@ use tokio::io::{AsyncWriteExt, BufReader};
 use tokio::time::MissedTickBehavior;
 use tokio_util::io::ReaderStream;
 
-use matrix_sdk::media::{MediaFormat, MediaRequestParameters, UniqueKey};
+use matrix_sdk::media::{MediaFormat, MediaRequestParameters};
 use matrix_sdk::ruma::events::room::message::RoomMessageEventContent;
 use matrix_sdk::ruma::events::room::MediaSource;
 use matrix_sdk::ruma::UInt;
 use matrix_sdk::Client;
 use reqwest::header::{HeaderValue, CONTENT_LENGTH};
 use reqwest::Version;
-use tauri::{AppHandle, Emitter, Manager, State};
+use tauri::{AppHandle, Emitter, State};
 
 use crate::AppState;
 
@@ -28,28 +28,37 @@ use super::media_protocol::{
 use super::message_display::mime_to_file_ext;
 use super::{fmt_error_chain, get_authed_client, get_client, resolve_room, sniff_media_mime};
 
+/// Acquire a file for a mounted media consumer. The lease protects its path
+/// until release_matrix_media runs; identical requests share one download.
 #[tauri::command]
 pub async fn get_matrix_image_path(
-    app: AppHandle,
     state: State<'_, Arc<AppState>>,
     request: serde_json::Value,
+    lease_id: String,
 ) -> Result<String, String> {
     let params: MediaRequestParameters =
         serde_json::from_value(request).map_err(|e| format!("Invalid media request: {e}"))?;
+    let identity = crate::attachments::request_key(&params)?;
+    state
+        .attachments
+        .acquire(&identity, &lease_id, fetch_matrix_media(&state, &params))
+        .await
+}
 
-    let cache_key = format!("mmedia:{}", params.unique_key());
+#[tauri::command]
+pub async fn release_matrix_media(
+    state: State<'_, Arc<AppState>>,
+    lease_id: String,
+) -> Result<(), String> {
+    state.attachments.release(&lease_id).await;
+    Ok(())
+}
 
-    if let Some(existing) = state.file_cache.get(&cache_key).await {
-        if existing.starts_with("data:") {
-            state.file_cache.remove(&cache_key).await;
-        } else if std::path::Path::new(&existing).is_file() {
-            return Ok(existing);
-        } else {
-            state.file_cache.remove(&cache_key).await;
-        }
-    }
-
-    let client = get_client(&state).await?;
+async fn fetch_matrix_media(
+    state: &AppState,
+    params: &MediaRequestParameters,
+) -> Result<(Vec<u8>, &'static str), String> {
+    let client = get_client(state).await?;
 
     let first_timeout = match &params.format {
         MediaFormat::Thumbnail(_) => MATRIX_IMAGE_THUMB_FETCH_TIMEOUT,
@@ -60,15 +69,15 @@ pub async fn get_matrix_image_path(
         && matches!(&params.source, MediaSource::Plain(_));
 
     let primary_fetch = if direct_plain_file {
-        match get_plain_matrix_file_bytes_direct(&state, &client, &params, first_timeout).await {
+        match get_plain_matrix_file_bytes_direct(state, &client, params, first_timeout).await {
             Ok(b) => Ok(b),
             Err(e) => {
                 log::warn!("Direct Matrix media fetch failed; falling back to matrix-sdk: {e}");
-                get_matrix_media_bytes_with_timeout(&client, &params, false, first_timeout).await
+                get_matrix_media_bytes_with_timeout(&client, params, false, first_timeout).await
             }
         }
     } else {
-        get_matrix_media_bytes_with_timeout(&client, &params, false, first_timeout).await
+        get_matrix_media_bytes_with_timeout(&client, params, false, first_timeout).await
     };
 
     let bytes = match primary_fetch {
@@ -105,69 +114,14 @@ pub async fn get_matrix_image_path(
     let mime = sniff_media_mime(&bytes);
     let ext = mime_to_file_ext(mime);
 
-    let temp_dir = app
-        .path()
-        .temp_dir()
-        .map_err(|e| format!("Failed to get temp dir: {e}"))?;
-    std::fs::create_dir_all(&temp_dir).map_err(|e| format!("Failed to create temp dir: {e}"))?;
-
-    let path = temp_dir.join(format!("pax_matrix_media_{}.{}", uuid::Uuid::new_v4(), ext));
-
-    std::fs::write(&path, &bytes).map_err(|e| format!("Failed to write image temp file: {e}"))?;
-
-    let path_str = path
-        .to_str()
-        .ok_or("Temp file path is not valid UTF-8")?
-        .to_string();
-
-    state.file_cache.insert(cache_key, path_str.clone()).await;
-
-    Ok(path_str)
+    Ok((bytes, ext))
 }
 
-/// Evict cached attachment temp files and their cache entries on room
-/// switch.  Attachments (images/videos/files in message bodies) can be
-/// large and there's no reason to keep the previous room's attachments
-/// around while the user is looking at a different room.
-///
-/// **Avatars are deliberately NOT cleared here.**  They are tiny, shared
-/// across every view (sidebar, home space, chat header, settings,
-/// voice call, …), and cheap to keep.  Wiping them on room switch
-/// broke every `<img>` currently on screen — the sidebar and DM banner
-/// would 404 the moment the user clicked a room, forcing a cascade of
-/// re-fetches, retries, and visible "avatar → initials → avatar-at-
-/// different-resolution" flashes.  Keep avatars alive for the session;
-/// they get evicted naturally on logout and on startup (see `lib.rs`).
+/// Explicit cache clearing retires active files and removes unused ones.
+/// A viewer or an in-progress Downloads copy keeps its file until release.
 #[tauri::command]
 pub async fn clear_media_cache(state: State<'_, Arc<AppState>>) -> Result<u32, String> {
-    // Evict only the `mmedia:` entries — avatars (persistent on disk,
-    // tiny, shared across every view) are deliberately preserved so
-    // we don't cascade 404s into every on-screen `<img>` the moment
-    // the user switches rooms.
-    let evicted = state.file_cache.remove_by_prefix("mmedia:").await.len();
-
-    let temp_dir = super::temp_dir();
-    let mut deleted = 0u32;
-    if let Ok(entries) = std::fs::read_dir(&temp_dir) {
-        for entry in entries.flatten() {
-            let name = entry.file_name();
-            let n = name.to_string_lossy();
-            if n.starts_with("pax_matrix_media_") {
-                if std::fs::remove_file(entry.path()).is_ok() {
-                    deleted += 1;
-                }
-            }
-        }
-    }
-
-    if evicted > 0 || deleted > 0 {
-        log::info!(
-            "[clear_media_cache] evicted {} attachment entries, deleted {} temp files (avatars preserved)",
-            evicted,
-            deleted,
-        );
-    }
-    Ok(deleted)
+    Ok(state.attachments.clear_unused().await)
 }
 
 #[derive(Clone, Serialize)]

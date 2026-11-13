@@ -1,7 +1,6 @@
 //! Keyed file storage, persistence, and duplicate-load coordination.
 //!
-//! The configured directory is persisted to index.json. External temporary
-//! attachment paths can share the index in memory without being persisted.
+//! Persistent stores keep an index.json; temporary stores have no disk index.
 //! Content identity, fetching, concurrency limits, and eviction policy belong
 //! to callers. Files created here are published atomically.
 
@@ -65,6 +64,20 @@ impl FileCache {
     /// Directory the cache is persisting to, if initialised.
     pub fn dir(&self) -> Option<PathBuf> {
         self.dir.get().cloned()
+    }
+
+    /// Configure a temporary store without hydrating or starting persistence.
+    /// Returns true only for the first initialization.
+    pub(crate) async fn init_temporary_dir(&self, dir: PathBuf) -> std::io::Result<bool> {
+        tokio::fs::create_dir_all(&dir).await?;
+        let dir = tokio::fs::canonicalize(dir).await?;
+        Ok(self.dir.set(dir).is_ok())
+    }
+
+    /// Invalidate pending fills while leaving published files available to
+    /// callers that still hold them. Retention policy decides which to delete.
+    pub(crate) fn invalidate_loads(&self) {
+        self.generation.fetch_add(1, Ordering::AcqRel);
     }
 
     /// Point the cache at a persistent directory, hydrate the
@@ -205,6 +218,10 @@ impl FileCache {
         tokio::fs::write(&staging, bytes)
             .await
             .map_err(|e| e.to_string())?;
+        if generation != self.generation.load(Ordering::Acquire) {
+            let _ = tokio::fs::remove_file(staging).await;
+            return Err("Cache cleared during load".into());
+        }
         if let Err(e) = tokio::fs::rename(&staging, &path).await {
             let _ = tokio::fs::remove_file(staging).await;
             return Err(e.to_string());
@@ -222,33 +239,24 @@ impl FileCache {
         self.mark_dirty();
     }
 
-    pub async fn remove(&self, key: &str) -> Option<String> {
-        let old = self.entries.lock().await.remove(key);
-        if old.is_some() {
-            self.mark_dirty();
+    /// Delete a published, owned file and its index entry. Failed unlinks keep
+    /// the entry so callers can account for disk usage and retry eviction.
+    pub(crate) async fn discard(&self, key: &str) -> Result<bool, String> {
+        let _io = self.io.lock().await;
+        let Some(path) = self.get(key).await else {
+            return Ok(false);
+        };
+        if Path::new(&path).parent() != self.dir.get().map(PathBuf::as_path) {
+            return Err("Refusing to delete a file outside the cache directory".into());
         }
-        old
-    }
-
-    /// Remove every entry whose key starts with `prefix` and return
-    /// the removed keys. Used by `clear_media_cache` to evict the
-    /// `mmedia:` matrix-media entries on room switch without touching
-    /// any avatar entries.
-    pub async fn remove_by_prefix(&self, prefix: &str) -> Vec<String> {
-        let mut entries = self.entries.lock().await;
-        let keys: Vec<String> = entries
-            .keys()
-            .filter(|k| k.starts_with(prefix))
-            .cloned()
-            .collect();
-        for k in &keys {
-            entries.remove(k);
-        }
-        drop(entries);
-        if !keys.is_empty() {
-            self.mark_dirty();
-        }
-        keys
+        let removed = match tokio::fs::remove_file(&path).await {
+            Ok(()) => true,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => false,
+            Err(error) => return Err(error.to_string()),
+        };
+        self.entries.lock().await.remove(key);
+        self.mark_dirty();
+        Ok(removed)
     }
 
     /// Snapshot the current map. The returned `HashMap` is
@@ -260,12 +268,9 @@ impl FileCache {
     }
 
     /// Wipe in-memory state, wipe every file inside the persistent directory,
-    /// delete `index.json`. Called when replacing a session. Temporary
-    /// attachment files (in the
-    /// Tauri temp dir) are untouched here; they're managed by
-    /// `clear_media_cache` on their own lifecycle.
+    /// delete `index.json`. Callers must release active readers first.
     pub async fn clear(&self) {
-        self.generation.fetch_add(1, Ordering::AcqRel);
+        self.invalidate_loads();
         let _io = self.io.lock().await;
         self.entries.lock().await.clear();
         self.mark_dirty();
@@ -318,8 +323,7 @@ impl FileCache {
                 // Persistence filter:
                 //  - `data:` URLs (legacy knock-member thumbnails) are
                 //    always ephemeral.
-                //  - Paths outside the persistent directory are `mmedia:` temp
-                //    files that get swept on startup anyway.
+                //  - External paths are never owned by this store.
                 if value.starts_with("data:") {
                     continue;
                 }
@@ -501,5 +505,43 @@ pub(crate) mod tests {
         restored.hydrate_from_disk().await;
         assert_eq!(restored.get_file("avatar").await, Some(path));
         assert!(restored.get("attachment").await.is_none());
+    }
+
+    #[tokio::test]
+    async fn discard_deletes_only_owned_files() {
+        let dir = TestDir::new();
+        let other = TestDir::new();
+        let cache = cache(&dir);
+        let owned = cache
+            .get_or_load("owned", async { Ok((vec![1], "bin")) })
+            .await
+            .unwrap();
+        assert!(cache.discard("owned").await.unwrap());
+        assert!(!Path::new(&owned).exists());
+        assert!(cache.get("owned").await.is_none());
+        let external = other.0.join("saved.bin");
+        tokio::fs::write(&external, [2]).await.unwrap();
+        cache
+            .insert("external".into(), external.to_string_lossy().into_owned())
+            .await;
+        assert!(cache.discard("external").await.is_err());
+        assert!(external.is_file());
+        assert!(cache.get("external").await.is_some());
+    }
+
+    #[tokio::test]
+    async fn failed_eviction_keeps_the_entry_and_a_missing_file_can_be_forgotten() {
+        let dir = TestDir::new();
+        let cache = cache(&dir);
+        let path = dir.0.join("not-a-regular-file");
+        tokio::fs::create_dir(&path).await.unwrap();
+        cache
+            .insert("retry".into(), path.to_string_lossy().into_owned())
+            .await;
+        assert!(cache.discard("retry").await.is_err());
+        assert!(cache.get("retry").await.is_some());
+        tokio::fs::remove_dir(path).await.unwrap();
+        assert!(!cache.discard("retry").await.unwrap());
+        assert!(cache.get("retry").await.is_none());
     }
 }

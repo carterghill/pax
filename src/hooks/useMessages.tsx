@@ -380,7 +380,7 @@ export function useMessages(roomId: string | null, currentUserId: string | null 
   // Feed the global user-avatar store from every message batch we fetch so
   // sidebars/members/headers can resolve sender avatars without a separate
   // round-trip. Clearing is delegated to the store's own event listeners
-  // (logout / clear_media_cache invalidation).
+  // (account changes and avatar-specific invalidation).
   const userAvatarStore = useUserAvatarStoreOptional();
   const primeAvatarsFromMessages = useCallback(
     (msgs: Message[]) => {
@@ -488,18 +488,9 @@ export function useMessages(roomId: string | null, currentUserId: string | null 
     const target = roomId;
     initialFetchingRef.current = true;
 
-    // Drops attachment temp files from the previous room before we
-    // fetch new ones. Avatars are intentionally preserved across room
-    // switches (see `clear_media_cache` in the backend); they're shared
-    // with every other view and wiping them caused widespread 404 flashes.
+    // Attachment retention has its own budget and reader leases. Room changes
+    // can load messages immediately without clearing or scanning media files.
     void (async () => {
-      try {
-        await invoke("clear_media_cache");
-      } catch {
-        /* non-fatal */
-      }
-      if (cancelled || activeRoomIdRef.current !== target) return;
-
       try {
         const batch = await invoke<MessageBatch>("get_messages", {
           roomId: target,
