@@ -149,14 +149,48 @@ test("unchanged local memberships do not cause periodic full scans", async (t) =
   assert.equal(calls.matrix.length, 1);
 });
 
-test("missing admin credentials stop remote polling for the session", async (t) => {
-  const { store, calls } = fixture(t, { pollMs: 5, loadLivekit: async () => activity({ [a]: [] }, false) });
+test("unadvertised capabilities back off without permanently disabling discovery", async (t) => {
+  let response = activity({}, false);
+  const { store, calls } = fixture(t, { pollMs: 10000, loadLivekit: async () => response });
+  store.watchLivekit([a]); store.start();
+  await until(() => calls.livekit.length === 1 && store.getSnapshot().participantsByRoom[a]);
+  await tick(30);
+  assert.equal(calls.livekit.length, 1);
+  assert.equal(store.getSnapshot().livekitByRoom[a], undefined);
+  response = activity({ [a]: [live()] });
+  store.invalidateLivekit([a]);
+  await until(() => store.getSnapshot().livekitByRoom[a]);
+  assert.equal(calls.livekit.length, 2);
+  store.invalidateMatrix([a]); await until(() => calls.matrix.length === 2);
+});
+
+test("an unsupported room does not disable polling for supported rooms", async (t) => {
+  const { store, calls } = fixture(t, { pollMs: 25, loadLivekit: async () => ({
+    ...activity({ [b]: [live("@bob:server")] }), unsupportedRoomIds: [a], retryAfterMs: 10000,
+  }) });
+  store.watchLivekit([a, b]); store.start();
+  await until(() => calls.livekit.length >= 2);
+  assert.deepEqual(calls.livekit[1], [b]);
+  assert.equal(store.getSnapshot().livekitByRoom[a], undefined);
+  assert.equal(store.getSnapshot().livekitByRoom[b][0].identity, "@bob:server");
+});
+
+test("unsupported discovery retries after its advertised backoff", async (t) => {
+  let reads = 0;
+  const { store } = fixture(t, { loadLivekit: async () => ++reads === 1
+    ? { ...activity({}, false), retryAfterMs: 1000 }
+    : activity({ [a]: [live()] }) });
   store.watchLivekit([a]); store.start();
   await until(() => store.getSnapshot().livekitByRoom[a]);
-  await tick(30);
-  store.invalidateLivekit([a]); await tick(10);
-  assert.equal(calls.livekit.length, 1);
-  store.invalidateMatrix([a]); await until(() => calls.matrix.length === 2);
+  assert.equal(reads, 2);
+});
+
+test("unknown server flags remain null in the shared snapshot", async (t) => {
+  const row = { identity: "@alice:server", isMuted: null, isDeafened: null, isSpeaking: null };
+  const { store } = fixture(t, { loadLivekit: async () => activity({ [a]: [row] }) });
+  store.watchLivekit([a]); store.start();
+  await until(() => store.getSnapshot().livekitByRoom[a]);
+  assert.deepEqual(store.getSnapshot().livekitByRoom[a][0], row);
 });
 
 test("the connected call uses live events and polling resumes on disconnect", async (t) => {

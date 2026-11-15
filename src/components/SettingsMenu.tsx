@@ -7,6 +7,7 @@ import {
   Camera,
   Trash2,
   Check,
+  Copy,
   X,
   Pencil,
   User,
@@ -60,6 +61,37 @@ export default function SettingsMenu({
 }: SettingsMenuProps) {
   const { palette, typography, spacing } = useTheme();
   const [activeSection, setActiveSection] = useState<SettingsSection>("user");
+  const [tokenCopyStatus, setTokenCopyStatus] = useState<
+    "idle" | "copying" | "copied" | "error"
+  >("idle");
+
+  useEffect(() => {
+    if (tokenCopyStatus !== "copied") return;
+    const timer = window.setTimeout(() => setTokenCopyStatus("idle"), 2000);
+    return () => window.clearTimeout(timer);
+  }, [tokenCopyStatus]);
+
+  async function handleCopyAccessToken() {
+    setTokenCopyStatus("copying");
+    try {
+      if (typeof ClipboardItem !== "undefined" && navigator.clipboard?.write) {
+        // Start the clipboard write during the click gesture: macOS WebKit
+        // rejects writes started only after awaiting the backend invocation.
+        const data = invoke<string>("get_access_token").then(
+          (token) => new Blob([token], { type: "text/plain" }),
+        );
+        // Also observe failure if clipboard permission is rejected immediately.
+        void data.catch(() => {});
+        await navigator.clipboard.write([new ClipboardItem({ "text/plain": data })]);
+      } else {
+        const token = await invoke<string>("get_access_token");
+        await navigator.clipboard.writeText(token);
+      }
+      setTokenCopyStatus("copied");
+    } catch {
+      setTokenCopyStatus("error");
+    }
+  }
 
   // ---- Notifications ----
   /**
@@ -299,7 +331,7 @@ export default function SettingsMenu({
       label: "Account",
       description: "Session and sign out",
       title: "Account",
-      blurb: "Control your current session and sign out safely when you are done.",
+      blurb: "Manage your current session and access token.",
       icon: LogOut,
     },
   ];
@@ -1080,8 +1112,74 @@ export default function SettingsMenu({
             <section style={panelStyle}>
               <h3 style={sectionHeadingStyle}>Session</h3>
               <p style={{ ...sectionDescriptionStyle, marginBottom: spacing.unit * 4 }}>
-                Sign out of your current account on this device.
+                Manage your current account session on this device.
               </p>
+              <div
+                style={{
+                  padding: spacing.unit * 3,
+                  marginBottom: spacing.unit * 3,
+                  borderRadius: 12,
+                  backgroundColor: palette.bgTertiary,
+                  border: `1px solid ${palette.border}`,
+                  display: "flex",
+                  alignItems: "center",
+                  justifyContent: "space-between",
+                  flexWrap: "wrap",
+                  gap: spacing.unit * 3,
+                }}
+              >
+                <div>
+                  <div
+                    style={{
+                      fontSize: typography.fontSizeBase,
+                      fontWeight: typography.fontWeightMedium,
+                      color: palette.textPrimary,
+                    }}
+                  >
+                    Access token
+                  </div>
+                  <div
+                    style={{
+                      marginTop: spacing.unit / 2,
+                      fontSize: typography.fontSizeSmall,
+                      color: palette.textSecondary,
+                    }}
+                  >
+                    Grants access to your account. Keep it private.
+                  </div>
+                </div>
+                <button
+                  type="button"
+                  onClick={handleCopyAccessToken}
+                  disabled={tokenCopyStatus === "copying"}
+                  aria-live="polite"
+                  style={{
+                    ...smallBtn,
+                    cursor: tokenCopyStatus === "copying" ? "wait" : "pointer",
+                    opacity: tokenCopyStatus === "copying" ? 0.6 : 1,
+                  }}
+                >
+                  {tokenCopyStatus === "copied" ? <Check size={14} /> : <Copy size={14} />}
+                  {tokenCopyStatus === "copying"
+                    ? "Copying..."
+                    : tokenCopyStatus === "copied"
+                      ? "Copied!"
+                      : "Copy access token"}
+                </button>
+                {tokenCopyStatus === "error" && (
+                  <p
+                    role="alert"
+                    style={{
+                      margin: 0,
+                      width: "100%",
+                      fontSize: typography.fontSizeSmall,
+                      color: "#f23f43",
+                    }}
+                  >
+                    Could not copy the access token. Please try again.
+                  </p>
+                )}
+              </div>
               <div
                 style={{
                   padding: spacing.unit * 3,

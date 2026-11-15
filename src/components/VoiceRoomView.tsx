@@ -387,9 +387,9 @@ export default function VoiceRoomView({
         displayName: localDisplayName,
         avatarUrl: avatarByUserId.get(nk) ?? null,
         isLocal: nk === normalizeUserId(userId),
-        isMuted: lp.isMuted,
-        isDeafened: lp.isDeafened,
-        isSpeaking: lp.isSpeaking,
+        isMuted: lp.isMuted === true,
+        isDeafened: lp.isDeafened === true,
+        isSpeaking: lp.isSpeaking === true,
       });
     }
     result.sort((a, b) =>

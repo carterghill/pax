@@ -49,7 +49,6 @@ export class VoicePresenceStore {
   private demanded = new Set<string>();
   private joined: Set<string> | null = null;
   private connectedRoom: string | null = null;
-  private livekitAvailable = true;
 
   constructor(options: Options) { this.options = options; }
   getSnapshot = () => this.snapshot;
@@ -132,7 +131,7 @@ export class VoicePresenceStore {
     this.timer = null;
     if (!this.active) return;
     const matrix = this.matrixFlight ? Infinity : Math.min(this.fullDue ?? Infinity, ...this.matrixDue.values());
-    const livekit = this.livekitFlight || !this.livekitAvailable ? Infinity : Math.min(...[...this.livekitDue].filter(([id]) => id !== this.connectedRoom).map(([, due]) => due));
+    const livekit = this.livekitFlight ? Infinity : Math.min(...[...this.livekitDue].filter(([id]) => id !== this.connectedRoom).map(([, due]) => due));
     const next = Math.min(matrix, livekit);
     if (!Number.isFinite(next)) return;
     this.timer = setTimeout(() => {
@@ -145,7 +144,7 @@ export class VoicePresenceStore {
           if (ids.length) void this.refreshMatrix(ids);
         }
       }
-      if (!this.livekitFlight && this.livekitAvailable) {
+      if (!this.livekitFlight) {
         const ids = [...this.livekitDue].filter(([id, due]) => id !== this.connectedRoom && due <= now).sort((a, b) => a[1] - b[1]).slice(0, 32).map(([id]) => id);
         if (ids.length) void this.refreshLivekit(ids);
       }
@@ -210,8 +209,8 @@ export class VoicePresenceStore {
     try {
       const result = await this.options.loadLivekit(ids);
       if (!this.active || epoch !== this.epoch) return;
-      this.livekitAvailable = result.available;
-      this.applyLivekit(ids, revisions, result.participantsByRoom);
+      const unsupported = new Set(result.available ? result.unsupportedRoomIds ?? [] : ids);
+      this.applyLivekit(ids, revisions, result.participantsByRoom, unsupported, result.retryAfterMs);
     } catch (error) {
       if (this.active && epoch === this.epoch) {
         this.applyLivekit(ids, revisions, {});
@@ -222,11 +221,20 @@ export class VoicePresenceStore {
     }
   }
 
-  private applyLivekit(ids: string[], revisions: Map<string, number>, incoming: LivekitMap) {
+  private applyLivekit(
+    ids: string[], revisions: Map<string, number>, incoming: LivekitMap,
+    unsupported = new Set<string>(), retryAfterMs = 60_000,
+  ) {
     const livekit = { ...this.snapshot.livekitByRoom };
     for (const id of ids) {
       if (!this.demanded.has(id) || revisions.get(id) !== this.livekitRevision.get(id)) continue;
       if (this.joined && !this.joined.has(id)) { this.livekitDue.delete(id); continue; }
+      if (unsupported.has(id)) {
+        delete livekit[id];
+        this.livekitFailures.delete(id);
+        this.livekitDue.set(id, Date.now() + Math.max(1000, retryAfterMs));
+        continue;
+      }
       const rows = incoming[id];
       if (rows === undefined) {
         const failures = (this.livekitFailures.get(id) ?? 0) + 1;

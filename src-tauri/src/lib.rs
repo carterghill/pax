@@ -15,6 +15,7 @@ mod types;
 pub mod video_recv;
 mod voice;
 mod voice_presence;
+mod voice_service;
 
 use std::collections::HashMap;
 use std::io::Write;
@@ -31,16 +32,6 @@ use tokio::sync::Mutex;
 use tokio::task::JoinHandle;
 
 use platform::DisplayServer;
-
-/// LiveKit server admin credentials for kicking stale participants.
-/// Loaded from .env at startup; all fields optional so the app still
-/// works (without kick capability) if the .env is missing.
-#[derive(Clone, Default)]
-pub struct LivekitConfig {
-    pub api_key: Option<String>,
-    pub api_secret: Option<String>,
-    pub url: Option<String>,
-}
 
 /// Auth/registration config loaded from .env at startup.
 /// Controls pre-fill and field visibility on the login/sign-up screen.
@@ -69,7 +60,6 @@ pub struct AppState {
     /// or replacing `client`, otherwise the DB stays locked (especially on Windows).
     pub sync_join: Mutex<Option<JoinHandle<()>>>,
     pub display_server: DisplayServer,
-    pub livekit: LivekitConfig,
     pub giphy_api_key: Option<String>,
     pub auth_config: AuthConfig,
     /// Stops the MSC4140 heartbeat task that restarts the delayed leave event.
@@ -279,19 +269,6 @@ pub fn run() {
     install_panic_hook();
     let display_server = platform::detect_display_server();
 
-    // All env vars are baked in at compile time via build.rs → cargo:rustc-env.
-    // option_env!() returns Option<&'static str>; None if the var was unset at build.
-    let livekit = LivekitConfig {
-        api_key: option_env!("LIVEKIT_API_KEY").map(String::from),
-        api_secret: option_env!("LIVEKIT_API_SECRET").map(String::from),
-        url: option_env!("LIVEKIT_URL").map(String::from),
-    };
-    if livekit.api_key.is_some() {
-        log::info!("LiveKit admin credentials compiled in");
-    } else {
-        log::info!("No LiveKit admin credentials — multi-device kick disabled");
-    }
-
     let giphy_api_key = option_env!("GIPHY_API_KEY").map(String::from);
 
     let default_homeserver = option_env!("PAX_HOMESERVER").map(String::from);
@@ -327,7 +304,6 @@ pub fn run() {
         sync_running: Arc::new(Mutex::new(false)),
         sync_join: Mutex::new(None),
         display_server,
-        livekit,
         giphy_api_key,
         auth_config,
         heartbeat_stop: Arc::new(AtomicBool::new(true)),
@@ -431,6 +407,7 @@ pub fn run() {
         })
         .invoke_handler(tauri::generate_handler![
             commands::auth::logout,
+            commands::auth::get_access_token,
             commands::auth::save_credentials,
             commands::auth::load_credentials,
             commands::auth::clear_saved_credentials,

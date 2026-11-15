@@ -286,20 +286,30 @@ pub struct VoiceJoinResult {
     pub livekit_url: String,
 }
 
-/// LiveKit participant row from Room Service API (mute/deafen/speaking) for UI when not in the SFU.
-#[derive(Clone, Serialize)]
+/// Optional server snapshot. Unknown flags stay null; connected calls use SDK events.
+#[derive(Clone, Serialize, serde::Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct LivekitVoiceParticipantInfo {
     pub identity: String,
-    pub is_muted: bool,
-    pub is_deafened: bool,
-    pub is_speaking: bool,
+    #[serde(default, alias = "is_muted")]
+    pub is_muted: Option<bool>,
+    #[serde(default, alias = "is_deafened")]
+    pub is_deafened: Option<bool>,
+    #[serde(default, alias = "is_speaking")]
+    pub is_speaking: Option<bool>,
 }
 
 #[derive(Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct VoiceParticipantsInvalidatedPayload {
     pub room_ids: Vec<String>,
+}
+
+#[derive(Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct VoiceSessionEndedPayload {
+    pub room_id: String,
+    pub message: String,
 }
 
 #[derive(Serialize)]

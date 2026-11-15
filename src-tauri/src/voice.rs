@@ -28,6 +28,14 @@ use std::time::Duration;
 use tauri::{AppHandle, Emitter};
 use tokio::sync::mpsc;
 use tokio::time::{interval_at, Instant as TokioInstant, MissedTickBehavior};
+
+fn should_auto_rejoin(reason: livekit::DisconnectReason) -> bool {
+    use livekit::DisconnectReason as Reason;
+    !matches!(reason,
+        Reason::ParticipantRemoved | Reason::DuplicateIdentity
+        | Reason::RoomDeleted | Reason::RoomClosed
+        | Reason::UserRejected | Reason::ClientInitiated)
+}
 // cpal::Stream is !Send because of platform internals, but we only ever
 // create streams on one thread and drop them (possibly on another).
 // This is safe for our use case.
@@ -492,13 +500,6 @@ impl VoiceManager {
             let vol_key = format!("{}::{}", user_part, source);
             state.user_volumes.insert(vol_key, clamped);
         }
-    }
-
-    /// Matrix room id + LiveKit SFU room name (from the joined room; used for admin ListParticipants).
-    pub fn current_matrix_room_and_livekit_sfu_name(&self) -> Option<(String, String)> {
-        let guard = self.session.lock();
-        let s = guard.as_ref()?;
-        Some((s.room_id.clone(), s.room.name()))
     }
 
     /// Get the reconnect notify handle for the current session (if any).
@@ -1147,10 +1148,17 @@ async fn run_event_loop(
                     }
                     Some(RoomEvent::Disconnected { reason }) => {
                         log::warn!("Permanently disconnected from LiveKit room: {:?}", reason);
-                        // Notify the frontend so it can auto-rejoin.
-                        // This does NOT fire on manual disconnect (that takes the shutdown_rx branch).
-                        let _ = app_handle.emit("voice-livekit-kicked", room_id.clone());
-                        emit_state(app_handle.as_ref(), &room_id, &local_identity, &audio_state, false, false, Some("Disconnected from voice".into()));
+                        let message = if should_auto_rejoin(reason) {
+                            let _ = app_handle.emit("voice-livekit-kicked", room_id.clone());
+                            "Disconnected from voice"
+                        } else {
+                            let message = "Voice session ended on this device";
+                            let _ = app_handle.emit("voice-session-ended", crate::types::VoiceSessionEndedPayload {
+                                room_id: room_id.clone(), message: message.into(),
+                            });
+                            message
+                        };
+                        emit_state(app_handle.as_ref(), &room_id, &local_identity, &audio_state, false, false, Some(message.into()));
                         break;
                     }
                     Some(RoomEvent::Reconnecting) => {
@@ -2632,4 +2640,28 @@ fn setup_mic_input_linux(
         shutdown,
         _thread: Some(thread),
     })
+}
+
+#[cfg(test)]
+mod voice_disconnect_tests {
+    use super::should_auto_rejoin;
+    use livekit::DisconnectReason;
+
+    #[test]
+    fn deliberate_removal_and_duplicate_sessions_never_auto_rejoin() {
+        for reason in [DisconnectReason::ParticipantRemoved, DisconnectReason::DuplicateIdentity,
+            DisconnectReason::RoomDeleted, DisconnectReason::RoomClosed, DisconnectReason::UserRejected,
+            DisconnectReason::ClientInitiated] {
+            assert!(!should_auto_rejoin(reason));
+        }
+    }
+
+    #[test]
+    fn transport_failures_still_allow_recovery() {
+        for reason in [DisconnectReason::UnknownReason, DisconnectReason::ServerShutdown,
+            DisconnectReason::ConnectionTimeout, DisconnectReason::MediaFailure,
+            DisconnectReason::SignalClose] {
+            assert!(should_auto_rejoin(reason));
+        }
+    }
 }

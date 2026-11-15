@@ -51,7 +51,7 @@ pub(crate) struct VoicePresenceSession {
     cancelled: watch::Sender<bool>,
     pub matrix_read: AsyncMutex<()>,
     pub livekit_read: AsyncMutex<()>,
-    pub sfu_rooms: Mutex<HashMap<String, String>>,
+    pub voice_api: crate::voice_service::VoiceApiClient,
 }
 
 impl VoicePresenceSession {
@@ -60,7 +60,7 @@ impl VoicePresenceSession {
             cancelled: watch::channel(closed).0,
             matrix_read: AsyncMutex::new(()),
             livekit_read: AsyncMutex::new(()),
-            sfu_rooms: Mutex::new(HashMap::new()),
+            voice_api: crate::voice_service::VoiceApiClient::default(),
         }
     }
     pub(crate) fn is_active(&self) -> bool {
@@ -98,11 +98,9 @@ pub(crate) struct LivekitVoiceSnapshot {
     pub available: bool,
     /// Missing entries are unavailable, never an instruction to erase rows.
     pub participants_by_room: HashMap<String, Vec<crate::types::LivekitVoiceParticipantInfo>>,
-}
-
-pub(crate) enum LivekitRoomRead {
-    Participants(Vec<crate::types::LivekitVoiceParticipantInfo>),
-    Missing,
+    /// Unsupported rooms back off independently; other rooms remain enabled.
+    pub unsupported_room_ids: Vec<String>,
+    pub retry_after_ms: u64,
 }
 
 pub(crate) fn now_ms() -> u64 {
@@ -114,7 +112,7 @@ pub(crate) fn now_ms() -> u64 {
 
 /// Active until the earliest future expiry. Legacy membership arrays can have
 /// per-device expiry fields; empty/redacted content represents a departure.
-fn active_membership(value: &Value, now: u64) -> Option<Option<u64>> {
+pub(crate) fn active_membership(value: &Value, now: u64) -> Option<Option<u64>> {
     let content = value.get("content")?;
     let origin = value
         .get("origin_server_ts")
@@ -328,38 +326,10 @@ pub(crate) async fn read_memberships(
     snapshot
 }
 
-/// A single discovery feeds this bounded set of per-room requests. Return
-/// completed results even if the batch budget expires; pending rooms remain
-/// absent from the snapshot and can be retried without erasing cached rows.
-pub(crate) async fn collect_livekit_reads<F, Fut>(
-    targets: Vec<(String, String)>,
-    budget: Duration,
-    fetch: F,
-) -> Vec<(String, String, Result<LivekitRoomRead, String>)>
-where
-    F: Fn(String) -> Fut,
-    Fut: Future<Output = Result<LivekitRoomRead, String>>,
-{
-    let mut requests = stream::iter(targets.into_iter().map(|(id, name)| {
-        let result = fetch(name.clone());
-        async move { (id, name, result.await) }
-    }))
-    .buffer_unordered(4);
-    let mut completed = Vec::new();
-    let _ = tokio::time::timeout(budget, async {
-        while let Some(result) = requests.next().await {
-            completed.push(result);
-        }
-    })
-    .await;
-    completed
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
     use serde_json::json;
-    use std::sync::atomic::{AtomicUsize, Ordering};
 
     #[test]
     fn modern_membership_expires_at_created_timestamp_or_event_timestamp() {
@@ -416,15 +386,11 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn session_reset_cancels_active_and_queued_reads_and_drops_old_mapping() {
+    async fn session_reset_cancels_active_and_queued_reads_and_replaces_discovery() {
         let service = VoicePresenceService::default();
         assert!(service.session().run(async { Ok(()) }).await.is_err());
         service.start_session();
         let old = service.session();
-        old.sfu_rooms
-            .lock()
-            .unwrap()
-            .insert("!room:server".into(), "old-sfu".into());
         let (started, ready) = tokio::sync::oneshot::channel();
         let active_session = old.clone();
         let active = tokio::spawn(async move {
@@ -459,66 +425,9 @@ mod tests {
         }
         service.start_session();
         let current = service.session();
-        assert!(current.sfu_rooms.lock().unwrap().is_empty());
+        assert!(!Arc::ptr_eq(&old, &current));
         assert!(current.run(async { Ok(()) }).await.is_ok());
         assert!(!old.is_active());
     }
 
-    #[tokio::test]
-    async fn livekit_batch_limits_concurrency_and_keeps_partial_failures_distinct() {
-        let active = AtomicUsize::new(0);
-        let maximum = AtomicUsize::new(0);
-        let targets = (0..12).map(|id| (id.to_string(), id.to_string())).collect();
-        let results = collect_livekit_reads(targets, Duration::from_secs(1), |name| {
-            let active = &active;
-            let maximum = &maximum;
-            async move {
-                let count = active.fetch_add(1, Ordering::SeqCst) + 1;
-                maximum.fetch_max(count, Ordering::SeqCst);
-                tokio::task::yield_now().await;
-                active.fetch_sub(1, Ordering::SeqCst);
-                if name == "2" {
-                    Err("unavailable".into())
-                } else {
-                    Ok(LivekitRoomRead::Participants(vec![]))
-                }
-            }
-        })
-        .await;
-        assert_eq!(results.len(), 12);
-        assert_eq!(maximum.load(Ordering::SeqCst), 4);
-        assert!(results
-            .iter()
-            .find(|(id, _, _)| id == "2")
-            .unwrap()
-            .2
-            .is_err());
-        assert_eq!(
-            results
-                .iter()
-                .filter(|(_, _, result)| result.is_ok())
-                .count(),
-            11
-        );
-    }
-
-    #[tokio::test]
-    async fn a_slow_livekit_room_does_not_discard_completed_rooms_at_the_deadline() {
-        let results = collect_livekit_reads(
-            vec![
-                ("fast".into(), "fast".into()),
-                ("slow".into(), "slow".into()),
-            ],
-            Duration::from_millis(5),
-            |name| async move {
-                if name == "slow" {
-                    std::future::pending::<()>().await;
-                }
-                Ok(LivekitRoomRead::Participants(vec![]))
-            },
-        )
-        .await;
-        assert_eq!(results.len(), 1);
-        assert_eq!(results[0].0, "fast");
-    }
 }

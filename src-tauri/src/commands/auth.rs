@@ -98,6 +98,14 @@ fn credentials_path(app: &tauri::AppHandle) -> Result<std::path::PathBuf, String
 }
 
 #[tauri::command]
+pub async fn get_access_token(state: State<'_, Arc<AppState>>) -> Result<String, String> {
+    let client = super::get_client(&state).await?;
+    client
+        .access_token()
+        .ok_or_else(|| "No access token for the current session".to_string())
+}
+
+#[tauri::command]
 pub async fn logout(state: State<'_, Arc<AppState>>, app: tauri::AppHandle) -> Result<(), String> {
     // Tell the server we're offline BEFORE tearing anything down, while the
     // client and access token still exist.

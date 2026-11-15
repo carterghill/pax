@@ -710,9 +710,9 @@ export default function MainLayout({
       byRoom[rid] = {};
       for (const lp of livekitByRoom[rid] ?? []) {
         const st: VoiceRowState = {
-          isMuted: lp.isMuted,
-          isDeafened: lp.isDeafened,
-          isSpeaking: lp.isSpeaking,
+          isMuted: lp.isMuted === true,
+          isDeafened: lp.isDeafened === true,
+          isSpeaking: lp.isSpeaking === true,
         };
         for (const key of voiceStateLookupKeysForLiveKitIdentity(lp.identity)) {
           byRoom[rid][key] = st;
