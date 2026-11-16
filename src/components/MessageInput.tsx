@@ -21,6 +21,7 @@ import {
 } from "../utils/composerEditorDom";
 import { MODAL_LAYER_Z } from "./ModalLayer";
 import { useComposerFileUpload } from "../features/chat/composer/useComposerFileUpload";
+import { getClipboardImageFile } from "../features/chat/composer/clipboardImage";
 import { useComposerTypingNotice } from "../features/chat/composer/useComposerTypingNotice";
 import { useComposerMentions } from "../features/chat/composer/useComposerMentions";
 import {
@@ -110,6 +111,7 @@ export default function MessageInput({
     pendingFile,
     pendingFileRef,
     setPendingFile,
+    attachFile,
     handleFileSelected,
     clearPendingFile,
   } = useComposerFileUpload({ roomId, interactionLocked, fileSendBridge });
@@ -237,6 +239,11 @@ export default function MessageInput({
         return;
       }
       e.preventDefault();
+      const image = getClipboardImageFile(e.clipboardData);
+      if (image) {
+        if (!draftDmPeerUserId && !editingMessage) void attachFile(image);
+        return;
+      }
       const text = e.clipboardData.getData("text/plain");
       const el = editorRef.current;
       if (!el) return;
@@ -248,7 +255,7 @@ export default function MessageInput({
       }
       refreshComposerDomState();
     },
-    [composerImgStyle, interactionLocked, refreshComposerDomState, syncHeight],
+    [attachFile, composerImgStyle, draftDmPeerUserId, editingMessage, interactionLocked, refreshComposerDomState, syncHeight],
   );
 
   // ─── Edit message loading ─────────────────────────────────────────────────
