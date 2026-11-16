@@ -17,6 +17,8 @@ import { listen } from "@tauri-apps/api/event";
 import QuitConfirmDialog from "./components/QuitConfirmDialog";
 import { homeserverUrlToHostname, sanitizeSignupUsernameInput } from "./utils/matrix";
 import { usePushNotifications } from "./hooks/usePushNotifications";
+import { EncryptionProvider } from "./context/EncryptionContext";
+import EncryptionRecovery, { EncryptionSignOut } from "./components/EncryptionRecovery";
 
 if (import.meta.env.DEV) {
   const w = window as unknown as { invoke: typeof invoke; listen: typeof listen };
@@ -243,7 +245,7 @@ function App() {
     setLoading(true);
     setError(null);
     try {
-      // No credentials file access before the server accepts login; optional persist after success.
+      // The backend preserves the existing device's keys when reauthenticating.
       const id = await invoke<string>("login", {
         homeserver,
         username,
@@ -371,7 +373,8 @@ function App() {
     // component so hooks run in the right context.
     return (
       <>
-        <UserAvatarStoreProvider key={userId} userId={userId}>
+        <EncryptionProvider key={userId}>
+        <UserAvatarStoreProvider userId={userId}>
           <NotificationSettingsProvider>
             <VoicePresenceProvider>
               <RoomMemberStoreProvider>
@@ -386,6 +389,8 @@ function App() {
             </VoicePresenceProvider>
           </NotificationSettingsProvider>
         </UserAvatarStoreProvider>
+        <EncryptionRecovery />
+        </EncryptionProvider>
         {quitOverlay}
       </>
     );
@@ -598,6 +603,7 @@ function AuthedApp({
 
   // Register FCM push token with the homeserver (Android only; no-op on desktop).
   const { unregisterPush } = usePushNotifications({ userId });
+  const [signOutRequested, setSignOutRequested] = useState(false);
 
   // Wrap the sign-out handler to unregister the pusher first.
   const handleSignOut = useCallback(async () => {
@@ -617,11 +623,14 @@ function AuthedApp({
   }
 
   return (
+    <>
     <MainLayout
       userId={userId}
-      onSignOut={handleSignOut}
+      onSignOut={() => setSignOutRequested(true)}
       rooms={{ spaces, roomsBySpace, getRoom, fetchRooms, upsertOptimisticRoom }}
     />
+    {signOutRequested && <EncryptionSignOut onCancel={() => setSignOutRequested(false)} onSignOut={handleSignOut} />}
+    </>
   );
 }
 

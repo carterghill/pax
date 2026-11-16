@@ -16,6 +16,7 @@ import {
   Bell,
   LogOut,
   Monitor,
+  ShieldCheck,
 } from "lucide-react";
 import type { LucideIcon } from "lucide-react";
 import type { VoiceCall } from "../hooks/useVoiceCall";
@@ -26,6 +27,7 @@ import {
   setSendPublicReceipts,
 } from "../utils/readReceiptPrefs";
 import NotificationSettingsPanel from "./NotificationSettingsPanel";
+import EncryptionSettingsPanel from "./EncryptionSettingsPanel";
 
 interface SettingsMenuProps {
   onSignOut: () => void;
@@ -41,6 +43,7 @@ type SettingsSection =
   | "audio"
   | "notifications"
   | "system"
+  | "encryption"
   | "account";
 
 interface SettingsNavItem {
@@ -333,6 +336,14 @@ export default function SettingsMenu({
       title: "Account",
       blurb: "Manage your current session and access token.",
       icon: LogOut,
+    },
+    {
+      id: "encryption",
+      label: "Encryption",
+      description: "Backup and recovery",
+      title: "Encryption",
+      blurb: "Keep access to your encrypted conversations across devices.",
+      icon: ShieldCheck,
     },
   ];
 
@@ -1105,6 +1116,12 @@ export default function SettingsMenu({
                   </div>
                 </div>
               </label>
+            </section>
+          )}
+
+          {activeSection === "encryption" && (
+            <section style={panelStyle}>
+              <EncryptionSettingsPanel />
             </section>
           )}
 

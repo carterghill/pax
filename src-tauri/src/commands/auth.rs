@@ -4,6 +4,7 @@ use std::time::Duration;
 use matrix_sdk::authentication::matrix::MatrixSession;
 use matrix_sdk::authentication::SessionTokens;
 use matrix_sdk::config::SyncSettings;
+use matrix_sdk::encryption::{BackupDownloadStrategy, EncryptionSettings};
 use matrix_sdk::{Client, SessionMeta};
 use serde::{Deserialize, Serialize};
 use tauri::{Manager, State};
@@ -27,65 +28,9 @@ pub struct SavedCredentials {
     pub homeserver: String,
     #[serde(default)]
     pub session: Option<SavedSession>,
-    /// Relative path under app data dir for the Matrix SDK SQLite store (password logins use a new subdir each time).
+    /// Relative path under app data dir for the Matrix SDK SQLite store.
     #[serde(default)]
     pub sqlite_store_dir: Option<String>,
-}
-
-/// Best-effort: delete every Matrix SDK SQLite directory except `keep_sqlite_relative`
-/// (relative to app data, `/`-separated, e.g. `matrix_sessions/pw_<uuid>`).
-/// Runs in the background so login/register return immediately.
-pub(crate) fn spawn_cleanup_stale_matrix_stores(
-    app: tauri::AppHandle,
-    keep_sqlite_relative: String,
-) {
-    tauri::async_runtime::spawn(async move {
-        let res = tokio::task::spawn_blocking(move || {
-            let Ok(base) = app.path().app_data_dir() else {
-                return;
-            };
-            let keep_norm = keep_sqlite_relative
-                .replace('\\', "/")
-                .trim_matches('/')
-                .to_string();
-
-            // Legacy single-directory layout
-            let legacy = base.join("matrix_store");
-            if legacy.exists() && keep_norm != "matrix_store" {
-                if let Err(e) = std::fs::remove_dir_all(&legacy) {
-                    log::debug!("cleanup: could not remove legacy matrix_store: {e}");
-                }
-            }
-
-            let sessions = base.join("matrix_sessions");
-            let Ok(read_dir) = std::fs::read_dir(&sessions) else {
-                return;
-            };
-            for ent in read_dir.flatten() {
-                let Ok(ft) = ent.file_type() else {
-                    continue;
-                };
-                if !ft.is_dir() {
-                    continue;
-                }
-                let name = ent.file_name().to_string_lossy().into_owned();
-                if !name.starts_with("pw_") {
-                    continue;
-                }
-                let rel = format!("matrix_sessions/{name}").replace('\\', "/");
-                if rel == keep_norm {
-                    continue;
-                }
-                if let Err(e) = std::fs::remove_dir_all(ent.path()) {
-                    log::debug!("cleanup: could not remove {rel}: {e}");
-                }
-            }
-        })
-        .await;
-        if let Err(e) = res {
-            log::debug!("cleanup: spawn_blocking join error: {e}");
-        }
-    });
 }
 
 fn credentials_path(app: &tauri::AppHandle) -> Result<std::path::PathBuf, String> {
@@ -107,6 +52,18 @@ pub async fn get_access_token(state: State<'_, Arc<AppState>>) -> Result<String,
 
 #[tauri::command]
 pub async fn logout(state: State<'_, Arc<AppState>>, app: tauri::AppHandle) -> Result<(), String> {
+    let _operation = state.encryption.operation.lock().await;
+    // Give pending keys a chance to reach backup before stopping the SDK. The
+    // databases remain on disk even if the network is unavailable.
+    if let Some(client) = state.client.lock().await.as_ref() {
+        let backups = client.encryption().backups();
+        if backups.are_enabled().await {
+            let _ = timeout(Duration::from_secs(10), async {
+                backups.wait_for_steady_state().await
+            })
+            .await;
+        }
+    }
     // Tell the server we're offline BEFORE tearing anything down, while the
     // client and access token still exist.
     //
@@ -147,11 +104,9 @@ pub async fn logout(state: State<'_, Arc<AppState>>, app: tauri::AppHandle) -> R
     state.presence_map.lock().await.clear();
     *state.sync_running.lock().await = false;
 
-    // Best-effort cleanup only — do not block on locked files (Windows).
-    if let Ok(dir) = app.path().app_data_dir() {
-        let store_path = dir.join("matrix_store");
-        let _ = std::fs::remove_dir_all(&store_path);
-    }
+    // A crypto store may contain the only remaining copy of a room key.
+    // Signing out must not delete it as if it were an ordinary message cache.
+    let _ = app;
     Ok(())
 }
 
@@ -228,6 +183,103 @@ pub fn clear_saved_credentials(app: tauri::AppHandle) -> Result<(), String> {
 /*  Login / Register / Restore                                         */
 /* ------------------------------------------------------------------ */
 
+/// Carry locally held history across reauthentication. An expired access token
+/// does not invalidate the keys in its SQLite store. The old store is kept even
+/// if transfer fails, and exports are encrypted with an ephemeral random secret.
+async fn transfer_previous_room_keys(
+    app: &tauri::AppHandle,
+    new_client: &Client,
+    live_previous: Option<Client>,
+    saved: Option<SavedCredentials>,
+) -> Result<(), String> {
+    // Reauthentication normally reuses the original device and crypto store.
+    if saved
+        .as_ref()
+        .and_then(|c| c.session.as_ref())
+        .is_some_and(|s| {
+            new_client
+                .user_id()
+                .is_some_and(|id| id.as_str() == s.user_id)
+                && new_client
+                    .device_id()
+                    .is_some_and(|id| id.as_str() == s.device_id)
+        })
+    {
+        return Ok(());
+    }
+    let same_account = |old: &Client| {
+        old.user_id() == new_client.user_id() && old.homeserver() == new_client.homeserver()
+    };
+    let previous = if let Some(old) = live_previous.filter(&same_account) {
+        Some(old)
+    } else if let Some(creds) = saved {
+        if let Some(session) = &creds.session {
+            let same_user = new_client
+                .user_id()
+                .is_some_and(|id| id.as_str() == session.user_id);
+            let same_server = creds.homeserver.trim_end_matches('/')
+                == new_client.homeserver().as_str().trim_end_matches('/');
+            let path = sqlite_path_for_restore(app, &creds)?;
+            if same_user && same_server && path.exists() {
+                // Use default settings for this source client: do not
+                // bootstrap an identity or create backups using an old token.
+                let old = Client::builder().homeserver_url(&creds.homeserver)
+                    .sqlite_store(path, None).build().await
+                    .map_err(|e| format!("Could not open your previous encryption keys. The original store has been kept: {}", fmt_error_chain(&e)))?;
+                old.restore_session(MatrixSession {
+                    meta: SessionMeta {
+                        user_id: matrix_sdk::ruma::UserId::parse(&session.user_id).map_err(|e| e.to_string())?,
+                        device_id: session.device_id.clone().into(),
+                    },
+                    tokens: SessionTokens { access_token: session.access_token.clone(), refresh_token: None },
+                }).await.map_err(|e| format!("Could not restore your previous encryption keys. The original store has been kept: {}", fmt_error_chain(&e)))?;
+                Some(old)
+            } else {
+                None
+            }
+        } else {
+            None
+        }
+    } else {
+        None
+    };
+    let Some(previous) = previous else {
+        return Ok(());
+    };
+    let path = app_data_dir(app)?.join(format!("key-transfer-{}.enc", uuid::Uuid::new_v4()));
+    let passphrase = format!("{}{}", uuid::Uuid::new_v4(), uuid::Uuid::new_v4());
+    let result =
+        transfer_room_keys_between_clients(&previous, new_client, &path, &passphrase).await;
+    let _ = std::fs::remove_file(path);
+    result.map_err(|e| format!("Could not transfer your previous encryption keys. Your original store has been kept: {e}"))
+}
+
+async fn transfer_room_keys_between_clients(
+    previous: &Client,
+    next: &Client,
+    path: &std::path::Path,
+    passphrase: &str,
+) -> Result<(), String> {
+    if previous.user_id().is_none()
+        || previous.user_id() != next.user_id()
+        || previous.homeserver() != next.homeserver()
+    {
+        return Err(
+            "Encryption keys can only be transferred between sessions of the same account.".into(),
+        );
+    }
+    previous
+        .encryption()
+        .export_room_keys(path.to_owned(), passphrase, |_| true)
+        .await
+        .map_err(|e| fmt_error_chain(&e))?;
+    next.encryption()
+        .import_room_keys(path.to_owned(), passphrase)
+        .await
+        .map_err(|e| fmt_error_chain(&e))?;
+    Ok(())
+}
+
 fn app_data_dir(app: &tauri::AppHandle) -> Result<std::path::PathBuf, String> {
     app.path()
         .app_data_dir()
@@ -245,6 +297,29 @@ fn sqlite_path_for_restore(
     })
 }
 
+fn reusable_login_store(
+    creds: &SavedCredentials,
+    homeserver: &str,
+    username: &str,
+) -> Option<(String, String)> {
+    if creds.homeserver.trim_end_matches('/') != homeserver.trim_end_matches('/') {
+        return None;
+    }
+    let session = creds.session.as_ref()?;
+    let user_id = matrix_sdk::ruma::UserId::parse(&session.user_id).ok()?;
+    let username = username.trim();
+    if username != user_id.as_str() && username != user_id.localpart() {
+        return None;
+    }
+    Some((
+        creds
+            .sqlite_store_dir
+            .clone()
+            .unwrap_or_else(|| "matrix_store".into()),
+        session.device_id.clone(),
+    ))
+}
+
 /// Build a matrix-sdk Client with automatic retries for transient failures
 /// (DNS hiccups, brief network outages). Tries up to 3 times with increasing
 /// delays before giving up.
@@ -257,6 +332,13 @@ async fn build_client_with_retry(
         match Client::builder()
             .homeserver_url(homeserver)
             .sqlite_store(store_path, None)
+            .with_encryption_settings(EncryptionSettings {
+                auto_enable_cross_signing: true,
+                auto_enable_backups: true,
+                // Fetch keys as rooms are read, rather than downloading an
+                // unbounded account-wide archive in one response.
+                backup_download_strategy: BackupDownloadStrategy::AfterDecryptionFailure,
+            })
             .build()
             .await
         {
@@ -277,15 +359,16 @@ async fn build_client_with_retry(
     Err(format!("{} (retried 3 times)", last_err))
 }
 
-/// Password login / registration: always use a new SQLite directory under `matrix_sessions/` so we
-/// never delete or reuse a store path that may still be open. Reusing the same `Client` after a
-/// failed `login_username` can panic with `AlreadyInitializedError`, so each attempt uses a new path.
+/// Reauthenticate an existing device in its original store when possible. New
+/// accounts/devices get their own store. Every attempt uses a fresh Client,
+/// since reusing a Client after failed login can cause AlreadyInitializedError.
 async fn login_password_into_new_store(
     app: &tauri::AppHandle,
     homeserver: &str,
     username: &str,
     password: &str,
     log_prefix: &str,
+    reusable: Option<(String, String)>,
 ) -> Result<(Client, String), String> {
     let base = app_data_dir(app)?;
     let sessions_root = base.join("matrix_sessions");
@@ -294,8 +377,10 @@ async fn login_password_into_new_store(
 
     let mut last_err = String::new();
     for attempt in 0u32..3 {
-        let id = uuid::Uuid::new_v4();
-        let rel = format!("matrix_sessions/pw_{id}");
+        let rel = reusable
+            .as_ref()
+            .map(|(rel, _)| rel.clone())
+            .unwrap_or_else(|| format!("matrix_sessions/pw_{}", uuid::Uuid::new_v4()));
         let sp = base.join(&rel);
 
         let client = match build_client_with_retry(homeserver, &sp).await {
@@ -314,13 +399,14 @@ async fn login_password_into_new_store(
                 continue;
             }
         };
-        match client
+        let mut login = client
             .matrix_auth()
             .login_username(username, password)
-            .initial_device_display_name("Pax")
-            .send()
-            .await
-        {
+            .initial_device_display_name("Pax");
+        if let Some((_, device_id)) = &reusable {
+            login = login.device_id(device_id);
+        }
+        match login.send().await {
             Ok(_) => return Ok((client, rel)),
             Err(e) => {
                 last_err = fmt_error_chain(&e);
@@ -331,7 +417,11 @@ async fn login_password_into_new_store(
                     last_err
                 );
                 drop(client);
-                let _ = std::fs::remove_dir_all(&sp);
+                // A wrong password or network error must never delete existing
+                // keys. Only this attempt's newly created directory is disposable.
+                if reusable.is_none() {
+                    let _ = std::fs::remove_dir_all(&sp);
+                }
                 if attempt < 2 {
                     tokio::time::sleep(Duration::from_millis(1000 * (attempt as u64 + 1))).await;
                 }
@@ -498,6 +588,7 @@ async fn finish_registration(
     password: &str,
     _reg_response: &serde_json::Value,
 ) -> Result<String, String> {
+    let _operation = state.encryption.operation.lock().await;
     // Registration succeeded — now do a normal SDK login so we get a fully
     // initialised Client with crypto store, sync, etc.
     state.stop_sync_task().await;
@@ -512,6 +603,7 @@ async fn finish_registration(
         username,
         password,
         "Post-registration login",
+        None,
     )
     .await?;
 
@@ -527,8 +619,7 @@ async fn finish_registration(
     .map_err(|e| format!("Initial sync failed: {}", fmt_error_chain(&e)))?;
 
     if let Some(session) = client.matrix_auth().session() {
-        let keep = store_rel.clone();
-        let _ = save_session_to_credentials(
+        save_session_to_credentials(
             app,
             homeserver,
             SavedSession {
@@ -537,8 +628,7 @@ async fn finish_registration(
                 access_token: session.tokens.access_token,
             },
             Some(store_rel),
-        );
-        spawn_cleanup_stale_matrix_stores(app.clone(), keep);
+        )?;
     }
 
     let user_id = client
@@ -566,6 +656,13 @@ pub async fn login(
     password: String,
     persist_session: bool,
 ) -> Result<String, String> {
+    let _operation = state.encryption.operation.lock().await;
+    let previous_client = state.client.lock().await.clone();
+    let previous_credentials = load_credentials(app.clone())?;
+    let reusable = previous_credentials
+        .as_ref()
+        .and_then(|creds| reusable_login_store(creds, &homeserver, &username))
+        .filter(|(rel, _)| app_data_dir(&app).is_ok_and(|base| base.join(rel).exists()));
     state.stop_sync_task().await;
     state.notifications.reset();
     state.voice_presence.reset();
@@ -574,7 +671,10 @@ pub async fn login(
 
     log::info!("login: password auth for {}", homeserver);
     let (client, store_rel) =
-        login_password_into_new_store(&app, &homeserver, &username, &password, "Login").await?;
+        login_password_into_new_store(&app, &homeserver, &username, &password, "Login", reusable)
+            .await?;
+
+    transfer_previous_room_keys(&app, &client, previous_client, previous_credentials).await?;
 
     log::info!("login: running initial sync...");
     tokio::time::timeout(
@@ -591,8 +691,7 @@ pub async fn login(
     log::info!("login: sync complete, saving session...");
     if persist_session {
         if let Some(session) = client.matrix_auth().session() {
-            let keep = store_rel.clone();
-            let _ = save_session_to_credentials(
+            save_session_to_credentials(
                 &app,
                 &homeserver,
                 SavedSession {
@@ -601,9 +700,10 @@ pub async fn login(
                     access_token: session.tokens.access_token,
                 },
                 Some(store_rel),
-            );
-            spawn_cleanup_stale_matrix_stores(app.clone(), keep);
+            )?;
         }
+    } else {
+        clear_saved_credentials(app.clone())?;
     }
 
     let user_id = client
@@ -630,6 +730,7 @@ pub async fn restore_session(
     state: State<'_, Arc<AppState>>,
     app: tauri::AppHandle,
 ) -> Result<String, String> {
+    let _operation = state.encryption.operation.lock().await;
     let creds = load_credentials(app.clone())?.ok_or("No saved credentials")?;
     let sp = sqlite_path_for_restore(&app, &creds)?;
     let sd = creds.session.ok_or("No saved session")?;
@@ -726,4 +827,119 @@ pub async fn restore_session(
     state.attachments.start_session();
     *state.sync_running.lock().await = false;
     Ok(user_id.to_string())
+}
+
+#[cfg(test)]
+mod encryption_tests {
+    use super::*;
+    use matrix_sdk::config::RequestConfig;
+    use matrix_sdk::ruma::api::MatrixVersion;
+
+    struct TestDir(std::path::PathBuf);
+    impl Drop for TestDir {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.0);
+        }
+    }
+
+    #[test]
+    fn encryption_store_reuse_requires_the_same_account_and_server() {
+        let saved = SavedCredentials {
+            homeserver: "https://example.org".into(),
+            session: Some(SavedSession {
+                user_id: "@alice:example.org".into(),
+                device_id: "ORIGINAL".into(),
+                access_token: "expired".into(),
+            }),
+            sqlite_store_dir: Some("matrix_sessions/pw_original".into()),
+        };
+        assert_eq!(
+            reusable_login_store(&saved, "https://example.org/", "alice"),
+            Some(("matrix_sessions/pw_original".into(), "ORIGINAL".into()))
+        );
+        assert!(
+            reusable_login_store(&saved, "https://example.org", "@alice:example.org").is_some()
+        );
+        assert!(reusable_login_store(&saved, "https://example.org", "bob").is_none());
+        assert!(reusable_login_store(&saved, "https://another.org", "alice").is_none());
+    }
+
+    async fn client(path: &std::path::Path, user: &str, device: &str) -> Client {
+        let client = Client::builder()
+            .homeserver_url("http://127.0.0.1:9")
+            .server_versions([MatrixVersion::V1_11])
+            .request_config(RequestConfig::new().disable_retry())
+            .sqlite_store(path, None)
+            .build()
+            .await
+            .unwrap();
+        client
+            .restore_session(MatrixSession {
+                meta: SessionMeta {
+                    user_id: matrix_sdk::ruma::UserId::parse(user).unwrap(),
+                    device_id: device.into(),
+                },
+                tokens: SessionTokens {
+                    access_token: "test-token".into(),
+                    refresh_token: None,
+                },
+            })
+            .await
+            .unwrap();
+        client
+    }
+
+    #[tokio::test]
+    async fn encryption_keys_survive_restart_and_transfer_to_a_new_device() {
+        let dir = TestDir(
+            std::env::temp_dir().join(format!("pax-encryption-test-{}", uuid::Uuid::new_v4())),
+        );
+        std::fs::create_dir_all(&dir.0).unwrap();
+        let fixture = dir.0.join("fixture.enc");
+        // Public test fixture from matrix-rust-sdk's backups.rs, Apache-2.0,
+        // Copyright The Matrix.org Foundation C.I.C. The test passphrase is 1234.
+        std::fs::write(&fixture, include_str!("fixtures/test-room-key-export.txt")).unwrap();
+        let old_path = dir.0.join("original-device");
+        let original = client(&old_path, "@alice:example.org", "ORIGINAL").await;
+        let imported = original
+            .encryption()
+            .import_room_keys(fixture.clone(), "1234")
+            .await
+            .unwrap();
+        assert_eq!(imported.imported_count, 1);
+        drop(original);
+
+        let reopened = client(&old_path, "@alice:example.org", "ORIGINAL").await;
+        let next = client(&dir.0.join("new-device"), "@alice:example.org", "NEW").await;
+        let transfer = dir.0.join("transfer.enc");
+        transfer_room_keys_between_clients(&reopened, &next, &transfer, "transfer-secret")
+            .await
+            .unwrap();
+        assert!(next
+            .encryption()
+            .import_room_keys(transfer.clone(), "wrong-secret")
+            .await
+            .is_err());
+        // The transferred key is already in the new device's persistent store.
+        let duplicate = next
+            .encryption()
+            .import_room_keys(transfer.clone(), "transfer-secret")
+            .await
+            .unwrap();
+        assert_eq!(duplicate.total_count, 1);
+        assert_eq!(duplicate.imported_count, 0);
+
+        let other = client(&dir.0.join("other-account"), "@bob:example.org", "BOB").await;
+        let rejected_export = dir.0.join("must-not-exist.enc");
+        assert!(
+            transfer_room_keys_between_clients(&reopened, &other, &rejected_export, "secret")
+                .await
+                .is_err()
+        );
+        assert!(!rejected_export.exists());
+        assert!(
+            old_path.exists(),
+            "Reauthentication must preserve the original store"
+        );
+    }
 }

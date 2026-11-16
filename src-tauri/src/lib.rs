@@ -47,6 +47,7 @@ pub struct AuthConfig {
 
 pub struct AppState {
     pub client: Mutex<Option<Client>>,
+    pub encryption: commands::encryption::EncryptionService,
     pub http_client: reqwest::Client,
     pub presence_map: Arc<Mutex<HashMap<String, String>>>,
     pub status_msg_map: Arc<Mutex<HashMap<String, String>>>,
@@ -120,6 +121,7 @@ impl AppState {
 
     /// Abort the Matrix sync loop and wait for the task to finish so `Client` / SQLite handles are dropped.
     pub async fn stop_sync_task(&self) {
+        self.encryption.stop().await;
         let handle = self.sync_join.lock().await.take();
         if let Some(h) = handle {
             h.abort();
@@ -289,6 +291,7 @@ pub fn run() {
 
     let file_cache = Arc::new(file_cache::FileCache::new());
     let state = Arc::new(AppState {
+        encryption: commands::encryption::EncryptionService::default(),
         client: Mutex::new(None),
         http_client: reqwest::Client::builder()
             .tcp_keepalive(Duration::from_secs(30))
@@ -414,6 +417,16 @@ pub fn run() {
             commands::auth::login,
             commands::auth::register,
             commands::auth::restore_session,
+            commands::encryption::get_encryption_status,
+            commands::encryption::get_pending_encryption_recovery_key,
+            commands::encryption::setup_encryption_recovery,
+            commands::encryption::acknowledge_encryption_recovery_key,
+            commands::encryption::restore_encryption_recovery,
+            commands::encryption::replace_encryption_recovery_key,
+            commands::encryption::sync_encryption_backup,
+            commands::encryption::request_encryption_verification,
+            commands::encryption::get_encryption_verification,
+            commands::encryption::respond_encryption_verification,
             commands::room_listing::get_rooms,
             commands::room_listing::current_homeserver,
             commands::room_membership::join_room,

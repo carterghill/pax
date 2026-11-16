@@ -1275,6 +1275,8 @@ pub async fn start_sync(
         *sync_running = true;
     }
 
+    state.encryption.start(&client, app.clone()).await;
+
     // Handler for incoming room messages
     let app_handle = app.clone();
     let avatars = state.avatars.clone();

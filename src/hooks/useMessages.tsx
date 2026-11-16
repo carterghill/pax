@@ -768,6 +768,50 @@ export function useMessages(roomId: string | null, currentUserId: string | null 
     }
   }, [roomId, commit]);
 
+  // Restoring keys must also retry the timeline: undecryptable events may have
+  // been omitted from an earlier fetch and cached as an empty room.
+  useEffect(() => {
+    let cancelled = false;
+    let timer: ReturnType<typeof setTimeout>;
+    const unlisten = listen<string[] | null>("encryption-keys-received", (event) => {
+      const rooms = event.payload;
+      if (rooms) for (const id of rooms) roomMessagesCache.delete(id);
+      else roomMessagesCache.clear();
+      if (!roomId || (rooms && !rooms.includes(roomId))) return;
+      clearTimeout(timer);
+      const retry = async () => {
+        if (cancelled || activeRoomIdRef.current !== roomId) return;
+        if (initialFetchingRef.current || loadingLockRef.current) {
+          timer = setTimeout(() => void retry(), 500);
+          return;
+        }
+        const atLatest = isAtLatestRef.current;
+        const snapshot = messagesRef.current;
+        const anchor = [...snapshot].reverse().find((message) => !message.eventId.startsWith("local:"));
+        try {
+          const batch = await invoke<MessageBatch>(atLatest || !anchor ? "get_messages" : "get_messages_around_event",
+            atLatest || !anchor ? { roomId, from: null, limit: INITIAL_LOAD_SIZE } : { roomId, eventId: anchor.eventId });
+          if (cancelled || activeRoomIdRef.current !== roomId || isAtLatestRef.current !== atLatest) return;
+          const recovered = batch.messages.filter((message) => atLatest || snapshot.length === 0
+            || (message.timestamp >= snapshot[0].timestamp && message.timestamp <= snapshot[snapshot.length - 1].timestamp));
+          const byId = new Map(messagesRef.current.map((message) => [message.eventId, message]));
+          for (const message of recovered) byId.set(message.eventId, message);
+          const combined = [...byId.values()].sort((a, b) => a.timestamp - b.timestamp).slice(-WINDOW_SIZE);
+          commit(combined, snapshot.length === 0 ? batch.prevBatch : olderTokenRef.current, atLatest);
+          primeAvatarsFromMessagesRef.current(recovered);
+        } catch (error) {
+          console.error("[useMessages] could not refresh restored history:", error);
+        }
+      };
+      timer = setTimeout(() => void retry(), 500);
+    });
+    return () => {
+      cancelled = true;
+      clearTimeout(timer);
+      void unlisten.then((stop) => stop());
+    };
+  }, [roomId, commit]);
+
   /* ================================================================ */
   /*  removeMessageById                                                */
   /* ================================================================ */
