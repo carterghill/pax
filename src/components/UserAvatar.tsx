@@ -60,7 +60,7 @@ export default function UserAvatar({
   // `avatarUrlHint` taking precedence in `effectiveUrl` below.
   useEffect(() => {
     if (!avatarUrlHint) return;
-    store.prime(userId, avatarUrlHint);
+    store.primeHint(userId, avatarUrlHint);
   }, [userId, avatarUrlHint, store]);
 
   // Subscribe to this user's slot only — other users' updates do not
@@ -72,19 +72,20 @@ export default function UserAvatar({
     }
   }, [userId, fromStore, store]);
 
-  // The STORE is authoritative once it has resolved. The hint is only a
-  // bootstrap value for the first paint (before the store answers), so a
-  // list-provided path that's been invalidated behind our back — e.g. a
-  // `room.avatarUrl` that pointed into the avatar temp dir before
-  // `clear_media_cache` wiped it on room switch — cannot permanently
-  // override a freshly-written path that messages / member sync just
-  // primed into the store. Without this, the sidebar / DM banner sit on
-  // initials forever after `clear_media_cache`, even though the chat
-  // timeline (which has a fresh hint from `get_messages`) renders fine.
+  // The store is authoritative after resolution. A stale list-provided hint
+  // must not override a refreshed avatar or a confirmed absence.
   const effectiveUrl =
     fromStore !== undefined ? fromStore : avatarUrlHint || null;
   const [imageFailed, setImageFailed] = useState(false);
   const failedUrlRef = useRef<string | null>(null);
+  const retriedUrlRef = useRef<string | null>(null);
+  useEffect(() => {
+    // Cache repair can recreate a deleted file at its original path.
+    if (fromStore) {
+      failedUrlRef.current = null;
+      setImageFailed(false);
+    }
+  }, [fromStore]);
   useEffect(() => {
     if (!effectiveUrl) return;
     if (effectiveUrl === failedUrlRef.current) return;
@@ -168,7 +169,10 @@ export default function UserAvatar({
             setImageFailed(true);
             // The on-disk temp file probably got cleaned up — drop the
             // entry so the next mount re-fetches through the store.
-            store.invalidate(userId);
+            if (retriedUrlRef.current !== effectiveUrl) {
+              retriedUrlRef.current = effectiveUrl;
+              store.invalidate(userId);
+            }
           }}
           style={{ width: "100%", height: "100%", objectFit: "cover" }}
         />

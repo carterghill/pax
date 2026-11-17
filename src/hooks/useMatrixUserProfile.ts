@@ -36,7 +36,7 @@ export function useMatrixUserProfile(userId: string | null): MatrixUserProfileSt
         setDisplayName(p.displayName ?? null);
         setAvatarUrl(p.avatarUrl ?? null);
         setLoading(false);
-        userAvatarStore?.prime(userId, p.avatarUrl ?? null);
+        userAvatarStore?.primeMany([{ userId, avatarUrl: p.avatarUrl }]);
       })
       .catch(() => {
         if (cancelled) return;

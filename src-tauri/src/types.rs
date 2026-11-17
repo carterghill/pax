@@ -83,6 +83,9 @@ pub struct MessageInfo {
     pub image_width: Option<u32>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub image_height: Option<u32>,
+    /// Blurhash placeholder string for `m.image` (MSC2448 `xyz.amorgan.blurhash`).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub image_blurhash: Option<String>,
     /// When set, the message is a video; same download path as images (`get_matrix_image_path`).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub video_media_request: Option<serde_json::Value>,
@@ -139,6 +142,13 @@ pub struct RoomMemberInfo {
     pub avatar_url: Option<String>,
     pub presence: String, // "online", "offline", "unavailable"
     pub status_msg: Option<String>,
+}
+
+#[derive(Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RoomMembersChangedPayload {
+    pub room_id: String,
+    pub membership_changed: bool,
 }
 
 #[derive(Clone, Serialize)]
@@ -238,6 +248,7 @@ pub struct MessageEditPayload {
     pub file_display_name: serde_json::Value,
     pub image_width: serde_json::Value,
     pub image_height: serde_json::Value,
+    pub image_blurhash: serde_json::Value,
     pub video_width: serde_json::Value,
     pub video_height: serde_json::Value,
     /// `null` when the edited event is not an unsupported `msgtype` row.
@@ -275,20 +286,30 @@ pub struct VoiceJoinResult {
     pub livekit_url: String,
 }
 
-/// LiveKit participant row from Room Service API (mute/deafen/speaking) for UI when not in the SFU.
-#[derive(Clone, Serialize)]
+/// Optional server snapshot. Unknown flags stay null; connected calls use SDK events.
+#[derive(Clone, Serialize, serde::Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct LivekitVoiceParticipantInfo {
     pub identity: String,
-    pub is_muted: bool,
-    pub is_deafened: bool,
-    pub is_speaking: bool,
+    #[serde(default, alias = "is_muted")]
+    pub is_muted: Option<bool>,
+    #[serde(default, alias = "is_deafened")]
+    pub is_deafened: Option<bool>,
+    #[serde(default, alias = "is_speaking")]
+    pub is_speaking: Option<bool>,
 }
 
 #[derive(Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
-pub struct VoiceParticipantsChangedPayload {
-    pub participants_by_room: HashMap<String, Vec<VoiceParticipant>>,
+pub struct VoiceParticipantsInvalidatedPayload {
+    pub room_ids: Vec<String>,
+}
+
+#[derive(Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct VoiceSessionEndedPayload {
+    pub room_id: String,
+    pub message: String,
 }
 
 #[derive(Serialize)]

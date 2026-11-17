@@ -53,11 +53,9 @@ fn main() {
     // environment), emit it so `option_env!("VAR")` returns `Some(value)`.
     // If unset, we emit nothing and `option_env!` returns `None`.
     let vars = [
-        "LIVEKIT_API_KEY",
-        "LIVEKIT_API_SECRET",
-        "LIVEKIT_URL",
         "GIPHY_API_KEY",
         "PAX_HOMESERVER",
+        "PAX_SERVER_NAME",
         "PAX_REGISTRATION_TOKEN",
         "PAX_HIDE_SERVER_CONFIG",
         "PAX_PUSH_GATEWAY_URL",

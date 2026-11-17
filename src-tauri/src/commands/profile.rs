@@ -1,6 +1,6 @@
 use std::sync::Arc;
 
-use tauri::State;
+use tauri::{Emitter, State};
 
 use crate::AppState;
 
@@ -35,6 +35,7 @@ pub async fn set_display_name(state: State<'_, Arc<AppState>>, name: String) -> 
 /// base64-encoded string plus the MIME type (e.g. "image/png").
 #[tauri::command]
 pub async fn set_user_avatar(
+    app: tauri::AppHandle,
     state: State<'_, Arc<AppState>>,
     data: String,
     mime: String,
@@ -55,7 +56,12 @@ pub async fn set_user_avatar(
         .map_err(|e| format!("Failed to upload avatar: {}", fmt_error_chain(&e)))?;
 
     // Invalidate the cached avatar so the UI picks up the new one
-    state.avatar_cache.clear().await;
+    if let Some(user_id) = client.user_id() {
+        let _ = app.emit(
+            "user-avatar-invalidated",
+            serde_json::json!({ "userId": user_id }),
+        );
+    }
 
     // Return a data URL so the frontend can display it immediately
     Ok(encode_avatar_data_url(&bytes))
@@ -63,7 +69,10 @@ pub async fn set_user_avatar(
 
 /// Remove the logged-in user's avatar entirely.
 #[tauri::command]
-pub async fn remove_user_avatar(state: State<'_, Arc<AppState>>) -> Result<(), String> {
+pub async fn remove_user_avatar(
+    app: tauri::AppHandle,
+    state: State<'_, Arc<AppState>>,
+) -> Result<(), String> {
     let client = get_client(&state).await?;
     let user_id = client.user_id().ok_or("No user ID")?.to_owned();
 
@@ -78,6 +87,11 @@ pub async fn remove_user_avatar(state: State<'_, Arc<AppState>>) -> Result<(), S
         .await
         .map_err(|e| format!("Failed to remove avatar: {}", fmt_error_chain(&e)))?;
 
-    state.avatar_cache.clear().await;
+    if let Some(user_id) = client.user_id() {
+        let _ = app.emit(
+            "user-avatar-invalidated",
+            serde_json::json!({ "userId": user_id }),
+        );
+    }
     Ok(())
 }

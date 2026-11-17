@@ -24,6 +24,7 @@ interface MessageEditPayload {
   fileDisplayName: unknown | null;
   imageWidth: unknown | null;
   imageHeight: unknown | null;
+  imageBlurhash: unknown | null;
   videoWidth: unknown | null;
   videoHeight: unknown | null;
   unsupportedMatrixMsgtype: unknown | null;
@@ -304,6 +305,7 @@ function applyMessageEdit(arr: Message[], payload: MessageEditPayload): Message[
     fileDisplayName: _ofd,
     imageWidth: _oiw,
     imageHeight: _oih,
+    imageBlurhash: _oibh,
     videoWidth: _ovw,
     videoHeight: _ovh,
     unsupportedMatrixMsgtype: _ou,
@@ -325,6 +327,10 @@ function applyMessageEdit(arr: Message[], payload: MessageEditPayload): Message[
       imageMediaRequest,
       imageWidth: editPayloadDimension(payload.imageWidth),
       imageHeight: editPayloadDimension(payload.imageHeight),
+      imageBlurhash:
+        typeof payload.imageBlurhash === "string"
+          ? payload.imageBlurhash
+          : undefined,
     };
   } else if (videoMediaRequest != null) {
     nextMessage = {
@@ -374,7 +380,7 @@ export function useMessages(roomId: string | null, currentUserId: string | null 
   // Feed the global user-avatar store from every message batch we fetch so
   // sidebars/members/headers can resolve sender avatars without a separate
   // round-trip. Clearing is delegated to the store's own event listeners
-  // (logout / clear_media_cache invalidation).
+  // (account changes and avatar-specific invalidation).
   const userAvatarStore = useUserAvatarStoreOptional();
   const primeAvatarsFromMessages = useCallback(
     (msgs: Message[]) => {
@@ -482,18 +488,9 @@ export function useMessages(roomId: string | null, currentUserId: string | null 
     const target = roomId;
     initialFetchingRef.current = true;
 
-    // Drops attachment temp files from the previous room before we
-    // fetch new ones. Avatars are intentionally preserved across room
-    // switches (see `clear_media_cache` in the backend); they're shared
-    // with every other view and wiping them caused widespread 404 flashes.
+    // Attachment retention has its own budget and reader leases. Room changes
+    // can load messages immediately without clearing or scanning media files.
     void (async () => {
-      try {
-        await invoke("clear_media_cache");
-      } catch {
-        /* non-fatal */
-      }
-      if (cancelled || activeRoomIdRef.current !== target) return;
-
       try {
         const batch = await invoke<MessageBatch>("get_messages", {
           roomId: target,
@@ -769,6 +766,50 @@ export function useMessages(roomId: string | null, currentUserId: string | null 
     } catch (e) {
       console.error("[useMessages] refresh error:", e);
     }
+  }, [roomId, commit]);
+
+  // Restoring keys must also retry the timeline: undecryptable events may have
+  // been omitted from an earlier fetch and cached as an empty room.
+  useEffect(() => {
+    let cancelled = false;
+    let timer: ReturnType<typeof setTimeout>;
+    const unlisten = listen<string[] | null>("encryption-keys-received", (event) => {
+      const rooms = event.payload;
+      if (rooms) for (const id of rooms) roomMessagesCache.delete(id);
+      else roomMessagesCache.clear();
+      if (!roomId || (rooms && !rooms.includes(roomId))) return;
+      clearTimeout(timer);
+      const retry = async () => {
+        if (cancelled || activeRoomIdRef.current !== roomId) return;
+        if (initialFetchingRef.current || loadingLockRef.current) {
+          timer = setTimeout(() => void retry(), 500);
+          return;
+        }
+        const atLatest = isAtLatestRef.current;
+        const snapshot = messagesRef.current;
+        const anchor = [...snapshot].reverse().find((message) => !message.eventId.startsWith("local:"));
+        try {
+          const batch = await invoke<MessageBatch>(atLatest || !anchor ? "get_messages" : "get_messages_around_event",
+            atLatest || !anchor ? { roomId, from: null, limit: INITIAL_LOAD_SIZE } : { roomId, eventId: anchor.eventId });
+          if (cancelled || activeRoomIdRef.current !== roomId || isAtLatestRef.current !== atLatest) return;
+          const recovered = batch.messages.filter((message) => atLatest || snapshot.length === 0
+            || (message.timestamp >= snapshot[0].timestamp && message.timestamp <= snapshot[snapshot.length - 1].timestamp));
+          const byId = new Map(messagesRef.current.map((message) => [message.eventId, message]));
+          for (const message of recovered) byId.set(message.eventId, message);
+          const combined = [...byId.values()].sort((a, b) => a.timestamp - b.timestamp).slice(-WINDOW_SIZE);
+          commit(combined, snapshot.length === 0 ? batch.prevBatch : olderTokenRef.current, atLatest);
+          primeAvatarsFromMessagesRef.current(recovered);
+        } catch (error) {
+          console.error("[useMessages] could not refresh restored history:", error);
+        }
+      };
+      timer = setTimeout(() => void retry(), 500);
+    });
+    return () => {
+      cancelled = true;
+      clearTimeout(timer);
+      void unlisten.then((stop) => stop());
+    };
   }, [roomId, commit]);
 
   /* ================================================================ */

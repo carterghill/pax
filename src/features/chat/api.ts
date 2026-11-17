@@ -64,6 +64,9 @@ export interface SendFileMessageRequest {
   mimeType: string;
   fileSize?: number | null;
   caption?: string | null;
+  blurhash?: string | null;
+  imageWidth?: number | null;
+  imageHeight?: number | null;
 }
 
 export interface UploadAndSendFileRequest {
@@ -152,8 +155,12 @@ export function sendTypingNotice(request: TypingNoticeRequest): Promise<void> {
   return invoke("send_typing_notice", invokeArgs(request));
 }
 
-export function getMatrixImagePath(request: unknown): Promise<string> {
-  return invoke<string>("get_matrix_image_path", { request });
+export function getMatrixImagePath(request: unknown, leaseId: string): Promise<string> {
+  return invoke<string>("get_matrix_image_path", { request, leaseId });
+}
+
+export function releaseMatrixMedia(leaseId: string): Promise<void> {
+  return invoke("release_matrix_media", { leaseId });
 }
 
 export function clearMediaCache(): Promise<number> {
@@ -197,6 +204,9 @@ export function sendFileMessage(request: SendFileMessageRequest): Promise<string
     mimeType: request.mimeType,
     fileSize: request.fileSize ?? null,
     caption: request.caption ?? null,
+    blurhash: request.blurhash ?? null,
+    imageWidth: request.imageWidth ?? null,
+    imageHeight: request.imageHeight ?? null,
   });
 }
 
@@ -228,6 +238,7 @@ export const chatApi = {
   unpinRoomMessage,
   sendTypingNotice,
   getMatrixImagePath,
+  releaseMatrixMedia,
   clearMediaCache,
   getMatrixMaxUploadBytes,
   roomFileStagingReset,

@@ -7,6 +7,7 @@ import {
 } from "../api";
 import {
   formatBinaryBytes,
+  extractImagePreviewMeta,
   streamFileToStaging,
   type PendingAttachment,
   UPLOAD_HTTP_END,
@@ -29,6 +30,7 @@ export function useComposerFileUpload({
   const fileInputRef = useRef<HTMLInputElement>(null);
   const [pendingFile, setPendingFile] = useState<PendingAttachment | null>(null);
   const pendingFileRef = useRef<PendingAttachment | null>(null);
+  const selectingFileRef = useRef<string | null>(null);
 
   useEffect(() => {
     pendingFileRef.current = pendingFile;
@@ -36,6 +38,7 @@ export function useComposerFileUpload({
 
   useEffect(() => {
     return () => {
+      selectingFileRef.current = null;
       const p = pendingFileRef.current;
       if (p?.previewUrl) URL.revokeObjectURL(p.previewUrl);
     };
@@ -134,17 +137,16 @@ export function useComposerFileUpload({
     [roomId],
   );
 
-  const handleFileSelected = useCallback(
-    async (e: React.ChangeEvent<HTMLInputElement>) => {
-      if (interactionLocked) return;
-      const file = e.target.files?.[0];
-      if (!file) return;
-      e.target.value = "";
+  const attachFile = useCallback(
+    async (file: File) => {
+      if (interactionLocked || !roomId || pendingFileRef.current || selectingFileRef.current) return;
+
+      // Reserve the single attachment slot before the async size-limit check.
+      const uploadId = crypto.randomUUID();
+      selectingFileRef.current = uploadId;
 
       try {
-        const uploadId = crypto.randomUUID();
         const mimeType = file.type || "application/octet-stream";
-        const previewUrl = mimeType.startsWith("image/") ? URL.createObjectURL(file) : null;
 
         let maxBytes: number | null = null;
         try {
@@ -152,6 +154,9 @@ export function useComposerFileUpload({
         } catch {
           // e.g. not logged in — still allow picking; server will reject if needed
         }
+        if (selectingFileRef.current !== uploadId) return;
+
+        const previewUrl = mimeType.startsWith("image/") ? URL.createObjectURL(file) : null;
 
         if (maxBytes != null && file.size > maxBytes) {
           const next: PendingAttachment = {
@@ -162,6 +167,9 @@ export function useComposerFileUpload({
             contentUri: null,
             byteSize: null,
             previewUrl,
+            blurhash: null,
+            imageWidth: null,
+            imageHeight: null,
             phase: "error",
             progress01: 0,
             errorMessage: `This file is ${formatBinaryBytes(file.size)} but your homeserver only allows ${formatBinaryBytes(maxBytes)} per upload (Matrix media limit).`,
@@ -179,20 +187,52 @@ export function useComposerFileUpload({
           contentUri: null,
           byteSize: null,
           previewUrl,
+          blurhash: null,
+          imageWidth: null,
+          imageHeight: null,
           phase: "reading",
           progress01: 0,
         };
         pendingFileRef.current = next;
         setPendingFile(next);
         void prepareAttachment(uploadId);
+
+        if (previewUrl) {
+          void extractImagePreviewMeta(previewUrl).then((meta) => {
+            if (!meta) return;
+            const patch: Partial<PendingAttachment> = {
+              blurhash: meta.blurhash,
+              imageWidth: meta.width,
+              imageHeight: meta.height,
+            };
+            setPendingFile((p) =>
+              p?.uploadId === uploadId ? { ...p, ...patch } : p,
+            );
+            if (pendingFileRef.current?.uploadId === uploadId) {
+              pendingFileRef.current = { ...pendingFileRef.current, ...patch };
+            }
+          });
+        }
       } catch (err) {
         console.error("Failed to read file:", err);
+      } finally {
+        if (selectingFileRef.current === uploadId) selectingFileRef.current = null;
       }
     },
-    [interactionLocked, prepareAttachment],
+    [interactionLocked, prepareAttachment, roomId],
+  );
+
+  const handleFileSelected = useCallback(
+    (e: React.ChangeEvent<HTMLInputElement>) => {
+      const file = e.target.files?.[0];
+      e.target.value = "";
+      if (file) void attachFile(file);
+    },
+    [attachFile],
   );
 
   const clearPendingFile = useCallback(() => {
+    selectingFileRef.current = null;
     const p = pendingFileRef.current;
     if (p?.uploadId) {
       void roomFileStagingRemove(p.uploadId).catch(() => {});
@@ -207,6 +247,7 @@ export function useComposerFileUpload({
     pendingFile,
     pendingFileRef,
     setPendingFile,
+    attachFile,
     handleFileSelected,
     clearPendingFile,
   };

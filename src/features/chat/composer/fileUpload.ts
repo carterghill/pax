@@ -1,3 +1,4 @@
+import { encode } from "blurhash";
 import {
   roomFileStagingAppendBase64,
   roomFileStagingByteLen,
@@ -15,6 +16,9 @@ export type PendingAttachment = {
   contentUri: string | null;
   byteSize: number | null;
   previewUrl: string | null;
+  blurhash: string | null;
+  imageWidth: number | null;
+  imageHeight: number | null;
   phase: "reading" | "uploading" | "ready" | "error";
   progress01: number;
   errorMessage?: string;
@@ -33,6 +37,49 @@ export function formatBinaryBytes(n: number): string {
   return i === 0
     ? `${Math.round(v)} ${units[i]}`
     : `${v >= 10 ? v.toFixed(1) : v.toFixed(2)} ${units[i]}`;
+}
+
+const BLURHASH_SAMPLE_SIZE = 64;
+const BLURHASH_COMPONENTS_X = 4;
+const BLURHASH_COMPONENTS_Y = 3;
+
+export interface ImagePreviewMeta {
+  blurhash: string | null;
+  width: number;
+  height: number;
+}
+
+export function extractImagePreviewMeta(blobUrl: string): Promise<ImagePreviewMeta | null> {
+  return new Promise((resolve) => {
+    const img = new Image();
+    img.onload = () => {
+      const width = img.naturalWidth;
+      const height = img.naturalHeight;
+      let blurhash: string | null = null;
+      try {
+        const canvas = document.createElement("canvas");
+        canvas.width = BLURHASH_SAMPLE_SIZE;
+        canvas.height = BLURHASH_SAMPLE_SIZE;
+        const ctx = canvas.getContext("2d");
+        if (ctx) {
+          ctx.drawImage(img, 0, 0, BLURHASH_SAMPLE_SIZE, BLURHASH_SAMPLE_SIZE);
+          const imageData = ctx.getImageData(0, 0, BLURHASH_SAMPLE_SIZE, BLURHASH_SAMPLE_SIZE);
+          blurhash = encode(
+            imageData.data,
+            BLURHASH_SAMPLE_SIZE,
+            BLURHASH_SAMPLE_SIZE,
+            BLURHASH_COMPONENTS_X,
+            BLURHASH_COMPONENTS_Y,
+          );
+        }
+      } catch {
+        // blurhash stays null
+      }
+      resolve({ blurhash, width, height });
+    };
+    img.onerror = () => resolve(null);
+    img.src = blobUrl;
+  });
 }
 
 const STAGING_CHUNK = 512 * 1024;

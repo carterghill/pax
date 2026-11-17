@@ -29,13 +29,13 @@
 //! This maps directly onto `All` vs "anything else".  The finer-grained
 //! levels (`UserMentions`, `RoomPings`, `None` as distinct from plain
 //! `AllMentions`) are stored in account data and applied by the
-//! client-side notification handler (to be built).  Mobile-push
+//! client-side notification handler.  Mobile-push
 //! behaviour for any non-`All` level defaults to "mentions only",
 //! matching Element's behaviour.
 //!
 //! ### What this module owns
 //!
-//! * `apply_level_to_room_inner` — install or remove the room-kind
+//! * `apply_level_to_room_for_client` — install or remove the room-kind
 //!   `dont_notify` rule to match the given level.
 //!
 //! * `has_suppression_installed` — drift-detection helper for the
@@ -51,13 +51,13 @@ use std::sync::Arc;
 use serde_json::{json, Value};
 use tauri::{AppHandle, Emitter, State};
 
+use super::AuthedClient;
 use crate::AppState;
 
-use super::get_client;
-use super::pax_settings::{
-    load_notification_settings_inner, set_room_level_inner, NotificationLevel,
+use super::pax_settings::{set_room_level_inner, NotificationLevel};
+use super::push_rules::{
+    delete_push_rule_for_client, put_push_rule_for_client, set_push_rule_enabled_for_client,
 };
-use super::push_rules::{delete_push_rule_raw, put_push_rule_raw};
 
 // ---------- Push-rule synthesis (the lossy projection) ----------
 
@@ -89,7 +89,7 @@ pub(super) fn has_suppression_installed(rules: &Value, room_id: &str) -> bool {
             .and_then(|a| a.as_array())
             .map(|arr| arr.iter().any(|v| v.as_str() == Some("dont_notify")))
             .unwrap_or(false);
-        id_matches && has_dont_notify
+        id_matches && has_dont_notify && r.get("enabled").and_then(Value::as_bool) != Some(false)
     })
 }
 
@@ -100,21 +100,36 @@ pub(super) fn has_suppression_installed(rules: &Value, room_id: &str) -> bool {
 /// Called from the reconciler (never directly from a Tauri command), so
 /// input validation and drift-checking happen at a higher layer — this
 /// function just makes the server state match.
-pub(super) async fn apply_level_to_room_inner(
-    state: &AppState,
+pub(super) async fn apply_level_to_room_for_client(
+    http: &reqwest::Client,
+    auth: &AuthedClient,
     room_id: &str,
     level: NotificationLevel,
+    rules: &Value,
 ) -> Result<(), String> {
     if level_wants_suppression(level) {
         let body = json!({ "actions": ["dont_notify"] });
         // Room-kind rules are keyed by room_id (the rule_id IS the room id
         // per spec); no before/after is meaningful here.
-        put_push_rule_raw(state, "room", room_id, &body, None, None).await?;
+        put_push_rule_for_client(http, auth, "room", room_id, &body, None, None).await?;
+        // Updating an existing rule preserves its enabled flag on the server.
+        let disabled = rules
+            .pointer("/global/room")
+            .and_then(Value::as_array)
+            .is_some_and(|rules| {
+                rules.iter().any(|rule| {
+                    rule.get("rule_id").and_then(Value::as_str) == Some(room_id)
+                        && rule.get("enabled").and_then(Value::as_bool) == Some(false)
+                })
+            });
+        if disabled {
+            set_push_rule_enabled_for_client(http, auth, "room", room_id, true).await?;
+        }
     } else {
         // `All` — tear down any suppression rule if present.  404 is
         // swallowed by delete_push_rule_raw so this is safe to call
         // unconditionally.
-        delete_push_rule_raw(state, "room", room_id).await?;
+        delete_push_rule_for_client(http, auth, "room", room_id).await?;
     }
     Ok(())
 }
@@ -137,9 +152,6 @@ pub async fn set_room_notification_level(
 ) -> Result<(), String> {
     // Write intent first; the reconcile picks it up and does the HTTP.
     set_room_level_inner(&state, &app, &room_id, Some(level)).await?;
-    if let Err(e) = super::reconciler::reconcile_room(&state, &app, &room_id).await {
-        log::warn!("[pax] set_room_notification_level: reconcile_room failed ({room_id}): {e}");
-    }
     let _ = app.emit(
         "pax-room-notification-level-changed",
         serde_json::json!({ "roomId": room_id, "level": level }),
@@ -158,9 +170,6 @@ pub async fn clear_room_notification_level(
     room_id: String,
 ) -> Result<(), String> {
     set_room_level_inner(&state, &app, &room_id, None).await?;
-    if let Err(e) = super::reconciler::reconcile_room(&state, &app, &room_id).await {
-        log::warn!("[pax] clear_room_notification_level: reconcile_room failed ({room_id}): {e}");
-    }
     let _ = app.emit(
         "pax-room-notification-level-changed",
         serde_json::json!({ "roomId": room_id, "level": null }),
@@ -183,25 +192,34 @@ pub async fn get_room_notification_level(
 }
 
 /// Bulk version of the above — effective level for every joined room.
-/// Single account-data fetch, single space-children scan, then one
-/// resolver call per room (each resolver call is pure; no further HTTP).
+/// Shares the session snapshot with single-room reads and the worker.
 #[tauri::command]
 pub async fn get_all_room_notification_levels(
     state: State<'_, Arc<AppState>>,
 ) -> Result<HashMap<String, NotificationLevel>, String> {
-    let client = get_client(&state).await?;
-    let settings = load_notification_settings_inner(&state).await?;
-    let space_children = super::reconciler::fetch_space_children_map(&client).await;
+    Ok(state
+        .notifications
+        .session()
+        .snapshot(&state)
+        .await?
+        .levels
+        .clone())
+}
 
-    let mut out = HashMap::new();
-    for room in client.joined_rooms() {
-        if room.is_space() {
-            continue;
-        }
-        let id = room.room_id().to_string();
-        let level =
-            super::reconciler::resolve_level_with_context(&room, &settings, &space_children).await;
-        out.insert(id, level);
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn suppression_checks_the_room_id_actions_and_enabled_flag() {
+        let rules = json!({"global":{"room":[
+            {"rule_id":"!muted:server", "actions":["dont_notify"], "enabled":true},
+            {"rule_id":"!disabled:server", "actions":["dont_notify"], "enabled":false},
+            {"rule_id":"!all:server", "actions":["notify"], "enabled":true}
+        ]}});
+        assert!(has_suppression_installed(&rules, "!muted:server"));
+        assert!(!has_suppression_installed(&rules, "!disabled:server"));
+        assert!(!has_suppression_installed(&rules, "!all:server"));
+        assert!(!has_suppression_installed(&rules, "!absent:server"));
     }
-    Ok(out)
 }

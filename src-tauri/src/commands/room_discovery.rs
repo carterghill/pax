@@ -7,8 +7,8 @@ use tauri::State;
 use crate::types::ParentSpaceInfo;
 use crate::AppState;
 
+use super::fmt_error_chain;
 use super::room_settings::{http_get_room_state, mxc_to_discovered_thumbnail_url};
-use super::{fmt_error_chain, get_or_fetch_avatar};
 
 /// Search the public room directory for spaces.
 ///
@@ -603,8 +603,15 @@ pub async fn search_public_spaces(
     limit: Option<u32>,
 ) -> Result<serde_json::Value, String> {
     let client = super::get_client(&state).await?;
-    search_public_filtered(&state, &client, search_term, server, limit, RoomTypeFilter::SpacesOnly)
-        .await
+    search_public_filtered(
+        &state,
+        &client,
+        search_term,
+        server,
+        limit,
+        RoomTypeFilter::SpacesOnly,
+    )
+    .await
 }
 
 #[tauri::command]
@@ -615,8 +622,15 @@ pub async fn search_public_rooms(
     limit: Option<u32>,
 ) -> Result<serde_json::Value, String> {
     let client = super::get_client(&state).await?;
-    search_public_filtered(&state, &client, search_term, server, limit, RoomTypeFilter::ExcludeSpaces)
-        .await
+    search_public_filtered(
+        &state,
+        &client,
+        search_term,
+        server,
+        limit,
+        RoomTypeFilter::ExcludeSpaces,
+    )
+    .await
 }
 
 /// Resolve a room alias (e.g. `#my-space:example.com`) to its room ID.
@@ -665,6 +679,7 @@ pub async fn get_room_parent_spaces(
     state: State<'_, Arc<AppState>>,
     room_id: String,
 ) -> Result<Vec<ParentSpaceInfo>, String> {
+    let avatar_request = state.avatars.session();
     let ac = super::get_authed_client(&state).await?;
     let parsed =
         matrix_sdk::ruma::RoomId::parse(&room_id).map_err(|e| format!("Invalid room ID: {e}"))?;
@@ -719,7 +734,6 @@ pub async fn get_room_parent_spaces(
         return Ok(Vec::new());
     }
 
-    let avatar_cache = state.avatar_cache.clone();
     let mut results = Vec::new();
     let mut media_base_url_cache = std::collections::HashMap::new();
 
@@ -738,12 +752,10 @@ pub async fn get_room_parent_spaces(
 
             let name = room.name().unwrap_or_else(|| space_id.clone());
             let topic = room.topic();
-            let avatar_url = get_or_fetch_avatar(
-                room.avatar_url().as_deref(),
-                room.avatar(matrix_sdk::media::MediaFormat::File),
-                &avatar_cache,
-            )
-            .await;
+            let avatar_url = match room.avatar_url() {
+                Some(mxc) => avatar_request.load(&ac.client, &mxc).await.ok(),
+                None => None,
+            };
 
             // Member count: expensive to query all members for spaces we've
             // already joined; the UI hides the count badge when 0 so this is fine.

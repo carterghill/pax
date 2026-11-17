@@ -182,6 +182,9 @@ export function useComposerSubmit({
           mimeType: snapshot.mimeType,
           fileSize: byteSize ?? null,
           caption: cap.length > 0 ? cap : null,
+          blurhash: snapshot.blurhash,
+          imageWidth: snapshot.imageWidth,
+          imageHeight: snapshot.imageHeight,
         });
 
         bridge.replaceMessageEventId(localEventId, serverEventId, {

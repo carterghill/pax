@@ -11,9 +11,19 @@ pub fn setup(app: &mut tauri::App) -> Result<(), Box<dyn std::error::Error>> {
         let _ = commands::TAURI_TEMP_DIR.set(tauri_temp);
     }
 
+    let attachments = app.state::<Arc<AppState>>().attachments.clone();
+    let attachment_dir = app
+        .path()
+        .app_cache_dir()
+        .map(|root| root.join("attachments"))
+        .unwrap_or_else(|_| commands::temp_dir().join("pax_attachments"));
+    if let Err(error) = tauri::async_runtime::block_on(attachments.init(attachment_dir)) {
+        log::warn!("Attachment cache initialization failed: {error}");
+    }
+
     if let Ok(cache_root) = app.path().app_cache_dir() {
         let avatar_dir = cache_root.join("avatars");
-        let avatar_cache = app.state::<Arc<AppState>>().avatar_cache.clone();
+        let avatar_cache = app.state::<Arc<AppState>>().file_cache.clone();
         if let Err(e) = tauri::async_runtime::block_on(avatar_cache.init_with_dir(avatar_dir)) {
             log::warn!("[avatar_cache] init failed: {e}; avatars will not persist this session");
         }
@@ -114,7 +124,8 @@ fn cleanup_temp_files(app: &mut tauri::App) {
             let is_proxy_video = name_str.starts_with("pax_media_") && name_str.ends_with(".mp4");
             let is_matrix_img = name_str.starts_with("pax_matrix_media_");
             let is_avatar = name_str.starts_with("pax_avatar_");
-            if is_proxy_video || is_matrix_img || is_avatar {
+            let is_compat_video = name_str.starts_with("pax_video_compat_");
+            if is_proxy_video || is_matrix_img || is_avatar || is_compat_video {
                 if std::fs::remove_file(entry.path()).is_ok() {
                     count += 1;
                 }

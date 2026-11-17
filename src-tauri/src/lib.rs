@@ -1,15 +1,21 @@
 #![recursion_limit = "256"]
 
 pub mod codec;
+mod avatars;
+mod attachments;
+mod file_cache;
 mod commands;
 mod idle;
 pub mod native_overlay;
 pub mod platform;
+mod room_relationships;
 mod screen;
 mod setup;
 mod types;
 pub mod video_recv;
 mod voice;
+mod voice_presence;
+mod voice_service;
 
 use std::collections::HashMap;
 use std::io::Write;
@@ -27,22 +33,14 @@ use tokio::task::JoinHandle;
 
 use platform::DisplayServer;
 
-/// LiveKit server admin credentials for kicking stale participants.
-/// Loaded from .env at startup; all fields optional so the app still
-/// works (without kick capability) if the .env is missing.
-#[derive(Clone, Default)]
-pub struct LivekitConfig {
-    pub api_key: Option<String>,
-    pub api_secret: Option<String>,
-    pub url: Option<String>,
-}
-
 /// Auth/registration config loaded from .env at startup.
 /// Controls pre-fill and field visibility on the login/sign-up screen.
 #[derive(Clone, Default, serde::Serialize)]
 pub struct AuthConfig {
     /// Default homeserver URL (pre-fills the field).
     pub default_homeserver: Option<String>,
+    /// Optional Matrix account domain when the server-key endpoint is unavailable.
+    pub server_name: Option<String>,
     /// Registration token (pre-fills the sign-up token field).
     pub registration_token: Option<String>,
     /// When true AND both above are set, hide homeserver + token fields entirely.
@@ -51,20 +49,23 @@ pub struct AuthConfig {
 
 pub struct AppState {
     pub client: Mutex<Option<Client>>,
+    pub account_mode: Mutex<commands::pax_auth::AccountMode>,
+    pub encryption: commands::encryption::EncryptionService,
     pub http_client: reqwest::Client,
     pub presence_map: Arc<Mutex<HashMap<String, String>>>,
     pub status_msg_map: Arc<Mutex<HashMap<String, String>>>,
-    pub avatar_cache: Arc<commands::avatar_cache::AvatarDiskCache>,
+    pub file_cache: Arc<file_cache::FileCache>,
+    pub avatars: Arc<avatars::AvatarService>,
+    pub attachments: Arc<attachments::AttachmentCache>,
+    pub notifications: commands::reconciler::NotificationService,
+    pub voice_presence: voice_presence::VoicePresenceService,
     pub sync_running: Arc<Mutex<bool>>,
     /// Background `sync_with_callback` task — must be aborted before deleting the SQLite store
     /// or replacing `client`, otherwise the DB stays locked (especially on Windows).
     pub sync_join: Mutex<Option<JoinHandle<()>>>,
     pub display_server: DisplayServer,
-    pub livekit: LivekitConfig,
     pub giphy_api_key: Option<String>,
     pub auth_config: AuthConfig,
-    /// Matrix voice room id → LiveKit SFU room name (learned on connect; used for admin ListParticipants).
-    pub livekit_matrix_to_sfu_room: StdMutex<HashMap<String, String>>,
     /// Stops the MSC4140 heartbeat task that restarts the delayed leave event.
     pub heartbeat_stop: Arc<AtomicBool>,
     pub heartbeat_task: StdMutex<Option<tauri::async_runtime::JoinHandle<()>>>,
@@ -123,6 +124,7 @@ impl AppState {
 
     /// Abort the Matrix sync loop and wait for the task to finish so `Client` / SQLite handles are dropped.
     pub async fn stop_sync_task(&self) {
+        self.encryption.stop().await;
         let handle = self.sync_join.lock().await.take();
         if let Some(h) = handle {
             h.abort();
@@ -272,19 +274,6 @@ pub fn run() {
     install_panic_hook();
     let display_server = platform::detect_display_server();
 
-    // All env vars are baked in at compile time via build.rs → cargo:rustc-env.
-    // option_env!() returns Option<&'static str>; None if the var was unset at build.
-    let livekit = LivekitConfig {
-        api_key: option_env!("LIVEKIT_API_KEY").map(String::from),
-        api_secret: option_env!("LIVEKIT_API_SECRET").map(String::from),
-        url: option_env!("LIVEKIT_URL").map(String::from),
-    };
-    if livekit.api_key.is_some() {
-        log::info!("LiveKit admin credentials compiled in");
-    } else {
-        log::info!("No LiveKit admin credentials — multi-device kick disabled");
-    }
-
     let giphy_api_key = option_env!("GIPHY_API_KEY").map(String::from);
 
     let default_homeserver = option_env!("PAX_HOMESERVER").map(String::from);
@@ -294,6 +283,7 @@ pub fn run() {
         .unwrap_or(false);
     let auth_config = AuthConfig {
         default_homeserver,
+        server_name: option_env!("PAX_SERVER_NAME").map(String::from),
         registration_token,
         hide_server_config,
     };
@@ -303,22 +293,27 @@ pub fn run() {
     #[cfg(desktop)]
     detect_codec_early();
 
+    let file_cache = Arc::new(file_cache::FileCache::new());
     let state = Arc::new(AppState {
+        encryption: commands::encryption::EncryptionService::default(),
         client: Mutex::new(None),
+        account_mode: Mutex::new(commands::pax_auth::AccountMode::Matrix),
         http_client: reqwest::Client::builder()
             .tcp_keepalive(Duration::from_secs(30))
             .build()
             .unwrap_or_else(|_| reqwest::Client::new()),
         presence_map: Arc::new(Mutex::new(HashMap::new())),
         status_msg_map: Arc::new(Mutex::new(HashMap::new())),
-        avatar_cache: Arc::new(commands::avatar_cache::AvatarDiskCache::new()),
+        avatars: Arc::new(avatars::AvatarService::new(file_cache.clone())),
+        attachments: Arc::new(attachments::AttachmentCache::new(attachments::RETAINED_BYTES)),
+        notifications: commands::reconciler::NotificationService::default(),
+        voice_presence: voice_presence::VoicePresenceService::default(),
+        file_cache,
         sync_running: Arc::new(Mutex::new(false)),
         sync_join: Mutex::new(None),
         display_server,
-        livekit,
         giphy_api_key,
         auth_config,
-        livekit_matrix_to_sfu_room: StdMutex::new(HashMap::new()),
         heartbeat_stop: Arc::new(AtomicBool::new(true)),
         heartbeat_task: StdMutex::new(None),
         delayed_leave_id: StdMutex::new(None),
@@ -406,20 +401,39 @@ pub fn run() {
         .register_uri_scheme_protocol("paxvideo", |_app, request| {
             video_recv::handle_protocol_request(request)
         })
-        .register_uri_scheme_protocol("paxmatrixmedia", |ctx, request| {
-            commands::media_protocol::handle_matrix_media_protocol_request(
-                ctx.app_handle().clone(),
-                request,
-            )
+        // Asynchronous so slow federation downloads and compat transcodes
+        // never block the webview's protocol thread (other media requests
+        // keep flowing while a video converts).
+        .register_asynchronous_uri_scheme_protocol("paxmatrixmedia", |ctx, request, responder| {
+            let app = ctx.app_handle().clone();
+            tauri::async_runtime::spawn(async move {
+                responder.respond(
+                    commands::media_protocol::handle_matrix_media_protocol_request(app, request)
+                        .await,
+                );
+            });
         })
         .invoke_handler(tauri::generate_handler![
             commands::auth::logout,
+            commands::auth::get_access_token,
             commands::auth::save_credentials,
             commands::auth::load_credentials,
             commands::auth::clear_saved_credentials,
             commands::auth::login,
             commands::auth::register,
             commands::auth::restore_session,
+            commands::encryption::get_encryption_status,
+            commands::encryption::get_pending_encryption_recovery_key,
+            commands::encryption::setup_encryption_recovery,
+            commands::encryption::acknowledge_encryption_recovery_key,
+            commands::encryption::restore_encryption_recovery,
+            commands::encryption::replace_encryption_recovery_key,
+            commands::encryption::sync_encryption_backup,
+            commands::history_backup::export_available_history,
+            commands::history_backup::import_available_history,
+            commands::encryption::request_encryption_verification,
+            commands::encryption::get_encryption_verification,
+            commands::encryption::respond_encryption_verification,
             commands::room_listing::get_rooms,
             commands::room_listing::current_homeserver,
             commands::room_membership::join_room,
@@ -448,6 +462,7 @@ pub fn run() {
             commands::room_discovery::get_room_parent_spaces,
             commands::messages::get_messages,
             commands::media_files::get_matrix_image_path,
+            commands::media_files::release_matrix_media,
             commands::media_files::clear_media_cache,
             commands::members::get_room_members,
             commands::members::get_room_management_members,
@@ -455,6 +470,7 @@ pub fn run() {
             commands::members::get_matrix_user_profile,
             commands::members::get_user_avatar,
             commands::members::get_user_avatars,
+            commands::members::get_room_avatars,
             commands::members::get_knock_members,
             commands::members::preview_leave_space,
             commands::members::invite_user,

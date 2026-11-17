@@ -74,6 +74,8 @@ export interface Message {
   /** From Matrix `m.image` `info` when present (inline layout / loading placeholder). */
   imageWidth?: number;
   imageHeight?: number;
+  /** Blurhash placeholder string from `m.image` `info` (MSC2448). */
+  imageBlurhash?: string;
   /** Matrix `m.video` payload: serialized `MediaRequestParameters` for authenticated download. */
   videoMediaRequest?: unknown;
   videoWidth?: number;
@@ -134,6 +136,13 @@ export interface RoomMember {
   statusMsg: string | null;
 }
 
+/** A room-scoped membership or member display-name update from Matrix sync. */
+export interface RoomMembersChangedPayload {
+  roomId: string;
+  /** False for display-name edits, which do not affect join requests. */
+  membershipChanged: boolean;
+}
+
 export interface RoomManagementMember extends RoomMember {
   role: "creator" | "administrator" | "moderator" | "user" | "banned";
   /** Present for joined members; whether the current user may kick. */
@@ -177,12 +186,25 @@ export interface VoiceParticipant {
   avatarUrl: string | null;
 }
 
-/** From LiveKit Room Service when LIVEKIT_* admin credentials are set */
+/** Optional homeserver voice snapshot; unknown flags remain null. */
 export interface LivekitVoiceParticipantInfo {
   identity: string;
-  isMuted: boolean;
-  isDeafened: boolean;
-  isSpeaking: boolean;
+  isMuted: boolean | null;
+  isDeafened: boolean | null;
+  isSpeaking: boolean | null;
+}
+
+export interface VoiceMembershipSnapshot {
+  roomIds: string[];
+  participantsByRoom: Record<string, VoiceParticipant[]>;
+  expiresAtByRoom: Record<string, number>;
+}
+
+export interface LivekitVoiceSnapshot {
+  available: boolean;
+  participantsByRoom: Record<string, LivekitVoiceParticipantInfo[]>;
+  unsupportedRoomIds?: string[];
+  retryAfterMs?: number;
 }
 
 export interface VoiceJoinResult {

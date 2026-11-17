@@ -163,48 +163,57 @@ export function useVoiceCall() {
     };
   }, []);
 
-  // Listen for force-disconnect events from the Rust backend.
-  // Emitted when the m.call.member refresh loop fails too many times
-  // (e.g. Matrix membership expired while AFK and couldn't be restored).
+  // Explicit removal/session replacement must stop rejoin attempts and clean
+  // up this device's membership, without disturbing the device taking over.
   useEffect(() => {
-    let unlisten: UnlistenFn | null = null;
-    listen<string>("voice-force-disconnect", (event) => {
-      const roomId = event.payload;
-      console.warn(
-        `[Pax] Force-disconnecting from voice room ${roomId} — Matrix call membership expired`
-      );
-      if (connectedRoomIdRef.current === roomId) {
-        playSound("ui/pop_close");
-        setState((prev) => ({
-          ...prev,
-          connectedRoomId: null,
-          isConnecting: false,
-          isMicEnabled: false,
-          isDeafened: false,
-          isNoiseSuppressed: false,
-          screenSharingOwners: [],
-          isLocalScreenSharing: false,
-          error: "Disconnected: call membership expired",
-          participants: [],
-          disconnectingFromRoomId: roomId,
-        }));
-        invoke("voice_disconnect", { roomId }).catch((e) => {
-          console.error("Failed to disconnect after force-disconnect:", e);
-        });
-        // Clear disconnecting state after Matrix has had time to sync
-        setTimeout(() => {
-          setState((prev) =>
-            prev.disconnectingFromRoomId === roomId
-              ? { ...prev, disconnectingFromRoomId: null }
-              : prev
-          );
-        }, 4000);
+    let cancelled = false;
+    const unlisteners: UnlistenFn[] = [];
+    const timers: ReturnType<typeof setTimeout>[] = [];
+    function endSession(roomId: string, message: string) {
+      if (cancelled || (connectedRoomIdRef.current !== roomId && rejoinRoomRef.current !== roomId)) return;
+      rejoinRoomRef.current = null;
+      isConnectingRef.current = false;
+      connectedRoomIdRef.current = null;
+      playSound("ui/pop_close");
+      setState((prev) => ({
+        ...prev,
+        connectedRoomId: null,
+        isConnecting: false,
+        isMicEnabled: false,
+        isDeafened: false,
+        isNoiseSuppressed: false,
+        screenSharingOwners: [],
+        isLocalScreenSharing: false,
+        error: message,
+        participants: [],
+        disconnectingFromRoomId: roomId,
+      }));
+      invoke("voice_disconnect", { roomId }).catch((error) => {
+        console.error("Failed to clean up ended voice session:", error);
+      });
+      timers.push(setTimeout(() => {
+        setState((prev) => prev.disconnectingFromRoomId === roomId
+          ? { ...prev, disconnectingFromRoomId: null } : prev);
+      }, 4000));
+    }
+    void Promise.allSettled([
+      listen<string>("voice-force-disconnect", ({ payload }) => {
+        endSession(payload, "Disconnected: call membership expired");
+      }),
+      listen<{ roomId: string; message: string }>("voice-session-ended", ({ payload }) => {
+        endSession(payload.roomId, payload.message);
+      }),
+    ]).then((results) => {
+      for (const result of results) {
+        if (result.status === "fulfilled") {
+          if (cancelled) result.value(); else unlisteners.push(result.value);
+        } else console.error("Failed to subscribe to voice session events:", result.reason);
       }
-    }).then((fn) => {
-      unlisten = fn;
     });
     return () => {
-      if (unlisten) unlisten();
+      cancelled = true;
+      unlisteners.forEach((stop) => stop());
+      timers.forEach(clearTimeout);
     };
   }, []);
 
@@ -239,7 +248,7 @@ export function useVoiceCall() {
         try {
           isConnectingRef.current = true;
           const { inputDeviceId, outputDeviceId } = getStoredAudioDevicePreferences();
-          await invoke("voice_connect", { roomId, inputDeviceId, outputDeviceId });
+          await invoke("voice_connect", { roomId, inputDeviceId, outputDeviceId, replaceOtherSessions: false });
           isConnectingRef.current = false;
           console.log(
             `[Pax] Auto-rejoin succeeded on attempt ${attempt + 1}`

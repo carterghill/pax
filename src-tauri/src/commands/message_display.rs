@@ -50,6 +50,7 @@ pub(super) struct MessageDisplayExtract {
     pub(super) file_display_name: Option<String>,
     pub(super) image_width: Option<u32>,
     pub(super) image_height: Option<u32>,
+    pub(super) image_blurhash: Option<String>,
     pub(super) video_width: Option<u32>,
     pub(super) video_height: Option<u32>,
     pub(super) unsupported_matrix_msgtype: Option<String>,
@@ -191,6 +192,10 @@ pub(super) fn extract_message_display(
             };
             let json = serde_json::to_value(&req).ok();
             let (image_width, image_height) = image_event_display_dimensions(img);
+            let image_blurhash = img
+                .info
+                .as_deref()
+                .and_then(|info| info.blurhash.clone());
             MessageDisplayExtract {
                 body,
                 image_media_request: json,
@@ -200,6 +205,7 @@ pub(super) fn extract_message_display(
                 file_display_name: None,
                 image_width,
                 image_height,
+                image_blurhash,
                 video_width: None,
                 video_height: None,
                 unsupported_matrix_msgtype: None,
@@ -226,6 +232,7 @@ pub(super) fn extract_message_display(
                 file_display_name: None,
                 image_width: None,
                 image_height: None,
+                image_blurhash: None,
                 video_width,
                 video_height,
                 unsupported_matrix_msgtype: None,
@@ -240,6 +247,7 @@ pub(super) fn extract_message_display(
             file_display_name: None,
             image_width: None,
             image_height: None,
+            image_blurhash: None,
             video_width: None,
             video_height: None,
             unsupported_matrix_msgtype: None,
@@ -253,6 +261,7 @@ pub(super) fn extract_message_display(
             file_display_name: None,
             image_width: None,
             image_height: None,
+            image_blurhash: None,
             video_width: None,
             video_height: None,
             unsupported_matrix_msgtype: None,
@@ -266,6 +275,7 @@ pub(super) fn extract_message_display(
             file_display_name: None,
             image_width: None,
             image_height: None,
+            image_blurhash: None,
             video_width: None,
             video_height: None,
             unsupported_matrix_msgtype: None,
@@ -301,6 +311,7 @@ pub(super) fn extract_message_display(
                 file_display_name: Some(display_name),
                 image_width: None,
                 image_height: None,
+                image_blurhash: None,
                 video_width: None,
                 video_height: None,
                 unsupported_matrix_msgtype: None,
@@ -315,6 +326,7 @@ pub(super) fn extract_message_display(
             file_display_name: None,
             image_width: None,
             image_height: None,
+            image_blurhash: None,
             video_width: None,
             video_height: None,
             unsupported_matrix_msgtype: None,
@@ -332,6 +344,7 @@ pub(super) fn extract_message_display(
                 file_display_name: None,
                 image_width: None,
                 image_height: None,
+                image_blurhash: None,
                 video_width: None,
                 video_height: None,
                 unsupported_matrix_msgtype,

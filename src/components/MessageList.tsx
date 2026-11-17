@@ -32,6 +32,7 @@ import {
 import LoadingSkeletons from "../features/chat/messages/LoadingSkeletons";
 import MessageActionMenu from "../features/chat/messages/MessageActionMenu";
 import { useActionBarPopover } from "../features/chat/messages/useActionBarPopover";
+import { useMessageScrollAnimation } from "../features/chat/messages/useMessageScrollAnimation";
 
 /* ------------------------------------------------------------------ */
 /*  Props                                                              */
@@ -81,7 +82,8 @@ interface MessageListProps {
 /*  Constants                                                          */
 /* ------------------------------------------------------------------ */
 
-const AUTO_SCROLL_THRESHOLD_PX = 200;
+// scrollTop can be fractional while scrollHeight/clientHeight are rounded.
+const SCROLL_BOTTOM_EPSILON_PX = 1;
 const SKELETON_COUNT = 4;
 const MESSAGE_ACTIONS_MENU_Z = 10_000;
 const REACTION_POPOVER_IGNORE = ["[data-message-reaction-popover]"];
@@ -132,7 +134,8 @@ const MessageList = forwardRef<MessageListHandle, MessageListProps>(function Mes
   const scrollContainerRef = useRef<HTMLDivElement>(null);
   /** Grows with message rows / media; observed so we can pin scroll when content height changes. */
   const scrollContentRef = useRef<HTMLDivElement>(null);
-  const bottomRef = useRef<HTMLDivElement>(null);
+  const { scrollToBottom, cancelScrollAnimation, scrollAnimationRef } =
+    useMessageScrollAnimation(scrollContainerRef);
 
   useImperativeHandle(ref, () => ({
     scrollToEventId: (eventId: string) => {
@@ -142,6 +145,9 @@ const MessageList = forwardRef<MessageListHandle, MessageListProps>(function Mes
         `[data-message-event-id="${CSS.escape(eventId)}"]`,
       ) as HTMLElement | null;
       if (!el) return;
+      cancelScrollAnimation();
+      shouldAutoScrollRef.current = false;
+      setAtBottom(false);
       el.scrollIntoView({ block: "center", behavior: "smooth" });
     },
   }));
@@ -156,6 +162,7 @@ const MessageList = forwardRef<MessageListHandle, MessageListProps>(function Mes
    * renders) and only commit to state when the boolean value actually flips.
    */
   const [atBottom, setAtBottom] = useState(true);
+  const [hasNewMessages, setHasNewMessages] = useState(false);
 
   /* ---- Popover hooks ---- */
   const menu = useActionBarPopover({
@@ -310,8 +317,10 @@ const MessageList = forwardRef<MessageListHandle, MessageListProps>(function Mes
   /* ================================================================ */
 
   useLayoutEffect(() => {
+    cancelScrollAnimation();
     shouldAutoScrollRef.current = true;
     setAtBottom(true);
+    setHasNewMessages(false);
     menu.setOpenId(null);
     reactionPicker.setOpenId(null);
     setMediaViewer(null);
@@ -319,40 +328,44 @@ const MessageList = forwardRef<MessageListHandle, MessageListProps>(function Mes
     setReactionTooltip(null);
   // menu.setOpenId / reactionPicker.setOpenId are stable useState setters
   // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [roomId]);
+  }, [roomId, cancelScrollAnimation]);
 
   /* ================================================================ */
   /*  Auto-scroll to bottom on new messages                            */
   /* ================================================================ */
 
   const lastId = messages[messages.length - 1]?.eventId ?? null;
+  const scrollContextRef = useRef<{
+    roomId: string;
+    initialLoading: boolean;
+    isAtLatest: boolean;
+    lastId: string | null;
+  } | null>(null);
 
   useLayoutEffect(() => {
-    if (!shouldAutoScrollRef.current) return;
+    const previous = scrollContextRef.current;
+    scrollContextRef.current = { roomId, initialLoading, isAtLatest, lastId };
     if (initialLoading) return;
 
-    const run = () => {
-      const el = scrollContainerRef.current;
-      if (el) {
-        el.scrollTop = el.scrollHeight;
+    const continuingTimeline = previous?.roomId === roomId && !previous.initialLoading;
+    if (!shouldAutoScrollRef.current) {
+      // A new tail on the same timeline means messages arrived below the reader.
+      // Prepending history, edits, and replacing local echoes don't count.
+      if (
+        continuingTimeline && previous.isAtLatest && isAtLatest &&
+        previous.lastId !== lastId &&
+        messages.some((message) => message.eventId === previous.lastId)
+      ) {
+        setHasNewMessages(true);
       }
-      bottomRef.current?.scrollIntoView({
-        block: "nearest",
-        inline: "nearest",
-      });
-      // Programmatic scroll does not always emit `scroll`; keep read-receipt + pin state in sync.
-      shouldAutoScrollRef.current = true;
-      setAtBottom(true);
-    };
+      return;
+    }
 
-    run();
-    // Second frame: flex + async image/layout can leave scrollHeight short on first paint.
-    const raf = requestAnimationFrame(() => {
-      run();
-      requestAnimationFrame(run);
-    });
-    return () => cancelAnimationFrame(raf);
-  }, [lastId, messages.length, initialLoading, roomId]);
+    // Open rooms at the latest message immediately; ease subsequent movement.
+    scrollToBottom(continuingTimeline);
+    setAtBottom(true);
+    if (isAtLatest) setHasNewMessages(false);
+  }, [lastId, messages, initialLoading, isAtLatest, roomId, scrollToBottom]);
 
   /* ================================================================ */
   /*  Preserve scroll position on prepend                              */
@@ -503,19 +516,6 @@ const MessageList = forwardRef<MessageListHandle, MessageListProps>(function Mes
       if (!el) return;
 
       const scrollTop = el.scrollTop;
-      const distFromBottom =
-        el.scrollHeight - scrollTop - el.clientHeight;
-      const nextAtBottom =
-        distFromBottom < AUTO_SCROLL_THRESHOLD_PX ||
-        // Short timelines: no overflow, or sub-pixel noise at the tail.
-        (el.scrollHeight <= el.clientHeight + 2 && el.scrollTop <= 2);
-      if (shouldAutoScrollRef.current !== nextAtBottom) {
-        shouldAutoScrollRef.current = nextAtBottom;
-        // Only commit the state mirror on flips — this runs inside the scroll
-        // rAF and must not cause a render per frame.
-        setAtBottom(nextAtBottom);
-      }
-
       // Keep the prepend-preservation anchor fresh. Without this, the stored
       // viewportTop reflects whatever scroll position we were at the last
       // time `messages` changed (often the bottom, right after initial load)
@@ -534,6 +534,21 @@ const MessageList = forwardRef<MessageListHandle, MessageListProps>(function Mes
         }
       }
 
+      // Intermediate animation frames are still approaching the bottom.
+      // Refresh the anchor, but don't disable following or load history.
+      if (scrollAnimationRef.current) return;
+
+      const distFromBottom =
+        el.scrollHeight - scrollTop - el.clientHeight;
+      const nextAtBottom = distFromBottom < SCROLL_BOTTOM_EPSILON_PX;
+      if (shouldAutoScrollRef.current !== nextAtBottom) {
+        shouldAutoScrollRef.current = nextAtBottom;
+        // Only commit the state mirror on flips — this runs inside the scroll
+        // rAF and must not cause a render per frame.
+        setAtBottom(nextAtBottom);
+      }
+      if (nextAtBottom && isAtLatestRef.current) setHasNewMessages(false);
+
       console.log("[MessageList] scroll", {
         scrollTop: Math.round(scrollTop),
         distFromBottom: Math.round(distFromBottom),
@@ -544,7 +559,20 @@ const MessageList = forwardRef<MessageListHandle, MessageListProps>(function Mes
       tryTriggerLoadOlder();
       tryTriggerLoadNewer();
     });
-  }, [tryTriggerLoadOlder, tryTriggerLoadNewer]);
+  }, [tryTriggerLoadOlder, tryTriggerLoadNewer, scrollAnimationRef]);
+
+  const handleScrollIntent = useCallback(() => {
+    if (!scrollAnimationRef.current) return;
+    cancelScrollAnimation();
+    shouldAutoScrollRef.current = false;
+    setAtBottom(false);
+  }, [cancelScrollAnimation, scrollAnimationRef]);
+
+  const handleScrollKeyDown = useCallback((event: React.KeyboardEvent) => {
+    if (["ArrowUp", "ArrowDown", "PageUp", "PageDown", "Home", "End", " "].includes(event.key)) {
+      handleScrollIntent();
+    }
+  }, [handleScrollIntent]);
 
   useEffect(() => {
     return () => {
@@ -588,11 +616,7 @@ const MessageList = forwardRef<MessageListHandle, MessageListProps>(function Mes
     let prevOuterH = outer.clientHeight;
     const pinIfFollowing = () => {
       if (!shouldAutoScrollRef.current) return;
-      outer.scrollTop = outer.scrollHeight;
-      bottomRef.current?.scrollIntoView({
-        block: "nearest",
-        inline: "nearest",
-      });
+      scrollToBottom(true);
       setAtBottom(true);
     };
 
@@ -614,7 +638,7 @@ const MessageList = forwardRef<MessageListHandle, MessageListProps>(function Mes
       roInner.disconnect();
       roOuter.disconnect();
     };
-  }, [initialLoading, roomId]);
+  }, [initialLoading, roomId, scrollToBottom]);
 
   /* ================================================================ */
   /*  Reaction emoji picker mount                                      */
@@ -673,10 +697,9 @@ const MessageList = forwardRef<MessageListHandle, MessageListProps>(function Mes
       ? "rgba(0, 0, 0, 0.055)"
       : "rgba(255, 255, 255, 0.06)";
 
-  const jumpToRecentLabel =
-    pendingRecentCount > 0
-      ? `Jump to recent (${pendingRecentCount} new)`
-      : "Jump to recent";
+  const hasUnreadMessages = hasNewMessages || pendingRecentCount > 0;
+  const showRecentNotice = showJumpToRecent || (!atBottom && hasUnreadMessages);
+  const jumpToRecentLabel = hasUnreadMessages ? "New messages" : "Jump to recent";
 
   /* ================================================================ */
   /*  Render: initial loading                                          */
@@ -704,9 +727,21 @@ const MessageList = forwardRef<MessageListHandle, MessageListProps>(function Mes
   /* ================================================================ */
 
   return (
+    <div style={{
+      position: "relative",
+      display: "flex",
+      flexDirection: "column",
+      flex: 1,
+      minHeight: 0,
+      minWidth: 0,
+    }}>
     <div
       ref={scrollContainerRef}
       onScroll={handleScroll}
+      onWheelCapture={handleScrollIntent}
+      onTouchStartCapture={handleScrollIntent}
+      onPointerDownCapture={handleScrollIntent}
+      onKeyDownCapture={handleScrollKeyDown}
       style={{
         position: "relative",
         flex: 1,
@@ -835,40 +870,42 @@ const MessageList = forwardRef<MessageListHandle, MessageListProps>(function Mes
         </div>
       )}
 
-      {/* Scroll anchor target */}
-      <div ref={bottomRef} style={{ overflowAnchor: "none" }} />
+      </div>
+    </div>
 
-      {/* Jump to Recent button */}
-      {showJumpToRecent && (
-        <div
-          style={{
-            position: "sticky",
-            bottom: spacing.unit * 3,
-            display: "flex",
-            justifyContent: "center",
-            marginTop: spacing.unit * 2,
-            pointerEvents: "none",
-            zIndex: 3,
-            overflowAnchor: "none",
-          }}
-        >
+      {/* Keep the notice above the composer without changing the timeline height. */}
+      <div
+        role="status"
+        aria-live="polite"
+        aria-atomic="true"
+        style={{
+          position: "absolute",
+          left: spacing.unit * 3,
+          right: spacing.unit * 3,
+          bottom: spacing.unit * 3,
+          display: "flex",
+          justifyContent: "center",
+          pointerEvents: "none",
+          zIndex: 3,
+        }}
+      >
+        {showRecentNotice && (
           <button
             type="button"
             onClick={() => {
               shouldAutoScrollRef.current = true;
               setAtBottom(true);
-              void Promise.resolve(onJumpToRecent()).finally(() => {
+              setHasNewMessages(false);
+              // The latest page is already loaded when the reader is only scrolled up.
+              void Promise.resolve(isAtLatest ? undefined : onJumpToRecent()).finally(() => {
                 requestAnimationFrame(() => {
-                  const el = scrollContainerRef.current;
-                  if (el) el.scrollTop = el.scrollHeight;
-                  bottomRef.current?.scrollIntoView({
-                    block: "nearest",
-                    inline: "nearest",
-                  });
+                  if (scrollContextRef.current?.roomId !== roomId) return;
+                  scrollToBottom(true);
                 });
               });
             }}
-            title={jumpToRecentLabel}
+            title="Jump to latest messages"
+            aria-label={`${jumpToRecentLabel}. Jump to latest messages`}
             style={{
               pointerEvents: "auto",
               display: "inline-flex",
@@ -877,7 +914,7 @@ const MessageList = forwardRef<MessageListHandle, MessageListProps>(function Mes
               gap: spacing.unit * 1.5,
               padding: `${spacing.unit * 2}px ${spacing.unit * 3}px`,
               borderRadius: 9999,
-              border: `1px solid ${palette.border}`,
+              border: `1px solid ${hasUnreadMessages ? palette.accent : palette.border}`,
               backgroundColor: palette.bgSecondary,
               color: palette.textPrimary,
               fontSize: typography.fontSizeSmall,
@@ -890,11 +927,10 @@ const MessageList = forwardRef<MessageListHandle, MessageListProps>(function Mes
                   : "0 10px 28px rgba(0,0,0,0.38)",
             }}
           >
-            <ArrowDown size={14} strokeWidth={2.5} />
+            <ArrowDown size={14} strokeWidth={2.5} color={hasUnreadMessages ? palette.accent : undefined} />
             {jumpToRecentLabel}
           </button>
-        </div>
-      )}
+        )}
       </div>
 
       {/* Context menu portal */}

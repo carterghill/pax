@@ -99,6 +99,7 @@ export default function MessageContent({
         request={msg.imageMediaRequest}
         metaWidth={msg.imageWidth}
         metaHeight={msg.imageHeight}
+        blurhash={msg.imageBlurhash}
         onExpand={() =>
           onOpenMediaViewer({
             kind: "image",

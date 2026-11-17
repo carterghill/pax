@@ -3,7 +3,7 @@ import { invoke } from "@tauri-apps/api/core";
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 import { useSound } from "react-sounds";
 import type { Message, Room } from "../types/matrix";
-import type { NotificationLevel } from "./useNotificationSettings";
+import { useNotificationSettings, type NotificationLevel } from "./useNotificationSettings";
 
 /* ------------------------------------------------------------------ */
 /*  Payload types                                                      */
@@ -18,25 +18,6 @@ interface RoomMessagePayload {
   roomPing: boolean;
   /** `matrix-sdk is_direct()` — true for 1:1 DMs. */
   isDm: boolean;
-}
-
-/* ------------------------------------------------------------------ */
-/*  Level cache                                                        */
-/* ------------------------------------------------------------------ */
-
-/**
- * TTL cache for per-room effective notification level.  `get_room_notification_level`
- * walks account data + space children + m.direct every call, which is a non-trivial
- * amount of backend work per message — caching for a minute cuts the typical
- * chat-of-active-users case from "one resolve per message" to "one resolve per
- * minute per room", and invalidation on `pax-notification-settings-changed`
- * means explicit user changes are reflected immediately.
- */
-const LEVEL_TTL_MS = 60_000;
-
-interface LevelCacheEntry {
-  level: NotificationLevel;
-  expiresAt: number;
 }
 
 /* ------------------------------------------------------------------ */
@@ -216,9 +197,9 @@ export function useDesktopNotifications({
     };
   }, []);
 
-  // Level cache — Map keyed by roomId.  Lives outside the effect so
-  // StrictMode double-mount doesn't lose entries.
-  const levelCacheRef = useRef<Map<string, LevelCacheEntry>>(new Map());
+  const { getRoomEffectiveLevel } = useNotificationSettings();
+  const resolveLevelRef = useRef(getRoomEffectiveLevel);
+  resolveLevelRef.current = getRoomEffectiveLevel;
 
   // Permission check + message subscription.
   useEffect(() => {
@@ -236,19 +217,8 @@ export function useDesktopNotifications({
     };
 
     async function resolveLevel(roomId: string): Promise<NotificationLevel> {
-      const cached = levelCacheRef.current.get(roomId);
-      const now = Date.now();
-      if (cached && cached.expiresAt > now) return cached.level;
       try {
-        const level = await invoke<NotificationLevel>(
-          "get_room_notification_level",
-          { roomId },
-        );
-        levelCacheRef.current.set(roomId, {
-          level,
-          expiresAt: now + LEVEL_TTL_MS,
-        });
-        return level;
+        return await resolveLevelRef.current(roomId);
       } catch (e) {
         console.warn(
           "[useDesktopNotifications] get_room_notification_level failed:",
@@ -275,6 +245,7 @@ export function useDesktopNotifications({
       }
 
       const level = await resolveLevel(roomId);
+      if (cancelled) return;
       if (!shouldNotifyForLevel(level, mentionsMe, roomPing, isDm)) {
         return;
       }
@@ -343,17 +314,6 @@ export function useDesktopNotifications({
         },
       );
       unlisteners.push(offMsg);
-
-      // Settings changed → drop the level cache so the next message
-      // resolves freshly.  We don't pre-warm — lazy resolve on the next
-      // incoming message is fine and avoids a fan-out query.
-      const offSettings = await listen(
-        "pax-notification-settings-changed",
-        () => {
-          levelCacheRef.current.clear();
-        },
-      );
-      unlisteners.push(offSettings);
 
       // Plugin click action → focus window + let MainLayout know which
       // room to jump to.  The plugin's `notification` event fires on

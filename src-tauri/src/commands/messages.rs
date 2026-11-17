@@ -40,16 +40,15 @@ use tauri::{Emitter, State};
 use crate::types::{
     MessageBatch, MessageEditPayload, MessageInfo, MessageReactionDeltaPayload,
     MessageReactionSummary, MessageRedactedPayload, MessageReplyTo, PinnedMessagePreview,
-    PresencePayload, RoomMessagePayload, RoomPinPermission, RoomRedactionPolicy,
-    RoomSendPermission, TypingPayload, VoiceParticipantsChangedPayload,
+    PresencePayload, RoomMembersChangedPayload, RoomMessagePayload, RoomPinPermission,
+    RoomRedactionPolicy, RoomSendPermission, TypingPayload, VoiceParticipantsInvalidatedPayload,
 };
 use crate::AppState;
 
 use super::message_display::{
     extract_mentioned_user_ids, extract_message_display, reply_to_from_message_relation,
 };
-use super::voice_matrix::collect_voice_participants_for_joined_voice_rooms;
-use super::{fmt_error_chain, get_client, get_or_fetch_avatar, resolve_room};
+use super::{fmt_error_chain, get_client, resolve_room};
 /// Matrix user IDs are compared case-insensitively; event `sender` and `client.user_id()` can differ in casing.
 fn user_id_strings_equal(a: &str, b: &str) -> bool {
     a == b || a.to_lowercase() == b.to_lowercase()
@@ -229,7 +228,7 @@ pub async fn get_messages(
     let client = get_client(&state).await?;
     let room = resolve_room(&client, &room_id)?;
 
-    let avatar_cache = state.avatar_cache.clone();
+    let avatars = state.avatars.clone();
 
     // First pass: extract message data and collect unique senders
     struct RawMsg {
@@ -244,6 +243,7 @@ pub async fn get_messages(
         file_display_name: Option<String>,
         image_width: Option<u32>,
         image_height: Option<u32>,
+        image_blurhash: Option<String>,
         video_width: Option<u32>,
         video_height: Option<u32>,
         unsupported_matrix_msgtype: Option<String>,
@@ -265,6 +265,7 @@ pub async fn get_messages(
             Option<String>,
             Option<u32>,
             Option<u32>,
+            Option<String>,
             Option<u32>,
             Option<u32>,
             Option<String>,
@@ -370,7 +371,7 @@ pub async fn get_messages(
                     let ts: u64 = original.origin_server_ts.0.into();
                     let replace = match latest_replacement.get(&target) {
                         None => true,
-                        Some((_, _, _, _, _, _, _, _, _, _, _, prev_ts)) => ts >= *prev_ts,
+                        Some((_, _, _, _, _, _, _, _, _, _, _, _, prev_ts)) => ts >= *prev_ts,
                     };
                     if replace {
                         latest_replacement.insert(
@@ -384,6 +385,7 @@ pub async fn get_messages(
                                 ext.file_display_name.clone(),
                                 ext.image_width,
                                 ext.image_height,
+                                ext.image_blurhash.clone(),
                                 ext.video_width,
                                 ext.video_height,
                                 ext.unsupported_matrix_msgtype.clone(),
@@ -414,6 +416,7 @@ pub async fn get_messages(
                     file_display_name: ext.file_display_name,
                     image_width: ext.image_width,
                     image_height: ext.image_height,
+                    image_blurhash: ext.image_blurhash,
                     video_width: ext.video_width,
                     video_height: ext.video_height,
                     unsupported_matrix_msgtype: ext.unsupported_matrix_msgtype,
@@ -452,12 +455,7 @@ pub async fn get_messages(
         let meta = match room.get_member_no_sync(uid).await {
             Ok(Some(member)) => {
                 let name = member.display_name().map(|n| n.to_string());
-                let avatar = get_or_fetch_avatar(
-                    member.avatar_url(),
-                    member.avatar(matrix_sdk::media::MediaFormat::File),
-                    &avatar_cache,
-                )
-                .await;
+                let avatar = avatars.cached(member.avatar_url()).await;
                 (name, avatar)
             }
             _ => (None, None),
@@ -481,12 +479,13 @@ pub async fn get_messages(
                 file_display_name,
                 image_width,
                 image_height,
+                image_blurhash,
                 video_width,
                 video_height,
                 unsupported_matrix_msgtype,
             ) = latest_replacement
                 .get(&m.event_id)
-                .map(|(b, img, vid, file, fm, fd, iw, ih, vw, vh, unsup, _ts)| {
+                .map(|(b, img, vid, file, fm, fd, iw, ih, ibh, vw, vh, unsup, _ts)| {
                     (
                         b.clone(),
                         img.clone(),
@@ -496,6 +495,7 @@ pub async fn get_messages(
                         fd.clone(),
                         *iw,
                         *ih,
+                        ibh.clone(),
                         *vw,
                         *vh,
                         unsup.clone(),
@@ -511,6 +511,7 @@ pub async fn get_messages(
                         m.file_display_name.clone(),
                         m.image_width,
                         m.image_height,
+                        m.image_blurhash.clone(),
                         m.video_width,
                         m.video_height,
                         m.unsupported_matrix_msgtype.clone(),
@@ -529,6 +530,7 @@ pub async fn get_messages(
                 image_media_request,
                 image_width,
                 image_height,
+                image_blurhash,
                 video_media_request,
                 video_width,
                 video_height,
@@ -691,7 +693,7 @@ async fn current_pinned_event_ids(room: &Room) -> Result<Vec<OwnedEventId>, Stri
 async fn build_message_infos_from_timeline_events(
     room: &Room,
     timeline_events: Vec<TimelineEvent>,
-    avatar_cache: &std::sync::Arc<crate::commands::avatar_cache::AvatarDiskCache>,
+    avatars: &std::sync::Arc<crate::avatars::AvatarService>,
 ) -> Result<Vec<MessageInfo>, String> {
     struct RawMsg {
         event_id: String,
@@ -705,6 +707,7 @@ async fn build_message_infos_from_timeline_events(
         file_display_name: Option<String>,
         image_width: Option<u32>,
         image_height: Option<u32>,
+        image_blurhash: Option<String>,
         video_width: Option<u32>,
         video_height: Option<u32>,
         unsupported_matrix_msgtype: Option<String>,
@@ -724,6 +727,7 @@ async fn build_message_infos_from_timeline_events(
             Option<String>,
             Option<u32>,
             Option<u32>,
+            Option<String>,
             Option<u32>,
             Option<u32>,
             Option<String>,
@@ -754,7 +758,7 @@ async fn build_message_infos_from_timeline_events(
                         let ts: u64 = original.origin_server_ts.0.into();
                         let replace = match latest_replacement.get(&target) {
                             None => true,
-                            Some((_, _, _, _, _, _, _, _, _, _, _, prev_ts)) => ts >= *prev_ts,
+                            Some((_, _, _, _, _, _, _, _, _, _, _, _, prev_ts)) => ts >= *prev_ts,
                         };
                         if replace {
                             latest_replacement.insert(
@@ -768,6 +772,7 @@ async fn build_message_infos_from_timeline_events(
                                     ext.file_display_name.clone(),
                                     ext.image_width,
                                     ext.image_height,
+                                    ext.image_blurhash.clone(),
                                     ext.video_width,
                                     ext.video_height,
                                     ext.unsupported_matrix_msgtype.clone(),
@@ -798,6 +803,7 @@ async fn build_message_infos_from_timeline_events(
                         file_display_name: ext.file_display_name,
                         image_width: ext.image_width,
                         image_height: ext.image_height,
+                        image_blurhash: ext.image_blurhash,
                         video_width: ext.video_width,
                         video_height: ext.video_height,
                         unsupported_matrix_msgtype: ext.unsupported_matrix_msgtype,
@@ -815,12 +821,7 @@ async fn build_message_infos_from_timeline_events(
         let meta = match room.get_member_no_sync(uid).await {
             Ok(Some(member)) => {
                 let name = member.display_name().map(|n| n.to_string());
-                let avatar = get_or_fetch_avatar(
-                    member.avatar_url(),
-                    member.avatar(matrix_sdk::media::MediaFormat::File),
-                    avatar_cache,
-                )
-                .await;
+                let avatar = avatars.cached(member.avatar_url()).await;
                 (name, avatar)
             }
             _ => (None, None),
@@ -843,12 +844,13 @@ async fn build_message_infos_from_timeline_events(
                 file_display_name,
                 image_width,
                 image_height,
+                image_blurhash,
                 video_width,
                 video_height,
                 unsupported_matrix_msgtype,
             ) = latest_replacement
                 .get(&m.event_id)
-                .map(|(b, img, vid, file, fm, fd, iw, ih, vw, vh, unsup, _ts)| {
+                .map(|(b, img, vid, file, fm, fd, iw, ih, ibh, vw, vh, unsup, _ts)| {
                     (
                         b.clone(),
                         img.clone(),
@@ -858,6 +860,7 @@ async fn build_message_infos_from_timeline_events(
                         fd.clone(),
                         *iw,
                         *ih,
+                        ibh.clone(),
                         *vw,
                         *vh,
                         unsup.clone(),
@@ -873,6 +876,7 @@ async fn build_message_infos_from_timeline_events(
                         m.file_display_name.clone(),
                         m.image_width,
                         m.image_height,
+                        m.image_blurhash.clone(),
                         m.video_width,
                         m.video_height,
                         m.unsupported_matrix_msgtype.clone(),
@@ -891,6 +895,7 @@ async fn build_message_infos_from_timeline_events(
                 image_media_request,
                 image_width,
                 image_height,
+                image_blurhash,
                 video_media_request,
                 video_width,
                 video_height,
@@ -1091,9 +1096,8 @@ pub async fn get_messages_around_event(
     }
     ordered.extend(response.events_after);
 
-    let avatar_cache = state.avatar_cache.clone();
-    let mut messages =
-        build_message_infos_from_timeline_events(&room, ordered, &avatar_cache).await?;
+    let avatars = state.avatars.clone();
+    let mut messages = build_message_infos_from_timeline_events(&room, ordered, &avatars).await?;
     messages.sort_by(|a, b| b.timestamp.cmp(&a.timestamp));
 
     Ok(MessageBatch {
@@ -1271,14 +1275,16 @@ pub async fn start_sync(
         *sync_running = true;
     }
 
+    state.encryption.start(&client, app.clone()).await;
+
     // Handler for incoming room messages
     let app_handle = app.clone();
-    let avatar_cache = state.avatar_cache.clone();
+    let avatars = state.avatars.clone();
     let raw_unread_for_msg = state.raw_unread_messages.clone();
     let self_user_id_for_msg = client.user_id().map(|u| u.to_owned());
     client.add_event_handler(move |ev: OriginalSyncRoomMessageEvent, room: Room| {
         let app = app_handle.clone();
-        let avatar_cache = avatar_cache.clone();
+        let avatars = avatars.clone();
         let raw_unread = raw_unread_for_msg.clone();
         let self_uid = self_user_id_for_msg.clone();
         async move {
@@ -1335,6 +1341,11 @@ pub async fn start_sync(
                     .clone()
                     .map(serde_json::Value::String)
                     .unwrap_or(serde_json::Value::Null);
+                let image_blurhash = ext
+                    .image_blurhash
+                    .clone()
+                    .map(serde_json::Value::String)
+                    .unwrap_or(serde_json::Value::Null);
                 let payload = MessageEditPayload {
                     room_id,
                     target_event_id: repl.event_id.to_string(),
@@ -1346,6 +1357,7 @@ pub async fn start_sync(
                     file_display_name,
                     image_width: json_u32(ext.image_width),
                     image_height: json_u32(ext.image_height),
+                    image_blurhash,
                     video_width: json_u32(ext.video_width),
                     video_height: json_u32(ext.video_height),
                     unsupported_matrix_msgtype,
@@ -1362,12 +1374,7 @@ pub async fn start_sync(
             let (sender_name, avatar_url) = match room.get_member_no_sync(&ev.sender).await {
                 Ok(Some(member)) => {
                     let name = member.display_name().map(|n| n.to_string());
-                    let avatar = get_or_fetch_avatar(
-                        member.avatar_url(),
-                        member.avatar(matrix_sdk::media::MediaFormat::File),
-                        &avatar_cache,
-                    )
-                    .await;
+                    let avatar = avatars.cached(member.avatar_url()).await;
                     (name, avatar)
                 }
                 _ => (None, None),
@@ -1438,6 +1445,7 @@ pub async fn start_sync(
                     image_media_request: ext.image_media_request,
                     image_width: ext.image_width,
                     image_height: ext.image_height,
+                    image_blurhash: ext.image_blurhash,
                     video_media_request: ext.video_media_request,
                     video_width: ext.video_width,
                     video_height: ext.video_height,
@@ -1472,11 +1480,24 @@ pub async fn start_sync(
         },
     );
 
+    let state_arc: Arc<AppState> = (*state).clone();
+    let reconcile_gate = Arc::new(AtomicBool::new(false));
+
     // Redactions (e.g. deleted messages): drop the target from the client timeline
     let app_handle = app.clone();
+    let redaction_state = state_arc.clone();
+    let redaction_gate = reconcile_gate.clone();
     client.add_event_handler(move |ev: OriginalSyncRoomRedactionEvent, room: Room| {
         let app = app_handle.clone();
+        let state = redaction_state.clone();
+        let gate = redaction_gate.clone();
         async move {
+            // A redaction can remove a space-child event without replaying it
+            // through the SpaceChild handler. The old target may be unavailable.
+            if room.is_space() && gate.load(Ordering::Relaxed) {
+                let _ = app.emit("rooms-changed", ());
+                state.notifications.schedule(&state, &app, super::reconciler::ReconcileScope::all());
+            }
             let room_id = room.room_id().to_string();
             let redacted = ev
                 .content
@@ -1548,30 +1569,8 @@ pub async fn start_sync(
         }
     });
 
-    // --- Auto-reconcile triggers ------------------------------------------
-    //
-    // Keep per-room push rules in sync with the user's notification intent
-    // without relying on the frontend to manually poke the reconciler:
-    //
-    //   - Self-join a room     → reconcile_room for that room (so new rooms
-    //                             pick up the global/space default).
-    //   - m.space.child changes → reconcile_rooms_for_space for the space
-    //                             that emitted (so rooms newly under a
-    //                             levelled space get that level applied).
-    //   - m.direct changes      → reconcile_all (DMs vs group rooms have
-    //                             different Element defaults, and the
-    //                             resolver consults m.direct).
-    //
-    // Everything runs gated on `reconcile_gate`, which only flips true
-    // after the first `sync_once` completes.  Without that gate, matrix-sdk
-    // fires handlers for the state-event replay during initial sync — on a
-    // fresh login that would spawn a reconcile_room per joined room in
-    // addition to the startup `reconcile_all` below, thrashing the
-    // homeserver for nothing since initial `reconcile_all` already covers
-    // them.
-    let state_arc: Arc<AppState> = (*state).clone();
-    let reconcile_gate = Arc::new(AtomicBool::new(false));
-
+    // Derived notification work runs in one session worker. Initial state
+    // replay is covered by a single full pass after the first sync completes.
     {
         let state_h = state_arc.clone();
         let app_h = app.clone();
@@ -1609,47 +1608,42 @@ pub async fn start_sync(
                 let room_id = room.room_id().to_string();
                 let _ = app.emit("rooms-changed", ());
 
-                if ev.content.membership != MembershipState::Join {
-                    return;
-                }
-                if prev_membership
-                    .as_ref()
-                    .map(|prev| prev == &MembershipState::Join)
-                    .unwrap_or(false)
-                {
-                    return;
-                }
-
-                log::info!("[pax reconcile] self-joined {room_id}; reconciling");
-                if let Err(e) = super::reconciler::reconcile_room(&state, &app, &room_id).await {
-                    log::warn!("[pax reconcile] room-join reconcile failed {room_id}: {e}");
-                }
+                let scope = if room.is_space() {
+                    // Joining/leaving a space changes inheritance for its old
+                    // and new children, including edges no longer in the store.
+                    super::reconciler::ReconcileScope::all()
+                } else {
+                    super::reconciler::ReconcileScope::room(room_id)
+                };
+                state.notifications.schedule(&state, &app, scope);
             }
         });
     }
 
-    // Watch m.room.member events for an avatar MXC change and tell the
-    // frontend to drop its cached entry for that user. We do NOT prefetch
-    // bytes here: initial sync delivers hundreds of member events and
-    // prefetching all of them swamps the homeserver (and the UI thread)
-    // — a freeze of several seconds on the home space was traced back
-    // to exactly this. The frontend store refetches lazily through the
-    // batched `get_user_avatars` command when a visible `<UserAvatar>`
-    // actually needs the user.
-    //
-    // We also require `prev_content` to exist so we only react to real
-    // changes, not to the initial-state firehose. A brand-new member we
-    // see for the first time will be resolved on demand the moment a
-    // component mounts for them.
+    // Scoped member updates replace broad room-list invalidation for other
+    // users' joins, departures, and name edits. Avatar changes keep their own
+    // event; neither path downloads data in the sync handler. Initial replay
+    // is covered by the stores' sync-ready refresh.
     {
         let app_h = app.clone();
         let gate_h = reconcile_gate.clone();
-        client.add_event_handler(move |ev: OriginalSyncRoomMemberEvent, _room: Room| {
+        client.add_event_handler(move |ev: OriginalSyncRoomMemberEvent, room: Room| {
             let app = app_h.clone();
             let gate = gate_h.clone();
             async move {
                 if !gate.load(Ordering::Relaxed) {
                     return;
+                }
+                if super::members::member_list_changed(&ev) {
+                    let _ = app.emit(
+                        "room-members-changed",
+                        RoomMembersChangedPayload {
+                            room_id: room.room_id().to_string(),
+                            membership_changed: ev.unsigned.prev_content.as_ref()
+                                .map(|previous| previous.membership != ev.content.membership)
+                                .unwrap_or(true),
+                        },
+                    );
                 }
                 if ev.content.membership != MembershipState::Join {
                     return;
@@ -1676,7 +1670,7 @@ pub async fn start_sync(
         let app_h = app.clone();
         let gate_h = reconcile_gate.clone();
         client.add_event_handler(
-            move |_ev: OriginalSyncStateEvent<SpaceChildEventContent>, room: Room| {
+            move |ev: matrix_sdk::ruma::events::SyncStateEvent<SpaceChildEventContent>, _room: Room| {
                 let state = state_h.clone();
                 let app = app_h.clone();
                 let gate = gate_h.clone();
@@ -1684,16 +1678,11 @@ pub async fn start_sync(
                     if !gate.load(Ordering::Relaxed) {
                         return;
                     }
-                    let space_id = room.room_id().to_string();
                     let _ = app.emit("rooms-changed", ());
-                    log::info!(
-                        "[pax reconcile] m.space.child changed in {space_id}; reconciling children"
-                    );
-                    if let Err(e) =
-                        super::reconciler::reconcile_rooms_for_space(&state, &app, &space_id).await
-                    {
-                        log::warn!("[pax reconcile] space-child reconcile failed {space_id}: {e}");
-                    }
+                    // The event's target must be reconciled even when the link
+                    // was removed/redacted and is absent from the new graph.
+                    state.notifications.schedule(&state, &app,
+                        super::reconciler::ReconcileScope::room(ev.state_key().to_string()));
                 }
             },
         );
@@ -1712,12 +1701,27 @@ pub async fn start_sync(
                     return;
                 }
                 let _ = app.emit("rooms-changed", ());
-                log::info!("[pax reconcile] m.direct changed; reconciling all rooms");
-                if let Err(e) = super::reconciler::reconcile_all(&state, &app).await {
-                    log::warn!("[pax reconcile] m.direct reconcile failed: {e}");
-                }
+                state.notifications.schedule(&state, &app, super::reconciler::ReconcileScope::all());
             }
         });
+    }
+
+    {
+        let app_h = app.clone();
+        client.add_event_handler(
+            move |_ev: OriginalSyncStateEvent<
+                matrix_sdk::ruma::events::room::avatar::RoomAvatarEventContent,
+            >,
+                  room: Room| {
+                let app = app_h.clone();
+                async move {
+                    let _ = app.emit(
+                        "room-avatar-invalidated",
+                        serde_json::json!({ "roomId": room.room_id() }),
+                    );
+                }
+            },
+        );
     }
 
     // Read-receipt handler — clears the raw-message counter for a room
@@ -1763,8 +1767,6 @@ pub async fn start_sync(
     // Clone shared state needed inside the sync loop.
     let presence_map = state.presence_map.clone();
     let status_msg_map = state.status_msg_map.clone();
-    let avatar_cache = state.avatar_cache.clone();
-    let voice_client = client.clone();
     let desired_presence = state.desired_presence.clone();
     let unread_cache = state.unread_cache.clone();
     let raw_unread = state.raw_unread_messages.clone();
@@ -1824,21 +1826,15 @@ pub async fn start_sync(
                 first_sync_done = true;
                 let _ = app.emit("sync-ready", ());
 
-                // Initial reconcile — catches drift from other clients
-                // since we last synced, plus applies global/space defaults
-                // to rooms that existed before join-event tracking started.
-                // Flip the gate BEFORE spawning so any join/space-child/
-                // m.direct events landing during the reconcile also fire
-                // their handlers.  Both paths running concurrently is fine
-                // — reconciles are idempotent.
                 reconcile_gate_for_loop.store(true, Ordering::Release);
-                let s = reconcile_state_arc.clone();
-                let a = app.clone();
-                tokio::spawn(async move {
-                    if let Err(e) = super::reconciler::reconcile_all(&s, &a).await {
-                        log::warn!("[pax reconcile] initial sync-ready reconcile failed: {e}");
-                    }
-                });
+                reconcile_state_arc.notifications.schedule(&reconcile_state_arc, &app,
+                    super::reconciler::ReconcileScope::all());
+            }
+
+            for event in &response.account_data {
+                if let Ok(value) = event.deserialize_as::<serde_json::Value>() {
+                    super::pax_settings::process_synced_settings(&reconcile_state_arc, &app, &value);
+                }
             }
 
             // Extract presence updates from the sync response.
@@ -1896,21 +1892,13 @@ pub async fn start_sync(
             )
             .await;
 
-            // Push voice participants from a spawned task so we
-            // don't block the sync loop with avatar fetches.
-            let vc = voice_client.clone();
-            let ac = avatar_cache.clone();
-            let ap = app.clone();
-            tokio::spawn(async move {
-                let participants_by_room =
-                    collect_voice_participants_for_joined_voice_rooms(&vc, &ac).await;
-                let _ = ap.emit(
-                    "voice-participants-changed",
-                    VoiceParticipantsChangedPayload {
-                        participants_by_room,
-                    },
+            let voice_rooms = crate::voice_presence::changed_rooms(&client, &response);
+            if !voice_rooms.is_empty() {
+                let _ = app.emit(
+                    "voice-participants-invalidated",
+                    VoiceParticipantsInvalidatedPayload { room_ids: voice_rooms },
                 );
-            });
+            }
         }
     });
 
