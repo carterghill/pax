@@ -27,7 +27,7 @@ pub const DERIVATION_PROFILE: &str = "pax-password-v1";
 
 #[cfg(test)]
 #[path = "pax_auth_tests.rs"]
-mod tests;
+pub(crate) mod tests;
 
 #[derive(Clone, Copy, Default, Debug, Deserialize, Serialize, PartialEq, Eq)]
 pub enum AccountMode {
@@ -47,6 +47,8 @@ pub struct Descriptor {
     pub derivation_profile: Option<String>,
     pub credential_revision: u32,
     pub state: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub conversion_id: Option<String>,
 }
 
 impl Descriptor {
@@ -58,6 +60,7 @@ impl Descriptor {
             derivation_profile: (mode == AccountMode::Pax).then(|| DERIVATION_PROFILE.into()),
             credential_revision: 1,
             state: if ready { "ready" } else { "pending" }.into(),
+            conversion_id: None,
         }
     }
 
@@ -65,7 +68,11 @@ impl Descriptor {
         if self.schema_version != 1
             || self.user_id != expected_user
             || self.credential_revision != 1
-            || !matches!(self.state.as_str(), "pending" | "ready")
+            || !matches!(self.state.as_str(), "pending" | "ready" | "converting")
+            || (self.state == "converting"
+                && (self.mode != AccountMode::Pax
+                    || !self.conversion_id.as_ref().is_some_and(|id| uuid::Uuid::parse_str(id).is_ok())))
+            || (self.state != "converting" && self.conversion_id.is_some())
             || (self.mode == AccountMode::Pax
                 && self.derivation_profile.as_deref() != Some(DERIVATION_PROFILE))
             || (self.mode == AccountMode::Matrix && self.derivation_profile.is_some())
@@ -380,20 +387,27 @@ pub async fn check_profile_support(http: &reqwest::Client, home: &str) -> Result
         .json()
         .await
         .map_err(|_| "Invalid homeserver support response")?;
-    let supported = versions["versions"].as_array().is_some_and(|versions| {
-        versions.iter().any(|v| {
-            let Some(version) = v.as_str().and_then(|v| v.strip_prefix('v')) else {
-                return false;
-            };
-            let mut parts = version.split('.').filter_map(|v| v.parse::<u32>().ok());
-            match (parts.next(), parts.next()) {
-                (Some(major), Some(minor)) => major > 1 || (major == 1 && minor >= 16),
-                _ => false,
-            }
-        })
-    });
+    // Synapse can implement the stable custom-profile API before advertising
+    // the complete Matrix 1.16 spec. Its explicit stable feature flag is also
+    // sufficient; the experimental-only flag requires a different API path.
+    let supported = versions["unstable_features"]["uk.tcpip.msc4133.stable"].as_bool()
+        == Some(true)
+        || versions["versions"].as_array().is_some_and(|versions| {
+            versions.iter().any(|v| {
+                let Some(version) = v.as_str().and_then(|v| v.strip_prefix('v')) else {
+                    return false;
+                };
+                let Some((major, minor)) = version.split_once('.') else {
+                    return false;
+                };
+                match (major.parse::<u32>(), minor.parse::<u32>()) {
+                    (Ok(major), Ok(minor)) => major > 1 || (major == 1 && minor >= 16),
+                    _ => false,
+                }
+            })
+        });
     if !supported {
-        return Err("This homeserver must support Matrix 1.16 custom profile fields for Pax sign-up. Standard Matrix sign-up is still available.".into());
+        return Err("This homeserver does not advertise the stable custom profile fields needed for Pax sign-up. Ask its administrator to enable that support or update the server. No account has been created; Standard Matrix sign-up is still available.".into());
     }
     Ok(())
 }
@@ -483,7 +497,7 @@ pub async fn publish(
     Ok(())
 }
 
-async fn secret_key_id(client: &Client) -> Result<String, String> {
+pub(super) async fn secret_key_id(client: &Client) -> Result<String, String> {
     let raw = client
         .encryption()
         .secret_storage()

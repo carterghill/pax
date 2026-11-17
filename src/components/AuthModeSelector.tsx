@@ -55,7 +55,8 @@ export default function AuthModeSelector({ value, onChange, disabled }: {
             useful if you want to sign in to other Matrix apps with this same password.
             Restoring encrypted history may require a recovery key or verification from another device.</p>
           <p style={{ margin: "0 0 10px" }}>Pax sign-in uses a different underlying Matrix password, so your
-            memorable password won’t sign in to other Matrix apps. Credential export and switching existing accounts are not available yet.</p>
+            memorable password won’t sign in to other Matrix apps. Credential export is not available yet.
+            Existing Matrix accounts can switch to Pax sign-in in Account settings.</p>
           <p style={{ margin: 0 }}>Pax currently trusts your homeserver to report account sign-in settings correctly.
             Use a homeserver you trust. Either choice lets you chat with other Matrix users.</p>
         </Dialog>

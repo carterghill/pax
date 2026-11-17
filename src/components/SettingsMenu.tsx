@@ -28,6 +28,7 @@ import {
 } from "../utils/readReceiptPrefs";
 import NotificationSettingsPanel from "./NotificationSettingsPanel";
 import EncryptionSettingsPanel from "./EncryptionSettingsPanel";
+import AccountSignInPanel from "./AccountSignInPanel";
 
 interface SettingsMenuProps {
   onSignOut: () => void;
@@ -1127,6 +1128,7 @@ export default function SettingsMenu({
 
           {activeSection === "account" && (
             <section style={panelStyle}>
+              <AccountSignInPanel onOpenEncryption={() => setActiveSection("encryption")} />
               <h3 style={sectionHeadingStyle}>Session</h3>
               <p style={{ ...sectionDescriptionStyle, marginBottom: spacing.unit * 4 }}>
                 Manage your current account session on this device.

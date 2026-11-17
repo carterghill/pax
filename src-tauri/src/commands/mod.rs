@@ -1,4 +1,5 @@
 pub mod auth;
+pub mod account_conversion;
 pub mod codec;
 pub mod config;
 pub mod downloads;

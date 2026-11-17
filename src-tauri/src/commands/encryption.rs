@@ -331,6 +331,8 @@ pub async fn get_encryption_status(
     current.pax_login = *state.account_mode.lock().await == super::pax_auth::AccountMode::Pax;
     if current.pax_login {
         current.can_setup = false;
+        current.pending_recovery_key = false;
+        current.recovery_key_needs_save = false;
     }
     Ok(current)
 }

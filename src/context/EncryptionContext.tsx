@@ -49,6 +49,7 @@ interface EncryptionContextValue {
   acknowledgeKey: () => Promise<void>;
   replaceKey: () => Promise<void>;
   backUp: () => Promise<void>;
+  convertToPax: (currentPassword: string, newPassword: string) => Promise<void>;
   historyExport: HistoryExport | null;
   historyImport: HistoryImport | null;
   exportHistory: (passphrase: string) => Promise<HistoryExport | null>;
@@ -83,8 +84,9 @@ export function EncryptionProvider({ children, userId }: { children: ReactNode; 
       if (mounted.current) {
         setStatus(next);
         setConnectionError(null);
+        if (next.paxLogin) { setRecoveryKey(null); setRecoveryKeyDismissed(false); }
         // Keep an unacknowledged generated key available after a webview reload.
-        if (next.pendingRecoveryKey) {
+        if (next.pendingRecoveryKey && !next.paxLogin) {
           const key = await invoke<string | null>("get_pending_encryption_recovery_key");
           if (mounted.current) setRecoveryKey(key);
         }
@@ -170,6 +172,16 @@ export function EncryptionProvider({ children, userId }: { children: ReactNode; 
   const backUp = () => run("Backing up message keys…", async () => {
     await invoke("sync_encryption_backup");
   });
+  const convertToPax = (currentPassword: string, newPassword: string) => run("Switching to Pax sign-in…", async () => {
+    try {
+      await invoke("convert_account_to_pax", { currentPassword, newPassword, expectedUserId: userId });
+    } finally {
+      // Reauthentication may replace the SDK client, including on a recoverable
+      // error after the password change. Restart sync against the current one.
+      await invoke("start_sync");
+      await refresh();
+    }
+  });
   const exportHistory = async (passphrase: string): Promise<HistoryExport | null> => {
     let result: HistoryExport | null = null;
     await run("Saving this device’s encrypted history backup…", async () => {
@@ -202,7 +214,7 @@ export function EncryptionProvider({ children, userId }: { children: ReactNode; 
   return (
     <EncryptionContext.Provider value={{ status, error: error ?? connectionError, busy, recoveryKey, verification, refresh,
       recoveryKeyDismissed, dismissRecoveryKey: () => setRecoveryKeyDismissed(true), showRecoveryKey: () => setRecoveryKeyDismissed(false),
-      setup, restore, acknowledgeKey, replaceKey, backUp, historyExport, historyImport, exportHistory, importHistory,
+      setup, restore, acknowledgeKey, replaceKey, backUp, convertToPax, historyExport, historyImport, exportHistory, importHistory,
       requestVerification, respondVerification,
       dismissVerification: () => { dismissedFlow.current = verification?.flowId ?? null; setVerification(null); void refresh(); },
     }}>
