@@ -576,6 +576,9 @@ pub async fn bootstrap_identity(client: &Client, credential: &str) -> Result<(),
         let challenge = error
             .as_uiaa_response()
             .ok_or("Could not initialize your encryption identity")?;
+        if credential.is_empty() {
+            return Err("Enter your account password to finish setting up encryption.".into());
+        }
         let mut auth = Password::new(
             UserIdentifier::UserIdOrLocalpart(client.user_id().ok_or("Not logged in")?.to_string()),
             credential.to_owned(),

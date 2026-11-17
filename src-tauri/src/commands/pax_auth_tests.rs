@@ -100,12 +100,13 @@ pub(crate) struct ServerState {
     devices: serde_json::Map<String, Value>,
     pub signing: serde_json::Map<String, Value>,
     pub backup: Option<Value>,
+    pub backup_archives: HashMap<String, (Value, serde_json::Map<String, Value>)>,
     rooms: serde_json::Map<String, Value>,
     pub fail_envelope: bool,
     pub password_disabled: bool,
     pub fail_password_response: bool,
     pub fail_conversion_write: bool,
-    fail_signing: bool,
+    pub fail_signing: bool,
     pub login_status: Option<u16>,
     pub profile_status: Option<u16>,
 }
@@ -322,7 +323,9 @@ fn respond(s: &mut ServerState, method: &str, path: &str, body: &Value) -> (u16,
                 json!({"session":"encryption", "flows":[{"stages":["m.login.password"]}]}),
             );
         }
-        assert_eq!(body["auth"]["password"].as_str(), s.credential.as_deref());
+        if body["auth"]["password"].as_str() != s.credential.as_deref() {
+            return (401, json!({"errcode":"M_FORBIDDEN"}));
+        }
         assert_eq!(body["auth"]["session"], "encryption");
         for field in ["master_key", "self_signing_key", "user_signing_key"] {
             if let Some(v) = body.get(field) {
@@ -343,15 +346,19 @@ fn respond(s: &mut ServerState, method: &str, path: &str, body: &Value) -> (u16,
     }
     if path.contains("/room_keys/version") {
         if method == "POST" {
+            if let Some(previous) = s.backup.take() {
+                let version = (s.backup_archives.len() + 1).to_string();
+                s.backup_archives.insert(version, (previous, std::mem::take(&mut s.rooms)));
+            }
             s.backup = Some(body.clone());
-            return (200, json!({"version":"1"}));
+            return (200, json!({"version":(s.backup_archives.len()+1).to_string()}));
         }
         return s
             .backup
             .as_ref()
             .map(|b| {
                 let mut v = b.clone();
-                v["version"] = json!("1");
+                v["version"] = json!((s.backup_archives.len()+1).to_string());
                 v["count"] = json!(s.rooms.len());
                 v["etag"] = json!("etag");
                 (200, v)

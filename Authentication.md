@@ -258,6 +258,20 @@ Private account-data type: `com.carter.pax.conversion`. Its schema is `schema_ve
 
 Conversion preserves the existing available history; it cannot recreate already lost message keys. If an older backup is inaccessible, this flow intentionally stops instead of silently replacing it with a partial backup. Unlock it with the old recovery key or another verified device first. Recovering a separate historical backup with a newly found older key remains separate work. A generated Secret Storage wrapper is a normal recovery key, but the password-protected Pax envelope handles it automatically.
 
+### Standard accounts with no configured recovery and missing secrets
+
+A public cross-signing identity or an automatic encrypted backup may already exist before Secret Storage/recovery is configured. The ordinary setup and conversion guards continue to refuse replacing those missing secrets implicitly. Encryption settings explain the missing identity/backup keys separately.
+
+**Set up recovery from this device** is a separate, explicit confirmation for a standard account with no configured Secret Storage and missing local secrets. It requires the current Matrix password, a confirmed-action flag, and the expected signed-in user ID. It cannot run during a pending sign-in conversion. An unfinished recovery setup likewise blocks conversion until completed.
+
+Before changes, save an atomic local journal bound to homeserver/user/device, containing a random transaction UUID, original already encrypted account-data records, and the old backup version/public metadata. Archive/read back that snapshot in private account data `com.carter.pax.recovery_restart.<UUID>`. Neither copy contains plaintext secrets or passwords. Pause sync while changing verification, then restart it on success or failure.
+
+If private verification keys are missing, explicitly reset cross-signing using password UIAA. Reuse keys already available locally on retry; the SDK may discard an unaccepted generated identity when it processes the old public identity, in which case another unpublished identity can be generated. Once the server has accepted a new identity, retries and app restarts retain it. A wrong password does not publish a replacement or change the account login password. If the identity is already unlocked, retain it.
+
+If the backup is inaccessible, create a new backup version for this device's available message keys. Never call the SDK's combined `recovery.reset_identity()` or backup deletion methods: those delete existing backups. Preserve all prior backup versions and encrypted contents. Enable Secret Storage, generate a recovery key, and show the normal save-key dialog. A local unfinished journal exposes **Finish recovery setup on this device**, including after restart; an interrupted unsaved Secret Storage wrapper may be regenerated while retaining the accepted identity, active backup, and local message keys. The original account-data archive remains available; importing historical archives still needs a separate UI.
+
+This action cannot recreate missing message keys or unlock older backups. It changes verification only through the explicit confirmation, preserves the current SDK store, and is never a fallback for ordinary login or Pax conversion. Fresh standard recovery setup also re-uploads the same locally generated identity keys when completing UIAA, because local key existence alone does not prove the server accepted an earlier upload.
+
 ### Change a Pax memorable password
 
 Derive a new credential and unlocking key, wrap the same recovery secret under the new key, update the Matrix password, and publish the new credential revision. Keep recoverable staged state until all required writes and the new login have been verified.

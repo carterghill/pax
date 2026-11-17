@@ -12,6 +12,8 @@ export interface EncryptionStatus {
   crossSigningReady: boolean;
   hasIdentity: boolean;
   canSetup: boolean;
+  canStartFromDevice: boolean;
+  newRecoveryPending: boolean;
   pendingRecoveryKey: boolean;
   recoveryKeyNeedsSave: boolean;
   progress: { state: string; backedUp: number | null; total: number | null; error: string | null };
@@ -45,6 +47,7 @@ interface EncryptionContextValue {
   verification: VerificationStatus | null;
   refresh: () => Promise<void>;
   setup: (password?: string) => Promise<void>;
+  startRecoveryFromDevice: (password: string) => Promise<void>;
   restore: (key: string) => Promise<void>;
   acknowledgeKey: () => Promise<void>;
   replaceKey: () => Promise<void>;
@@ -158,6 +161,12 @@ export function EncryptionProvider({ children, userId }: { children: ReactNode; 
     const key = await invoke<string>("setup_encryption_recovery", { password: password || null });
     if (mounted.current) { setRecoveryKey(key); setRecoveryKeyDismissed(false); }
   });
+  const startRecoveryFromDevice = (password: string) => run("Setting up recovery from this device…", async () => {
+    try {
+      const key = await invoke<string>("start_encryption_recovery_from_device", { password, expectedUserId: userId, confirmed: true });
+      if (mounted.current) { setRecoveryKey(key); setRecoveryKeyDismissed(false); }
+    } finally { await invoke("start_sync"); await refresh(); }
+  }, false);
   const replaceKey = () => run("Creating recovery key…", async () => {
     const key = await invoke<string>("replace_encryption_recovery_key");
     if (mounted.current) { setRecoveryKey(key); setRecoveryKeyDismissed(false); }
@@ -214,7 +223,7 @@ export function EncryptionProvider({ children, userId }: { children: ReactNode; 
   return (
     <EncryptionContext.Provider value={{ status, error: error ?? connectionError, busy, recoveryKey, verification, refresh,
       recoveryKeyDismissed, dismissRecoveryKey: () => setRecoveryKeyDismissed(true), showRecoveryKey: () => setRecoveryKeyDismissed(false),
-      setup, restore, acknowledgeKey, replaceKey, backUp, convertToPax, historyExport, historyImport, exportHistory, importHistory,
+      setup, startRecoveryFromDevice, restore, acknowledgeKey, replaceKey, backUp, convertToPax, historyExport, historyImport, exportHistory, importHistory,
       requestVerification, respondVerification,
       dismissVerification: () => { dismissedFlow.current = verification?.flowId ?? null; setVerification(null); void refresh(); },
     }}>

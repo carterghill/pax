@@ -655,6 +655,11 @@ pub async fn convert_account_to_pax(
     if client.user_id().map(|u| u.as_str()) != Some(expected_user_id.as_str()) {
         return Err("The signed-in account changed. Reopen Account settings.".into());
     }
+    if super::encryption::has_pending_recovery_setup(&app, &client)? {
+        return Err(
+            "Finish recovery setup in Encryption settings before switching sign-in methods.".into(),
+        );
+    }
     let home = client.homeserver().to_string();
     pax_auth::ensure_trusted(&home, &state.auth_config)?;
     let keys = pax_auth::derive(&expected_user_id, &new).await?;
