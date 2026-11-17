@@ -55,6 +55,7 @@ fn main() {
     let vars = [
         "GIPHY_API_KEY",
         "PAX_HOMESERVER",
+        "PAX_SERVER_NAME",
         "PAX_REGISTRATION_TOKEN",
         "PAX_HIDE_SERVER_CONFIG",
         "PAX_PUSH_GATEWAY_URL",

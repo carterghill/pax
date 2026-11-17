@@ -7,12 +7,13 @@ use matrix_sdk::config::SyncSettings;
 use matrix_sdk::encryption::{BackupDownloadStrategy, EncryptionSettings};
 use matrix_sdk::{Client, SessionMeta};
 use serde::{Deserialize, Serialize};
-use tauri::{Manager, State};
+use tauri::{Emitter, Manager, State};
 use tokio::time::timeout;
 
 use crate::AppState;
 
 use super::fmt_error_chain;
+use super::pax_auth::{self, AccountMode, Descriptor, Enrollment};
 
 const CREDENTIALS_FILENAME: &str = "credentials.json";
 
@@ -31,6 +32,10 @@ pub struct SavedCredentials {
     /// Relative path under app data dir for the Matrix SDK SQLite store.
     #[serde(default)]
     pub sqlite_store_dir: Option<String>,
+    #[serde(default)]
+    pub account_mode: AccountMode,
+    #[serde(default)]
+    pub pax_enrollment_pending: bool,
 }
 
 fn credentials_path(app: &tauri::AppHandle) -> Result<std::path::PathBuf, String> {
@@ -115,30 +120,21 @@ pub fn save_session_to_credentials(
     homeserver: &str,
     session: SavedSession,
     sqlite_store_dir: Option<String>,
+    account_mode: AccountMode,
+    pax_enrollment_pending: bool,
 ) -> Result<(), String> {
     let path = credentials_path(app)?;
 
-    let mut creds = if path.exists() {
-        let contents = std::fs::read_to_string(&path)
-            .map_err(|e| format!("Failed to read credentials: {e}"))?;
-        serde_json::from_str(&contents).map_err(|e| format!("Failed to parse credentials: {e}"))?
-    } else {
-        SavedCredentials {
-            homeserver: homeserver.to_string(),
-            session: None,
-            sqlite_store_dir: None,
-        }
+    let creds = SavedCredentials {
+        homeserver: homeserver.to_owned(),
+        session: Some(session),
+        sqlite_store_dir,
+        account_mode,
+        pax_enrollment_pending,
     };
-
-    creds.homeserver = homeserver.to_string();
-    creds.session = Some(session);
-    if let Some(dir) = sqlite_store_dir {
-        creds.sqlite_store_dir = Some(dir);
-    }
     let json = serde_json::to_string_pretty(&creds)
         .map_err(|e| format!("Failed to serialize credentials: {e}"))?;
-    std::fs::write(&path, json).map_err(|e| format!("Failed to write credentials: {e}"))?;
-    Ok(())
+    pax_auth::atomic_write(&path, json.as_bytes())
 }
 
 /// Persist the homeserver URL (no password). Session tokens are patched in
@@ -150,6 +146,8 @@ pub fn save_credentials(app: tauri::AppHandle, homeserver: String) -> Result<(),
         homeserver,
         session: None,
         sqlite_store_dir: None,
+        account_mode: AccountMode::Matrix,
+        pax_enrollment_pending: false,
     };
     let json = serde_json::to_string_pretty(&creds)
         .map_err(|e| format!("Failed to serialize credentials: {e}"))?;
@@ -323,9 +321,10 @@ fn reusable_login_store(
 /// Build a matrix-sdk Client with automatic retries for transient failures
 /// (DNS hiccups, brief network outages). Tries up to 3 times with increasing
 /// delays before giving up.
-async fn build_client_with_retry(
+async fn build_client_for_mode(
     homeserver: &str,
     store_path: &std::path::Path,
+    mode: AccountMode,
 ) -> Result<Client, String> {
     let mut last_err = String::new();
     for attempt in 0u64..3 {
@@ -333,8 +332,10 @@ async fn build_client_with_retry(
             .homeserver_url(homeserver)
             .sqlite_store(store_path, None)
             .with_encryption_settings(EncryptionSettings {
-                auto_enable_cross_signing: true,
-                auto_enable_backups: true,
+                // Pax must recover the existing identity before doing anything
+                // that could create or replace server-side encryption state.
+                auto_enable_cross_signing: mode == AccountMode::Matrix,
+                auto_enable_backups: mode == AccountMode::Matrix,
                 // Fetch keys as rooms are read, rather than downloading an
                 // unbounded account-wide archive in one response.
                 backup_download_strategy: BackupDownloadStrategy::AfterDecryptionFailure,
@@ -359,82 +360,238 @@ async fn build_client_with_retry(
     Err(format!("{} (retried 3 times)", last_err))
 }
 
-/// Reauthenticate an existing device in its original store when possible. New
-/// accounts/devices get their own store. Every attempt uses a fresh Client,
-/// since reusing a Client after failed login can cause AlreadyInitializedError.
-async fn login_password_into_new_store(
-    app: &tauri::AppHandle,
-    homeserver: &str,
-    username: &str,
-    password: &str,
-    log_prefix: &str,
-    reusable: Option<(String, String)>,
-) -> Result<(Client, String), String> {
-    let base = app_data_dir(app)?;
-    let sessions_root = base.join("matrix_sessions");
-    std::fs::create_dir_all(&sessions_root)
-        .map_err(|e| format!("Failed to create matrix_sessions: {e}"))?;
-
-    let mut last_err = String::new();
-    for attempt in 0u32..3 {
-        let rel = reusable
-            .as_ref()
-            .map(|(rel, _)| rel.clone())
-            .unwrap_or_else(|| format!("matrix_sessions/pw_{}", uuid::Uuid::new_v4()));
-        let sp = base.join(&rel);
-
-        let client = match build_client_with_retry(homeserver, &sp).await {
-            Ok(c) => c,
-            Err(e) => {
-                last_err = e;
-                log::warn!(
-                    "{}: build client attempt {}/3 failed: {}",
-                    log_prefix,
-                    attempt + 1,
-                    last_err
-                );
-                if attempt < 2 {
-                    tokio::time::sleep(Duration::from_millis(1000 * (attempt as u64 + 1))).await;
-                }
-                continue;
-            }
-        };
-        let mut login = client
-            .matrix_auth()
-            .login_username(username, password)
-            .initial_device_display_name("Pax");
-        if let Some((_, device_id)) = &reusable {
-            login = login.device_id(device_id);
-        }
-        match login.send().await {
-            Ok(_) => return Ok((client, rel)),
-            Err(e) => {
-                last_err = fmt_error_chain(&e);
-                log::warn!(
-                    "{}: authenticate attempt {}/3 failed: {}",
-                    log_prefix,
-                    attempt + 1,
-                    last_err
-                );
-                drop(client);
-                // A wrong password or network error must never delete existing
-                // keys. Only this attempt's newly created directory is disposable.
-                if reusable.is_none() {
-                    let _ = std::fs::remove_dir_all(&sp);
-                }
-                if attempt < 2 {
-                    tokio::time::sleep(Duration::from_millis(1000 * (attempt as u64 + 1))).await;
-                }
-            }
+#[derive(Debug)]
+pub(super) enum PasswordLoginError {
+    Rejected,
+    Other(String),
+}
+impl PasswordLoginError {
+    fn message(self) -> String {
+        match self {
+            Self::Rejected => "Incorrect username or password.".into(),
+            Self::Other(message) => message,
         }
     }
-    Err(format!("{log_prefix} failed after 3 attempts: {last_err}"))
 }
 
-/// Register a new account on the homeserver.
-///
-/// Handles the UIAA flow for `m.login.registration_token` + `m.login.dummy`.
-/// After registration succeeds, builds a full matrix-sdk Client and logs in.
+// Keep the typed rejection separate from timeouts, malformed responses and
+// rate limits. Only a genuine credential rejection permits a legacy probe.
+pub(super) async fn request_password_session(
+    http: &reqwest::Client,
+    home: &str,
+    user: &str,
+    credential: &str,
+    device: Option<&str>,
+) -> Result<SavedSession, PasswordLoginError> {
+    let mut body = serde_json::json!({
+        "type": "m.login.password", "identifier": { "type": "m.id.user", "user": user },
+        "password": credential, "initial_device_display_name": "Pax", "refresh_token": false,
+    });
+    if let Some(device) = device {
+        body["device_id"] = device.into();
+    }
+    let response = http
+        .post(format!(
+            "{}/_matrix/client/v3/login",
+            home.trim_end_matches('/')
+        ))
+        .timeout(Duration::from_secs(30))
+        .json(&body)
+        .send()
+        .await
+        .map_err(|_| {
+            PasswordLoginError::Other(
+                "Could not contact the homeserver. Check your connection and try again.".into(),
+            )
+        })?;
+    let status = response.status();
+    let value: serde_json::Value = response.json().await.map_err(|_| {
+        PasswordLoginError::Other("Invalid sign-in response from the homeserver.".into())
+    })?;
+    if status.as_u16() == 403 && value["errcode"] == "M_FORBIDDEN" {
+        return Err(PasswordLoginError::Rejected);
+    }
+    if !status.is_success() {
+        // Do not echo server-controlled error text which could contain secrets.
+        return Err(PasswordLoginError::Other(if status.as_u16() == 429 {
+            "Too many sign-in attempts. Wait a moment and try again.".into()
+        } else {
+            format!("The homeserver could not complete sign-in (HTTP {status}).")
+        }));
+    }
+    session_from_response(&value).map_err(PasswordLoginError::Other)
+}
+
+fn session_from_response(value: &serde_json::Value) -> Result<SavedSession, String> {
+    let field = |name| {
+        value[name]
+            .as_str()
+            .filter(|s| !s.is_empty())
+            .map(str::to_owned)
+            .ok_or_else(|| "Incomplete authentication response from the homeserver.".to_string())
+    };
+    let user_id = field("user_id")?;
+    matrix_sdk::ruma::UserId::parse(&user_id)
+        .map_err(|_| "Invalid account ID in authentication response")?;
+    Ok(SavedSession {
+        user_id,
+        device_id: field("device_id")?,
+        access_token: field("access_token")?,
+    })
+}
+
+/// Registration UIAA always receives the actual Matrix credential, never a
+/// Pax account's memorable password. Unsupported challenges fail explicitly.
+pub(super) async fn submit_registration(
+    http: &reqwest::Client,
+    home: &str,
+    username: &str,
+    credential: &str,
+    token: &str,
+) -> Result<SavedSession, String> {
+    let url = format!("{}/_matrix/client/v3/register", home.trim_end_matches('/'));
+    let mut body = serde_json::json!({ "username": username, "password": credential, "initial_device_display_name": "Pax" });
+    for _ in 0..4 {
+        let response = http.post(&url).timeout(Duration::from_secs(30)).json(&body).send().await
+            .map_err(|_| "Registration could not reach the homeserver. If the account was created, sign in with the same password to finish setup.")?;
+        let status = response.status();
+        let challenge: serde_json::Value = response
+            .json()
+            .await
+            .map_err(|_| "Invalid registration response")?;
+        if status.is_success() {
+            return session_from_response(&challenge);
+        }
+        if status.as_u16() != 401 {
+            return Err(match challenge["errcode"].as_str() {
+                Some("M_USER_IN_USE") => {
+                    "This username is already registered. Sign in or choose another username."
+                        .into()
+                }
+                Some("M_INVALID_USERNAME") => {
+                    "This username is not allowed by the homeserver.".into()
+                }
+                Some("M_WEAK_PASSWORD") => {
+                    "The homeserver did not accept this account password.".into()
+                }
+                Some("M_FORBIDDEN") => {
+                    "Registration was rejected. Check the registration token.".into()
+                }
+                _ => format!("Registration failed (HTTP {status})."),
+            });
+        }
+        let session = challenge["session"]
+            .as_str()
+            .ok_or("Missing registration authentication session")?;
+        let completed = challenge["completed"]
+            .as_array()
+            .cloned()
+            .unwrap_or_default();
+        let flows = challenge["flows"]
+            .as_array()
+            .ok_or("Unsupported registration challenge")?;
+        let stages = flows
+            .iter()
+            .filter_map(|f| f["stages"].as_array())
+            .find(|stages| {
+                stages.iter().all(|s| {
+                    matches!(
+                        s.as_str(),
+                        Some("m.login.dummy" | "m.login.registration_token")
+                    )
+                })
+            })
+            .ok_or("This server requires a registration step Pax does not support yet.")?;
+        let next = stages
+            .iter()
+            .find(|s| !completed.contains(s))
+            .and_then(|s| s.as_str())
+            .ok_or("Registration did not complete. Check the registration token.")?;
+        if body["auth"]["type"].as_str() == Some(next) {
+            return Err(
+                "Registration authentication was rejected. Check the registration token.".into(),
+            );
+        }
+        body["auth"] = match next {
+            "m.login.registration_token" => {
+                serde_json::json!({ "type": next, "token": token, "session": session })
+            }
+            _ => serde_json::json!({ "type": next, "session": session }),
+        };
+    }
+    Err("Registration did not complete. Check the registration token.".into())
+}
+
+async fn stop_previous_session(state: &AppState) {
+    state.stop_sync_task().await;
+    state.notifications.reset();
+    state.voice_presence.reset();
+    state.attachments.reset().await;
+    *state.client.lock().await = None;
+}
+
+async fn restore_authenticated_client(
+    app: &tauri::AppHandle,
+    home: &str,
+    session: &SavedSession,
+    rel: &str,
+    mode: AccountMode,
+) -> Result<Client, String> {
+    let client = build_client_for_mode(home, &app_data_dir(app)?.join(rel), mode).await?;
+    client
+        .restore_session(MatrixSession {
+            meta: SessionMeta {
+                user_id: matrix_sdk::ruma::UserId::parse(&session.user_id)
+                    .map_err(|_| "Invalid account ID")?,
+                device_id: session.device_id.clone().into(),
+            },
+            tokens: SessionTokens {
+                access_token: session.access_token.clone(),
+                refresh_token: None,
+            },
+        })
+        .await
+        .map_err(|_| {
+            "Could not open the encryption store. The original files have been preserved."
+        })?;
+    Ok(client)
+}
+
+async fn initial_sync(client: &Client) -> Result<(), String> {
+    timeout(
+        Duration::from_secs(30),
+        client.sync_once(
+            SyncSettings::default()
+                .set_presence(matrix_sdk::ruma::presence::PresenceState::Offline),
+        ),
+    )
+    .await
+    .map_err(|_| "Initial sync timed out. Sign in again to continue.".to_string())?
+    .map_err(|_| "Initial sync failed. Check your connection and sign in again.".to_string())?;
+    Ok(())
+}
+
+async fn install_session(
+    state: &AppState,
+    client: Client,
+    mode: AccountMode,
+) -> Result<String, String> {
+    let user = client.user_id().ok_or("Missing account ID")?.to_string();
+    *state.account_mode.lock().await = mode;
+    *state.client.lock().await = Some(client);
+    state.notifications.start_session();
+    state.voice_presence.start_session();
+    state.attachments.start_session();
+    *state.sync_running.lock().await = false;
+    state.avatars.reset();
+    state.file_cache.clear().await;
+    Ok(user)
+}
+
+fn progress(app: &tauri::AppHandle, message: &str) {
+    let _ = app.emit("auth-progress", message);
+}
+
 #[tauri::command]
 pub async fn register(
     state: State<'_, Arc<AppState>>,
@@ -443,208 +600,208 @@ pub async fn register(
     username: String,
     password: String,
     registration_token: String,
-) -> Result<String, String> {
-    let http = &state.http_client;
-    let register_url = format!(
-        "{}/_matrix/client/v3/register",
-        homeserver.trim_end_matches('/')
-    );
-
-    // Step 1: Initial request to get session + required flows
-    let initial = serde_json::json!({
-        "username": username,
-        "password": password,
-        "initial_device_display_name": "Pax",
-    });
-
-    let resp = http
-        .post(&register_url)
-        .json(&initial)
-        .send()
-        .await
-        .map_err(|e| format!("Failed to contact homeserver: {e}"))?;
-
-    // 200 means open registration (no UIAA) — unlikely with a token server, but handle it
-    if resp.status().is_success() {
-        let body: serde_json::Value = resp
-            .json()
-            .await
-            .map_err(|e| format!("Failed to parse registration response: {e}"))?;
-        return finish_registration(&state, &app, &homeserver, &username, &password, &body).await;
-    }
-
-    if resp.status().as_u16() != 401 {
-        let status = resp.status();
-        let text = resp.text().await.unwrap_or_default();
-        return Err(format!("Registration failed ({}): {}", status, text));
-    }
-
-    // 401 → UIAA challenge
-    let uiaa: serde_json::Value = resp
-        .json()
-        .await
-        .map_err(|e| format!("Failed to parse UIAA response: {e}"))?;
-
-    let session = uiaa["session"]
-        .as_str()
-        .ok_or("No UIAA session in response")?
-        .to_string();
-
-    // Step 2: Complete m.login.registration_token stage
-    let token_auth = serde_json::json!({
-        "username": username,
-        "password": password,
-        "initial_device_display_name": "Pax",
-        "auth": {
-            "type": "m.login.registration_token",
-            "token": registration_token,
-            "session": session,
-        }
-    });
-
-    let resp = http
-        .post(&register_url)
-        .json(&token_auth)
-        .send()
-        .await
-        .map_err(|e| format!("Failed to send token auth: {e}"))?;
-
-    if resp.status().is_success() {
-        let body: serde_json::Value = resp
-            .json()
-            .await
-            .map_err(|e| format!("Failed to parse registration response: {e}"))?;
-        return finish_registration(&state, &app, &homeserver, &username, &password, &body).await;
-    }
-
-    if resp.status().as_u16() != 401 {
-        let status = resp.status();
-        let text = resp.text().await.unwrap_or_default();
-        return Err(format!(
-            "Registration token rejected ({}): {}",
-            status, text
-        ));
-    }
-
-    // Some servers require an additional m.login.dummy stage after the token
-    let uiaa2: serde_json::Value = resp
-        .json()
-        .await
-        .map_err(|e| format!("Failed to parse second UIAA response: {e}"))?;
-
-    // Check if the token stage completed (should appear in "completed" array)
-    let completed = uiaa2["completed"].as_array();
-    let token_accepted = completed
-        .map(|arr| {
-            arr.iter()
-                .any(|v| v.as_str() == Some("m.login.registration_token"))
-        })
-        .unwrap_or(false);
-
-    if !token_accepted {
-        return Err("Registration token was not accepted by the server".to_string());
-    }
-
-    // Step 3: Complete m.login.dummy stage
-    let dummy_auth = serde_json::json!({
-        "username": username,
-        "password": password,
-        "initial_device_display_name": "Pax",
-        "auth": {
-            "type": "m.login.dummy",
-            "session": session,
-        }
-    });
-
-    let resp = http
-        .post(&register_url)
-        .json(&dummy_auth)
-        .send()
-        .await
-        .map_err(|e| format!("Failed to send dummy auth: {e}"))?;
-
-    if resp.status().is_success() {
-        let body: serde_json::Value = resp
-            .json()
-            .await
-            .map_err(|e| format!("Failed to parse registration response: {e}"))?;
-        return finish_registration(&state, &app, &homeserver, &username, &password, &body).await;
-    }
-
-    let status = resp.status();
-    let text = resp.text().await.unwrap_or_default();
-    Err(format!(
-        "Registration failed at dummy stage ({}): {}",
-        status, text
-    ))
-}
-
-/// After registration succeeds, log in with the SDK to get a proper Client.
-async fn finish_registration(
-    state: &State<'_, Arc<AppState>>,
-    app: &tauri::AppHandle,
-    homeserver: &str,
-    username: &str,
-    password: &str,
-    _reg_response: &serde_json::Value,
+    account_mode: Option<AccountMode>,
 ) -> Result<String, String> {
     let _operation = state.encryption.operation.lock().await;
-    // Registration succeeded — now do a normal SDK login so we get a fully
-    // initialised Client with crypto store, sync, etc.
-    state.stop_sync_task().await;
-    state.notifications.reset();
-    state.voice_presence.reset();
-    state.attachments.reset().await;
-    *state.client.lock().await = None;
-
-    let (client, store_rel) = login_password_into_new_store(
-        app,
-        homeserver,
-        username,
-        password,
-        "Post-registration login",
-        None,
+    let password = zeroize::Zeroizing::new(password);
+    let mode = account_mode.unwrap_or(AccountMode::Pax);
+    if username.is_empty() || password.is_empty() {
+        return Err("Username and password are required.".into());
+    }
+    let rel = format!("matrix_sessions/pw_{}", uuid::Uuid::new_v4());
+    if mode == AccountMode::Matrix {
+        progress(&app, "Creating account…");
+        let session = submit_registration(
+            &state.http_client,
+            &homeserver,
+            &username,
+            &password,
+            &registration_token,
+        )
+        .await?;
+        stop_previous_session(&state).await;
+        save_session_to_credentials(
+            &app,
+            &homeserver,
+            session.clone(),
+            Some(rel.clone()),
+            mode,
+            false,
+        )?;
+        let client = restore_authenticated_client(&app, &homeserver, &session, &rel, mode).await?;
+        initial_sync(&client).await?;
+        // Explicit standard markers are helpful, but legacy servers without
+        // custom profile support remain fully usable.
+        if pax_auth::check_profile_support(&state.http_client, &homeserver)
+            .await
+            .is_ok()
+        {
+            let _ = pax_auth::publish(
+                &state.http_client,
+                &client,
+                &Descriptor::new(&session.user_id, mode, true),
+            )
+            .await;
+        }
+        return install_session(&state, client, mode).await;
+    }
+    pax_auth::ensure_trusted(&homeserver, &state.auth_config)?;
+    if password.chars().count() < 12 {
+        return Err(
+            "Use at least 12 characters for your Pax password. A few unrelated words work well."
+                .into(),
+        );
+    }
+    progress(&app, "Checking homeserver…");
+    pax_auth::check_profile_support(&state.http_client, &homeserver).await?;
+    let user = pax_auth::account_id(
+        &state.http_client,
+        &homeserver,
+        &username,
+        &state.auth_config,
     )
     .await?;
-
-    tokio::time::timeout(
-        Duration::from_secs(30),
-        client.sync_once(
-            SyncSettings::default()
-                .set_presence(matrix_sdk::ruma::presence::PresenceState::Offline),
-        ),
-    )
-    .await
-    .map_err(|_| "Initial sync timed out (30s)".to_string())?
-    .map_err(|e| format!("Initial sync failed: {}", fmt_error_chain(&e)))?;
-
-    if let Some(session) = client.matrix_auth().session() {
-        save_session_to_credentials(
-            app,
-            homeserver,
-            SavedSession {
-                user_id: session.meta.user_id.to_string(),
-                device_id: session.meta.device_id.to_string(),
-                access_token: session.tokens.access_token,
-            },
-            Some(store_rel),
-        )?;
+    let existing = pax_auth::read_enrollment(&app, &homeserver, &user)?;
+    if existing.as_ref().is_some_and(|e| e.registered || e.ready) {
+        return Err(
+            "This account was already created. Sign in with the same password to continue setup."
+                .into(),
+        );
     }
+    progress(&app, "Protecting your password…");
+    let keys = pax_auth::derive(&user, &password).await?;
+    let mut record = Enrollment {
+        user_id: user.clone(),
+        homeserver: homeserver.clone(),
+        store_dir: rel.clone(),
+        device_id: None,
+        registered: false,
+        ready: false,
+    };
+    pax_auth::save_enrollment(&app, &record)?;
+    progress(&app, "Creating account…");
+    let session = submit_registration(
+        &state.http_client,
+        &homeserver,
+        &username,
+        &keys.credential,
+        &registration_token,
+    )
+    .await?;
+    let finish: Result<Client, String> = async {
+        if session.user_id != user {
+            return Err("The server returned a different account domain. Account creation succeeded, but Pax setup stopped to protect your keys. Check PAX_SERVER_NAME before continuing.".into());
+        }
+        record.registered = true;
+        record.device_id = Some(session.device_id.clone());
+        // Save the original device before any fallible crypto/network work. A
+        // normal sign-in can resume using exactly this device's encryption store.
+        pax_auth::save_enrollment(&app, &record)?;
+        save_session_to_credentials(
+            &app, &homeserver, session.clone(), Some(rel.clone()), mode, true,
+        )?;
+        stop_previous_session(&state).await;
+        let client = restore_authenticated_client(&app, &homeserver, &session, &rel, mode).await?;
+        pax_auth::publish(&state.http_client, &client, &Descriptor::new(&user, mode, false)).await?;
+        initial_sync(&client).await?;
+        progress(&app, "Setting up encrypted history…");
+        pax_auth::complete_enrollment(&state.http_client, &client, &keys, true).await?;
+        record.ready = true;
+        pax_auth::save_enrollment(&app, &record)?;
+        save_session_to_credentials(&app, &homeserver, session, Some(rel), mode, false)?;
+        Ok(client)
+    }.await;
+    let client = finish.map_err(|e| {
+        format!("Your account was created. Sign in with the same password to finish setup. {e}")
+    })?;
+    install_session(&state, client, mode).await
+}
 
-    let user_id = client
-        .user_id()
-        .ok_or("No user ID after registration")?
-        .to_string();
+pub(super) struct PasswordAuthentication {
+    pub session: SavedSession,
+    pub mode: AccountMode,
+    pub keys: Option<pax_auth::PaxKeys>,
+    pub descriptor: Option<Descriptor>,
+}
 
-    *state.client.lock().await = Some(client);
-    state.notifications.start_session();
-    state.voice_presence.start_session();
-    state.attachments.start_session();
-    *state.sync_running.lock().await = false;
-    state.avatars.reset();
-    state.file_cache.clear().await;
-    log::info!("register: done — user_id={}", user_id);
-    Ok(user_id)
+/// Mode discovery and network authentication share one path in the UI and
+/// integration tests. No Tauri or disk state is needed until authentication.
+pub(super) async fn authenticate_password(
+    http: &reqwest::Client,
+    home: &str,
+    user: &str,
+    password: &str,
+    device: Option<&str>,
+    config: &crate::AuthConfig,
+    pinned: bool,
+) -> Result<PasswordAuthentication, String> {
+    // A local Pax pin can safely keep using derived authentication during a
+    // discovery outage. It never permits sending the memorable password.
+    let descriptor = match pax_auth::discover(http, home, user).await {
+        Ok(d) => d,
+        Err(pax_auth::DiscoveryError::Unavailable(_)) if pinned => None,
+        Err(e) => return Err(e.into()),
+    };
+    if pinned
+        && descriptor
+            .as_ref()
+            .is_some_and(|d| d.mode == AccountMode::Matrix)
+    {
+        return Err("This account's sign-in settings changed unexpectedly. Pax has kept your password private. Check with your homeserver administrator.".into());
+    }
+    let desired = if pinned {
+        Some(AccountMode::Pax)
+    } else {
+        descriptor.as_ref().map(|d| d.mode)
+    };
+    // Pax enrollment is limited to the deployment's trusted homeserver.
+    // Unmarked accounts on other servers keep ordinary Matrix authentication.
+    let desired = if desired.is_none() && pax_auth::ensure_trusted(home, config).is_err() {
+        Some(AccountMode::Matrix)
+    } else {
+        desired
+    };
+    let mut keys = None;
+    let (session, mode) = if desired == Some(AccountMode::Matrix) {
+        (
+            request_password_session(http, home, user, password, device)
+                .await
+                .map_err(PasswordLoginError::message)?,
+            AccountMode::Matrix,
+        )
+    } else {
+        pax_auth::ensure_trusted(home, config)?;
+        let derived = pax_auth::derive(user, password).await?;
+        match request_password_session(http, home, user, &derived.credential, device).await {
+            Ok(session) => {
+                keys = Some(derived);
+                (session, AccountMode::Pax)
+            }
+            // Unsigned, trusted-server compatibility for older, unmarked
+            // Matrix accounts. Never infer mode from a timeout or rate limit.
+            Err(PasswordLoginError::Rejected) if desired.is_none() => (
+                request_password_session(http, home, user, password, device)
+                    .await
+                    .map_err(PasswordLoginError::message)?,
+                AccountMode::Matrix,
+            ),
+            Err(e) => return Err(e.message()),
+        }
+    };
+    if session.user_id != user {
+        return Err(
+            "The homeserver authenticated a different account. Sign-in was stopped.".into(),
+        );
+    }
+    if device.is_some_and(|device| device != session.device_id) {
+        return Err("The homeserver returned a different device. Your original encryption store has been preserved.".into());
+    }
+    Ok(PasswordAuthentication {
+        session,
+        mode,
+        keys,
+        descriptor,
+    })
 }
 
 #[tauri::command]
@@ -657,69 +814,124 @@ pub async fn login(
     persist_session: bool,
 ) -> Result<String, String> {
     let _operation = state.encryption.operation.lock().await;
-    let previous_client = state.client.lock().await.clone();
+    let password = zeroize::Zeroizing::new(password);
     let previous_credentials = load_credentials(app.clone())?;
+    let previous_client = state.client.lock().await.clone();
     let reusable = previous_credentials
         .as_ref()
-        .and_then(|creds| reusable_login_store(creds, &homeserver, &username))
-        .filter(|(rel, _)| app_data_dir(&app).is_ok_and(|base| base.join(rel).exists()));
-    state.stop_sync_task().await;
-    state.notifications.reset();
-    state.voice_presence.reset();
-    state.attachments.reset().await;
-    *state.client.lock().await = None;
-
-    log::info!("login: password auth for {}", homeserver);
-    let (client, store_rel) =
-        login_password_into_new_store(&app, &homeserver, &username, &password, "Login", reusable)
-            .await?;
-
-    transfer_previous_room_keys(&app, &client, previous_client, previous_credentials).await?;
-
-    log::info!("login: running initial sync...");
-    tokio::time::timeout(
-        Duration::from_secs(30),
-        client.sync_once(
-            SyncSettings::default()
-                .set_presence(matrix_sdk::ruma::presence::PresenceState::Offline),
-        ),
+        .and_then(|c| reusable_login_store(c, &homeserver, &username));
+    let user = if reusable.is_some() {
+        previous_credentials
+            .as_ref()
+            .and_then(|c| c.session.as_ref())
+            .unwrap()
+            .user_id
+            .clone()
+    } else {
+        pax_auth::account_id(
+            &state.http_client,
+            &homeserver,
+            &username,
+            &state.auth_config,
+        )
+        .await?
+    };
+    let record = pax_auth::read_enrollment(&app, &homeserver, &user)?;
+    let pinned = record.as_ref().is_some_and(|e| e.registered || e.ready)
+        || previous_credentials
+            .as_ref()
+            .is_some_and(|c| c.account_mode == AccountMode::Pax && reusable.is_some());
+    let reusable = reusable
+        .or_else(|| {
+            record.as_ref().and_then(|r| {
+                r.device_id
+                    .as_ref()
+                    .map(|d| (r.store_dir.clone(), d.clone()))
+            })
+        })
+        .filter(|(rel, device)| {
+            app_data_dir(&app).is_ok_and(|base| base.join(rel).exists())
+                || record.as_ref().is_some_and(|r| {
+                    r.registered
+                        && !r.ready
+                        && &r.store_dir == rel
+                        && r.device_id.as_ref() == Some(device)
+                })
+        });
+    progress(&app, "Unlocking your account…");
+    let PasswordAuthentication {
+        session,
+        mode,
+        keys,
+        descriptor,
+    } = authenticate_password(
+        &state.http_client,
+        &homeserver,
+        &user,
+        &password,
+        reusable.as_ref().map(|(_, d)| d.as_str()),
+        &state.auth_config,
+        pinned,
     )
-    .await
-    .map_err(|_| "Initial sync timed out (30s) — is the homeserver responsive?".to_string())?
-    .map_err(|e| format!("Initial sync failed: {}", fmt_error_chain(&e)))?;
-
-    log::info!("login: sync complete, saving session...");
-    if persist_session {
-        if let Some(session) = client.matrix_auth().session() {
-            save_session_to_credentials(
-                &app,
-                &homeserver,
-                SavedSession {
-                    user_id: session.meta.user_id.to_string(),
-                    device_id: session.meta.device_id.to_string(),
-                    access_token: session.tokens.access_token,
-                },
-                Some(store_rel),
-            )?;
+    .await?;
+    let rel = reusable
+        .as_ref()
+        .map(|(r, _)| r.clone())
+        .unwrap_or_else(|| format!("matrix_sessions/pw_{}", uuid::Uuid::new_v4()));
+    let local_setup = record.as_ref().is_some_and(|r| {
+        r.registered
+            && !r.ready
+            && r.store_dir == rel
+            && r.device_id.as_deref() == Some(session.device_id.as_str())
+    });
+    let mut pin = if mode == AccountMode::Pax {
+        let mut pin = record.unwrap_or(Enrollment {
+            user_id: user.clone(),
+            homeserver: homeserver.clone(),
+            store_dir: rel.clone(),
+            device_id: Some(session.device_id.clone()),
+            registered: false,
+            ready: true,
+        });
+        pin.store_dir = rel.clone();
+        pin.device_id = Some(session.device_id.clone());
+        pax_auth::save_enrollment(&app, &pin)?;
+        save_session_to_credentials(
+            &app,
+            &homeserver,
+            session.clone(),
+            Some(rel.clone()),
+            mode,
+            true,
+        )?;
+        Some(pin)
+    } else {
+        None
+    };
+    stop_previous_session(&state).await;
+    let client = restore_authenticated_client(&app, &homeserver, &session, &rel, mode).await?;
+    transfer_previous_room_keys(&app, &client, previous_client, previous_credentials).await?;
+    initial_sync(&client).await?;
+    if let Some(keys) = &keys {
+        progress(&app, "Restoring encrypted history…");
+        let pending = descriptor.as_ref().is_some_and(|d| d.state == "pending") || local_setup;
+        if pending {
+            pax_auth::complete_enrollment(&state.http_client, &client, keys, local_setup).await?;
+        } else {
+            let envelope = pax_auth::fetch_envelope(&client).await?.ok_or("Account recovery information is missing. Try your original computer; no encryption data has been replaced.")?;
+            pax_auth::unlock(&client, keys, &envelope).await?;
         }
+        if let Some(pin) = pin.as_mut() {
+            pin.ready = true;
+            pax_auth::save_enrollment(&app, pin)?;
+        }
+    }
+    if persist_session {
+        save_session_to_credentials(&app, &homeserver, session, Some(rel), mode, false)?;
     } else {
         clear_saved_credentials(app.clone())?;
     }
-
-    let user_id = client
-        .user_id()
-        .ok_or("No user ID after login")?
-        .to_string();
-
-    *state.client.lock().await = Some(client);
-    state.notifications.start_session();
-    state.voice_presence.start_session();
-    state.attachments.start_session();
-    *state.sync_running.lock().await = false;
-    state.avatars.reset();
-    state.file_cache.clear().await;
-    log::info!("login: done — user_id={}", user_id);
-    Ok(user_id)
+    install_session(&state, client, mode).await
 }
 
 /// Fast-path boot: restore a previously saved session from the SQLite store.
@@ -732,7 +944,16 @@ pub async fn restore_session(
 ) -> Result<String, String> {
     let _operation = state.encryption.operation.lock().await;
     let creds = load_credentials(app.clone())?.ok_or("No saved credentials")?;
+    if creds.pax_enrollment_pending {
+        return Err("Sign in with your password to finish encrypted account setup.".into());
+    }
     let sp = sqlite_path_for_restore(&app, &creds)?;
+    if creds.account_mode == AccountMode::Pax && !sp.exists() {
+        return Err(
+            "Sign in with your Pax password to restore encrypted history on this installation."
+                .into(),
+        );
+    }
     let sd = creds.session.ok_or("No saved session")?;
 
     // If a compile-time homeserver is configured, reject saved sessions that
@@ -748,7 +969,7 @@ pub async fn restore_session(
     }
 
     log::info!("restore_session: building client for {}", creds.homeserver);
-    let client = build_client_with_retry(&creds.homeserver, &sp).await?;
+    let client = build_client_for_mode(&creds.homeserver, &sp, creds.account_mode).await?;
 
     let user_id = matrix_sdk::ruma::UserId::parse(&sd.user_id)
         .map_err(|e| format!("Invalid user ID: {e}"))?;
@@ -816,6 +1037,22 @@ pub async fn restore_session(
     }
 
     log::info!("restore_session: valid — user_id={}", user_id);
+    if creds.account_mode == AccountMode::Pax {
+        client
+            .encryption()
+            .wait_for_e2ee_initialization_tasks()
+            .await;
+        if !client
+            .encryption()
+            .cross_signing_status()
+            .await
+            .is_some_and(|s| s.is_complete())
+            || !client.encryption().backups().are_enabled().await
+        {
+            return Err("Sign in with your Pax password to restore encrypted history.".into());
+        }
+    }
+    *state.account_mode.lock().await = creds.account_mode;
     state.notifications.reset();
     state.voice_presence.reset();
     state.attachments.reset().await;
@@ -852,6 +1089,8 @@ mod encryption_tests {
                 access_token: "expired".into(),
             }),
             sqlite_store_dir: Some("matrix_sessions/pw_original".into()),
+            account_mode: AccountMode::Matrix,
+            pax_enrollment_pending: false,
         };
         assert_eq!(
             reusable_login_store(&saved, "https://example.org/", "alice"),

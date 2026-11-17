@@ -26,7 +26,7 @@ export default function EncryptionSettingsPanel({ compact = false }: { compact?:
     <div style={{ display: "flex", flexDirection: "column", gap: 16, color: palette.textPrimary, fontSize: typography.fontSizeBase }}>
       <p style={{ color: palette.textSecondary, lineHeight: 1.5, margin: 0 }}>
         Keep your encrypted conversations when you switch computers or reinstall Pax.
-        Your message keys are backed up encrypted, and only your verified devices or recovery key can unlock them.
+        {status?.paxLogin ? "Your Pax password unlocks encrypted recovery automatically when you sign in." : "Your message keys are backed up encrypted, and only your verified devices or recovery key can unlock them."}
       </p>
       {!status && !error && <p role="status">Checking encrypted backup…</p>}
       {status && (
@@ -63,7 +63,8 @@ export default function EncryptionSettingsPanel({ compact = false }: { compact?:
           </button>
         </form>
       )}
-      {status?.secretStorageExists && (!ready || !compact || status.recoveryKeyNeedsSave) && (
+      {status?.paxLogin && !ready && <p style={{ margin: 0, lineHeight: 1.5 }}>Sign in again with your Pax password to restore encrypted recovery automatically.</p>}
+      {!status?.paxLogin && status?.secretStorageExists && (!ready || !compact || status.recoveryKeyNeedsSave) && (
         <form onSubmit={(e) => { e.preventDefault(); ignore(encryption.restore(key).then(() => setKey(""))); }} style={{ display: "grid", gap: 10 }}>
           <label htmlFor={keyInputId}>Recovery key or recovery passphrase</label>
           <input id={keyInputId} type="password" autoComplete="off" spellCheck={false}
@@ -85,7 +86,7 @@ export default function EncryptionSettingsPanel({ compact = false }: { compact?:
       {status?.backupEnabled && !compact && (
         <button type="button" disabled={!!busy} style={button} onClick={() => ignore(encryption.backUp())}>Back up keys now</button>
       )}
-      {ready && (!compact || status?.recoveryKeyNeedsSave) && !replaceConfirm && (
+      {ready && !status?.paxLogin && (!compact || status?.recoveryKeyNeedsSave) && !replaceConfirm && (
         <button type="button" disabled={!!busy} style={button} onClick={() => setReplaceConfirm(true)}>Create a new recovery key</button>
       )}
       {replaceConfirm && (

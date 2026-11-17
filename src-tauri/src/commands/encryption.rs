@@ -153,6 +153,7 @@ impl EncryptionService {
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct EncryptionStatus {
+    pub pax_login: bool,
     pub recovery_state: String,
     pub backup_state: String,
     pub backup_exists: bool,
@@ -251,6 +252,7 @@ async fn status(client: &Client, service: &EncryptionService) -> Result<Encrypti
         .map_err(|e| format!("Could not check your identity: {}", fmt_error_chain(&e)))?
         .is_some();
     Ok(EncryptionStatus {
+        pax_login: false,
         recovery_state: format!("{:?}", encryption.recovery().state()).to_lowercase(),
         backup_state: format!("{:?}", encryption.backups().state()).to_lowercase(),
         backup_exists,
@@ -321,11 +323,16 @@ pub async fn get_encryption_status(
 ) -> Result<EncryptionStatus, String> {
     let _operation = state.encryption.operation.lock().await;
     let client = get_client(&state).await?;
-    timeout(Duration::from_secs(20), status(&client, &state.encryption))
+    let mut current = timeout(Duration::from_secs(20), status(&client, &state.encryption))
         .await
         .map_err(|_| {
             "Could not check encrypted backup. Check your connection and try again.".to_string()
-        })?
+        })??;
+    current.pax_login = *state.account_mode.lock().await == super::pax_auth::AccountMode::Pax;
+    if current.pax_login {
+        current.can_setup = false;
+    }
+    Ok(current)
 }
 
 #[tauri::command]
@@ -344,6 +351,11 @@ pub async fn setup_encryption_recovery(
     password: Option<String>,
 ) -> Result<String, String> {
     let _operation = state.encryption.operation.lock().await;
+    if *state.account_mode.lock().await == super::pax_auth::AccountMode::Pax {
+        return Err(
+            "Sign in again with your Pax password to restore automatic encrypted recovery.".into(),
+        );
+    }
     let client = get_client(&state).await?;
     if let Some(key) = state.encryption.pending_key.lock().await.as_ref() {
         return Ok(key.clone());
@@ -455,6 +467,9 @@ pub async fn replace_encryption_recovery_key(
     app: tauri::AppHandle,
 ) -> Result<String, String> {
     let _operation = state.encryption.operation.lock().await;
+    if *state.account_mode.lock().await == super::pax_auth::AccountMode::Pax {
+        return Err("Pax sign-in manages your recovery key automatically. Replacing it here would prevent password-based history recovery.".into());
+    }
     let client = get_client(&state).await?;
     let current = status(&client, &state.encryption).await?;
     if !current.cross_signing_ready || !current.backup_enabled {

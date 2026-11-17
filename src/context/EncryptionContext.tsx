@@ -3,6 +3,7 @@ import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 
 export interface EncryptionStatus {
+  paxLogin: boolean;
   recoveryState: string;
   backupState: string;
   backupExists: boolean;

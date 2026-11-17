@@ -39,6 +39,8 @@ use platform::DisplayServer;
 pub struct AuthConfig {
     /// Default homeserver URL (pre-fills the field).
     pub default_homeserver: Option<String>,
+    /// Optional Matrix account domain when the server-key endpoint is unavailable.
+    pub server_name: Option<String>,
     /// Registration token (pre-fills the sign-up token field).
     pub registration_token: Option<String>,
     /// When true AND both above are set, hide homeserver + token fields entirely.
@@ -47,6 +49,7 @@ pub struct AuthConfig {
 
 pub struct AppState {
     pub client: Mutex<Option<Client>>,
+    pub account_mode: Mutex<commands::pax_auth::AccountMode>,
     pub encryption: commands::encryption::EncryptionService,
     pub http_client: reqwest::Client,
     pub presence_map: Arc<Mutex<HashMap<String, String>>>,
@@ -280,6 +283,7 @@ pub fn run() {
         .unwrap_or(false);
     let auth_config = AuthConfig {
         default_homeserver,
+        server_name: option_env!("PAX_SERVER_NAME").map(String::from),
         registration_token,
         hide_server_config,
     };
@@ -293,6 +297,7 @@ pub fn run() {
     let state = Arc::new(AppState {
         encryption: commands::encryption::EncryptionService::default(),
         client: Mutex::new(None),
+        account_mode: Mutex::new(commands::pax_auth::AccountMode::Matrix),
         http_client: reqwest::Client::builder()
             .tcp_keepalive(Duration::from_secs(30))
             .build()

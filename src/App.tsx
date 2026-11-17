@@ -19,6 +19,7 @@ import { homeserverUrlToHostname, sanitizeSignupUsernameInput } from "./utils/ma
 import { usePushNotifications } from "./hooks/usePushNotifications";
 import { EncryptionProvider } from "./context/EncryptionContext";
 import EncryptionRecovery, { EncryptionSignOut } from "./components/EncryptionRecovery";
+import AuthModeSelector, { type AccountMode } from "./components/AuthModeSelector";
 
 if (import.meta.env.DEV) {
   const w = window as unknown as { invoke: typeof invoke; listen: typeof listen };
@@ -28,6 +29,7 @@ if (import.meta.env.DEV) {
 
 interface AuthConfig {
   default_homeserver: string | null;
+  server_name: string | null;
   registration_token: string | null;
   hide_server_config: boolean;
 }
@@ -54,8 +56,9 @@ function App() {
         display: "flex",
         flexDirection: "column" as const,
         alignItems: "center",
-        justifyContent: "center",
+        justifyContent: "safe center",
         height: "100%",
+        overflowY: "auto" as const,
         width: "100%",
         padding: spacing.unit * 5,
         gap: spacing.unit * 4,
@@ -181,6 +184,9 @@ function App() {
   const [rememberMe, setRememberMe] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [loading, setLoading] = useState(false);
+  const authBusyRef = useRef(false);
+  const [authProgress, setAuthProgress] = useState<string | null>(null);
+  const [accountMode, setAccountMode] = useState<AccountMode>("pax-password");
   const autoLoginAttemptedRef = useRef(false);
   const syncStartedRef = useRef(false);
   const [autoLoggingIn, setAutoLoggingIn] = useState(true);
@@ -231,8 +237,15 @@ function App() {
         setRegistrationToken(cfg.registration_token);
       }
     }).catch(() => {
-      setAuthConfig({ default_homeserver: null, registration_token: null, hide_server_config: false });
+      setAuthConfig({ default_homeserver: null, server_name: null, registration_token: null, hide_server_config: false });
     });
+  }, []);
+
+  useEffect(() => {
+    const unlisten = listen<string>("auth-progress", ({ payload }) => {
+      if (authBusyRef.current) setAuthProgress(payload);
+    });
+    return () => { void unlisten.then((stop) => stop()); };
   }, []);
 
   // Whether to hide the homeserver + token fields
@@ -242,6 +255,10 @@ function App() {
     (tab === "login" || !!authConfig.registration_token);
 
   async function handleLogin() {
+    if (authBusyRef.current) return;
+    if (!username.trim() || !password) { setError("Username and password are required"); return; }
+    authBusyRef.current = true;
+    setAuthProgress(null);
     setLoading(true);
     setError(null);
     try {
@@ -257,13 +274,17 @@ function App() {
         await invoke("start_sync");
       }
       setUserId(id);
+      setPassword("");
+      setConfirmPassword("");
     } catch (e) {
       setError(String(e));
     }
     setLoading(false);
+    authBusyRef.current = false;
   }
 
   async function handleRegister() {
+    if (authBusyRef.current) return;
     if (password !== confirmPassword) {
       setError("Passwords do not match");
       return;
@@ -276,25 +297,34 @@ function App() {
       setError("Username is required");
       return;
     }
+    if (accountMode === "pax-password" && Array.from(password).length < 12) {
+      setError("Use at least 12 characters for your Pax password. A few unrelated words work well.");
+      return;
+    }
+    authBusyRef.current = true;
+    setAuthProgress(null);
     setLoading(true);
     setError(null);
     try {
-      await invoke("save_credentials", { homeserver });
       const id = await invoke<string>("register", {
         homeserver,
         username,
         password,
         registrationToken,
+        accountMode,
       });
       if (!syncStartedRef.current) {
         syncStartedRef.current = true;
         await invoke("start_sync");
       }
       setUserId(id);
+      setPassword("");
+      setConfirmPassword("");
     } catch (e) {
       setError(String(e));
     }
     setLoading(false);
+    authBusyRef.current = false;
   }
 
   async function handleSignOut() {
@@ -329,7 +359,7 @@ function App() {
       }
 
       try {
-        const creds = await invoke<{ homeserver: string } | null>("load_credentials");
+        const creds = await invoke<{ homeserver: string; session?: { user_id: string } } | null>("load_credentials");
         if (creds) {
           // Only restore the saved homeserver if no compile-time default is
           // configured — PAX_HOMESERVER is the source of truth when set.
@@ -337,6 +367,7 @@ function App() {
             setHomeserver(creds.homeserver);
           }
           setRememberMe(true);
+          if (creds.session?.user_id) setUsername(creds.session.user_id);
         }
       } catch {
         // No saved credentials
@@ -347,6 +378,7 @@ function App() {
   }, [userId, authConfig]);
 
   function switchTab(newTab: "login" | "signup") {
+    if (authBusyRef.current) return;
     setTab(newTab);
     setError(null);
     if (newTab === "signup") {
@@ -355,8 +387,8 @@ function App() {
   }
 
   const signupHomeserverHost = useMemo(
-    () => (tab === "signup" ? homeserverUrlToHostname(homeserver) : null),
-    [tab, homeserver],
+    () => (tab === "signup" ? authConfig?.server_name ?? homeserverUrlToHostname(homeserver) : null),
+    [tab, homeserver, authConfig?.server_name],
   );
 
   const quitOverlay =
@@ -421,6 +453,7 @@ function App() {
       <div style={authStyles.tabRow}>
         <button
           type="button"
+          disabled={loading}
           style={tab === "login" ? authStyles.tabActive : authStyles.tab}
           onClick={() => switchTab("login")}
         >
@@ -428,6 +461,7 @@ function App() {
         </button>
         <button
           type="button"
+          disabled={loading}
           style={tab === "signup" ? authStyles.tabActive : authStyles.tab}
           onClick={() => switchTab("signup")}
         >
@@ -441,6 +475,8 @@ function App() {
           <input
             style={authStyles.input}
             placeholder="Homeserver URL"
+            aria-label="Homeserver URL"
+            disabled={loading}
             value={homeserver}
             onChange={(e) => setHomeserver(e.target.value)}
           />
@@ -454,6 +490,11 @@ function App() {
               : "Username"
           }
           value={username}
+          aria-label="Username"
+          autoComplete="username"
+          autoCapitalize="none"
+          spellCheck={false}
+          disabled={loading}
           onChange={(e) =>
             setUsername(
               tab === "signup"
@@ -486,6 +527,9 @@ function App() {
           style={authStyles.input}
           type="password"
           placeholder="Password"
+          aria-label="Password"
+          autoComplete={tab === "signup" ? "new-password" : "current-password"}
+          disabled={loading}
           value={password}
           onChange={(e) => setPassword(e.target.value)}
           onKeyDown={(e) => {
@@ -499,6 +543,9 @@ function App() {
               style={authStyles.input}
               type="password"
               placeholder="Confirm Password"
+              aria-label="Confirm password"
+              autoComplete="new-password"
+              disabled={loading}
               value={confirmPassword}
               onChange={(e) => setConfirmPassword(e.target.value)}
               onKeyDown={(e) => {
@@ -510,6 +557,8 @@ function App() {
               <input
                 style={authStyles.input}
                 placeholder="Registration Token (if required)"
+                aria-label="Registration token"
+                disabled={loading}
                 value={registrationToken}
                 onChange={(e) => setRegistrationToken(e.target.value)}
                 onKeyDown={(e) => {
@@ -517,6 +566,7 @@ function App() {
                 }}
               />
             )}
+            <AuthModeSelector value={accountMode} onChange={setAccountMode} disabled={loading} />
           </>
         )}
 
@@ -524,6 +574,7 @@ function App() {
           <label style={authStyles.checkboxLabel}>
             <input
               type="checkbox"
+              disabled={loading}
               checked={rememberMe}
               onChange={(e) => setRememberMe(e.target.checked)}
             />
@@ -548,15 +599,19 @@ function App() {
           }}
         >
           {loading
-            ? tab === "login"
+            ? authProgress ?? (tab === "login"
               ? "Logging in..."
-              : "Creating account..."
+              : "Creating account...")
             : tab === "login"
               ? "Login"
               : "Create Account"}
         </button>
 
-        {error && <p style={authStyles.error}>{error}</p>}
+        {error && <p role="alert" style={authStyles.error}>{error}</p>}
+        {tab === "signup" && (error?.startsWith("Your account was created.") || error?.startsWith("This account was already created.")) && (
+          <button type="button" disabled={loading} onClick={() => switchTab("login")}
+            style={{ ...authStyles.tab, color: palette.textPrimary }}>Sign in to finish setup</button>
+        )}
       </div>
     </div>
     {quitOverlay}
