@@ -30,6 +30,12 @@ Save the recovery key outside Pax. Your account password alone does not unlock e
 
 Local key databases survive logout and reauthentication. When saved credentials identify an existing device, password reauthentication reuses its database and device ID. Keys can also be transferred from a previous local session of the same account without deleting its original store. Sign-out checks recovery and attempts to finish pending uploads first.
 
+If you do not have a recovery key or account recovery cannot be unlocked, open **Settings → Encryption → Back up available history → Back up this device’s history**. Choose and confirm a backup file password of at least 12 characters. Pax saves an encrypted `pax-history-….txt` file to **Downloads** and shows how many message keys it contains. Move a copy somewhere safe and keep its password in your password manager. Both the file and its password are needed to restore it. This option is available for standard Matrix and Pax accounts even when the server recovery-status check fails.
+
+On another installation, sign in to the same account, open **Settings → Encryption → Restore from backup file**, select the file, and enter its backup password. Pax adds the keys without resetting account verification or replacing the existing server backup. This uses the standard Matrix encrypted message-key export format and also accepts compatible exports from other Matrix apps.
+
+File backups are snapshots of message keys present on that device. They do not include future keys, account identity secrets, message bodies, or attachments. Messages/media must still be available on the homeserver; already-lost keys cannot be recreated. Files are limited to 64 MiB, and imports reject unsupported or excessively costly key-derivation parameters. Export/import works offline once the account’s local store is open.
+
 To validate against a homeserver:
 
 1. On the original device, set up recovery, save the key, and choose **Back up keys now**. Check that the stored keys have finished backing up.

@@ -4,6 +4,7 @@ pub mod config;
 pub mod downloads;
 pub mod embed;
 pub mod encryption;
+pub mod history_backup;
 pub mod lifecycle;
 #[cfg(target_os = "linux")]
 pub mod media_compat;

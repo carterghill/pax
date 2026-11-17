@@ -429,6 +429,8 @@ pub fn run() {
             commands::encryption::restore_encryption_recovery,
             commands::encryption::replace_encryption_recovery_key,
             commands::encryption::sync_encryption_backup,
+            commands::history_backup::export_available_history,
+            commands::history_backup::import_available_history,
             commands::encryption::request_encryption_verification,
             commands::encryption::get_encryption_verification,
             commands::encryption::respond_encryption_verification,

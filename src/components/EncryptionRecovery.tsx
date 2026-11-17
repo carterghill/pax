@@ -41,7 +41,7 @@ function RecoveryDialog({ title, children }: { title: string; children: ReactNod
 
 export function EncryptionSignOut({ onCancel, onSignOut }: { onCancel: () => void; onSignOut: () => void }) {
   const { palette } = useTheme();
-  const { status } = useEncryption();
+  const { status, busy } = useEncryption();
   const [checking, setChecking] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [showRecovery, setShowRecovery] = useState(false);
@@ -69,19 +69,19 @@ export function EncryptionSignOut({ onCancel, onSignOut }: { onCancel: () => voi
   return (
     <RecoveryDialog title={checking ? "Backing up before sign-out" : "Protect your history before signing out"}>
       {checking ? <p role="status">Checking recovery and backing up your message keys…</p> : <>
-        <p style={{ lineHeight: 1.5 }}>Your encrypted history is not confirmed recoverable yet. Set up or unlock recovery and finish backing up before signing out.</p>
+        <p style={{ lineHeight: 1.5 }}>Your encrypted history is not confirmed recoverable yet. Set up or unlock recovery, or save an encrypted file of this device’s available message keys before signing out.</p>
         {error && <p role="alert">{error}</p>}
         {showRecovery ? <EncryptionSettingsPanel compact />
-          : <button type="button" style={button} onClick={() => setShowRecovery(true)}>Set up or restore recovery</button>}
+          : <button type="button" style={button} onClick={() => setShowRecovery(true)}>Recovery and file backup options</button>}
       </>}
       <div style={{ display: "flex", flexWrap: "wrap", gap: 10, marginTop: 20 }}>
-        <button type="button" style={button} onClick={onCancel}>Stay signed in</button>
+        <button type="button" disabled={!!busy} style={button} onClick={onCancel}>Stay signed in</button>
         {!checking && status?.backupEnabled && status.secretStorageExists && status.crossSigningReady && !status.recoveryKeyNeedsSave &&
-          <button type="button" style={button} onClick={() => {
+          <button type="button" disabled={!!busy} style={button} onClick={() => {
             setChecking(true);
             void invoke("sync_encryption_backup").then(onSignOut).catch((e) => { setError(String(e)); setChecking(false); });
           }}>Back up and sign out</button>}
-        {!checking && <button type="button" style={button} onClick={onSignOut}>Sign out anyway</button>}
+        {!checking && <button type="button" disabled={!!busy} style={button} onClick={onSignOut}>Sign out anyway</button>}
       </div>
     </RecoveryDialog>
   );

@@ -24,6 +24,16 @@ export interface VerificationStatus {
   decimals: [number, number, number] | null;
 }
 
+export interface HistoryExport {
+  savedPath: string;
+  keyCount: number;
+}
+
+export interface HistoryImport {
+  importedCount: number;
+  totalCount: number;
+}
+
 interface EncryptionContextValue {
   status: EncryptionStatus | null;
   error: string | null;
@@ -36,6 +46,10 @@ interface EncryptionContextValue {
   acknowledgeKey: () => Promise<void>;
   replaceKey: () => Promise<void>;
   backUp: () => Promise<void>;
+  historyExport: HistoryExport | null;
+  historyImport: HistoryImport | null;
+  exportHistory: (passphrase: string) => Promise<HistoryExport | null>;
+  importHistory: (contents: string, passphrase: string) => Promise<HistoryImport | null>;
   requestVerification: () => Promise<void>;
   respondVerification: (action: "accept" | "confirm" | "mismatch" | "cancel") => Promise<void>;
   dismissVerification: () => void;
@@ -43,13 +57,15 @@ interface EncryptionContextValue {
 
 const EncryptionContext = createContext<EncryptionContextValue | null>(null);
 
-export function EncryptionProvider({ children }: { children: ReactNode }) {
+export function EncryptionProvider({ children, userId }: { children: ReactNode; userId: string }) {
   const [status, setStatus] = useState<EncryptionStatus | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [connectionError, setConnectionError] = useState<string | null>(null);
   const [busy, setBusy] = useState<string | null>(null);
   const [recoveryKey, setRecoveryKey] = useState<string | null>(null);
   const [verification, setVerification] = useState<VerificationStatus | null>(null);
+  const [historyExport, setHistoryExport] = useState<HistoryExport | null>(null);
+  const [historyImport, setHistoryImport] = useState<HistoryImport | null>(null);
   const mounted = useRef(true);
   const refreshing = useRef(false);
   const operating = useRef(false);
@@ -116,14 +132,14 @@ export function EncryptionProvider({ children }: { children: ReactNode }) {
     return () => { cancelled = true; clearTimeout(timer); };
   }, [refreshVerification, verification?.state]);
 
-  const run = useCallback(async (label: string, action: () => Promise<void>) => {
+  const run = useCallback(async (label: string, action: () => Promise<void>, refreshAfter = true) => {
     if (operating.current) return;
     operating.current = true;
     setBusy(label);
     setError(null);
     try {
       await action();
-      await refresh();
+      if (refreshAfter) await refresh();
     } catch (e) {
       if (mounted.current) setError(String(e));
       throw e;
@@ -151,6 +167,24 @@ export function EncryptionProvider({ children }: { children: ReactNode }) {
   const backUp = () => run("Backing up message keys…", async () => {
     await invoke("sync_encryption_backup");
   });
+  const exportHistory = async (passphrase: string): Promise<HistoryExport | null> => {
+    let result: HistoryExport | null = null;
+    await run("Saving this device’s encrypted history backup…", async () => {
+      if (mounted.current) setHistoryExport(null);
+      result = await invoke<HistoryExport>("export_available_history", { passphrase, expectedUserId: userId });
+      if (mounted.current) setHistoryExport(result);
+    }, false);
+    return result;
+  };
+  const importHistory = async (contents: string, passphrase: string): Promise<HistoryImport | null> => {
+    let result: HistoryImport | null = null;
+    await run("Restoring message keys from your backup file…", async () => {
+      if (mounted.current) setHistoryImport(null);
+      result = await invoke<HistoryImport>("import_available_history", { contents, passphrase, expectedUserId: userId });
+      if (mounted.current) setHistoryImport(result);
+    }, false);
+    return result;
+  };
   const requestVerification = () => run("Requesting verification…", async () => {
     dismissedFlow.current = null;
     await invoke("request_encryption_verification");
@@ -164,7 +198,8 @@ export function EncryptionProvider({ children }: { children: ReactNode }) {
 
   return (
     <EncryptionContext.Provider value={{ status, error: error ?? connectionError, busy, recoveryKey, verification, refresh,
-      setup, restore, acknowledgeKey, replaceKey, backUp, requestVerification, respondVerification,
+      setup, restore, acknowledgeKey, replaceKey, backUp, historyExport, historyImport, exportHistory, importHistory,
+      requestVerification, respondVerification,
       dismissVerification: () => { dismissedFlow.current = verification?.flowId ?? null; setVerification(null); void refresh(); },
     }}>
       {children}

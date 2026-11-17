@@ -405,7 +405,7 @@ function App() {
     // component so hooks run in the right context.
     return (
       <>
-        <EncryptionProvider key={userId}>
+        <EncryptionProvider key={userId} userId={userId}>
         <UserAvatarStoreProvider userId={userId}>
           <NotificationSettingsProvider>
             <VoicePresenceProvider>

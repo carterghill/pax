@@ -1,6 +1,7 @@
 import { useId, useState, type CSSProperties } from "react";
 import { useEncryption } from "../context/EncryptionContext";
 import { useTheme } from "../theme/ThemeContext";
+import HistoryBackupPanel from "./HistoryBackupPanel";
 
 export default function EncryptionSettingsPanel({ compact = false }: { compact?: boolean }) {
   const { palette, typography } = useTheme();
@@ -98,6 +99,7 @@ export default function EncryptionSettingsPanel({ compact = false }: { compact?:
           </div>
         </div>
       )}
+      <HistoryBackupPanel />
       {busy && <p role="status" style={{ margin: 0, color: palette.textSecondary }}>{busy}</p>}
       {(error || status?.progress.error) && <p role="alert" style={{ margin: 0, color: palette.textPrimary, lineHeight: 1.5 }}>{error || status?.progress.error}</p>}
       <button type="button" disabled={!!busy} style={{ ...button, alignSelf: "flex-start" }} onClick={() => ignore(encryption.refresh())}>Check status</button>

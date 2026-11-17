@@ -298,6 +298,16 @@ An advanced export may provide the actual Matrix credential and standard recover
 - Use protected platform storage where persistence of additional secrets is necessary. Existing SDK/session storage hardening is separate work and must not be represented as already implemented by this specification.
 - Attempt to finish pending key uploads before sign-out; expose failure and preserve local data even when the user chooses to leave.
 
+### Fallback: encrypted backups of available history
+
+Settings → Encryption exposes a file export/import path for both account schemes, independently of the network recovery status and availability of identity/backup secrets. It preserves the message keys that the active SDK store still has, including keys for older history. Export uses the SDK’s standard encrypted Megolm session-data file format, protected by a separately chosen backup password (at least 12 Unicode scalar values). The file is saved under a new name in Downloads; earlier files and the source crypto store are retained. The file password is not a Matrix Secret Storage recovery key and cannot be entered into the account-recovery form.
+
+Restoration requires both the exported file and its password. The SDK authenticates and decrypts the file before importing its message keys. Imported keys persist in the destination store, and affected conversation timelines are refreshed. Repeated imports leave existing keys intact. Existing enabled SDK backups may subsequently upload imported keys as usual. The fallback never resets cross-signing, replaces a server backup, changes Secret Storage, or rewrites the Pax recovery envelope. It does not mark full account recovery as ready.
+
+Only encrypted file contents pass through the webview during import. Export writes only ciphertext to private temporary files and a fresh destination file; Unix directory/file modes are 0700/0600. Passwords remain transient and native copies use best-effort zeroization. Operations are serialized with session/recovery changes and bound to the expected signed-in Matrix ID, including after file-reading delays. Both exports and imports are capped at 64 MiB; imports validate version/framing and limit the unauthenticated PBKDF2 work factor before SDK decryption.
+
+This is a snapshot of available message keys, not a message/attachment archive, identity backup, automatic ongoing backup, or replacement for Pax account recovery. The homeserver must still retain the corresponding events/media. Tests exercise offline export without cross-signing/backup secrets, import on a fresh device, restart persistence, duplicate imports, wrong passwords, tampering, account changes, empty stores, temporary-file cleanup, and file permissions.
+
 ## 12. Future signed discovery
 
 Signing covers the authentication descriptor, including the account identity, mode, derivation profile, revision, and transition state. The verification key must come from Pax or independently trusted configuration, not from the same untrusted profile being verified.
