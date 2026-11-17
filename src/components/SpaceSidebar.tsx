@@ -1173,10 +1173,8 @@ export default function SpaceSidebar({
           onLeaveSpaceOnly={handleLeaveSpaceOnly}
           onLeaveSpaceAndAllRooms={handleLeaveSpaceAndAllRooms}
           onClose={() => {
-            if (!leaveSpaceSubmitting) {
-              setLeaveSpace(null);
-              setLeaveSpaceError(null);
-            }
+            setLeaveSpace(null);
+            setLeaveSpaceError(null);
           }}
         />
       )}

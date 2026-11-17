@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useRef, useState, type CSSProperties } from "react";
-import { createPortal } from "react-dom";
+import Dialog from "./Dialog";
 import { convertFileSrc } from "@tauri-apps/api/core";
 import {
   ChevronLeft,
@@ -198,15 +198,6 @@ export default function MediaViewerModal({
       cancelled = true;
     };
   }, [open, fileUrl, effectiveKind]);
-
-  useEffect(() => {
-    if (!open) return;
-    const onKey = (e: KeyboardEvent) => {
-      if (e.key === "Escape") onClose();
-    };
-    document.addEventListener("keydown", onKey);
-    return () => document.removeEventListener("keydown", onKey);
-  }, [open, onClose]);
 
   // PDF: load document
   useEffect(() => {
@@ -587,46 +578,28 @@ export default function MediaViewerModal({
     );
   })();
 
-  return createPortal(
-    <div
-      role="dialog"
-      aria-modal="true"
+  return (
+    <Dialog
+      onClose={onClose}
       aria-label="File viewer"
-      onClick={(e) => {
-        if (e.target === e.currentTarget) onClose();
-      }}
+      backdropStyle={{ backgroundColor: overlayBg, padding: spacing.unit * 3, zIndex: 50_000 }}
       style={{
-        position: "fixed",
-        inset: 0,
-        zIndex: 50_000,
-        backgroundColor: overlayBg,
+        width: "min(960px, 100%)",
+        maxHeight: "92vh",
         display: "flex",
-        alignItems: "center",
-        justifyContent: "center",
-        padding: spacing.unit * 3,
+        flexDirection: "column",
+        borderRadius: spacing.unit * 2,
+        overflow: "hidden",
+        boxShadow:
+          resolvedColorScheme === "light"
+            ? "0 12px 48px rgba(0,0,0,0.2)"
+            : "0 16px 56px rgba(0,0,0,0.55)",
+        backgroundColor: palette.bgPrimary,
       }}
     >
-      <div
-        onClick={(e) => e.stopPropagation()}
-        style={{
-          width: "min(960px, 100%)",
-          maxHeight: "92vh",
-          display: "flex",
-          flexDirection: "column",
-          borderRadius: spacing.unit * 2,
-          overflow: "hidden",
-          boxShadow:
-            resolvedColorScheme === "light"
-              ? "0 12px 48px rgba(0,0,0,0.2)"
-              : "0 16px 56px rgba(0,0,0,0.55)",
-          backgroundColor: palette.bgPrimary,
-        }}
-      >
-        {toolbar}
-        <div style={{ flex: 1, minHeight: 0, display: "flex", flexDirection: "column" }}>{body}</div>
-      </div>
-    </div>,
-    document.body,
+      {toolbar}
+      <div style={{ flex: 1, minHeight: 0, display: "flex", flexDirection: "column" }}>{body}</div>
+    </Dialog>
   );
 }
 

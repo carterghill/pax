@@ -1,10 +1,9 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { X, Loader2, Users, Shield, Bell, Settings as SettingsIcon } from "lucide-react";
 import { useTheme } from "../theme/ThemeContext";
 import { paletteDialogShellBorderStyle } from "../theme/paletteBorder";
-import { useOverlayObstruction } from "../hooks/useOverlayObstruction";
-import ModalLayer from "./ModalLayer";
+import Dialog from "./Dialog";
 import ModerationScopeDialog from "./ModerationScopeDialog";
 import SettingsMemberCategory from "./SettingsMemberCategory";
 import PowerLevelsSettingsPanel from "./PowerLevelsSettingsPanel";
@@ -80,8 +79,6 @@ export default function RoomSettingsDialog({
   moderationSpaceRootId = null,
 }: RoomSettingsDialogProps) {
   const { palette, typography, spacing } = useTheme();
-  const modalRef = useRef<HTMLDivElement>(null);
-  useOverlayObstruction(modalRef);
 
   const [activeTab, setActiveTab] = useState<SettingsTab>("general");
 
@@ -173,21 +170,6 @@ export default function RoomSettingsDialog({
     if (activeTab !== "members") return;
     void loadManagementMembers();
   }, [activeTab, loadManagementMembers]);
-
-  useEffect(() => {
-    const handleKey = (e: KeyboardEvent) => {
-      if (e.key === "Escape") onClose();
-    };
-    window.addEventListener("keydown", handleKey);
-    return () => window.removeEventListener("keydown", handleKey);
-  }, [onClose]);
-
-  const handleBackdropClick = useCallback(
-    (e: React.MouseEvent) => {
-      if (e.target === e.currentTarget) onClose();
-    },
-    [onClose],
-  );
 
   const adminMembers = useMemo(
     () =>
@@ -376,28 +358,20 @@ export default function RoomSettingsDialog({
 
   return (
     <>
-      <ModalLayer
-        onBackdropClick={handleBackdropClick}
-        backdropStyle={{
-          backgroundColor: "rgba(0,0,0,0.7)",
+      <Dialog
+        onClose={onClose}
+        aria-label="Room settings"
+        style={{
+          backgroundColor: palette.bgSecondary,
+          borderRadius: 8,
+          width: "min(720px, calc(100vw - 40px))",
+          maxHeight: "min(90vh, 920px)",
           display: "flex",
-          alignItems: "center",
-          justifyContent: "center",
+          flexDirection: "column",
+          boxShadow: "0 8px 32px rgba(0,0,0,0.5)",
+          ...paletteDialogShellBorderStyle(palette),
         }}
       >
-        <div
-          ref={modalRef}
-          style={{
-            backgroundColor: palette.bgSecondary,
-            borderRadius: 8,
-            width: "min(720px, calc(100vw - 40px))",
-            maxHeight: "min(90vh, 920px)",
-            display: "flex",
-            flexDirection: "column",
-            boxShadow: "0 8px 32px rgba(0,0,0,0.5)",
-            ...paletteDialogShellBorderStyle(palette),
-          }}
-        >
           <div
             style={{
               display: "flex",
@@ -1029,8 +1003,7 @@ export default function RoomSettingsDialog({
             </div>
           </div>
           <style>{`@keyframes spin { to { transform: rotate(360deg); } }`}</style>
-        </div>
-      </ModalLayer>
+      </Dialog>
       {moderationDialog && (
         <ModerationScopeDialog
           kind={moderationDialog.kind}
@@ -1040,7 +1013,7 @@ export default function RoomSettingsDialog({
           spaceName={scopeDialogSpaceLabel}
           onSpaceScope={() => void runModeration("space")}
           onRoomOnly={() => void runModeration("room")}
-          onCancel={() => !moderationBusy && setModerationDialog(null)}
+          onCancel={() => setModerationDialog(null)}
           busy={moderationBusy}
         />
       )}

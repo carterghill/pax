@@ -39,6 +39,9 @@ interface EncryptionContextValue {
   error: string | null;
   busy: string | null;
   recoveryKey: string | null;
+  recoveryKeyDismissed: boolean;
+  dismissRecoveryKey: () => void;
+  showRecoveryKey: () => void;
   verification: VerificationStatus | null;
   refresh: () => Promise<void>;
   setup: (password?: string) => Promise<void>;
@@ -63,6 +66,7 @@ export function EncryptionProvider({ children, userId }: { children: ReactNode; 
   const [connectionError, setConnectionError] = useState<string | null>(null);
   const [busy, setBusy] = useState<string | null>(null);
   const [recoveryKey, setRecoveryKey] = useState<string | null>(null);
+  const [recoveryKeyDismissed, setRecoveryKeyDismissed] = useState(false);
   const [verification, setVerification] = useState<VerificationStatus | null>(null);
   const [historyExport, setHistoryExport] = useState<HistoryExport | null>(null);
   const [historyImport, setHistoryImport] = useState<HistoryImport | null>(null);
@@ -79,8 +83,7 @@ export function EncryptionProvider({ children, userId }: { children: ReactNode; 
       if (mounted.current) {
         setStatus(next);
         setConnectionError(null);
-        // A pending generated key is kept in memory by the backend so reloading
-        // the webview cannot silently dismiss the save-key step.
+        // Keep an unacknowledged generated key available after a webview reload.
         if (next.pendingRecoveryKey) {
           const key = await invoke<string | null>("get_pending_encryption_recovery_key");
           if (mounted.current) setRecoveryKey(key);
@@ -151,11 +154,11 @@ export function EncryptionProvider({ children, userId }: { children: ReactNode; 
 
   const setup = (password?: string) => run("Setting up recovery…", async () => {
     const key = await invoke<string>("setup_encryption_recovery", { password: password || null });
-    if (mounted.current) setRecoveryKey(key);
+    if (mounted.current) { setRecoveryKey(key); setRecoveryKeyDismissed(false); }
   });
   const replaceKey = () => run("Creating recovery key…", async () => {
     const key = await invoke<string>("replace_encryption_recovery_key");
-    if (mounted.current) setRecoveryKey(key);
+    if (mounted.current) { setRecoveryKey(key); setRecoveryKeyDismissed(false); }
   });
   const restore = (key: string) => run("Restoring encryption keys…", async () => {
     await invoke("restore_encryption_recovery", { recoveryKey: key });
@@ -198,6 +201,7 @@ export function EncryptionProvider({ children, userId }: { children: ReactNode; 
 
   return (
     <EncryptionContext.Provider value={{ status, error: error ?? connectionError, busy, recoveryKey, verification, refresh,
+      recoveryKeyDismissed, dismissRecoveryKey: () => setRecoveryKeyDismissed(true), showRecoveryKey: () => setRecoveryKeyDismissed(false),
       setup, restore, acknowledgeKey, replaceKey, backUp, historyExport, historyImport, exportHistory, importHistory,
       requestVerification, respondVerification,
       dismissVerification: () => { dismissedFlow.current = verification?.flowId ?? null; setVerification(null); void refresh(); },

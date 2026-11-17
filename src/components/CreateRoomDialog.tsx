@@ -14,8 +14,7 @@ import {
 } from "lucide-react";
 import { useTheme } from "../theme/ThemeContext";
 import { paletteDialogShellBorderStyle } from "../theme/paletteBorder";
-import { useOverlayObstruction } from "../hooks/useOverlayObstruction";
-import ModalLayer from "./ModalLayer";
+import Dialog from "./Dialog";
 import { VOICE_ROOM_TYPE } from "../utils/matrix";
 import type { Room } from "../types/matrix";
 import type { RoomsChangedPayload } from "../types/roomsChanged";
@@ -137,8 +136,6 @@ export default function CreateRoomDialog({
 
   const isStandaloneHome = spaceId === null;
   const { palette, typography, resolvedColorScheme } = useTheme();
-  const modalRef = useRef<HTMLDivElement>(null);
-  useOverlayObstruction(modalRef);
 
   const [activeTab, setActiveTab] = useState<"join" | "create">("join");
 
@@ -169,14 +166,6 @@ export default function CreateRoomDialog({
 
   const homeserverPublicListFetchedRef = useRef(false);
   const homeserverAutoStaleRef = useRef(false);
-
-  useEffect(() => {
-    const handleKey = (e: KeyboardEvent) => {
-      if (e.key === "Escape") onClose();
-    };
-    window.addEventListener("keydown", handleKey);
-    return () => window.removeEventListener("keydown", handleKey);
-  }, [onClose]);
 
   useEffect(() => {
     invoke<string>("current_homeserver")
@@ -226,13 +215,6 @@ export default function CreateRoomDialog({
     if (explicitServers.length > 0) return explicitServers;
     return buildDefaultSearchServers(currentHomeserver);
   }, [searchServer, currentHomeserver]);
-
-  const handleBackdropClick = useCallback(
-    (e: React.MouseEvent) => {
-      if (e.target === e.currentTarget) onClose();
-    },
-    [onClose]
-  );
 
   const handleCreate = useCallback(async () => {
     if (!name.trim()) {
@@ -507,28 +489,20 @@ export default function CreateRoomDialog({
   const showJoinOnly = !allowCreate;
 
   return (
-    <ModalLayer
-      onBackdropClick={handleBackdropClick}
-      backdropStyle={{
-        backgroundColor: "rgba(0,0,0,0.7)",
+    <Dialog
+      onClose={onClose}
+      aria-label="Join or create a room"
+      style={{
+        backgroundColor: palette.bgSecondary,
+        borderRadius: 8,
+        width: 500,
+        maxHeight: "85vh",
         display: "flex",
-        alignItems: "center",
-        justifyContent: "center",
+        flexDirection: "column",
+        boxShadow: "0 8px 32px rgba(0,0,0,0.5)",
+        ...paletteDialogShellBorderStyle(palette),
       }}
     >
-      <div
-        ref={modalRef}
-        style={{
-          backgroundColor: palette.bgSecondary,
-          borderRadius: 8,
-          width: 500,
-          maxHeight: "85vh",
-          display: "flex",
-          flexDirection: "column",
-          boxShadow: "0 8px 32px rgba(0,0,0,0.5)",
-          ...paletteDialogShellBorderStyle(palette),
-        }}
-      >
         <div
           style={{
             display: "flex",
@@ -1180,10 +1154,9 @@ export default function CreateRoomDialog({
             </button>
           </div>
         )}
-      </div>
 
       <style>{`@keyframes spin { to { transform: rotate(360deg); } }`}</style>
-    </ModalLayer>
+    </Dialog>
   );
 }
 

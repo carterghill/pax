@@ -2,40 +2,18 @@ import { useEffect, useId, useRef, useState, type ReactNode } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { useEncryption, type EncryptionStatus } from "../context/EncryptionContext";
 import { useTheme } from "../theme/ThemeContext";
-import { useOverlayObstruction } from "../hooks/useOverlayObstruction";
-import { paletteDialogOuterBorderStyle } from "../theme/paletteBorder";
-import ModalLayer from "./ModalLayer";
+import Dialog from "./Dialog";
 import EncryptionSettingsPanel from "./EncryptionSettingsPanel";
 
-function RecoveryDialog({ title, children }: { title: string; children: ReactNode }) {
-  const { palette, typography } = useTheme();
-  const ref = useRef<HTMLDivElement>(null);
+function RecoveryDialog({ title, onClose, children }: { title: string; onClose: () => void; children: ReactNode }) {
+  const { typography } = useTheme();
   const titleId = useId();
-  useOverlayObstruction(ref);
-  useEffect(() => { ref.current?.focus(); }, []);
   return (
-    <ModalLayer backdropStyle={{ background: "rgba(0,0,0,0.7)", display: "flex", alignItems: "center", justifyContent: "center", padding: 16 }}>
-      <div ref={ref} role="dialog" aria-modal="true" aria-labelledby={titleId} tabIndex={-1}
-        onKeyDown={(event) => {
-          if (event.key === "Escape") { event.stopPropagation(); return; }
-          if (event.key !== "Tab") return;
-          const controls = ref.current?.querySelectorAll<HTMLElement>("button:not([disabled]),input:not([disabled]),textarea:not([disabled]),[tabindex='0']");
-          if (!controls?.length) { event.preventDefault(); return; }
-          const first = controls[0];
-          const last = controls[controls.length - 1];
-          if (event.shiftKey && (document.activeElement === first || document.activeElement === ref.current)) {
-            event.preventDefault(); last.focus();
-          } else if (!event.shiftKey && (document.activeElement === last || document.activeElement === ref.current)) {
-            event.preventDefault(); first.focus();
-          }
-        }}
-        style={{ width: "min(520px, calc(100vw - 32px))", maxHeight: "85vh", overflowY: "auto", padding: 24,
-          borderRadius: 14, border: paletteDialogOuterBorderStyle(palette), background: palette.bgSecondary,
-          color: palette.textPrimary, fontFamily: typography.fontFamily, boxShadow: "0 18px 48px rgba(0,0,0,0.45)" }}>
-        <h2 id={titleId} style={{ fontSize: typography.fontSizeLarge, margin: "0 0 16px" }}>{title}</h2>
-        {children}
-      </div>
-    </ModalLayer>
+    <Dialog onClose={onClose} aria-labelledby={titleId}
+      style={{ width: "min(520px, calc(100vw - 32px))", overflowY: "auto", padding: 24 }}>
+      <h2 id={titleId} style={{ fontSize: typography.fontSizeLarge, margin: "0 0 16px" }}>{title}</h2>
+      {children}
+    </Dialog>
   );
 }
 
@@ -45,10 +23,12 @@ export function EncryptionSignOut({ onCancel, onSignOut }: { onCancel: () => voi
   const [checking, setChecking] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [showRecovery, setShowRecovery] = useState(false);
+  const active = useRef(true);
   const finish = useRef(onSignOut);
   finish.current = onSignOut;
   useEffect(() => {
     let cancelled = false;
+    active.current = true;
     void (async () => {
       try {
         const status = await invoke<EncryptionStatus>("get_encryption_status");
@@ -57,17 +37,18 @@ export function EncryptionSignOut({ onCancel, onSignOut }: { onCancel: () => voi
           return;
         }
         await invoke("sync_encryption_backup");
-        if (!cancelled) finish.current();
+        if (!cancelled && active.current) finish.current();
       } catch (e) {
         if (!cancelled) { setError(String(e)); setChecking(false); }
       }
     })();
-    return () => { cancelled = true; };
+    return () => { cancelled = true; active.current = false; };
   }, []);
   const button = { border: `1px solid ${palette.border}`, borderRadius: 8, padding: "9px 14px",
     background: palette.bgTertiary, color: palette.textPrimary, cursor: "pointer", font: "inherit" };
+  const cancel = () => { active.current = false; onCancel(); };
   return (
-    <RecoveryDialog title={checking ? "Backing up before sign-out" : "Protect your history before signing out"}>
+    <RecoveryDialog onClose={cancel} title={checking ? "Backing up before sign-out" : "Protect your history before signing out"}>
       {checking ? <p role="status">Checking recovery and backing up your message keys…</p> : <>
         <p style={{ lineHeight: 1.5 }}>Your encrypted history is not confirmed recoverable yet. Set up or unlock recovery, or save an encrypted file of this device’s available message keys before signing out.</p>
         {error && <p role="alert">{error}</p>}
@@ -75,11 +56,15 @@ export function EncryptionSignOut({ onCancel, onSignOut }: { onCancel: () => voi
           : <button type="button" style={button} onClick={() => setShowRecovery(true)}>Recovery and file backup options</button>}
       </>}
       <div style={{ display: "flex", flexWrap: "wrap", gap: 10, marginTop: 20 }}>
-        <button type="button" disabled={!!busy} style={button} onClick={onCancel}>Stay signed in</button>
+        <button type="button" style={button} onClick={cancel}>Stay signed in</button>
         {!checking && status?.backupEnabled && status.secretStorageExists && status.crossSigningReady && !status.recoveryKeyNeedsSave &&
           <button type="button" disabled={!!busy} style={button} onClick={() => {
             setChecking(true);
-            void invoke("sync_encryption_backup").then(onSignOut).catch((e) => { setError(String(e)); setChecking(false); });
+            void invoke("sync_encryption_backup").then(() => {
+              if (active.current) finish.current();
+            }).catch((e) => {
+              if (active.current) { setError(String(e)); setChecking(false); }
+            });
           }}>Back up and sign out</button>}
         {!checking && <button type="button" disabled={!!busy} style={button} onClick={onSignOut}>Sign out anyway</button>}
       </div>
@@ -88,11 +73,16 @@ export function EncryptionSignOut({ onCancel, onSignOut }: { onCancel: () => voi
 }
 
 /** Mounted once per signed-in account, including when Settings is closed. */
-export default function EncryptionRecovery() {
+export default function EncryptionRecovery({ userId }: { userId: string }) {
   const encryption = useEncryption();
   const { status, recoveryKey, verification, busy, error } = encryption;
   const { palette } = useTheme();
-  const [snoozed, setSnoozed] = useState(false);
+  const preferenceKey = `pax:hide-encryption-recovery-prompt:${userId}`;
+  const [snoozed, setSnoozed] = useState(() => {
+    try { return localStorage.getItem(preferenceKey) === "true"; }
+    catch { return false; }
+  });
+  const [dontShowAgain, setDontShowAgain] = useState(false);
   const [saved, setSaved] = useState(false);
   const [copied, setCopied] = useState(false);
   useEffect(() => { setSaved(false); setCopied(false); }, [recoveryKey]);
@@ -101,8 +91,11 @@ export default function EncryptionRecovery() {
     background: palette.bgTertiary, color: palette.textPrimary, cursor: "pointer", font: "inherit" };
   const ready = status?.secretStorageExists && status.crossSigningReady && status.backupEnabled;
 
-  if (recoveryKey) return (
-    <RecoveryDialog title="Save your recovery key">
+  if (recoveryKey && !encryption.recoveryKeyDismissed) return (
+    <RecoveryDialog title="Save your recovery key" onClose={() => {
+      setSnoozed(true);
+      encryption.dismissRecoveryKey();
+    }}>
       <p style={{ lineHeight: 1.5 }}>Keep this key in your password manager or somewhere safe. You will need it to restore encrypted history if you lose access to your devices.</p>
       <textarea aria-label="Your recovery key" readOnly value={recoveryKey} rows={3} spellCheck={false}
         style={{ width: "100%", boxSizing: "border-box", resize: "none", padding: 12, borderRadius: 8,
@@ -120,7 +113,10 @@ export default function EncryptionRecovery() {
   );
 
   if (verification) return (
-    <RecoveryDialog title={verification.state === "done" ? "Device verified" : "Verify your device"}>
+    <RecoveryDialog onClose={() => {
+      setSnoozed(true);
+      encryption.dismissVerification();
+    }} title={verification.state === "done" ? "Device verified" : "Verify your device"}>
       {verification.state === "requested" ? <>
         <p style={{ lineHeight: 1.5 }}>Another device signed in to your account wants to verify. Accept only if you started this on your other device.</p>
         <button type="button" style={button} disabled={!!busy} onClick={() => ignore(encryption.respondVerification("accept"))}>Accept verification</button>
@@ -151,11 +147,22 @@ export default function EncryptionRecovery() {
     </RecoveryDialog>
   );
 
-  if (snoozed || (ready && !status?.recoveryKeyNeedsSave) || !status) return null;
+  if (snoozed || recoveryKey || (ready && !status?.recoveryKeyNeedsSave) || !status) return null;
   return (
-    <RecoveryDialog title={status.canSetup ? "Protect your encrypted history" : "Restore your encrypted history"}>
+    <RecoveryDialog onClose={() => setSnoozed(true)} title={status.canSetup ? "Protect your encrypted history" : "Restore your encrypted history"}>
       <EncryptionSettingsPanel compact />
-      <button type="button" disabled={!!busy} style={{ ...button, marginTop: 20 }} onClick={() => setSnoozed(true)}>Later</button>
+      <label style={{ display: "flex", alignItems: "center", gap: 10, marginTop: 20, cursor: "pointer" }}>
+        <input type="checkbox" checked={dontShowAgain} onChange={(event) => {
+          const checked = event.target.checked;
+          setDontShowAgain(checked);
+          try {
+            if (checked) localStorage.setItem(preferenceKey, "true");
+            else localStorage.removeItem(preferenceKey);
+          } catch { /* Keep the dialog usable when browser storage is unavailable. */ }
+        }} style={{ width: 16, height: 16, accentColor: palette.accent }} />
+        Don’t show me again
+      </label>
+      <button type="button" style={{ ...button, marginTop: 16 }} onClick={() => setSnoozed(true)}>Later</button>
       <p style={{ fontSize: 13, color: palette.textSecondary, marginBottom: 0 }}>You can return to Settings → Encryption at any time.</p>
     </RecoveryDialog>
   );

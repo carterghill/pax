@@ -1,11 +1,10 @@
-import { useState, useRef, useEffect, useCallback } from "react";
+import { useState, useEffect, useCallback } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { X, Loader2, Users, Crown } from "lucide-react";
 import { useTheme } from "../theme/ThemeContext";
 import { paletteDialogShellBorderStyle } from "../theme/paletteBorder";
-import { useOverlayObstruction } from "../hooks/useOverlayObstruction";
 import { avatarSrc } from "../utils/avatarSrc";
-import ModalLayer from "./ModalLayer";
+import Dialog from "./Dialog";
 
 interface ParentSpaceInfo {
   id: string;
@@ -30,22 +29,12 @@ export default function ParentSpacesDialog({
   onClose,
 }: ParentSpacesDialogProps) {
   const { palette, typography } = useTheme();
-  const modalRef = useRef<HTMLDivElement>(null);
-  useOverlayObstruction(modalRef);
 
   const [loading, setLoading] = useState(true);
   const [spaces, setSpaces] = useState<ParentSpaceInfo[]>([]);
   const [error, setError] = useState<string | null>(null);
   const [joiningId, setJoiningId] = useState<string | null>(null);
   const [joinError, setJoinError] = useState<string | null>(null);
-
-  useEffect(() => {
-    const handleKey = (e: KeyboardEvent) => {
-      if (e.key === "Escape" && !joiningId) onClose();
-    };
-    window.addEventListener("keydown", handleKey);
-    return () => window.removeEventListener("keydown", handleKey);
-  }, [onClose, joiningId]);
 
   useEffect(() => {
     let cancelled = false;
@@ -67,13 +56,6 @@ export default function ParentSpacesDialog({
       cancelled = true;
     };
   }, [roomId]);
-
-  const handleBackdropClick = useCallback(
-    (e: React.MouseEvent<HTMLDivElement>) => {
-      if (e.target === e.currentTarget && !joiningId) onClose();
-    },
-    [onClose, joiningId],
-  );
 
   const handleJoin = useCallback(
     async (spaceId: string) => {
@@ -109,30 +91,20 @@ export default function ParentSpacesDialog({
     s.membership === "none" && (s.joinRule === "public" || s.joinRule === "knock");
 
   return (
-    <ModalLayer
-      onBackdropClick={handleBackdropClick}
-      backdropStyle={{
-        backgroundColor: "rgba(0,0,0,0.7)",
+    <Dialog
+      onClose={onClose}
+      aria-labelledby="parent-spaces-title"
+      style={{
+        backgroundColor: palette.bgSecondary,
+        borderRadius: 12,
+        width: "min(440px, calc(100vw - 32px))",
+        maxHeight: "75vh",
         display: "flex",
-        alignItems: "center",
-        justifyContent: "center",
+        flexDirection: "column",
+        boxShadow: "0 12px 40px rgba(0,0,0,0.55)",
+        ...paletteDialogShellBorderStyle(palette),
       }}
     >
-      <div
-        ref={modalRef}
-        role="dialog"
-        aria-labelledby="parent-spaces-title"
-        style={{
-          backgroundColor: palette.bgSecondary,
-          borderRadius: 12,
-          width: "min(440px, calc(100vw - 32px))",
-          maxHeight: "75vh",
-          display: "flex",
-          flexDirection: "column",
-          boxShadow: "0 12px 40px rgba(0,0,0,0.55)",
-          ...paletteDialogShellBorderStyle(palette),
-        }}
-      >
         {/* Header */}
         <div
           style={{
@@ -453,7 +425,6 @@ export default function ParentSpacesDialog({
           )}
           <style>{`@keyframes spin { from { transform: rotate(0deg); } to { transform: rotate(360deg); } }`}</style>
         </div>
-      </div>
-    </ModalLayer>
+    </Dialog>
   );
 }

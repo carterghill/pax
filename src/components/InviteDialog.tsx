@@ -1,10 +1,9 @@
-import { useState, useRef, useEffect, useCallback } from "react";
+import { useState, useEffect, useCallback } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { X, UserPlus, Loader2, Check } from "lucide-react";
 import { useTheme } from "../theme/ThemeContext";
 import { paletteDialogOuterBorderStyle } from "../theme/paletteBorder";
-import { useOverlayObstruction } from "../hooks/useOverlayObstruction";
-import ModalLayer from "./ModalLayer";
+import Dialog from "./Dialog";
 import { parseInviteUserInput } from "../utils/matrix";
 import UserAvatar from "./UserAvatar";
 
@@ -34,8 +33,6 @@ export default function InviteDialog({
   onClose,
 }: InviteDialogProps) {
   const { palette, typography } = useTheme();
-  const modalRef = useRef<HTMLDivElement>(null);
-  useOverlayObstruction(modalRef);
 
   const [input, setInput] = useState("");
   const [submitting, setSubmitting] = useState(false);
@@ -48,14 +45,6 @@ export default function InviteDialog({
   const [searchResults, setSearchResults] = useState<InviteUserCandidate[]>([]);
   const [searchLoading, setSearchLoading] = useState(false);
   const [searchError, setSearchError] = useState<string | null>(null);
-
-  useEffect(() => {
-    const handleKey = (e: KeyboardEvent) => {
-      if (e.key === "Escape") onClose();
-    };
-    window.addEventListener("keydown", handleKey);
-    return () => window.removeEventListener("keydown", handleKey);
-  }, [onClose]);
 
   useEffect(() => {
     let cancelled = false;
@@ -111,13 +100,6 @@ export default function InviteDialog({
       clearTimeout(t);
     };
   }, [input, roomId]);
-
-  const handleBackdropClick = useCallback(
-    (e: React.MouseEvent) => {
-      if (e.target === e.currentTarget) onClose();
-    },
-    [onClose]
-  );
 
   const inviteByMxid = useCallback(
     async (mxid: string, options?: { fromList?: boolean }) => {
@@ -193,29 +175,18 @@ export default function InviteDialog({
   const listLoading = showSearch ? searchLoading : suggestionsLoading;
 
   return (
-    <ModalLayer
-      onBackdropClick={handleBackdropClick}
-      backdropStyle={{
-        backgroundColor: "rgba(0,0,0,0.7)",
-        display: "flex",
-        alignItems: "center",
-        justifyContent: "center",
-        padding: 16,
+    <Dialog
+      onClose={onClose}
+      aria-labelledby="invite-dialog-title"
+      style={{
+        backgroundColor: palette.bgSecondary,
+        borderRadius: 12,
+        width: "min(480px, calc(100vw - 32px))",
+        maxWidth: 480,
+        boxShadow: "0 12px 40px rgba(0,0,0,0.55)",
+        border: paletteDialogOuterBorderStyle(palette),
       }}
     >
-      <div
-        ref={modalRef}
-        role="dialog"
-        aria-labelledby="invite-dialog-title"
-        style={{
-          backgroundColor: palette.bgSecondary,
-          borderRadius: 12,
-          width: "min(480px, calc(100vw - 32px))",
-          maxWidth: 480,
-          boxShadow: "0 12px 40px rgba(0,0,0,0.55)",
-          border: paletteDialogOuterBorderStyle(palette),
-        }}
-      >
         <div
           style={{
             display: "flex",
@@ -603,7 +574,6 @@ export default function InviteDialog({
             </>
           )}
         </div>
-      </div>
-    </ModalLayer>
+    </Dialog>
   );
 }

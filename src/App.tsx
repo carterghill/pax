@@ -421,7 +421,7 @@ function App() {
             </VoicePresenceProvider>
           </NotificationSettingsProvider>
         </UserAvatarStoreProvider>
-        <EncryptionRecovery />
+        <EncryptionRecovery userId={userId} />
         </EncryptionProvider>
         {quitOverlay}
       </>

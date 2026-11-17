@@ -30,6 +30,9 @@ export default function EncryptionSettingsPanel({ compact = false }: { compact?:
         {status?.paxLogin ? "Your Pax password unlocks encrypted recovery automatically when you sign in." : "Your message keys are backed up encrypted, and only your verified devices or recovery key can unlock them."}
       </p>
       {!status && !error && <p role="status">Checking encrypted backup…</p>}
+      {encryption.recoveryKey && encryption.recoveryKeyDismissed && (
+        <button type="button" style={button} onClick={encryption.showRecoveryKey}>View and save recovery key</button>
+      )}
       {status && (
         <div style={{ padding: 14, borderRadius: 10, background: palette.bgTertiary, lineHeight: 1.5 }}>
           <strong>{ready ? "Recovery is ready" : status.canSetup ? "Set up recovery" : "Unlock your encrypted history"}</strong>

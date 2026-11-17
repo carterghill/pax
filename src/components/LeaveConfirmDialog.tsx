@@ -1,10 +1,8 @@
-import { useEffect, useRef, useCallback } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { X, Loader2, AlertTriangle } from "lucide-react";
 import { useTheme } from "../theme/ThemeContext";
 import { paletteDialogOuterBorderStyle } from "../theme/paletteBorder";
-import { useOverlayObstruction } from "../hooks/useOverlayObstruction";
-import ModalLayer from "./ModalLayer";
+import Dialog from "./Dialog";
 
 export type LeaveTargetKind = "room" | "space";
 
@@ -30,23 +28,6 @@ type LeaveConfirmDialogProps =
 export default function LeaveConfirmDialog(props: LeaveConfirmDialogProps) {
   const { kind, targetName, onlyAdminWarning, leaving, error, onClose } = props;
   const { palette, typography } = useTheme();
-  const modalRef = useRef<HTMLDivElement>(null);
-  useOverlayObstruction(modalRef);
-
-  useEffect(() => {
-    const handleKey = (e: KeyboardEvent) => {
-      if (e.key === "Escape" && !leaving) onClose();
-    };
-    window.addEventListener("keydown", handleKey);
-    return () => window.removeEventListener("keydown", handleKey);
-  }, [onClose, leaving]);
-
-  const handleBackdropClick = useCallback(
-    (e: React.MouseEvent) => {
-      if (e.target === e.currentTarget && !leaving) onClose();
-    },
-    [onClose, leaving]
-  );
 
   const noun = kind === "space" ? "space" : "room";
   const title = kind === "space" ? "Leave space?" : "Leave room?";
@@ -85,28 +66,17 @@ export default function LeaveConfirmDialog(props: LeaveConfirmDialogProps) {
   };
 
   return (
-    <ModalLayer
-      onBackdropClick={handleBackdropClick}
-      backdropStyle={{
-        backgroundColor: "rgba(0,0,0,0.7)",
-        display: "flex",
-        alignItems: "center",
-        justifyContent: "center",
-        padding: 16,
+    <Dialog
+      onClose={onClose}
+      aria-labelledby="leave-dialog-title"
+      style={{
+        backgroundColor: palette.bgSecondary,
+        borderRadius: 12,
+        width: "min(400px, calc(100vw - 32px))",
+        boxShadow: "0 12px 40px rgba(0,0,0,0.55)",
+        border: paletteDialogOuterBorderStyle(palette),
       }}
     >
-      <div
-        ref={modalRef}
-        role="dialog"
-        aria-labelledby="leave-dialog-title"
-        style={{
-          backgroundColor: palette.bgSecondary,
-          borderRadius: 12,
-          width: "min(400px, calc(100vw - 32px))",
-          boxShadow: "0 12px 40px rgba(0,0,0,0.55)",
-          border: paletteDialogOuterBorderStyle(palette),
-        }}
-      >
         <div
           style={{
             display: "flex",
@@ -336,8 +306,7 @@ export default function LeaveConfirmDialog(props: LeaveConfirmDialogProps) {
           )}
           <style>{`@keyframes spin { from { transform: rotate(0deg); } to { transform: rotate(360deg); } }`}</style>
         </div>
-      </div>
-    </ModalLayer>
+    </Dialog>
   );
 }
 

@@ -1,10 +1,9 @@
-import { useEffect, useRef, useCallback, useState } from "react";
+import { useCallback, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { X } from "lucide-react";
 import { useTheme } from "../theme/ThemeContext";
 import { paletteDialogOuterBorderStyle } from "../theme/paletteBorder";
-import { useOverlayObstruction } from "../hooks/useOverlayObstruction";
-import ModalLayer from "./ModalLayer";
+import Dialog from "./Dialog";
 
 interface QuitConfirmDialogProps {
   onClose: () => void;
@@ -12,29 +11,7 @@ interface QuitConfirmDialogProps {
 
 export default function QuitConfirmDialog({ onClose }: QuitConfirmDialogProps) {
   const { palette, typography } = useTheme();
-  const modalRef = useRef<HTMLDivElement>(null);
-  const primaryButtonRef = useRef<HTMLButtonElement>(null);
   const [rememberChoice, setRememberChoice] = useState(false);
-  useOverlayObstruction(modalRef);
-
-  useEffect(() => {
-    primaryButtonRef.current?.focus();
-  }, []);
-
-  useEffect(() => {
-    const handleKey = (e: KeyboardEvent) => {
-      if (e.key === "Escape") onClose();
-    };
-    window.addEventListener("keydown", handleKey);
-    return () => window.removeEventListener("keydown", handleKey);
-  }, [onClose]);
-
-  const handleBackdropClick = useCallback(
-    (e: React.MouseEvent) => {
-      if (e.target === e.currentTarget) onClose();
-    },
-    [onClose],
-  );
 
   const minimize = useCallback(async () => {
     try {
@@ -71,28 +48,17 @@ export default function QuitConfirmDialog({ onClose }: QuitConfirmDialogProps) {
   };
 
   return (
-    <ModalLayer
-      onBackdropClick={handleBackdropClick}
-      backdropStyle={{
-        backgroundColor: "rgba(0,0,0,0.7)",
-        display: "flex",
-        alignItems: "center",
-        justifyContent: "center",
-        padding: 16,
+    <Dialog
+      onClose={onClose}
+      aria-labelledby="quit-dialog-title"
+      style={{
+        backgroundColor: palette.bgSecondary,
+        borderRadius: 12,
+        width: "min(420px, calc(100vw - 32px))",
+        boxShadow: "0 12px 40px rgba(0,0,0,0.55)",
+        border: paletteDialogOuterBorderStyle(palette),
       }}
     >
-      <div
-        ref={modalRef}
-        role="dialog"
-        aria-labelledby="quit-dialog-title"
-        style={{
-          backgroundColor: palette.bgSecondary,
-          borderRadius: 12,
-          width: "min(420px, calc(100vw - 32px))",
-          boxShadow: "0 12px 40px rgba(0,0,0,0.55)",
-          border: paletteDialogOuterBorderStyle(palette),
-        }}
-      >
         <div
           style={{
             display: "flex",
@@ -178,7 +144,6 @@ export default function QuitConfirmDialog({ onClose }: QuitConfirmDialogProps) {
               Quit completely
             </button>
             <button
-              ref={primaryButtonRef}
               type="button"
               onClick={minimize}
               style={{
@@ -202,7 +167,6 @@ export default function QuitConfirmDialog({ onClose }: QuitConfirmDialogProps) {
             </button>
           </div>
         </div>
-      </div>
-    </ModalLayer>
+    </Dialog>
   );
 }

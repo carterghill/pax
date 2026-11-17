@@ -1,9 +1,7 @@
-import { useRef } from "react";
 import { X } from "lucide-react";
-import ModalLayer from "./ModalLayer";
+import Dialog from "./Dialog";
 import { useTheme } from "../theme/ThemeContext";
 import { paletteDialogOuterBorderStyle } from "../theme/paletteBorder";
-import { useOverlayObstruction } from "../hooks/useOverlayObstruction";
 
 export interface ModerationScopeDialogProps {
   kind: "kick" | "ban" | "unban";
@@ -32,8 +30,6 @@ export default function ModerationScopeDialog({
   busy = false,
 }: ModerationScopeDialogProps) {
   const { palette, typography, spacing } = useTheme();
-  const modalRef = useRef<HTMLDivElement>(null);
-  useOverlayObstruction(modalRef);
 
   const verb =
     kind === "kick" ? "Kick" : kind === "ban" ? "Ban" : "Unban";
@@ -43,34 +39,21 @@ export default function ModerationScopeDialog({
   const spaceLabel = spaceName?.trim() || "this space";
 
   return (
-    <ModalLayer
-      onBackdropClick={busy ? undefined : onCancel}
-      backdropStyle={{
-        backgroundColor: "rgba(0,0,0,0.85)",
+    <Dialog
+      onClose={onCancel}
+      aria-labelledby="moderation-scope-title"
+      style={{
+        backgroundColor: palette.bgSecondary,
+        borderRadius: 8,
+        width: "min(420px, calc(100vw - 32px))",
+        maxHeight: "calc(100vh - 32px)",
+        overflow: "auto",
         display: "flex",
-        alignItems: "center",
-        justifyContent: "center",
-        padding: 16,
-        fontFamily: typography.fontFamily,
+        flexDirection: "column",
+        boxShadow: "0 24px 48px rgba(0,0,0,0.65), 0 0 0 1px rgba(255,255,255,0.06) inset",
+        border: paletteDialogOuterBorderStyle(palette),
       }}
     >
-      <div
-        ref={modalRef}
-        role="dialog"
-        aria-modal="true"
-        aria-labelledby="moderation-scope-title"
-        style={{
-          backgroundColor: palette.bgSecondary,
-          borderRadius: 8,
-          width: "min(420px, calc(100vw - 32px))",
-          maxHeight: "calc(100vh - 32px)",
-          overflow: "auto",
-          display: "flex",
-          flexDirection: "column",
-          boxShadow: "0 24px 48px rgba(0,0,0,0.65), 0 0 0 1px rgba(255,255,255,0.06) inset",
-          border: paletteDialogOuterBorderStyle(palette),
-        }}
-      >
         <div
           style={{
             display: "flex",
@@ -209,7 +192,6 @@ export default function ModerationScopeDialog({
             Cancel
           </button>
         </div>
-      </div>
-    </ModalLayer>
+    </Dialog>
   );
 }

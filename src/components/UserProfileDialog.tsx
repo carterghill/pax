@@ -1,10 +1,9 @@
-import { useEffect, useRef, useState, useCallback, useMemo } from "react";
+import { useEffect, useState, useCallback, useMemo } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { X, Loader2, MessageCircle, Copy, Shield, Crown, User, Calendar, Hash } from "lucide-react";
 import { useTheme } from "../theme/ThemeContext";
 import { paletteDialogOuterBorderStyle } from "../theme/paletteBorder";
-import { useOverlayObstruction } from "../hooks/useOverlayObstruction";
-import ModalLayer from "./ModalLayer";
+import Dialog from "./Dialog";
 import { usePresenceContext } from "../hooks/PresenceContext";
 import type { RoomMemberProfile } from "../types/matrix";
 import { resolvePresenceWithDnd, parseStatusMsg } from "../utils/statusMessage";
@@ -91,8 +90,6 @@ export default function UserProfileDialog({
 }: UserProfileDialogProps) {
   const { palette, typography, spacing, resolvedColorScheme } = useTheme();
   const { effectivePresence, statusMessage } = usePresenceContext();
-  const modalRef = useRef<HTMLDivElement>(null);
-  useOverlayObstruction(modalRef);
 
   const [profile, setProfile] = useState<RoomMemberProfile | null>(null);
   const [loading, setLoading] = useState(true);
@@ -103,14 +100,6 @@ export default function UserProfileDialog({
     () => bannerGradientFromUserId(userId, resolvedColorScheme === "dark"),
     [userId, resolvedColorScheme],
   );
-
-  useEffect(() => {
-    const handleKey = (e: KeyboardEvent) => {
-      if (e.key === "Escape") onClose();
-    };
-    window.addEventListener("keydown", handleKey);
-    return () => window.removeEventListener("keydown", handleKey);
-  }, [onClose]);
 
   useEffect(() => {
     let cancelled = false;
@@ -131,13 +120,6 @@ export default function UserProfileDialog({
       cancelled = true;
     };
   }, [roomId, userId]);
-
-  const handleBackdropClick = useCallback(
-    (e: React.MouseEvent) => {
-      if (e.target === e.currentTarget) onClose();
-    },
-    [onClose],
-  );
 
   const displayName = profile?.displayName ?? null;
   const { localpart, server } = profile ? parseMxid(profile.userId) : parseMxid(userId);
@@ -174,34 +156,22 @@ export default function UserProfileDialog({
     profile && isSelf ? effectivePresence : resolvePresenceWithDnd(profile?.presence ?? "offline", profile?.statusMsg);
 
   return (
-    <ModalLayer
-      onBackdropClick={handleBackdropClick}
-      backdropStyle={{
-        backgroundColor: "rgba(0,0,0,0.85)",
+    <Dialog
+      onClose={onClose}
+      aria-labelledby={titleId}
+      style={{
+        backgroundColor: palette.bgSecondary,
+        borderRadius: 8,
+        width: "min(400px, calc(100vw - 32px))",
+        // Nearly full webview height (backdrop padding 16px × 2); no fixed px cap so the dialog grows with the window.
+        maxHeight: "calc(100vh - 32px)",
+        overflow: "hidden",
         display: "flex",
-        alignItems: "center",
-        justifyContent: "center",
-        padding: 16,
-        fontFamily: typography.fontFamily,
+        flexDirection: "column",
+        boxShadow: "0 24px 48px rgba(0,0,0,0.65), 0 0 0 1px rgba(255,255,255,0.06) inset",
+        border: paletteDialogOuterBorderStyle(palette),
       }}
     >
-      <div
-        ref={modalRef}
-        role="dialog"
-        aria-labelledby={titleId}
-        style={{
-          backgroundColor: palette.bgSecondary,
-          borderRadius: 8,
-          width: "min(400px, calc(100vw - 32px))",
-          // Nearly full webview height (backdrop padding 16px × 2); no fixed px cap so the dialog grows with the window.
-          maxHeight: "calc(100vh - 32px)",
-          overflow: "hidden",
-          display: "flex",
-          flexDirection: "column",
-          boxShadow: "0 24px 48px rgba(0,0,0,0.65), 0 0 0 1px rgba(255,255,255,0.06) inset",
-          border: paletteDialogOuterBorderStyle(palette),
-        }}
-      >
         {/* Banner, close, and avatar (absolute so scroll overflow does not clip the circle) */}
         <div
           style={{
@@ -680,10 +650,10 @@ export default function UserProfileDialog({
             )}
           </div>
         </div>
-      </div>
+
       <style>{`
         @keyframes paxSpin { from { transform: rotate(0deg); } to { transform: rotate(360deg); } }
       `}</style>
-    </ModalLayer>
+    </Dialog>
   );
 }
