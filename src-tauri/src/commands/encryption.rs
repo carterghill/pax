@@ -8,7 +8,6 @@ use std::time::Duration;
 use futures_util::StreamExt;
 use matrix_sdk::encryption::backups::UploadState;
 use matrix_sdk::encryption::verification::{VerificationRequest, VerificationRequestState};
-use matrix_sdk::ruma::api::client::uiaa::{AuthData, Password};
 use matrix_sdk::ruma::events::key::verification::request::ToDeviceKeyVerificationRequestEvent;
 use matrix_sdk::ruma::events::key::verification::VerificationMethod;
 use matrix_sdk::Client;
@@ -20,6 +19,9 @@ use tokio::time::timeout;
 
 use super::{fmt_error_chain, get_client};
 use crate::AppState;
+
+#[path = "recovery_restart.rs"]
+mod restart;
 
 #[derive(Clone, Default, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -162,6 +164,8 @@ pub struct EncryptionStatus {
     pub cross_signing_ready: bool,
     pub has_identity: bool,
     pub can_setup: bool,
+    pub can_start_from_device: bool,
+    pub new_recovery_pending: bool,
     pub progress: BackupProgress,
     pub pending_recovery_key: bool,
     pub recovery_key_needs_save: bool,
@@ -267,6 +271,8 @@ async fn status(client: &Client, service: &EncryptionService) -> Result<Encrypti
             backup_enabled,
             backup_exists,
         ),
+        can_start_from_device: false,
+        new_recovery_pending: false,
         progress: service.progress.lock().await.clone(),
         pending_recovery_key: service.pending_key.lock().await.is_some(),
         recovery_key_needs_save: service
@@ -285,6 +291,51 @@ fn can_setup_recovery(
     !secret_storage_exists
         && (cross_signing_ready || !has_identity)
         && (backup_enabled || !backup_exists)
+}
+
+fn setup_blocked_message(current: &EncryptionStatus) -> &'static str {
+    if current.secret_storage_exists {
+        "Recovery is already configured. Use your recovery key or verify with another device to unlock it."
+    } else if current.has_identity && !current.cross_signing_ready {
+        "Recovery has not been configured, but this account already has an encryption identity whose private keys are missing on this device. Verify using a device that still has those keys before setting up recovery."
+    } else if current.backup_exists && !current.backup_enabled {
+        "This account already has an encrypted message backup, but this device cannot unlock it. Recovery may never have been configured. Use a device that still has the backup key; creating a recovery key here cannot unlock that existing backup."
+    } else {
+        "Encryption is not ready for recovery setup. Check status and try again."
+    }
+}
+
+pub(super) fn has_pending_recovery_setup(
+    app: &tauri::AppHandle,
+    client: &Client,
+) -> Result<bool, String> {
+    restart::is_pending(app, client)
+}
+
+async fn prepare_recovery_setup(
+    client: &Client,
+    service: &EncryptionService,
+    password: Option<&str>,
+) -> Result<(), String> {
+    let current = status(client, service).await?;
+    if !current.can_setup {
+        return Err(setup_blocked_message(&current).into());
+    }
+    // An automatic bootstrap or earlier attempt may have created the local
+    // keys without completing their UIAA upload. Re-upload those SAME keys;
+    // local completeness alone does not prove the server has accepted them.
+    super::pax_auth::bootstrap_identity(client, password.unwrap_or("")).await?;
+    if !client
+        .encryption()
+        .cross_signing_status()
+        .await
+        .is_some_and(|s| s.is_complete())
+    {
+        return Err(
+            "Verify this device using another signed-in device before setting up recovery.".into(),
+        );
+    }
+    Ok(())
 }
 
 #[cfg(test)]
@@ -320,6 +371,7 @@ mod tests {
 #[tauri::command]
 pub async fn get_encryption_status(
     state: State<'_, Arc<AppState>>,
+    app: tauri::AppHandle,
 ) -> Result<EncryptionStatus, String> {
     let _operation = state.encryption.operation.lock().await;
     let client = get_client(&state).await?;
@@ -329,10 +381,55 @@ pub async fn get_encryption_status(
             "Could not check encrypted backup. Check your connection and try again.".to_string()
         })??;
     current.pax_login = *state.account_mode.lock().await == super::pax_auth::AccountMode::Pax;
+    current.new_recovery_pending = restart::is_pending(&app, &client)?;
+    current.can_start_from_device = !current.pax_login
+        && (current.new_recovery_pending || (!current.secret_storage_exists && !current.can_setup));
     if current.pax_login {
         current.can_setup = false;
+        current.pending_recovery_key = false;
+        current.recovery_key_needs_save = false;
+        current.can_start_from_device = false;
     }
     Ok(current)
+}
+
+#[tauri::command]
+pub async fn start_encryption_recovery_from_device(
+    state: State<'_, Arc<AppState>>,
+    app: tauri::AppHandle,
+    expected_user_id: String,
+    password: String,
+    confirmed: bool,
+) -> Result<String, String> {
+    let _operation = state.encryption.operation.lock().await;
+    if !confirmed {
+        return Err("Confirm the new recovery setup before continuing.".into());
+    }
+    if *state.account_mode.lock().await != super::pax_auth::AccountMode::Matrix {
+        return Err("This action is only available for standard Matrix accounts.".into());
+    }
+    let client = get_client(&state).await?;
+    if client.user_id().map(|u| u.as_str()) != Some(expected_user_id.as_str()) {
+        return Err("The signed-in account changed. Reopen Encryption settings.".into());
+    }
+    if super::account_conversion::read_journal(
+        &app,
+        client.homeserver().as_str(),
+        &expected_user_id,
+    )?
+    .is_some_and(|j| !j.record.complete)
+    {
+        return Err(
+            "Finish switching sign-in methods before starting new encryption recovery.".into(),
+        );
+    }
+    let password = zeroize::Zeroizing::new(password);
+    // Pause incoming key queries while changing verification so an old public
+    // identity cannot invalidate new keys during their authenticated upload.
+    let pending_key = state.encryption.pending_key.lock().await.clone();
+    state.stop_sync_task().await;
+    *state.encryption.pending_key.lock().await = pending_key;
+    restart::start(&app, &client, &state.encryption, &password).await
 }
 
 #[tauri::command]
@@ -357,57 +454,21 @@ pub async fn setup_encryption_recovery(
         );
     }
     let client = get_client(&state).await?;
+    if restart::is_pending(&app, &client)? {
+        return Err(
+            "Use Finish recovery setup on this device to continue the interrupted setup.".into(),
+        );
+    }
     if let Some(key) = state.encryption.pending_key.lock().await.as_ref() {
         return Ok(key.clone());
     }
-    let current = status(&client, &state.encryption).await?;
-    if !current.can_setup {
-        return Err("Recovery already exists. Use your recovery key or verify with another device to unlock it.".into());
-    }
-    if !current.cross_signing_ready {
-        let result = client
-            .encryption()
-            .bootstrap_cross_signing_if_needed(None)
-            .await;
-        if let Err(error) = result {
-            let challenge = error.as_uiaa_response().ok_or_else(|| {
-                format!(
-                    "Could not set up your encryption identity: {}",
-                    fmt_error_chain(&error)
-                )
-            })?;
-            let password = password
-                .filter(|p| !p.is_empty())
-                .ok_or("Enter your account password to finish setting up encryption.")?;
-            let mut auth = Password::new(
-                matrix_sdk::ruma::api::client::uiaa::UserIdentifier::UserIdOrLocalpart(
-                    client.user_id().expect("authenticated client").to_string(),
-                ),
-                password,
-            );
-            auth.session = challenge.session.clone();
-            client
-                .encryption()
-                .bootstrap_cross_signing_if_needed(Some(AuthData::Password(auth)))
-                .await
-                .map_err(|e| {
-                    format!(
-                        "Could not set up your encryption identity: {}",
-                        fmt_error_chain(&e)
-                    )
-                })?;
-        }
-    }
-    if !client
-        .encryption()
-        .cross_signing_status()
-        .await
-        .is_some_and(|s| s.is_complete())
-    {
-        return Err(
-            "Verify this device using another signed-in device before setting up recovery.".into(),
-        );
-    }
+    let password = password.map(zeroize::Zeroizing::new);
+    prepare_recovery_setup(
+        &client,
+        &state.encryption,
+        password.as_ref().map(|p| p.as_str()),
+    )
+    .await?;
     mark_key_needs_save(&app, &client, &state.encryption)?;
     let key = client
         .encryption()

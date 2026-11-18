@@ -18,8 +18,7 @@ import {
 } from "lucide-react";
 import { useTheme } from "../theme/ThemeContext";
 import { paletteDialogShellBorderStyle } from "../theme/paletteBorder";
-import { useOverlayObstruction } from "../hooks/useOverlayObstruction";
-import ModalLayer from "./ModalLayer";
+import Dialog from "./Dialog";
 import type { ResolvedColorScheme } from "../theme/types";
 import { spaceInitialAvatarBackground } from "../utils/userAvatarColor";
 
@@ -136,8 +135,6 @@ export default function CreateSpaceDialog({
   parentSpace = null,
 }: CreateSpaceDialogProps) {
   const { palette, typography, resolvedColorScheme } = useTheme();
-  const modalRef = useRef<HTMLDivElement>(null);
-  useOverlayObstruction(modalRef);
 
   // Tab state — if user can't create, only show join (no tabs at all)
   const [activeTab, setActiveTab] = useState<"join" | "create">("join");
@@ -181,15 +178,6 @@ export default function CreateSpaceDialog({
   const homeserverPublicListFetchedRef = useRef(false);
   /** When the user runs a manual search, ignore in-flight homeserver auto-list results. */
   const homeserverAutoStaleRef = useRef(false);
-
-  // Close on Escape
-  useEffect(() => {
-    const handleKey = (e: KeyboardEvent) => {
-      if (e.key === "Escape") onClose();
-    };
-    window.addEventListener("keydown", handleKey);
-    return () => window.removeEventListener("keydown", handleKey);
-  }, [onClose]);
 
   useEffect(() => {
     invoke<string>("current_homeserver")
@@ -256,13 +244,6 @@ export default function CreateSpaceDialog({
       setJoinRule("invite");
     }
   }, [isPublic, joinRule]);
-
-  const handleBackdropClick = useCallback(
-    (e: React.MouseEvent) => {
-      if (e.target === e.currentTarget) onClose();
-    },
-    [onClose]
-  );
 
   // ── Avatar handling ──
   const handleAvatarPick = useCallback(() => {
@@ -554,28 +535,20 @@ export default function CreateSpaceDialog({
   };
 
   return (
-    <ModalLayer
-      onBackdropClick={handleBackdropClick}
-      backdropStyle={{
-        backgroundColor: "rgba(0,0,0,0.7)",
+    <Dialog
+      onClose={onClose}
+      aria-label="Join or create a space"
+      style={{
+        backgroundColor: palette.bgSecondary,
+        borderRadius: 8,
+        width: 500,
+        maxHeight: "85vh",
         display: "flex",
-        alignItems: "center",
-        justifyContent: "center",
+        flexDirection: "column",
+        boxShadow: "0 8px 32px rgba(0,0,0,0.5)",
+        ...paletteDialogShellBorderStyle(palette),
       }}
     >
-      <div
-        ref={modalRef}
-        style={{
-          backgroundColor: palette.bgSecondary,
-          borderRadius: 8,
-          width: 500,
-          maxHeight: "85vh",
-          display: "flex",
-          flexDirection: "column",
-          boxShadow: "0 8px 32px rgba(0,0,0,0.5)",
-          ...paletteDialogShellBorderStyle(palette),
-        }}
-      >
         {/* ── Header ── */}
         <div
           style={{
@@ -1281,10 +1254,9 @@ export default function CreateSpaceDialog({
             </button>
           </div>
         )}
-      </div>
 
       <style>{`@keyframes spin { to { transform: rotate(360deg); } }`}</style>
-    </ModalLayer>
+    </Dialog>
   );
 }
 

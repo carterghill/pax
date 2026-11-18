@@ -15,8 +15,7 @@ import {
 } from "lucide-react";
 import { useTheme } from "../theme/ThemeContext";
 import { paletteDialogShellBorderStyle } from "../theme/paletteBorder";
-import { useOverlayObstruction } from "../hooks/useOverlayObstruction";
-import ModalLayer from "./ModalLayer";
+import Dialog from "./Dialog";
 import ModerationScopeDialog from "./ModerationScopeDialog";
 import SettingsMemberCategory from "./SettingsMemberCategory";
 import PowerLevelsSettingsPanel from "./PowerLevelsSettingsPanel";
@@ -81,8 +80,6 @@ export default function SpaceSettingsDialog({
   onSaved,
 }: SpaceSettingsDialogProps) {
   const { palette, typography, spacing } = useTheme();
-  const modalRef = useRef<HTMLDivElement>(null);
-  useOverlayObstruction(modalRef);
 
   const [activeTab, setActiveTab] = useState<SettingsTab>("general");
   const [loading, setLoading] = useState(true);
@@ -190,21 +187,6 @@ export default function SpaceSettingsDialog({
       setJoinRule("invite");
     }
   }, [isPublic, joinRule]);
-
-  useEffect(() => {
-    const handleKey = (e: KeyboardEvent) => {
-      if (e.key === "Escape") onClose();
-    };
-    window.addEventListener("keydown", handleKey);
-    return () => window.removeEventListener("keydown", handleKey);
-  }, [onClose]);
-
-  const handleBackdropClick = useCallback(
-    (e: React.MouseEvent) => {
-      if (e.target === e.currentTarget) onClose();
-    },
-    [onClose]
-  );
 
   const handleAvatarPick = useCallback(() => {
     if (!perm?.avatar) return;
@@ -484,28 +466,20 @@ export default function SpaceSettingsDialog({
 
   return (
     <>
-    <ModalLayer
-      onBackdropClick={handleBackdropClick}
-      backdropStyle={{
-        backgroundColor: "rgba(0,0,0,0.7)",
+    <Dialog
+      onClose={onClose}
+      aria-label="Space settings"
+      style={{
+        backgroundColor: palette.bgSecondary,
+        borderRadius: 8,
+        width: "min(720px, calc(100vw - 40px))",
+        maxHeight: "min(90vh, 920px)",
         display: "flex",
-        alignItems: "center",
-        justifyContent: "center",
+        flexDirection: "column",
+        boxShadow: "0 8px 32px rgba(0,0,0,0.5)",
+        ...paletteDialogShellBorderStyle(palette),
       }}
     >
-      <div
-        ref={modalRef}
-        style={{
-          backgroundColor: palette.bgSecondary,
-          borderRadius: 8,
-          width: "min(720px, calc(100vw - 40px))",
-          maxHeight: "min(90vh, 920px)",
-          display: "flex",
-          flexDirection: "column",
-          boxShadow: "0 8px 32px rgba(0,0,0,0.5)",
-          ...paletteDialogShellBorderStyle(palette),
-        }}
-      >
         <div
           style={{
             display: "flex",
@@ -1253,8 +1227,7 @@ export default function SpaceSettingsDialog({
           </div>
         </div>
         <style>{`@keyframes spin { to { transform: rotate(360deg); } }`}</style>
-      </div>
-    </ModalLayer>
+    </Dialog>
     {moderationDialog && (
       <ModerationScopeDialog
         kind={moderationDialog.kind}
@@ -1264,7 +1237,7 @@ export default function SpaceSettingsDialog({
         spaceName={headerTitle}
         onSpaceScope={() => void runModeration("space")}
         onRoomOnly={() => void runModeration("room")}
-        onCancel={() => !moderationBusy && setModerationDialog(null)}
+        onCancel={() => setModerationDialog(null)}
         busy={moderationBusy}
       />
     )}

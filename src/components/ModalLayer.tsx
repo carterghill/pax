@@ -1,5 +1,5 @@
 import { createPortal } from "react-dom";
-import type { CSSProperties, MouseEvent, ReactNode } from "react";
+import type { CSSProperties, MouseEvent, PointerEvent, ReactNode } from "react";
 
 /**
  * Z-index for app-wide modal backdrops (portaled to `document.body`).
@@ -11,6 +11,7 @@ export const MODAL_LAYER_Z = 13_000;
 export interface ModalLayerProps {
   children: ReactNode;
   onBackdropClick?: (e: MouseEvent<HTMLDivElement>) => void;
+  onBackdropPointerDown?: (e: PointerEvent<HTMLDivElement>) => void;
   /** Merged after base fixed fullscreen layer; omit position/inset/zIndex (handled here). */
   backdropStyle?: CSSProperties;
 }
@@ -22,11 +23,13 @@ export interface ModalLayerProps {
 export default function ModalLayer({
   children,
   onBackdropClick,
+  onBackdropPointerDown,
   backdropStyle,
 }: ModalLayerProps) {
   const node = (
     <div
       onClick={onBackdropClick}
+      onPointerDown={onBackdropPointerDown}
       style={{
         position: "fixed",
         inset: 0,

@@ -1,6 +1,6 @@
 # Pax authentication design
 
-Status: phase-one Pax signup and automatic password login are implemented for testing. Existing-account conversion, password changes, emergency/credential export, and signed discovery remain future work.
+Status: phase-one Pax signup, automatic password login, and explicit Matrix-to-Pax account conversion are implemented for testing. Pax password changes, reverse conversion, emergency/credential export, and signed discovery remain future work.
 
 This document records the product behavior, implemented version-one formats, and security boundaries. The custom composition still needs cryptographic review and device benchmarking before production rollout. The integration tests use actual SDK-generated Secret Storage and encrypted message-key backups served by a local test homeserver; testing against the deployed homeserver remains necessary.
 
@@ -149,7 +149,7 @@ A version-one Pax descriptor is:
 }
 ```
 
-An explicit standard account uses `mode: "matrix-password"` and has no Pax password-derivation profile. Transition records are discussed in section 10; their final schema is an implementation gate.
+An explicit standard account uses `mode: "matrix-password"` and has no Pax password-derivation profile. Conversion uses the same Pax descriptor with `state: "converting"` and a `conversion_id` UUID. That identifier is required only in that state. `pending` remains reserved for new-account setup. See section 10 for resumption rules.
 
 Parsing rules:
 
@@ -191,13 +191,13 @@ For a password login:
 
 1. Fetch the public profile and validate the authentication descriptor under the configured trust policy.
 2. For `pax-password`, derive `C` and `K_wrap`; send only `C` to Matrix.
-3. For an authorized `matrix-password` account, perform ordinary Matrix password login.
+3. For an authorized `matrix-password` account, perform ordinary Matrix password login. Preserve the entered username/localpart or full Matrix ID as the standard login identifier; do not substitute the canonical account ID used for Pax derivation and recovery bindings. Password providers may distinguish these input forms. The same rule applies to the trusted-legacy ordinary-password attempt.
 4. Verify the returned account ID before accessing local stores or recovery data.
 5. On a successful Pax login, fetch the private recovery envelope, decrypt it locally, and restore secrets through the SDK.
 6. Restore historical room keys automatically as conversations are read, and refresh affected timelines when keys arrive.
 7. Continue automatic encrypted key uploads while signed in.
 
-The UI remains the same for both account schemes. No login-type selector or mode-choice retry prompt is introduced.
+The UI remains the same for both account schemes. No login-type selector or mode-choice retry prompt is introduced. Standard-password rejections explicitly identify the standard Matrix attempt. Diagnostic logs record the selected scheme, local-pin decision and HTTP rejection status, without passwords, derived credentials, recovery secrets, tokens or server response bodies.
 
 Pax should remember an account's successful Pax-mode enrollment locally. On that installation, an absent descriptor or a later claim of standard mode must not silently downgrade the account. This improves continuity on existing installations; it does not establish trust on a fresh installation or replace signed discovery.
 
@@ -237,24 +237,40 @@ If registration succeeds but descriptor publication fails, the deterministic cre
 
 Use ordinary Matrix registration, publish a standard-account descriptor, and retain ordinary Matrix encryption recovery behavior. The account-creation option must explain that standard sign-in credentials remain compatible with other Matrix clients and that automatic history unlocking is not supplied by this scheme.
 
-Pax registration checks Matrix 1.16 profile support before creating the account. Registration UIAA supports registration-token and dummy stages; unsupported flows return an explicit error. The original registration token/device session is restored into its own SDK store, avoiding an unnecessary second device. The account pin and pending session are saved before encryption setup. A failed setup displays “account created” and offers sign-in to finish. Token restoration is blocked until enrollment is complete. Only a positively confirmed new-account journal tied to that original device/store permits completing initialization without an envelope. Ready accounts with missing/corrupt envelopes stop without replacing their identity or backup. An interrupted new setup may rotate its unfinished Secret Storage wrapper while retaining the existing cross-signing and message-backup keys.
+Pax registration checks stable custom-profile support before creating the account. It accepts either Matrix 1.16+ or the explicit boolean `unstable_features["uk.tcpip.msc4133.stable"]: true` capability; Synapse can advertise the latter while claiming an earlier complete Matrix specification. The experimental-only `uk.tcpip.msc4133` flag is insufficient because Pax uses the stable `/v3/profile` API. The authenticated profile write and unauthenticated read-back still verify actual support before enrollment completes. Registration UIAA supports registration-token and dummy stages; unsupported flows return an explicit error. The original registration token/device session is restored into its own SDK store, avoiding an unnecessary second device. The account pin and pending session are saved before encryption setup. A failed setup displays “account created” and offers sign-in to finish. Token restoration is blocked until enrollment is complete. Only a positively confirmed new-account journal tied to that original device/store permits completing initialization without an envelope. Ready accounts with missing/corrupt envelopes stop without replacing their identity or backup. An interrupted new setup may rotate its unfinished Secret Storage wrapper while retaining the existing cross-signing and message-backup keys.
 
 ## 10. Conversion and password changes
 
-The workflows in this section are design requirements and are **not implemented**. Password changes in another client or an administrator reset do not update the Pax envelope and can break single-password login. Manual Secret Storage key replacement is disabled for Pax sessions so it cannot silently invalidate that envelope.
+Matrix-to-Pax conversion is implemented; the Pax password-change workflow below remains a design requirement. Password changes in another client or an administrator reset do not update the Pax envelope and can break single-password login. Manual Secret Storage key replacement is disabled for Pax sessions so it cannot silently invalidate that envelope.
 
 ### Convert an existing account to Pax mode
 
-Conversion is explicit and happens while signed in:
+Conversion is explicit in **Settings → Account → Switch to Pax sign-in**. It uses the existing account, standard password-change/UIAA APIs, and authenticated account data. No registration endpoint or registration token is involved. The dialog asks for the old Matrix password and a different new Pax password (at least 12 Unicode scalar values). A previously shared Matrix password must not become the recovery-unlocking password.
 
-1. Preserve the current SDK store, room keys, identity, and backup. Unlock existing recovery secrets if needed.
-2. Ask for a new memorable password that has never been sent to the homeserver. Reusing the old Matrix password cannot provide that guarantee.
-3. Derive the new credential and unlocking key. Prepare and verify an encrypted envelope for the existing recovery secret.
-4. Publish an appropriate transition descriptor before activating the new credential. Once conversion starts, discovery must not interpret that account as an ordinary-password fallback candidate.
-5. Change the actual Matrix password to the derived credential using the existing password-change and authentication mechanisms.
-6. Verify the new credential, recovery envelope, account binding, and backup access before publishing the final descriptor and completing conversion.
+1. Confirm the trusted HTTPS homeserver supports stable custom profiles and allows password changes. Identify the current persistent SDK store and device. An existing cross-signing identity must have all three private signing keys locally; an existing server backup must be unlocked. If either is unavailable, ask the user to unlock recovery or verify the device in Encryption settings before starting. Do not reset or replace an inaccessible identity or backup.
+2. Derive the new Matrix credential and wrapping key using the unchanged version-one construction. Atomically save a private local conversion journal. Upload the private conversion record and publish the public `converting` descriptor before slow recovery writes. Ordinary password login stops on this state without sending any password. Local unfinished journals enforce the same rule even if profile discovery fails or the first profile write never succeeded.
+3. Retain a snapshot of the original encrypted Secret Storage default/key-description records, cross-signing secret records, backup secret, and any old Pax envelope. Generate a fresh Secret Storage wrapper using the existing SDK identity and backup keys. If no backup exists, enable a first backup. The SDK merges encrypted secret slots, retaining the old recovery key's slots. Never delete an existing backup or reset cross-signing.
+4. Encrypt the new recovery key using the new wrapping key. Save the envelope locally before uploading it in the private conversion record. Publish it as the account's active Pax recovery envelope, download it, and verify actual recovery restores the identity and enables the backup. Retrying this step reuses the prepared envelope; it does not rotate another wrapper.
+5. Persist `password_change_requested: true` locally and on the server **before** changing the Matrix password to the derived credential. Send `logout_devices: false`. Password and dummy UIAA stages are supported; the old Matrix password is the only human password ever included in a UIAA authentication field. The new memorable password never leaves the native derivation/encryption code. Other devices may still be soft-logged-out by the server.
+6. Verify the derived credential with a real login for the same user and device. Reopen the same persistent SDK store with the returned session, verify recovery again, and check the active recovery envelope and private transaction identifier match. Publish/read back `ready`, save the local Pax downgrade pin and remembered session if enabled, then complete the private server and local journals. Restart sync against the authenticated client.
 
-Do not reset the Matrix identity, rotate room sessions merely to change the account scheme, or discard previously held history keys. Preserve existing device sessions where supported, using `logout_devices: false` when appropriate.
+Private account-data type: `com.carter.pax.conversion`. Its schema is `schema_version: 1`, exact `user_id`, random UUID `transaction_id`, encrypted `password_check`, optional staged `envelope`, `original_recovery` map of already encrypted Matrix account-data records, `snapshot_saved`, `password_change_requested`, and `complete`. Both encrypted fields use the existing recovery-envelope construction. The password check uses the key-id/AAD context `conversion:<transaction_id>` and the fixed plaintext `pax-conversion-password-check-v1`; it proves the same new password is being supplied without storing that password or its derived login credential. It is private authenticated account data, never a public profile field. The local journal additionally binds the homeserver, relative store directory, and original device ID. Files use atomic writes and Unix mode 0600. Neither journal stores plaintext passwords, recovery secrets, derived credentials, or access tokens. The completed encrypted snapshot is retained; this version has no UI for importing a superseded snapshot.
+
+Conversion preserves the existing available history; it cannot recreate already lost message keys. If an older backup is inaccessible, this flow intentionally stops instead of silently replacing it with a partial backup. Unlock it with the old recovery key or another verified device first. Recovering a separate historical backup with a newly found older key remains separate work. A generated Secret Storage wrapper is a normal recovery key, but the password-protected Pax envelope handles it automatically.
+
+### Standard accounts with no configured recovery and missing secrets
+
+A public cross-signing identity or an automatic encrypted backup may already exist before Secret Storage/recovery is configured. The ordinary setup and conversion guards continue to refuse replacing those missing secrets implicitly. Encryption settings explain the missing identity/backup keys separately.
+
+**Set up recovery from this device** is a separate, explicit confirmation for a standard account with no configured Secret Storage and missing local secrets. It requires the current Matrix password, a confirmed-action flag, and the expected signed-in user ID. It cannot run during a pending sign-in conversion. An unfinished recovery setup likewise blocks conversion until completed.
+
+Before changes, save an atomic local journal bound to homeserver/user/device, containing a random transaction UUID, original already encrypted account-data records, and the old backup version/public metadata. Archive/read back that snapshot in private account data `com.carter.pax.recovery_restart.<UUID>`. Neither copy contains plaintext secrets or passwords. Pause sync while changing verification, then restart it on success or failure.
+
+If private verification keys are missing, explicitly reset cross-signing using password UIAA. Reuse keys already available locally on retry; the SDK may discard an unaccepted generated identity when it processes the old public identity, in which case another unpublished identity can be generated. Once the server has accepted a new identity, retries and app restarts retain it. A wrong password does not publish a replacement or change the account login password. If the identity is already unlocked, retain it.
+
+If the backup is inaccessible, create a new backup version for this device's available message keys. Never call the SDK's combined `recovery.reset_identity()` or backup deletion methods: those delete existing backups. Preserve all prior backup versions and encrypted contents. Enable Secret Storage, generate a recovery key, and show the normal save-key dialog. A local unfinished journal exposes **Finish recovery setup on this device**, including after restart; an interrupted unsaved Secret Storage wrapper may be regenerated while retaining the accepted identity, active backup, and local message keys. The original account-data archive remains available; importing historical archives still needs a separate UI.
+
+This action cannot recreate missing message keys or unlock older backups. It changes verification only through the explicit confirmation, preserves the current SDK store, and is never a fallback for ordinary login or Pax conversion. Fresh standard recovery setup also re-uploads the same locally generated identity keys when completing UIAA, because local key existence alone does not prove the server accepted an earlier upload.
 
 ### Change a Pax memorable password
 
@@ -268,7 +284,9 @@ These changes cannot be treated as an atomic transaction on a stock homeserver. 
 
 For a password change within Pax mode, a transition record may advertise a bounded set of old and new derivation descriptors. Candidate login attempts remain derived credentials; no failed candidate permits sending the entered password directly. Retain the corresponding envelopes until the active credential has been verified.
 
-Conversion from standard mode needs particular care because a transition must prevent the newly chosen memorable password from being sent through the old login path. The journal, transition schema, ordering, and resumption rules must be specified and tested before conversion is implemented. Successful login against a server that returns an inconsistent revision must not cause destructive repair.
+For Matrix-to-Pax conversion, a failed or lost password-change response is an ambiguous commit. Never roll the public descriptor back or assume the old password still works. In Account settings, **Finish switching** validates the chosen new password against the encrypted local check and tries the derived credential first if the password change was requested. A successful login resumes finalization without repeating the password change. A genuine rejection permits retrying the pending change with the explicitly entered old Matrix password.
+
+When ordinary login sees an unfinished local journal or public `converting` descriptor, it opens a small **Finish switching** dialog. On the original installation, the new password must decrypt the local password check before any old-password authentication is allowed. It tries derived authentication first; only a genuine credential rejection, a valid local password check, and a separately entered old password permit standard authentication. A fresh installation never sends an old human password: if derived authentication succeeds, it downloads the private transaction and finishes recovery; otherwise, it directs the user to the original installation. Incorrect passwords, network failures, and rate limits never trigger a raw fallback. This flow has no cancellation/rollback after remote enrollment begins; it resumes using the same new password. Signed discovery remains future work, so the trusted-server assumption in section 4 still applies.
 
 Rewrapping does not revoke secrets already copied by an attacker. A server may retain old envelopes, so a compromised old password and an old envelope can remain useful. Recovery from actual key compromise requires a separate, reviewed rotation process that preserves legitimate history; an ordinary password change must not claim to solve it.
 
@@ -349,7 +367,7 @@ Before enabling the new scheme for production accounts:
 - Freeze the version-one cryptographic profile, encodings, labels, resource limits, and credential representation; review the composition and publish deterministic test vectors.
 - Verify custom-profile support and pre-login behavior on the deployed homeserver, including empty and missing legacy profiles.
 - Resolve legacy enrollment and interrupted-registration discovery without adding a login-mode selector or an error-driven downgrade.
-- Specify the envelope/slot and transition formats, then test interruption after every server write in registration, conversion, and password change.
+- Exercise interruption after every server write in registration, conversion, and future password changes. Current conversion integration tests cover failed journal/profile/envelope writes, incorrect passwords, a lost password-change response, final profile failure, inaccessible secrets, and unchanged identity/backup with fresh-device room-key recovery.
 - Confirm that Matrix password policies and authentication challenges accept the derived credential unchanged.
 - Test that a fresh installation using only the account name and memorable password restores old messages and attachments, then remains usable after restart and token expiry.
 - Test default Pax creation, optional standard creation, existing standard accounts, conversion, wrong passwords, offline operation, rate limits, corrupted descriptors, and missing envelopes.
@@ -362,6 +380,9 @@ The current Pax integration tests register through all supported UIAA stages, ch
 These are local protocol tests, not an audit or proof that a particular deployed server is configured correctly. No test substitutes mocked decryption success for the actual encrypted-envelope and SDK recovery round trip.
 
 ## 15. Implementation entry points
+
+- `src-tauri/src/commands/account_conversion.rs`: guarded Matrix-to-Pax conversion, encrypted journals, password UIAA, and interrupted-login repair.
+- `src/components/AccountSignInPanel.tsx` and `PaxConversionForm.tsx`: Account settings and the interrupted-conversion dialog.
 
 - [`src-tauri/src/commands/auth.rs`](src-tauri/src/commands/auth.rs): registration, login, session restoration, and preservation of local stores. It implements UIAA registration, automatic mode selection, derived credential login, setup journaling/resumption, and device-store reuse.
 - [`src-tauri/src/commands/pax_auth.rs`](src-tauri/src/commands/pax_auth.rs): versioned derivation, descriptor/envelope validation, encrypted SDK recovery, local pins, and enrollment helpers. [`pax_auth_tests.rs`](src-tauri/src/commands/pax_auth_tests.rs) contains the frozen derivation vector, AEAD failures, and real SDK recovery integration tests.

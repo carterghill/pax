@@ -103,6 +103,7 @@ pub async fn logout(state: State<'_, Arc<AppState>>, app: tauri::AppHandle) -> R
         *g = None;
     }
     *state.client.lock().await = None;
+    *state.session_store_dir.lock().await = None;
     state.avatars.reset();
     state.file_cache.clear().await;
     crate::commands::unread::clear_unread_cache(state.inner()).await;
@@ -366,10 +367,19 @@ pub(super) enum PasswordLoginError {
     Other(String),
 }
 impl PasswordLoginError {
-    fn message(self) -> String {
+    pub(super) fn message(self) -> String {
         match self {
             Self::Rejected => "Incorrect username or password.".into(),
             Self::Other(message) => message,
+        }
+    }
+
+    fn matrix_message(self) -> String {
+        match self {
+            Self::Rejected => {
+                "The homeserver rejected your standard Matrix username or password.".into()
+            }
+            other => other.message(),
         }
     }
 }
@@ -409,6 +419,8 @@ pub(super) async fn request_password_session(
         PasswordLoginError::Other("Invalid sign-in response from the homeserver.".into())
     })?;
     if status.as_u16() == 403 && value["errcode"] == "M_FORBIDDEN" {
+        // Only log the status, never credentials, response bodies or tokens.
+        log::info!("login: password authentication rejected (HTTP 403)");
         return Err(PasswordLoginError::Rejected);
     }
     if !status.is_success() {
@@ -530,7 +542,7 @@ async fn stop_previous_session(state: &AppState) {
     *state.client.lock().await = None;
 }
 
-async fn restore_authenticated_client(
+pub(super) async fn restore_authenticated_client(
     app: &tauri::AppHandle,
     home: &str,
     session: &SavedSession,
@@ -575,9 +587,11 @@ async fn install_session(
     state: &AppState,
     client: Client,
     mode: AccountMode,
+    store_dir: String,
 ) -> Result<String, String> {
     let user = client.user_id().ok_or("Missing account ID")?.to_string();
     *state.account_mode.lock().await = mode;
+    *state.session_store_dir.lock().await = Some(store_dir);
     *state.client.lock().await = Some(client);
     state.notifications.start_session();
     state.voice_presence.start_session();
@@ -643,7 +657,7 @@ pub async fn register(
             )
             .await;
         }
-        return install_session(&state, client, mode).await;
+        return install_session(&state, client, mode, rel).await;
     }
     pax_auth::ensure_trusted(&homeserver, &state.auth_config)?;
     if password.chars().count() < 12 {
@@ -708,13 +722,13 @@ pub async fn register(
         pax_auth::complete_enrollment(&state.http_client, &client, &keys, true).await?;
         record.ready = true;
         pax_auth::save_enrollment(&app, &record)?;
-        save_session_to_credentials(&app, &homeserver, session, Some(rel), mode, false)?;
+        save_session_to_credentials(&app, &homeserver, session, Some(rel.clone()), mode, false)?;
         Ok(client)
     }.await;
     let client = finish.map_err(|e| {
         format!("Your account was created. Sign in with the same password to finish setup. {e}")
     })?;
-    install_session(&state, client, mode).await
+    install_session(&state, client, mode, rel).await
 }
 
 pub(super) struct PasswordAuthentication {
@@ -730,6 +744,7 @@ pub(super) async fn authenticate_password(
     http: &reqwest::Client,
     home: &str,
     user: &str,
+    matrix_identifier: &str,
     password: &str,
     device: Option<&str>,
     config: &crate::AuthConfig,
@@ -742,6 +757,9 @@ pub(super) async fn authenticate_password(
         Err(pax_auth::DiscoveryError::Unavailable(_)) if pinned => None,
         Err(e) => return Err(e.into()),
     };
+    if descriptor.as_ref().is_some_and(|d| d.state == "converting") {
+        return Err(super::account_conversion::PENDING_MESSAGE.into());
+    }
     if pinned
         && descriptor
             .as_ref()
@@ -762,11 +780,13 @@ pub(super) async fn authenticate_password(
         desired
     };
     let mut keys = None;
+    log::info!("login: account={user}, discovered_mode={desired:?}, local_pax_pin={pinned}");
     let (session, mode) = if desired == Some(AccountMode::Matrix) {
+        log::info!("login: using standard Matrix authentication");
         (
-            request_password_session(http, home, user, password, device)
+            request_password_session(http, home, matrix_identifier, password, device)
                 .await
-                .map_err(PasswordLoginError::message)?,
+                .map_err(PasswordLoginError::matrix_message)?,
             AccountMode::Matrix,
         )
     } else {
@@ -779,12 +799,15 @@ pub(super) async fn authenticate_password(
             }
             // Unsigned, trusted-server compatibility for older, unmarked
             // Matrix accounts. Never infer mode from a timeout or rate limit.
-            Err(PasswordLoginError::Rejected) if desired.is_none() => (
-                request_password_session(http, home, user, password, device)
-                    .await
-                    .map_err(PasswordLoginError::message)?,
-                AccountMode::Matrix,
-            ),
+            Err(PasswordLoginError::Rejected) if desired.is_none() => {
+                log::info!("login: Pax probe rejected; using standard Matrix authentication for the unmarked account");
+                (
+                    request_password_session(http, home, matrix_identifier, password, device)
+                        .await
+                        .map_err(PasswordLoginError::matrix_message)?,
+                    AccountMode::Matrix,
+                )
+            }
             Err(e) => return Err(e.message()),
         }
     };
@@ -837,6 +860,11 @@ pub async fn login(
         .await?
     };
     let record = pax_auth::read_enrollment(&app, &homeserver, &user)?;
+    if super::account_conversion::read_journal(&app, &homeserver, &user)?
+        .is_some_and(|j| !j.record.complete)
+    {
+        return Err(super::account_conversion::PENDING_MESSAGE.into());
+    }
     let pinned = record.as_ref().is_some_and(|e| e.registered || e.ready)
         || previous_credentials
             .as_ref()
@@ -868,6 +896,7 @@ pub async fn login(
         &state.http_client,
         &homeserver,
         &user,
+        username.trim(),
         &password,
         reusable.as_ref().map(|(_, d)| d.as_str()),
         &state.auth_config,
@@ -927,11 +956,11 @@ pub async fn login(
         }
     }
     if persist_session {
-        save_session_to_credentials(&app, &homeserver, session, Some(rel), mode, false)?;
+        save_session_to_credentials(&app, &homeserver, session, Some(rel.clone()), mode, false)?;
     } else {
         clear_saved_credentials(app.clone())?;
     }
-    install_session(&state, client, mode).await
+    install_session(&state, client, mode, rel).await
 }
 
 /// Fast-path boot: restore a previously saved session from the SQLite store.
@@ -1053,6 +1082,7 @@ pub async fn restore_session(
         }
     }
     *state.account_mode.lock().await = creds.account_mode;
+    *state.session_store_dir.lock().await = Some(creds.sqlite_store_dir.clone().unwrap_or_else(|| "matrix_store".into()));
     state.notifications.reset();
     state.voice_presence.reset();
     state.attachments.reset().await;

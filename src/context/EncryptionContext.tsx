@@ -12,6 +12,8 @@ export interface EncryptionStatus {
   crossSigningReady: boolean;
   hasIdentity: boolean;
   canSetup: boolean;
+  canStartFromDevice: boolean;
+  newRecoveryPending: boolean;
   pendingRecoveryKey: boolean;
   recoveryKeyNeedsSave: boolean;
   progress: { state: string; backedUp: number | null; total: number | null; error: string | null };
@@ -39,13 +41,18 @@ interface EncryptionContextValue {
   error: string | null;
   busy: string | null;
   recoveryKey: string | null;
+  recoveryKeyDismissed: boolean;
+  dismissRecoveryKey: () => void;
+  showRecoveryKey: () => void;
   verification: VerificationStatus | null;
   refresh: () => Promise<void>;
   setup: (password?: string) => Promise<void>;
+  startRecoveryFromDevice: (password: string) => Promise<void>;
   restore: (key: string) => Promise<void>;
   acknowledgeKey: () => Promise<void>;
   replaceKey: () => Promise<void>;
   backUp: () => Promise<void>;
+  convertToPax: (currentPassword: string, newPassword: string) => Promise<void>;
   historyExport: HistoryExport | null;
   historyImport: HistoryImport | null;
   exportHistory: (passphrase: string) => Promise<HistoryExport | null>;
@@ -63,6 +70,7 @@ export function EncryptionProvider({ children, userId }: { children: ReactNode; 
   const [connectionError, setConnectionError] = useState<string | null>(null);
   const [busy, setBusy] = useState<string | null>(null);
   const [recoveryKey, setRecoveryKey] = useState<string | null>(null);
+  const [recoveryKeyDismissed, setRecoveryKeyDismissed] = useState(false);
   const [verification, setVerification] = useState<VerificationStatus | null>(null);
   const [historyExport, setHistoryExport] = useState<HistoryExport | null>(null);
   const [historyImport, setHistoryImport] = useState<HistoryImport | null>(null);
@@ -79,9 +87,9 @@ export function EncryptionProvider({ children, userId }: { children: ReactNode; 
       if (mounted.current) {
         setStatus(next);
         setConnectionError(null);
-        // A pending generated key is kept in memory by the backend so reloading
-        // the webview cannot silently dismiss the save-key step.
-        if (next.pendingRecoveryKey) {
+        if (next.paxLogin) { setRecoveryKey(null); setRecoveryKeyDismissed(false); }
+        // Keep an unacknowledged generated key available after a webview reload.
+        if (next.pendingRecoveryKey && !next.paxLogin) {
           const key = await invoke<string | null>("get_pending_encryption_recovery_key");
           if (mounted.current) setRecoveryKey(key);
         }
@@ -151,11 +159,17 @@ export function EncryptionProvider({ children, userId }: { children: ReactNode; 
 
   const setup = (password?: string) => run("Setting up recovery…", async () => {
     const key = await invoke<string>("setup_encryption_recovery", { password: password || null });
-    if (mounted.current) setRecoveryKey(key);
+    if (mounted.current) { setRecoveryKey(key); setRecoveryKeyDismissed(false); }
   });
+  const startRecoveryFromDevice = (password: string) => run("Setting up recovery from this device…", async () => {
+    try {
+      const key = await invoke<string>("start_encryption_recovery_from_device", { password, expectedUserId: userId, confirmed: true });
+      if (mounted.current) { setRecoveryKey(key); setRecoveryKeyDismissed(false); }
+    } finally { await invoke("start_sync"); await refresh(); }
+  }, false);
   const replaceKey = () => run("Creating recovery key…", async () => {
     const key = await invoke<string>("replace_encryption_recovery_key");
-    if (mounted.current) setRecoveryKey(key);
+    if (mounted.current) { setRecoveryKey(key); setRecoveryKeyDismissed(false); }
   });
   const restore = (key: string) => run("Restoring encryption keys…", async () => {
     await invoke("restore_encryption_recovery", { recoveryKey: key });
@@ -166,6 +180,16 @@ export function EncryptionProvider({ children, userId }: { children: ReactNode; 
   });
   const backUp = () => run("Backing up message keys…", async () => {
     await invoke("sync_encryption_backup");
+  });
+  const convertToPax = (currentPassword: string, newPassword: string) => run("Switching to Pax sign-in…", async () => {
+    try {
+      await invoke("convert_account_to_pax", { currentPassword, newPassword, expectedUserId: userId });
+    } finally {
+      // Reauthentication may replace the SDK client, including on a recoverable
+      // error after the password change. Restart sync against the current one.
+      await invoke("start_sync");
+      await refresh();
+    }
   });
   const exportHistory = async (passphrase: string): Promise<HistoryExport | null> => {
     let result: HistoryExport | null = null;
@@ -198,7 +222,8 @@ export function EncryptionProvider({ children, userId }: { children: ReactNode; 
 
   return (
     <EncryptionContext.Provider value={{ status, error: error ?? connectionError, busy, recoveryKey, verification, refresh,
-      setup, restore, acknowledgeKey, replaceKey, backUp, historyExport, historyImport, exportHistory, importHistory,
+      recoveryKeyDismissed, dismissRecoveryKey: () => setRecoveryKeyDismissed(true), showRecoveryKey: () => setRecoveryKeyDismissed(false),
+      setup, startRecoveryFromDevice, restore, acknowledgeKey, replaceKey, backUp, convertToPax, historyExport, historyImport, exportHistory, importHistory,
       requestVerification, respondVerification,
       dismissVerification: () => { dismissedFlow.current = verification?.flowId ?? null; setVerification(null); void refresh(); },
     }}>

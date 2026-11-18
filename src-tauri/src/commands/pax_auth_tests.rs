@@ -18,7 +18,7 @@ use tokio::{
     net::{TcpListener, TcpStream},
 };
 
-const USER: &str = "@alice:example.org";
+pub(crate) const USER: &str = "@alice:example.org";
 const PASSWORD: &str = "four unrelated words 🔐";
 
 #[test]
@@ -90,23 +90,29 @@ fn envelope_rejects_wrong_password_tampering_and_account_or_key_substitution() {
 // Secret Storage records and encrypted message-key backups. It deliberately
 // knows neither the human password nor any encryption private key.
 #[derive(Default)]
-struct ServerState {
-    requests: Vec<(String, String, Value)>,
-    credential: Option<String>,
-    profile: Value,
-    account_data: HashMap<String, Value>,
+pub(crate) struct ServerState {
+    versions: Option<Value>,
+    pub requests: Vec<(String, String, Value)>,
+    pub credential: Option<String>,
+    required_login_identifier: Option<String>,
+    pub profile: Value,
+    pub account_data: HashMap<String, Value>,
     devices: serde_json::Map<String, Value>,
-    signing: serde_json::Map<String, Value>,
-    backup: Option<Value>,
+    pub signing: serde_json::Map<String, Value>,
+    pub backup: Option<Value>,
+    pub backup_archives: HashMap<String, (Value, serde_json::Map<String, Value>)>,
     rooms: serde_json::Map<String, Value>,
-    fail_envelope: bool,
-    fail_signing: bool,
-    login_status: Option<u16>,
-    profile_status: Option<u16>,
+    pub fail_envelope: bool,
+    pub password_disabled: bool,
+    pub fail_password_response: bool,
+    pub fail_conversion_write: bool,
+    pub fail_signing: bool,
+    pub login_status: Option<u16>,
+    pub profile_status: Option<u16>,
 }
-struct Server {
-    home: String,
-    state: Arc<Mutex<ServerState>>,
+pub(crate) struct Server {
+    pub home: String,
+    pub state: Arc<Mutex<ServerState>>,
     task: tokio::task::JoinHandle<()>,
 }
 impl Drop for Server {
@@ -115,7 +121,7 @@ impl Drop for Server {
     }
 }
 impl Server {
-    async fn start() -> Self {
+    pub async fn start() -> Self {
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let home = format!("http://{}", listener.local_addr().unwrap());
         let state = Arc::new(Mutex::new(ServerState {
@@ -191,10 +197,35 @@ async fn serve(mut socket: TcpStream, state: Arc<Mutex<ServerState>>) {
 fn respond(s: &mut ServerState, method: &str, path: &str, body: &Value) -> (u16, Value) {
     let missing = || (404, json!({"errcode":"M_NOT_FOUND", "error":"Missing"}));
     if path.ends_with("/versions") {
-        return (200, json!({"versions":["v1.16"]}));
+        return (
+            200,
+            s.versions
+                .clone()
+                .unwrap_or_else(|| json!({"versions":["v1.16"]})),
+        );
     }
     if path == "/_matrix/key/v2/server" {
         return (200, json!({"server_name":"example.org"}));
+    }
+    if path.ends_with("/capabilities") {
+        return (200, json!({"capabilities":{"m.change_password":{"enabled":!s.password_disabled}}}));
+    }
+    if path.ends_with("/account/password") {
+        assert_eq!(body["logout_devices"], false);
+        if body.get("auth").is_none() {
+            return (401, json!({"session":"change-password","flows":[{"stages":["m.login.password"]}]}));
+        }
+        assert_eq!(body["auth"]["type"], "m.login.password");
+        assert_eq!(body["auth"]["session"], "change-password");
+        assert_eq!(body["auth"]["identifier"]["user"], USER);
+        if body["auth"]["password"].as_str() != s.credential.as_deref() {
+            return (401, json!({"errcode":"M_FORBIDDEN"}));
+        }
+        s.credential = Some(body["new_password"].as_str().unwrap().into());
+        if s.fail_password_response {
+            return (502, json!({"errcode":"M_UNKNOWN"}));
+        }
+        return (200, json!({}));
     }
     if path.ends_with("/register") {
         let flows = json!([{"stages":["m.login.registration_token", "m.login.dummy"]}]);
@@ -220,6 +251,13 @@ fn respond(s: &mut ServerState, method: &str, path: &str, body: &Value) -> (u16,
         if let Some(status) = s.login_status {
             return (status, json!({"errcode":"M_LIMIT_EXCEEDED"}));
         }
+        assert_eq!(body["identifier"]["type"], "m.id.user");
+        if s.required_login_identifier
+            .as_deref()
+            .is_some_and(|identifier| body["identifier"]["user"].as_str() != Some(identifier))
+        {
+            return (403, json!({"errcode":"M_FORBIDDEN"}));
+        }
         if body["password"].as_str() != s.credential.as_deref() {
             return (403, json!({"errcode":"M_FORBIDDEN"}));
         }
@@ -240,6 +278,9 @@ fn respond(s: &mut ServerState, method: &str, path: &str, body: &Value) -> (u16,
     }
     if let Some((_, key)) = path.split_once("/account_data/") {
         if method == "PUT" {
+            if key == "com.carter.pax.conversion" && s.fail_conversion_write {
+                return (500, json!({"errcode":"M_UNKNOWN"}));
+            }
             if key == RECOVERY_TYPE && s.fail_envelope {
                 return (400, json!({"errcode":"M_BAD_JSON"}));
             }
@@ -282,7 +323,9 @@ fn respond(s: &mut ServerState, method: &str, path: &str, body: &Value) -> (u16,
                 json!({"session":"encryption", "flows":[{"stages":["m.login.password"]}]}),
             );
         }
-        assert_eq!(body["auth"]["password"].as_str(), s.credential.as_deref());
+        if body["auth"]["password"].as_str() != s.credential.as_deref() {
+            return (401, json!({"errcode":"M_FORBIDDEN"}));
+        }
         assert_eq!(body["auth"]["session"], "encryption");
         for field in ["master_key", "self_signing_key", "user_signing_key"] {
             if let Some(v) = body.get(field) {
@@ -303,15 +346,19 @@ fn respond(s: &mut ServerState, method: &str, path: &str, body: &Value) -> (u16,
     }
     if path.contains("/room_keys/version") {
         if method == "POST" {
+            if let Some(previous) = s.backup.take() {
+                let version = (s.backup_archives.len() + 1).to_string();
+                s.backup_archives.insert(version, (previous, std::mem::take(&mut s.rooms)));
+            }
             s.backup = Some(body.clone());
-            return (200, json!({"version":"1"}));
+            return (200, json!({"version":(s.backup_archives.len()+1).to_string()}));
         }
         return s
             .backup
             .as_ref()
             .map(|b| {
                 let mut v = b.clone();
-                v["version"] = json!("1");
+                v["version"] = json!((s.backup_archives.len()+1).to_string());
                 v["count"] = json!(s.rooms.len());
                 v["etag"] = json!("etag");
                 (200, v)
@@ -348,9 +395,100 @@ fn respond(s: &mut ServerState, method: &str, path: &str, body: &Value) -> (u16,
     missing()
 }
 
-struct TestDir(PathBuf);
+#[tokio::test]
+async fn standard_login_preserves_the_entered_identifier_for_password_providers() {
+    let server = Server::start().await;
+    let http = reqwest::Client::new();
+    let config = AuthConfig::default();
+    {
+        let mut state = server.state.lock().unwrap();
+        state.credential = Some("ordinary Matrix password".into());
+        // Some password providers accept the local username used by the old
+        // login form rather than a substituted, fully qualified Matrix ID.
+        state.required_login_identifier = Some("alice".into());
+        state.profile = json!({"displayname":"Alice"});
+    }
+    let legacy = authenticate_password(
+        &http,
+        &server.home,
+        USER,
+        "alice",
+        "ordinary Matrix password",
+        None,
+        &config,
+        false,
+    )
+    .await
+    .unwrap();
+    assert_eq!(legacy.mode, AccountMode::Matrix);
+    assert_eq!(legacy.session.user_id, USER);
+    assert!(legacy.keys.is_none());
+    {
+        let state = server.state.lock().unwrap();
+        let attempts: Vec<_> = state
+            .requests
+            .iter()
+            .filter(|(_, p, _)| p.ends_with("/login"))
+            .collect();
+        assert_eq!(attempts.len(), 2);
+        assert_eq!(attempts[0].2["identifier"]["user"], USER);
+        assert_ne!(attempts[0].2["password"], "ordinary Matrix password");
+        assert_eq!(attempts[1].2["identifier"]["user"], "alice");
+        assert_eq!(attempts[1].2["password"], "ordinary Matrix password");
+    }
+    {
+        let mut state = server.state.lock().unwrap();
+        state.requests.clear();
+        state.profile = json!({PROFILE_FIELD:Descriptor::new(USER,AccountMode::Matrix,true)});
+    }
+    assert_eq!(
+        authenticate_password(
+            &http,
+            &server.home,
+            USER,
+            "alice",
+            "ordinary Matrix password",
+            None,
+            &config,
+            false
+        )
+        .await
+        .unwrap()
+        .mode,
+        AccountMode::Matrix
+    );
+    assert_eq!(
+        server
+            .state
+            .lock()
+            .unwrap()
+            .requests
+            .iter()
+            .filter(|(_, p, _)| p.ends_with("/login"))
+            .count(),
+        1
+    );
+    // A failed standard login must identify which authentication was rejected,
+    // so the error cannot be mistaken for a failed Pax-only attempt.
+    let error = authenticate_password(
+        &http,
+        &server.home,
+        USER,
+        "alice",
+        "wrong password",
+        None,
+        &config,
+        false,
+    )
+    .await
+    .err()
+    .unwrap();
+    assert!(error.contains("standard Matrix"));
+}
+
+pub(crate) struct TestDir(pub PathBuf);
 impl TestDir {
-    fn new() -> Self {
+    pub fn new() -> Self {
         let path = std::env::temp_dir().join(format!("pax-auth-test-{}", uuid::Uuid::new_v4()));
         std::fs::create_dir_all(&path).unwrap();
         Self(path)
@@ -362,7 +500,16 @@ impl Drop for TestDir {
     }
 }
 
-async fn client(home: &str, path: &Path, session: SavedSession) -> Client {
+pub(crate) async fn client(home: &str, path: &Path, session: SavedSession) -> Client {
+    let client = client_without_sync(home, path, session).await;
+    client
+        .sync_once(matrix_sdk::config::SyncSettings::default())
+        .await
+        .unwrap();
+    client
+}
+
+pub(crate) async fn client_without_sync(home: &str, path: &Path, session: SavedSession) -> Client {
     let client = Client::builder()
         .homeserver_url(home)
         .sqlite_store(path, None)
@@ -389,16 +536,18 @@ async fn client(home: &str, path: &Path, session: SavedSession) -> Client {
         .await
         .unwrap();
     client
-        .sync_once(matrix_sdk::config::SyncSettings::default())
-        .await
-        .unwrap();
-    client
 }
 
 #[tokio::test]
 async fn signup_and_new_device_restore_real_encrypted_room_keys() {
     tokio::time::timeout(std::time::Duration::from_secs(60), async {
         let server = Server::start().await;
+        // Match the advertised capabilities of Synapse 1.150.0: the stable
+        // feature exists even though the server only claims Matrix 1.12.
+        server.state.lock().unwrap().versions = Some(json!({
+            "versions":["r0.6.1","v1.11","v1.12"],
+            "unstable_features":{"uk.tcpip.msc4133":false,"uk.tcpip.msc4133.stable":true}
+        }));
         let http = reqwest::Client::new();
         check_profile_support(&http, &server.home).await.unwrap();
         assert_eq!(
@@ -453,6 +602,7 @@ async fn signup_and_new_device_restore_real_encrypted_room_keys() {
             &http,
             &server.home,
             USER,
+            USER,
             PASSWORD,
             None,
             &AuthConfig::default(),
@@ -502,6 +652,44 @@ async fn signup_and_new_device_restore_real_encrypted_room_keys() {
     })
     .await
     .expect("Pax registration/recovery should not hang");
+}
+
+#[tokio::test]
+async fn profile_support_uses_explicit_stable_capabilities_as_well_as_spec_versions() {
+    let server = Server::start().await;
+    let http = reqwest::Client::new();
+    for response in [
+        json!({"versions":["v1.16"]}),
+        json!({"versions":["v1.17"]}),
+        json!({"versions":["v1.12"],"unstable_features":{"uk.tcpip.msc4133":false,"uk.tcpip.msc4133.stable":true}}),
+    ] {
+        server.state.lock().unwrap().versions = Some(response);
+        check_profile_support(&http, &server.home).await.unwrap();
+    }
+    for response in [
+        json!({"versions":["v1.12"]}),
+        json!({"versions":["v1.12"],"unstable_features":{"uk.tcpip.msc4133.stable":false}}),
+        json!({"versions":["v1.12"],"unstable_features":{"uk.tcpip.msc4133.stable":"true"}}),
+        // Do not accept an experimental-only API while publishing to /v3.
+        json!({"versions":["v1.12"],"unstable_features":{"uk.tcpip.msc4133":true}}),
+        json!({"versions":["r0.6.1","v1.15","vinvalid.16.1","v1.16.invalid"]}),
+    ] {
+        server.state.lock().unwrap().versions = Some(response);
+        let error = check_profile_support(&http, &server.home)
+            .await
+            .unwrap_err();
+        assert!(error.contains("No account has been created"));
+    }
+    assert!(
+        server
+            .state
+            .lock()
+            .unwrap()
+            .requests
+            .iter()
+            .all(|(method, path, _)| method == "GET" && path.ends_with("/versions")),
+        "Capability checks must never register an account or write profile data"
+    );
 }
 
 #[tokio::test]
@@ -575,9 +763,18 @@ async fn automatic_login_preserves_standard_accounts_and_refuses_downgrades() {
     submit_registration(&http, &server.home, "alice", PASSWORD, "invite")
         .await
         .unwrap();
-    let standard = authenticate_password(&http, &server.home, USER, PASSWORD, None, &config, false)
-        .await
-        .unwrap();
+    let standard = authenticate_password(
+        &http,
+        &server.home,
+        USER,
+        USER,
+        PASSWORD,
+        None,
+        &config,
+        false,
+    )
+    .await
+    .unwrap();
     assert_eq!(standard.mode, AccountMode::Matrix);
     assert!(standard.keys.is_none());
     assert_eq!(
@@ -595,10 +792,19 @@ async fn automatic_login_preserves_standard_accounts_and_refuses_downgrades() {
     server.state.lock().unwrap().profile =
         json!({PROFILE_FIELD:Descriptor::new(USER,AccountMode::Matrix,true)});
     assert_eq!(
-        authenticate_password(&http, &server.home, USER, PASSWORD, None, &config, false)
-            .await
-            .unwrap()
-            .mode,
+        authenticate_password(
+            &http,
+            &server.home,
+            USER,
+            USER,
+            PASSWORD,
+            None,
+            &config,
+            false
+        )
+        .await
+        .unwrap()
+        .mode,
         AccountMode::Matrix
     );
     assert_eq!(
@@ -613,11 +819,18 @@ async fn automatic_login_preserves_standard_accounts_and_refuses_downgrades() {
         1
     );
     server.state.lock().unwrap().requests.clear();
-    assert!(
-        authenticate_password(&http, &server.home, USER, PASSWORD, None, &config, true)
-            .await
-            .is_err()
-    );
+    assert!(authenticate_password(
+        &http,
+        &server.home,
+        USER,
+        USER,
+        PASSWORD,
+        None,
+        &config,
+        true
+    )
+    .await
+    .is_err());
     assert!(!server
         .state
         .lock()
@@ -631,11 +844,18 @@ async fn automatic_login_preserves_standard_accounts_and_refuses_downgrades() {
     server.state.lock().unwrap().profile =
         json!({PROFILE_FIELD:Descriptor::new(USER,AccountMode::Pax,true)});
     server.state.lock().unwrap().requests.clear();
-    assert!(
-        authenticate_password(&http, &server.home, USER, PASSWORD, None, &config, false)
-            .await
-            .is_err()
-    );
+    assert!(authenticate_password(
+        &http,
+        &server.home,
+        USER,
+        USER,
+        PASSWORD,
+        None,
+        &config,
+        false
+    )
+    .await
+    .is_err());
     assert_eq!(
         server
             .state
@@ -657,11 +877,18 @@ async fn automatic_login_preserves_standard_accounts_and_refuses_downgrades() {
     for status in [429, 500] {
         server.state.lock().unwrap().requests.clear();
         server.state.lock().unwrap().login_status = Some(status);
-        assert!(
-            authenticate_password(&http, &server.home, USER, PASSWORD, None, &config, false)
-                .await
-                .is_err()
-        );
+        assert!(authenticate_password(
+            &http,
+            &server.home,
+            USER,
+            USER,
+            PASSWORD,
+            None,
+            &config,
+            false
+        )
+        .await
+        .is_err());
         assert_eq!(
             server
                 .state
@@ -682,11 +909,18 @@ async fn automatic_login_preserves_standard_accounts_and_refuses_downgrades() {
     server.state.lock().unwrap().login_status = None;
     server.state.lock().unwrap().profile_status = Some(404);
     server.state.lock().unwrap().requests.clear();
-    assert!(
-        authenticate_password(&http, &server.home, USER, PASSWORD, None, &config, false)
-            .await
-            .is_err()
-    );
+    assert!(authenticate_password(
+        &http,
+        &server.home,
+        USER,
+        USER,
+        PASSWORD,
+        None,
+        &config,
+        false
+    )
+    .await
+    .is_err());
     assert!(!server
         .state
         .lock()
@@ -698,10 +932,19 @@ async fn automatic_login_preserves_standard_accounts_and_refuses_downgrades() {
     let keys = derive(USER, PASSWORD).await.unwrap();
     server.state.lock().unwrap().credential = Some(keys.credential.to_string());
     assert_eq!(
-        authenticate_password(&http, &server.home, USER, PASSWORD, None, &config, true)
-            .await
-            .unwrap()
-            .mode,
+        authenticate_password(
+            &http,
+            &server.home,
+            USER,
+            USER,
+            PASSWORD,
+            None,
+            &config,
+            true
+        )
+        .await
+        .unwrap()
+        .mode,
         AccountMode::Pax
     );
     assert!(
@@ -712,11 +955,18 @@ async fn automatic_login_preserves_standard_accounts_and_refuses_downgrades() {
     server.state.lock().unwrap().profile_status = None;
     server.state.lock().unwrap().profile = json!({PROFILE_FIELD:{"schema_version":999}});
     server.state.lock().unwrap().requests.clear();
-    assert!(
-        authenticate_password(&http, &server.home, USER, PASSWORD, None, &config, true)
-            .await
-            .is_err()
-    );
+    assert!(authenticate_password(
+        &http,
+        &server.home,
+        USER,
+        USER,
+        PASSWORD,
+        None,
+        &config,
+        true
+    )
+    .await
+    .is_err());
     assert!(!server
         .state
         .lock()

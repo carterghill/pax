@@ -1,9 +1,7 @@
-import { useCallback, useEffect, useRef } from "react";
 import { X } from "lucide-react";
 import { useTheme } from "../theme/ThemeContext";
 import { paletteDialogOuterBorderStyle } from "../theme/paletteBorder";
-import { useOverlayObstruction } from "../hooks/useOverlayObstruction";
-import ModalLayer from "./ModalLayer";
+import Dialog from "./Dialog";
 import type { VoiceCall } from "../hooks/useVoiceCall";
 import SettingsMenu from "./SettingsMenu";
 
@@ -25,51 +23,24 @@ export default function SettingsDialog({
   voiceCall,
 }: SettingsDialogProps) {
   const { palette } = useTheme();
-  const dialogRef = useRef<HTMLDivElement>(null);
-
-  useOverlayObstruction(dialogRef);
-
-  useEffect(() => {
-    const handleKey = (e: KeyboardEvent) => {
-      if (e.key === "Escape") onClose();
-    };
-    window.addEventListener("keydown", handleKey);
-    return () => window.removeEventListener("keydown", handleKey);
-  }, [onClose]);
-
-  const handleBackdropClick = useCallback(
-    (e: React.MouseEvent) => {
-      if (e.target === e.currentTarget) onClose();
-    },
-    [onClose],
-  );
 
   return (
-    <ModalLayer
-      onBackdropClick={handleBackdropClick}
-      backdropStyle={{
-        backgroundColor: "rgba(0,0,0,0.7)",
+    <Dialog
+      onClose={onClose}
+      aria-label="Settings"
+      style={{
+        position: "relative",
+        width: "min(980px, calc(100vw - 48px))",
+        maxHeight: "min(88vh, 860px)",
         display: "flex",
-        alignItems: "center",
         justifyContent: "center",
-        padding: 16,
+        overflow: "hidden",
+        backgroundColor: palette.bgSecondary,
+        border: paletteDialogOuterBorderStyle(palette),
+        borderRadius: 16,
+        boxShadow: "0 18px 48px rgba(0,0,0,0.45)",
       }}
     >
-      <div
-        ref={dialogRef}
-        style={{
-          position: "relative",
-          width: "min(980px, calc(100vw - 48px))",
-          maxHeight: "min(88vh, 860px)",
-          display: "flex",
-          justifyContent: "center",
-          overflow: "hidden",
-          backgroundColor: palette.bgSecondary,
-          border: paletteDialogOuterBorderStyle(palette),
-          borderRadius: 16,
-          boxShadow: "0 18px 48px rgba(0,0,0,0.45)",
-        }}
-      >
         <button
           onClick={onClose}
           title="Close settings"
@@ -99,7 +70,6 @@ export default function SettingsDialog({
           onAvatarChanged={onAvatarChanged}
           voiceCall={voiceCall}
         />
-      </div>
-    </ModalLayer>
+    </Dialog>
   );
 }

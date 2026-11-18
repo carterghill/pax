@@ -2,6 +2,7 @@ import { useId, useState, type CSSProperties } from "react";
 import { useEncryption } from "../context/EncryptionContext";
 import { useTheme } from "../theme/ThemeContext";
 import HistoryBackupPanel from "./HistoryBackupPanel";
+import NewRecoveryDialog from "./NewRecoveryDialog";
 
 export default function EncryptionSettingsPanel({ compact = false }: { compact?: boolean }) {
   const { palette, typography } = useTheme();
@@ -10,6 +11,7 @@ export default function EncryptionSettingsPanel({ compact = false }: { compact?:
   const [key, setKey] = useState("");
   const [password, setPassword] = useState("");
   const [replaceConfirm, setReplaceConfirm] = useState(false);
+  const [newRecoveryOpen, setNewRecoveryOpen] = useState(false);
   const keyInputId = useId();
   const button: CSSProperties = {
     border: `1px solid ${palette.border}`, borderRadius: 8, padding: "9px 14px",
@@ -22,6 +24,8 @@ export default function EncryptionSettingsPanel({ compact = false }: { compact?:
     color: palette.textPrimary, font: "inherit",
   };
   const ready = status?.secretStorageExists && status.crossSigningReady && status.backupEnabled;
+  const missingIdentityKeys = status?.hasIdentity && !status.crossSigningReady;
+  const missingBackupKey = status?.backupExists && !status.backupEnabled;
   const ignore = (promise: Promise<void>) => { void promise.catch(() => {}); };
   return (
     <div style={{ display: "flex", flexDirection: "column", gap: 16, color: palette.textPrimary, fontSize: typography.fontSizeBase }}>
@@ -30,9 +34,13 @@ export default function EncryptionSettingsPanel({ compact = false }: { compact?:
         {status?.paxLogin ? "Your Pax password unlocks encrypted recovery automatically when you sign in." : "Your message keys are backed up encrypted, and only your verified devices or recovery key can unlock them."}
       </p>
       {!status && !error && <p role="status">Checking encrypted backup…</p>}
+      {encryption.recoveryKey && encryption.recoveryKeyDismissed && (
+        <button type="button" style={button} onClick={encryption.showRecoveryKey}>View and save recovery key</button>
+      )}
       {status && (
         <div style={{ padding: 14, borderRadius: 10, background: palette.bgTertiary, lineHeight: 1.5 }}>
-          <strong>{ready ? "Recovery is ready" : status.canSetup ? "Set up recovery" : "Unlock your encrypted history"}</strong>
+          <strong>{ready ? "Recovery is ready" : status.canSetup ? "Set up recovery"
+            : !status.secretStorageExists ? "Recovery setup needs your existing encryption keys" : "Unlock your encrypted history"}</strong>
           <div style={{ color: palette.textSecondary, marginTop: 4 }}>
             {status.backupState === "downloading" ? "Downloading message keys. Older messages will appear as their keys arrive."
               : status.progress.state === "uploading" ? `Backing up ${status.progress.backedUp ?? 0} of ${status.progress.total ?? 0} message keys…`
@@ -40,6 +48,7 @@ export default function EncryptionSettingsPanel({ compact = false }: { compact?:
               : ready && status.progress.state === "complete" ? "All currently stored message keys have been backed up."
               : ready ? "Message keys are backed up automatically while Pax is open."
               : status.canSetup ? "Save a recovery key so you can restore your history on another device."
+              : !status.secretStorageExists ? "Recovery has not been configured. This device needs the account’s existing encryption secrets before it can set up recovery."
               : "Use your recovery key, or verify this device using another device where you are signed in."}
           </div>
         </div>
@@ -50,15 +59,13 @@ export default function EncryptionSettingsPanel({ compact = false }: { compact?:
           or create a new recovery key below and save it now.
         </div>
       )}
-      {status?.canSetup && (
+      {status?.canSetup && !status.newRecoveryPending && (
         <form onSubmit={(e) => { e.preventDefault(); ignore(encryption.setup(password).then(() => setPassword(""))); }} style={{ display: "grid", gap: 10 }}>
-          {!status.crossSigningReady && (
-            <label>
+          <label>
               Account password
-              <input type="password" autoComplete="current-password" value={password} disabled={!!busy}
+              <input type="password" autoComplete="current-password" required value={password} disabled={!!busy}
                 onChange={(e) => setPassword(e.target.value)} style={{ ...input, marginTop: 6 }} />
-            </label>
-          )}
+          </label>
           <button type="submit" disabled={!!busy} style={{ ...button, background: palette.accent, color: "#fff" }}>
             Set up recovery
           </button>
@@ -79,11 +86,25 @@ export default function EncryptionSettingsPanel({ compact = false }: { compact?:
         </button>
       )}
       {status && !status.canSetup && !status.secretStorageExists && !ready && (
-        <p style={{ margin: 0, color: palette.textSecondary, lineHeight: 1.5 }}>
-          Recovery has not been set up for this account. Verify with a device that already has your encryption keys,
-          then set up recovery here or on that device.
-        </p>
+        <div style={{ color: palette.textSecondary, lineHeight: 1.5 }}>
+          {missingIdentityKeys && <p style={{ margin: "0 0 10px" }}>
+            An encryption identity already exists for this account, but its private verification keys are missing on this device.
+            This can happen even if you have never set up a recovery key. Verify with a device that still has those keys to retrieve them.
+          </p>}
+          {missingBackupKey && <p style={{ margin: "0 0 10px" }}>
+            An encrypted message backup also exists, but this device does not have its decryption key.
+            Backups can be created automatically before a recovery key is set up. A new recovery key cannot unlock that existing backup.
+          </p>}
+          <p style={{ margin: 0 }}>
+            If none of your devices has the missing keys, you can set up new recovery using this device’s available history.
+            You can also save a backup file below.
+          </p>
+        </div>
       )}
+      {status?.canStartFromDevice && <button type="button" disabled={!!busy} style={button} onClick={() => setNewRecoveryOpen(true)}>
+        {status.newRecoveryPending ? "Finish recovery setup on this device" : "Set up recovery from this device"}
+      </button>}
+      {newRecoveryOpen && <NewRecoveryDialog onClose={() => setNewRecoveryOpen(false)} />}
       {status?.backupEnabled && !compact && (
         <button type="button" disabled={!!busy} style={button} onClick={() => ignore(encryption.backUp())}>Back up keys now</button>
       )}

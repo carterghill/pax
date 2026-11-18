@@ -50,6 +50,7 @@ pub struct AuthConfig {
 pub struct AppState {
     pub client: Mutex<Option<Client>>,
     pub account_mode: Mutex<commands::pax_auth::AccountMode>,
+    pub session_store_dir: Mutex<Option<String>>,
     pub encryption: commands::encryption::EncryptionService,
     pub http_client: reqwest::Client,
     pub presence_map: Arc<Mutex<HashMap<String, String>>>,
@@ -298,6 +299,7 @@ pub fn run() {
         encryption: commands::encryption::EncryptionService::default(),
         client: Mutex::new(None),
         account_mode: Mutex::new(commands::pax_auth::AccountMode::Matrix),
+        session_store_dir: Mutex::new(None),
         http_client: reqwest::Client::builder()
             .tcp_keepalive(Duration::from_secs(30))
             .build()
@@ -422,9 +424,13 @@ pub fn run() {
             commands::auth::login,
             commands::auth::register,
             commands::auth::restore_session,
+            commands::account_conversion::get_account_conversion_status,
+            commands::account_conversion::convert_account_to_pax,
+            commands::account_conversion::resume_pax_conversion,
             commands::encryption::get_encryption_status,
             commands::encryption::get_pending_encryption_recovery_key,
             commands::encryption::setup_encryption_recovery,
+            commands::encryption::start_encryption_recovery_from_device,
             commands::encryption::acknowledge_encryption_recovery_key,
             commands::encryption::restore_encryption_recovery,
             commands::encryption::replace_encryption_recovery_key,

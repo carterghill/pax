@@ -1,17 +1,13 @@
 import {
   useState,
-  useRef,
-  useEffect,
   useCallback,
   useMemo,
-  type MouseEvent,
 } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { X, Loader2, Search } from "lucide-react";
 import { useTheme } from "../theme/ThemeContext";
 import { paletteDialogShellBorderStyle } from "../theme/paletteBorder";
-import { useOverlayObstruction } from "../hooks/useOverlayObstruction";
-import ModalLayer from "./ModalLayer";
+import Dialog from "./Dialog";
 import type { Room } from "../types/matrix";
 
 export type LinkExistingKind = "room" | "space";
@@ -32,33 +28,16 @@ export default function LinkExistingToSpaceDialog({
   onLinked,
 }: LinkExistingToSpaceDialogProps) {
   const { palette, typography } = useTheme();
-  const modalRef = useRef<HTMLDivElement>(null);
-  useOverlayObstruction(modalRef);
 
   const [query, setQuery] = useState("");
   const [linkingId, setLinkingId] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
-
-  useEffect(() => {
-    const handleKey = (e: KeyboardEvent) => {
-      if (e.key === "Escape") onClose();
-    };
-    window.addEventListener("keydown", handleKey);
-    return () => window.removeEventListener("keydown", handleKey);
-  }, [onClose]);
 
   const filtered = useMemo(() => {
     const q = query.trim().toLowerCase();
     if (!q) return candidates;
     return candidates.filter((r) => r.name.toLowerCase().includes(q));
   }, [candidates, query]);
-
-  const handleBackdropClick = useCallback(
-    (e: MouseEvent<HTMLDivElement>) => {
-      if (e.target === e.currentTarget) onClose();
-    },
-    [onClose]
-  );
 
   const handlePick = useCallback(
     async (roomId: string) => {
@@ -83,28 +62,20 @@ export default function LinkExistingToSpaceDialog({
   const title = kind === "room" ? "Add existing room" : "Add existing space";
 
   return (
-    <ModalLayer
-      onBackdropClick={handleBackdropClick}
-      backdropStyle={{
-        backgroundColor: "rgba(0,0,0,0.7)",
+    <Dialog
+      onClose={onClose}
+      aria-label={title}
+      style={{
+        backgroundColor: palette.bgSecondary,
+        borderRadius: 8,
+        width: 420,
+        maxHeight: "75vh",
         display: "flex",
-        alignItems: "center",
-        justifyContent: "center",
+        flexDirection: "column",
+        boxShadow: "0 8px 32px rgba(0,0,0,0.5)",
+        ...paletteDialogShellBorderStyle(palette),
       }}
     >
-      <div
-        ref={modalRef}
-        style={{
-          backgroundColor: palette.bgSecondary,
-          borderRadius: 8,
-          width: 420,
-          maxHeight: "75vh",
-          display: "flex",
-          flexDirection: "column",
-          boxShadow: "0 8px 32px rgba(0,0,0,0.5)",
-          ...paletteDialogShellBorderStyle(palette),
-        }}
-      >
         <div
           style={{
             display: "flex",
@@ -259,7 +230,6 @@ export default function LinkExistingToSpaceDialog({
             </div>
           )}
         </div>
-      </div>
-    </ModalLayer>
+    </Dialog>
   );
 }

@@ -1919,10 +1919,8 @@ export default function RoomSidebar({
           error={leaveRoomError}
           onConfirm={handleConfirmLeaveRoom}
           onClose={() => {
-            if (!leaveRoomSubmitting) {
-              setLeaveRoom(null);
-              setLeaveRoomError(null);
-            }
+            setLeaveRoom(null);
+            setLeaveRoomError(null);
           }}
         />
       )}

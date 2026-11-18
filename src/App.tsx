@@ -20,6 +20,8 @@ import { usePushNotifications } from "./hooks/usePushNotifications";
 import { EncryptionProvider } from "./context/EncryptionContext";
 import EncryptionRecovery, { EncryptionSignOut } from "./components/EncryptionRecovery";
 import AuthModeSelector, { type AccountMode } from "./components/AuthModeSelector";
+import Dialog from "./components/Dialog";
+import PaxConversionForm from "./components/PaxConversionForm";
 
 if (import.meta.env.DEV) {
   const w = window as unknown as { invoke: typeof invoke; listen: typeof listen };
@@ -194,6 +196,8 @@ function App() {
   const [tab, setTab] = useState<"login" | "signup">("login");
   const [authConfig, setAuthConfig] = useState<AuthConfig | null>(null);
   const [quitConfirmOpen, setQuitConfirmOpen] = useState(false);
+  const [conversionOpen, setConversionOpen] = useState(false);
+  const [conversionError, setConversionError] = useState<string | null>(null);
 
   useEffect(() => {
     let cancelled = false;
@@ -277,10 +281,23 @@ function App() {
       setPassword("");
       setConfirmPassword("");
     } catch (e) {
-      setError(String(e));
+      if (String(e).startsWith("PAX_CONVERSION_PENDING:")) {
+        setConversionOpen(true); setConversionError(null); setPassword("");
+      } else { setError(String(e)); }
     }
     setLoading(false);
     authBusyRef.current = false;
+  }
+
+  async function resumeConversion(currentPassword: string, newPassword: string) {
+    if (authBusyRef.current) return;
+    authBusyRef.current = true; setLoading(true); setConversionError(null);
+    try {
+      const id = await invoke<string>("resume_pax_conversion", { homeserver, username, currentPassword, newPassword, persistSession: rememberMe });
+      await invoke("start_sync"); syncStartedRef.current = true;
+      setConversionOpen(false); setPassword(""); setUserId(id);
+    } catch (e) { setConversionError(String(e)); throw e; }
+    finally { authBusyRef.current = false; setLoading(false); }
   }
 
   async function handleRegister() {
@@ -421,7 +438,7 @@ function App() {
             </VoicePresenceProvider>
           </NotificationSettingsProvider>
         </UserAvatarStoreProvider>
-        <EncryptionRecovery />
+        <EncryptionRecovery userId={userId} />
         </EncryptionProvider>
         {quitOverlay}
       </>
@@ -615,6 +632,9 @@ function App() {
       </div>
     </div>
     {quitOverlay}
+    {conversionOpen && <Dialog aria-labelledby="pax-conversion-title" onClose={() => { if (!loading) setConversionOpen(false); }} style={{ width: 480, padding: 24 }}>
+      <PaxConversionForm pending busy={loading} error={conversionError} onSubmit={resumeConversion} onClose={() => setConversionOpen(false)} />
+    </Dialog>}
     </>
   );
 }

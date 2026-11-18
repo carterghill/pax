@@ -1,6 +1,7 @@
 import { useId, useState } from "react";
-import { CircleHelp } from "lucide-react";
+import { CircleHelp, X } from "lucide-react";
 import { useTheme } from "../theme/ThemeContext";
+import Dialog from "./Dialog";
 
 export type AccountMode = "pax-password" | "matrix-password";
 
@@ -26,7 +27,7 @@ export default function AuthModeSelector({ value, onChange, disabled }: {
             <option value="matrix-password">Standard Matrix</option>
           </select>
         </label>
-        <button type="button" aria-label="About sign-in methods" aria-expanded={helpOpen}
+        <button type="button" aria-label="About sign-in methods" aria-haspopup="dialog" aria-expanded={helpOpen}
           aria-controls={helpId} onClick={() => setHelpOpen((open) => !open)}
           style={{ display: "inline-flex", padding: 4, border: "none", borderRadius: 4,
             color: palette.textSecondary, background: "transparent", cursor: "pointer" }}>
@@ -34,9 +35,17 @@ export default function AuthModeSelector({ value, onChange, disabled }: {
         </button>
       </div>
       {helpOpen && (
-        <div id={helpId} role="region" aria-label="Sign-in methods explained"
-          style={{ marginTop: 8, padding: 14, border: `1px solid ${palette.border}`, borderRadius: 8,
-            background: palette.bgSecondary, lineHeight: 1.5 }}>
+        <Dialog id={helpId} onClose={() => setHelpOpen(false)} aria-labelledby={`${helpId}-title`}
+          style={{ width: 420, padding: 20, color: palette.textSecondary,
+            fontSize: typography.fontSizeSmall, lineHeight: 1.5 }}>
+          <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 16, marginBottom: 14 }}>
+            <h2 id={`${helpId}-title`} style={{ margin: 0, color: palette.textHeading, fontSize: typography.fontSizeLarge }}>Sign-in methods</h2>
+            <button type="button" aria-label="Close sign-in help" onClick={() => setHelpOpen(false)}
+              style={{ display: "inline-flex", padding: 4, border: "none", borderRadius: 4,
+                color: palette.textSecondary, background: "transparent", cursor: "pointer" }}>
+              <X size={18} aria-hidden="true" />
+            </button>
+          </div>
           <p style={{ margin: "0 0 10px" }}><strong style={{ color: palette.textPrimary }}>Pax sign-in</strong> restores
             your backed-up encrypted history with your password when you switch computers or reinstall.
             You won’t need to enter a separate recovery key.</p>
@@ -46,10 +55,11 @@ export default function AuthModeSelector({ value, onChange, disabled }: {
             useful if you want to sign in to other Matrix apps with this same password.
             Restoring encrypted history may require a recovery key or verification from another device.</p>
           <p style={{ margin: "0 0 10px" }}>Pax sign-in uses a different underlying Matrix password, so your
-            memorable password won’t sign in to other Matrix apps. Credential export and switching existing accounts are not available yet.</p>
+            memorable password won’t sign in to other Matrix apps. Credential export is not available yet.
+            Existing Matrix accounts can switch to Pax sign-in in Account settings.</p>
           <p style={{ margin: 0 }}>Pax currently trusts your homeserver to report account sign-in settings correctly.
             Use a homeserver you trust. Either choice lets you chat with other Matrix users.</p>
-        </div>
+        </Dialog>
       )}
     </div>
   );
