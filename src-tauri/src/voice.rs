@@ -575,7 +575,7 @@ impl VoiceManager {
             window_handle
         );
         let handle =
-            crate::screen::start_screen_capture(room.clone(), mode, window_title, window_handle)
+            crate::screen::start_screen_capture(room.clone(), mode, window_title, window_handle.clone())
                 .await?;
         // Video is published inside start_screen_capture (after capture is hot)
         if let Some(audio_track) = &handle.audio_track {
@@ -603,7 +603,7 @@ impl VoiceManager {
             track_for_abr,
             abr_shutdown.clone(),
         ));
-        screen_share_generation.fetch_add(1, Ordering::Relaxed);
+        let share_generation = screen_share_generation.fetch_add(1, Ordering::Relaxed) + 1;
         {
             let mut handle_slot = screen_handle.lock();
             *handle_slot = Some(handle);
@@ -624,7 +624,7 @@ impl VoiceManager {
 
         #[cfg(target_os = "windows")]
         if mode == crate::screen::ScreenShareMode::Window {
-            if let Some(raw_window_handle) = monitor_window_handle.as_deref() {
+            if let Some(raw_window_handle) = window_handle.as_deref() {
                 match raw_window_handle.parse::<usize>() {
                     Ok(hwnd) => {
                         spawn_window_share_exit_monitor(

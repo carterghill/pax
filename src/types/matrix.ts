@@ -25,6 +25,8 @@ export interface Room {
    */
   spaceChildOrders?: Record<string, SpaceChildOrder>;
   roomType: string | null;
+  /** Normal Matrix chat with Pax RSS feed metadata. */
+  isRss?: boolean;
   /** `m.room.topic` when the homeserver includes it (e.g. after sync). */
   topic?: string | null;
   /** "joined" or "invited" */

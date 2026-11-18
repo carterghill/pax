@@ -6,6 +6,7 @@ use tauri::State;
 use crate::AppState;
 
 use super::room_settings::build_chat_room_creation_content;
+use super::rss::{add_feed_to_creation, RssFeedConfig};
 use super::{get_authed_client, upload_media_b64};
 
 /// Shared parameters for creating a Matrix space (used by both top-level and sub-space creation).
@@ -470,6 +471,7 @@ pub async fn create_room_in_space(
     room_alias: Option<String>,
     history_visibility: Option<String>,
     federate: bool,
+    rss_feed: Option<RssFeedConfig>,
 ) -> Result<String, String> {
     if !can_manage_space_children_for_user(&state, &space_id).await? {
         return Err(
@@ -571,6 +573,13 @@ pub async fn create_room_in_space(
     let rt = room_type.as_deref().filter(|s| !s.is_empty());
     body["creation_content"] = build_chat_room_creation_content(rt, federate);
 
+    add_feed_to_creation(
+        &mut body,
+        rss_feed.as_ref(),
+        federate,
+        ac.client.user_id().ok_or("Not logged in")?,
+    )?;
+
     // Create the room
     let create_url = format!(
         "{}/_matrix/client/v3/createRoom",
@@ -640,6 +649,7 @@ pub async fn create_standalone_room(
     room_alias: Option<String>,
     history_visibility: Option<String>,
     federate: bool,
+    rss_feed: Option<RssFeedConfig>,
 ) -> Result<String, String> {
     let ac = get_authed_client(&state).await?;
 
@@ -691,6 +701,13 @@ pub async fn create_standalone_room(
 
     let rt = room_type.as_deref().filter(|s| !s.is_empty());
     body["creation_content"] = build_chat_room_creation_content(rt, federate);
+
+    add_feed_to_creation(
+        &mut body,
+        rss_feed.as_ref(),
+        federate,
+        ac.client.user_id().ok_or("Not logged in")?,
+    )?;
 
     let create_url = format!(
         "{}/_matrix/client/v3/createRoom",

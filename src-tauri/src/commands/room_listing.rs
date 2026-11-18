@@ -51,6 +51,21 @@ async fn build_room_info(
     }
 
     let room_type_str = room.room_type().map(|rt| rt.to_string());
+    let is_rss = room
+        .get_state_event(super::rss::RSS_FEED_EVENT.into(), "")
+        .await
+        .ok()
+        .flatten()
+        .is_some_and(|event| {
+            use matrix_sdk::deserialized_responses::RawAnySyncOrStrippedState;
+            let value = match event {
+                RawAnySyncOrStrippedState::Sync(raw) => raw.deserialize_as::<serde_json::Value>(),
+                RawAnySyncOrStrippedState::Stripped(raw) => raw.deserialize_as::<serde_json::Value>(),
+            };
+            value.is_ok_and(|value| {
+                value["content"]["version"] == 1 && value["content"]["url"].is_string()
+            })
+        });
     let topic = room.topic();
 
     let mut name = room.name().unwrap_or_else(|| "Unnamed".to_string());
@@ -79,6 +94,7 @@ async fn build_room_info(
         parent_space_ids,
         space_child_orders,
         room_type: room_type_str,
+        is_rss,
         topic,
         membership: membership.to_string(),
         is_direct,

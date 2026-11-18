@@ -20,6 +20,7 @@ export interface SpaceChildInfo {
   membership: string;
   joinRule: string | null;
   roomType: string | null;
+  isRss?: boolean;
   numJoinedMembers: number;
   isDirect?: boolean;
   dmPeerUserId?: string | null;

@@ -4,6 +4,7 @@ import { listen } from "@tauri-apps/api/event";
 import UserAvatar from "./UserAvatar";
 import {
   Hash,
+  Rss,
   House,
   ArrowLeft,
   Volume2,
@@ -490,6 +491,8 @@ function ChannelBlock({
                     : palette.textSecondary
               }
             />
+          ) : room.isRss ? (
+            <Rss size={16} color={isHighlighted ? palette.textHeading : palette.textSecondary} />
           ) : isDmChatUi(room) ? (
             <div
               style={{

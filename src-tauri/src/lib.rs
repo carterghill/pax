@@ -462,6 +462,8 @@ pub fn run() {
             commands::room_creation::can_manage_space_children,
             commands::room_creation::create_room_in_space,
             commands::room_creation::create_standalone_room,
+            commands::rss::setup_rss_feed,
+            commands::rss::get_rss_feed_status,
             commands::room_creation::link_room_to_space,
             commands::room_creation::set_space_child_order,
             commands::room_discovery::search_public_spaces,

@@ -31,6 +31,7 @@ pub struct RoomInfo {
     #[serde(default)]
     pub space_child_orders: HashMap<String, SpaceChildOrder>,
     pub room_type: Option<String>,
+    pub is_rss: bool,
     /// `m.room.topic` when known (spaces and rooms).
     pub topic: Option<String>,
     /// "joined" or "invited"

@@ -889,12 +889,20 @@ export default function MainLayout({
       for (const room of optimisticRooms) {
         upsertOptimisticRoom(room);
       }
+      if (payload?.openRoomId) {
+        const openedRoom = optimisticRooms.find((room) => room.id === payload.openRoomId);
+        const parentSpaceId = openedRoom?.parentSpaceIds[0] ?? null;
+        setDiscoverOpen(false);
+        setActiveSpaceId(parentSpaceId);
+        setActiveRoomBySpace((prev) => ({ ...prev, [parentSpaceId ?? ""]: payload.openRoomId! }));
+        if (isMobile) setMobileNavDrawerOpen(false);
+      }
       void fetchRooms();
       return;
     }
 
     await fetchRooms();
-  }, [fetchRooms, upsertOptimisticRoom]);
+  }, [fetchRooms, upsertOptimisticRoom, isMobile]);
 
   const handleLeftRoom = useCallback(
     (roomId: string) => {
