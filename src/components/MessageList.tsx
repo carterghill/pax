@@ -48,6 +48,9 @@ interface MessageListProps {
   initialLoading: boolean;
   hasOlder: boolean;
   isAtLatest: boolean;
+  automaticReadBlocked?: boolean;
+  privateReadOnly?: boolean;
+  acknowledgedThrough?: string | null;
   onLoadOlder: () => void;
   onLoadNewer: () => void;
   pendingRecentCount: number;
@@ -100,6 +103,9 @@ const MessageList = forwardRef<MessageListHandle, MessageListProps>(function Mes
     initialLoading,
     hasOlder,
     isAtLatest,
+    automaticReadBlocked = false,
+    privateReadOnly = false,
+    acknowledgedThrough = null,
     onLoadOlder,
     onLoadNewer,
     pendingRecentCount,
@@ -463,6 +469,9 @@ const MessageList = forwardRef<MessageListHandle, MessageListProps>(function Mes
     {
       latestVisibleEventId: lastId,
       atBottom: isAtLatest && atBottom,
+      blocked: automaticReadBlocked,
+      privateOnly: privateReadOnly,
+      alreadyAcknowledgedEventId: acknowledgedThrough,
     },
     userId,
   );
@@ -817,9 +826,9 @@ const MessageList = forwardRef<MessageListHandle, MessageListProps>(function Mes
         const canEdit = messageAllowsEdit(msg, userId);
         const canDelete = messageAllowsDelete(msg, userId, redactionPolicy);
         const showReplyButton =
-          allowReply && !msg.eventId.startsWith("local:");
-        const showOverflowMenu = canEdit || canDelete || canPinMessages;
-        const canReact = !msg.eventId.startsWith("local:");
+          allowReply && !msg.decryptionFailed && !msg.eventId.startsWith("local:");
+        const showOverflowMenu = !msg.decryptionFailed && (canEdit || canDelete || canPinMessages);
+        const canReact = !msg.decryptionFailed && !msg.eventId.startsWith("local:");
         const showHoverActions =
           showReplyButton || canReact || showOverflowMenu;
 

@@ -32,6 +32,7 @@ pub mod room_settings;
 pub mod space_order;
 pub mod tray_indicator;
 pub mod unread;
+pub mod unavailable_messages;
 pub mod voice_matrix;
 
 use data_encoding::BASE64;

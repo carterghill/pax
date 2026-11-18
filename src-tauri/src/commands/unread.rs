@@ -78,7 +78,7 @@ pub struct RoomUnreadState {
 impl RoomUnreadState {
     /// Build a snapshot, taking the `raw_unread_messages` counter into account.
     /// `raw_count` is this room's current counter value (0 if absent).
-    fn from_room_with_raw(room: &matrix_sdk::Room, raw_count: u64) -> Self {
+    pub(super) fn from_room_with_raw(room: &matrix_sdk::Room, raw_count: u64) -> Self {
         let server = room.unread_notification_counts();
         let server_notifications = u64::from(server.notification_count);
         let server_mentions = u64::from(server.highlight_count);
@@ -138,7 +138,16 @@ pub async fn get_room_unread_state(
         .get(room.room_id())
         .copied()
         .unwrap_or(0);
-    Ok(RoomUnreadState::from_room_with_raw(&room, raw))
+    let pending = state
+        .pending_unavailable_reads
+        .lock()
+        .await
+        .get(room.room_id())
+        .cloned();
+    Ok(super::unavailable_messages::apply_pending(
+        RoomUnreadState::from_room_with_raw(&room, raw),
+        pending.as_ref(),
+    ))
 }
 
 /// Bulk snapshot over every joined room.  Cheaper than N individual invokes on
@@ -149,12 +158,16 @@ pub async fn get_all_unread_states(
 ) -> Result<HashMap<String, RoomUnreadState>, String> {
     let client = get_client(&state).await?;
     let raw_map = state.raw_unread_messages.lock().await.clone();
+    let pending = state.pending_unavailable_reads.lock().await.clone();
     let mut out = HashMap::new();
     for room in client.joined_rooms() {
         let raw = raw_map.get(room.room_id()).copied().unwrap_or(0);
         out.insert(
             room.room_id().to_string(),
-            RoomUnreadState::from_room_with_raw(&room, raw),
+            super::unavailable_messages::apply_pending(
+                RoomUnreadState::from_room_with_raw(&room, raw),
+                pending.get(room.room_id()),
+            ),
         );
     }
     Ok(out)
@@ -186,10 +199,9 @@ async fn apply_room_read_receipt(
         .await
         .remove(room.room_id());
 
-    // Echo locally so the sidebar updates immediately, even before the server's
-    // next sync response returns.  `send_single_receipt` already zeroed the counts
-    // in the SDK's in-memory `RoomInfo` (via `compute_unread_counts`), so this
-    // just reads them and ships them to the UI.
+    // Publish the current local snapshot. The SDK/server notification counts
+    // reconcile through sync. Explicit unavailable-message acknowledgements
+    // additionally mask the old counts until their private receipt echoes.
     let new_state = RoomUnreadState::from_room_with_raw(room, 0);
     let payload = RoomUnreadChangedPayload {
         room_id: room.room_id().to_string(),
@@ -241,6 +253,13 @@ pub async fn set_room_marked_unread(
 ) -> Result<(), String> {
     let client = get_client(&state).await?;
     let room = resolve_room(&client, &room_id)?;
+    if unread {
+        state
+            .pending_unavailable_reads
+            .lock()
+            .await
+            .remove(room.room_id());
+    }
     room.set_unread_flag(unread)
         .await
         .map_err(|e| format!("Failed to set unread flag: {}", fmt_error_chain(&e)))?;
@@ -259,11 +278,13 @@ pub async fn emit_unread_snapshot_if_changed(
     client: &Client,
     cache: &UnreadStateCache,
     raw_unread: &RawUnreadMessageCounts,
+    pending_reads: &super::unavailable_messages::PendingUnavailableReads,
     app: &AppHandle,
 ) {
     // Snapshot the raw-message map first so we hold its lock briefly; the
     // matrix-sdk room reads are synchronous below.
     let raw_map: HashMap<OwnedRoomId, u64> = raw_unread.lock().await.clone();
+    let pending = pending_reads.lock().await.clone();
 
     // Snapshot current state first (no locks held across .emit()).
     let snapshots: Vec<(OwnedRoomId, RoomUnreadState)> = client
@@ -273,7 +294,10 @@ pub async fn emit_unread_snapshot_if_changed(
             let raw = raw_map.get(r.room_id()).copied().unwrap_or(0);
             (
                 r.room_id().to_owned(),
-                RoomUnreadState::from_room_with_raw(&r, raw),
+                super::unavailable_messages::apply_pending(
+                    RoomUnreadState::from_room_with_raw(&r, raw),
+                    pending.get(r.room_id()),
+                ),
             )
         })
         .collect();
@@ -320,4 +344,5 @@ pub async fn emit_unread_snapshot_if_changed(
 pub async fn clear_unread_cache(state: &Arc<AppState>) {
     state.unread_cache.lock().await.clear();
     state.raw_unread_messages.lock().await.clear();
+    state.pending_unavailable_reads.lock().await.clear();
 }

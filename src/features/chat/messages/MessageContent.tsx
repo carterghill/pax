@@ -1,4 +1,4 @@
-import { Video } from "lucide-react";
+import { LockKeyhole, Video } from "lucide-react";
 import type { Message } from "../../../types/matrix";
 import type { useTheme } from "../../../theme/ThemeContext";
 import type { MediaViewerOpenPayload } from "../../../components/MediaViewerModal";
@@ -49,6 +49,10 @@ export default function MessageContent({
   onOpenSenderProfile,
   resolveMemberLabel,
 }: MessageContentProps) {
+  if (msg.decryptionFailed) return <div style={{ display: "flex", alignItems: "center", gap: 8, color: palette.textSecondary,
+    fontSize: typography.fontSizeBase, lineHeight: 1.5 }}>
+    <LockKeyhole size={15} aria-hidden="true" />Message unavailable on this device
+  </div>;
   const uploadRing =
     msg.localFileUpload && msg.localFileUpload.phase !== "failed" ? (
       <CircularUploadRing

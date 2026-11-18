@@ -1,5 +1,5 @@
-import { useEffect, useRef } from "react";
-import { Settings, UserPlus, LogOut, Layers } from "lucide-react";
+import { useEffect, useRef, useState } from "react";
+import { CheckCheck, Settings, UserPlus, LogOut, Layers } from "lucide-react";
 import { useTheme } from "../theme/ThemeContext";
 import { useOverlayObstruction } from "../hooks/useOverlayObstruction";
 
@@ -12,6 +12,7 @@ interface RoomContextMenuProps {
   onViewParentSpaces: () => void;
   onLeave: () => void;
   onClose: () => void;
+  onClearNotification: () => Promise<void>;
 }
 
 export default function RoomContextMenu({
@@ -23,9 +24,12 @@ export default function RoomContextMenu({
   onViewParentSpaces,
   onLeave,
   onClose,
+  onClearNotification,
 }: RoomContextMenuProps) {
   const { palette, spacing, typography } = useTheme();
   const menuRef = useRef<HTMLDivElement>(null);
+  const [clearing, setClearing] = useState(false);
+  const [clearError, setClearError] = useState<string | null>(null);
   useOverlayObstruction(menuRef);
 
   useEffect(() => {
@@ -59,7 +63,7 @@ export default function RoomContextMenu({
     if (rect.bottom > window.innerHeight) {
       el.style.top = `${window.innerHeight - rect.height - 8}px`;
     }
-  }, [x, y]);
+  }, [x, y, clearError]);
 
   return (
     <div
@@ -103,6 +107,21 @@ export default function RoomContextMenu({
           margin: `${spacing.unit}px 0`,
         }}
       />
+
+      <button type="button" disabled={clearing} onClick={() => {
+        setClearing(true); setClearError(null);
+        void onClearNotification().then(onClose).catch((error) => setClearError(String(error))).finally(() => setClearing(false));
+      }} style={{ display: "flex", alignItems: "center", gap: spacing.unit * 2, width: "100%",
+        padding: `${spacing.unit * 1.5}px ${spacing.unit * 2}px`, border: "none", borderRadius: 4,
+        backgroundColor: "transparent", color: palette.textPrimary, fontSize: typography.fontSizeSmall,
+        cursor: clearing ? "wait" : "pointer", textAlign: "left", opacity: clearing ? 0.6 : 1 }}
+        onMouseEnter={(e) => { e.currentTarget.style.backgroundColor = palette.bgActive; }}
+        onMouseLeave={(e) => { e.currentTarget.style.backgroundColor = "transparent"; }}>
+        <CheckCheck size={14} color={palette.textSecondary} />
+        {clearing ? "Clearing…" : "Clear notification"}
+      </button>
+      {clearError && <p role="alert" style={{ margin: 0, padding: spacing.unit * 2, maxWidth: 240,
+        fontSize: typography.fontSizeSmall, color: palette.textPrimary, overflowWrap: "anywhere" }}>{clearError}</p>}
 
       <button
         onClick={() => {

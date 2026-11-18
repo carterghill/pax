@@ -6,6 +6,19 @@ This template should help get you started developing with Tauri, React and Types
 
 - [VS Code](https://code.visualstudio.com/) + [Tauri](https://marketplace.visualstudio.com/items?itemName=tauri-apps.tauri-vscode) + [rust-analyzer](https://marketplace.visualstudio.com/items?itemName=rust-lang.rust-analyzer)
 
+## Unavailable encrypted messages
+
+Encrypted events that cannot currently be decrypted remain in the timeline as **Message unavailable on this device**, with their sender and timestamp. Opening a chat with such messages shows a notice rather than silently hiding a reply.
+
+- **Clear notification** sends a private Matrix read receipt through the newest observed server event, independently of decryption. It clears the room, sidebar and tray counts without publishing a read receipt. The placeholders remain, and new incoming messages still notify normally. Jump to recent first if viewing older history.
+- **Try recovery** opens the existing encryption recovery controls. Restored keys replace the placeholders with readable content.
+- **Ignore** hides the warning for that conversation on this device, including after reopening it or restarting Pax. It does not clear notifications or remove message placeholders.
+- **Clear notification** is also available by right-clicking any room or conversation in the sidebar, whether its messages are readable or unavailable and whether the chat is open or closed.
+
+Unacknowledged unavailable incoming messages block automatic read receipts. A timeline containing unavailable messages uses private receipts even when public receipts are enabled. Acknowledged event IDs are stored in private room account data and survive reopening the chat or using another installation. No message contents or encryption keys are stored in that record.
+
+Validation: `npm run test:unavailable-messages` and `cd src-tauri && cargo test --lib unavailable_messages`. The native integration tests cover undecrypted SDK events, private-only receipts, persistent acknowledgement, failed requests, a new message arriving while clearing is in flight, and clearing readable/unavailable/empty conversations from the room menu.
+
 ## Encrypted history and recovery
 
 New accounts default to **Pax sign-in**: a single password authenticates and unlocks encrypted recovery automatically. The signup form has a subtle **Sign-in** preference and a question-mark explanation. Login detects the account type automatically. The algorithm, formats, trust assumptions, and migration behavior are documented in [Authentication.md](Authentication.md).

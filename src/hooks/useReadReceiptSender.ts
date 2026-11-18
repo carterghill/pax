@@ -28,6 +28,11 @@ export interface ReadReceiptTrigger {
   readonly latestVisibleEventId: string | null;
   /** True when the user is scrolled near the bottom of the timeline. */
   readonly atBottom: boolean;
+  /** An unavailable message needs explicit acknowledgement before advancing. */
+  readonly blocked?: boolean;
+  /** Acknowledging a gap must never broadcast a public read receipt. */
+  readonly privateOnly?: boolean;
+  readonly alreadyAcknowledgedEventId?: string | null;
 }
 
 export function useReadReceiptSender(
@@ -85,12 +90,14 @@ export function useReadReceiptSender(
 
   useEffect(() => {
     if (!roomId || !userId) return;
+    if (trigger.blocked) return;
     if (!trigger.atBottom) return;
     if (!isFocusedRef.current) return;
     if (typeof document !== "undefined" && !document.hasFocus()) return;
 
     const eventId = trigger.latestVisibleEventId;
     if (!eventId) return;
+    if (eventId === trigger.alreadyAcknowledgedEventId) return;
 
     if (
       sentForRoomRef.current.roomId === roomId &&
@@ -105,7 +112,7 @@ export function useReadReceiptSender(
     const prev = sentForRoomRef.current.lastSent;
     sentForRoomRef.current = { roomId, lastSent: eventId };
 
-    const publicReceipt = getSendPublicReceipts();
+    const publicReceipt = !trigger.privateOnly && getSendPublicReceipts();
 
     invoke("send_room_read_receipt", {
       roomId,
@@ -143,7 +150,7 @@ export function useReadReceiptSender(
         void invoke("send_room_read_receipt", {
           roomId,
           eventId: eid,
-          asPublic: getSendPublicReceipts(),
+          asPublic: !trigger.privateOnly && getSendPublicReceipts(),
         }).catch((e) => {
           console.warn("[useReadReceiptSender] retry invoke failed:", e);
         });
@@ -151,5 +158,5 @@ export function useReadReceiptSender(
     }
     window.addEventListener("pax:rr-retry", onRetry);
     return () => window.removeEventListener("pax:rr-retry", onRetry);
-  }, [roomId, userId, trigger.latestVisibleEventId, trigger.atBottom]);
+  }, [roomId, userId, trigger.latestVisibleEventId, trigger.atBottom, trigger.blocked, trigger.privateOnly, trigger.alreadyAcknowledgedEventId]);
 }

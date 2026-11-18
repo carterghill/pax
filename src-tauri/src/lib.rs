@@ -90,6 +90,7 @@ pub struct AppState {
     /// (tl;dr: matrix-sdk 0.16 only flags the broadcast's READ_RECEIPT reason on
     /// the sliding-sync path; legacy sync_once doesn't, so we poll instead).
     pub unread_cache: commands::unread::UnreadStateCache,
+    pub pending_unavailable_reads: commands::unavailable_messages::PendingUnavailableReads,
     /// Per-room raw message count since the user's last read receipt, observed
     /// by counting non-self `m.room.message` events in the sync loop's event
     /// handler.
@@ -323,6 +324,7 @@ pub fn run() {
         voice_livekit_jwt_service_url: StdMutex::new(None),
         desired_presence: Arc::new(StdMutex::new("online".to_string())),
         unread_cache: Arc::new(Mutex::new(HashMap::new())),
+        pending_unavailable_reads: Arc::new(Mutex::new(HashMap::new())),
         raw_unread_messages: Arc::new(Mutex::new(HashMap::new())),
     });
 
@@ -556,6 +558,9 @@ pub fn run() {
             commands::unread::get_room_unread_state,
             commands::unread::get_all_unread_states,
             commands::unread::send_room_read_receipt,
+            commands::unavailable_messages::get_unavailable_message_acknowledgement,
+            commands::unavailable_messages::acknowledge_unavailable_messages,
+            commands::unavailable_messages::clear_room_notification,
             commands::unread::set_room_marked_unread,
             // --- Push rules (raw CS-API wrappers + master-toggle convenience) ---
             commands::push_rules::get_push_rules,

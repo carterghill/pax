@@ -398,6 +398,7 @@ export function useMessages(roomId: string | null, currentUserId: string | null 
   const [messages, setMessages] = useState<Message[]>([]);
   const [olderToken, setOlderToken] = useState<string | null>(null);
   const [isAtLatest, setIsAtLatest] = useState(true);
+  const [latestCursor, setLatestCursor] = useState<{ roomId: string | null; eventId: string | null }>({ roomId: null, eventId: null });
   const [loadingOlder, setLoadingOlder] = useState(false);
   const [initialLoading, setInitialLoading] = useState(false);
   const [pendingRecentCount, setPendingRecentCount] = useState(0);
@@ -448,6 +449,7 @@ export function useMessages(roomId: string | null, currentUserId: string | null 
       });
     }
     prevRoomIdRef.current = roomId;
+    setLatestCursor({ roomId, eventId: null });
 
     loadingLockRef.current = false;
     initialFetchingRef.current = false;
@@ -499,6 +501,7 @@ export function useMessages(roomId: string | null, currentUserId: string | null 
         });
         if (cancelled || activeRoomIdRef.current !== target) return;
         const msgs = batch.messages.slice().reverse();
+        setLatestCursor({ roomId: target, eventId: batch.latestEventId ?? null });
         commit(msgs, batch.prevBatch, true);
         primeAvatarsFromMessagesRef.current(msgs);
         putRoomMessagesSnapshot(target, {
@@ -534,6 +537,9 @@ export function useMessages(roomId: string | null, currentUserId: string | null 
     const unMsg = listen<RoomMessagePayload>("room-message", (event) => {
       const { roomId: rid, message } = event.payload;
       if (rid !== roomId) return;
+      if (!messagesRef.current.some((m) => m.eventId === message.eventId)) {
+        setLatestCursor({ roomId, eventId: message.eventId });
+      }
 
       if (!isAtLatestRef.current) {
         setPendingRecentCount((c) => c + 1);
@@ -699,6 +705,7 @@ export function useMessages(roomId: string | null, currentUserId: string | null 
       if (activeRoomIdRef.current !== target) return;
 
       const msgs = batch.messages.slice().reverse();
+      setLatestCursor({ roomId: target, eventId: batch.latestEventId ?? null });
       commit(msgs, batch.prevBatch, true);
       primeAvatarsFromMessagesRef.current(msgs);
       hasLoadedOlderRef.current = false;
@@ -742,6 +749,7 @@ export function useMessages(roomId: string | null, currentUserId: string | null 
       if (!isAtLatestRef.current) return;
 
       const fetched = batch.messages.slice().reverse();
+      setLatestCursor({ roomId: target, eventId: batch.latestEventId ?? null });
       const prev = messagesRef.current;
 
       const fetchedIds = new Set(fetched.map((m) => m.eventId));
@@ -792,6 +800,7 @@ export function useMessages(roomId: string | null, currentUserId: string | null 
           const batch = await invoke<MessageBatch>(atLatest || !anchor ? "get_messages" : "get_messages_around_event",
             atLatest || !anchor ? { roomId, from: null, limit: INITIAL_LOAD_SIZE } : { roomId, eventId: anchor.eventId });
           if (cancelled || activeRoomIdRef.current !== roomId || isAtLatestRef.current !== atLatest) return;
+          if (atLatest) setLatestCursor({ roomId, eventId: batch.latestEventId ?? null });
           const recovered = batch.messages.filter((message) => atLatest || snapshot.length === 0
             || (message.timestamp >= snapshot[0].timestamp && message.timestamp <= snapshot[snapshot.length - 1].timestamp));
           const byId = new Map(messagesRef.current.map((message) => [message.eventId, message]));
@@ -1031,6 +1040,7 @@ export function useMessages(roomId: string | null, currentUserId: string | null 
 
   return {
     messages,
+    latestEventId: latestCursor.roomId === roomId ? latestCursor.eventId : null,
     loadOlder,
     loadNewer,
     hasOlder,

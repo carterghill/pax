@@ -20,6 +20,11 @@ import { useTheme } from "../theme/ThemeContext";
 import { Message, Room } from "../types/matrix";
 import { useResizeHandle } from "../hooks/useResizeHandle";
 import { effectiveDmTitle, isDmChatUi } from "../utils/dmDisplay";
+import { useUnavailableMessages } from "../hooks/useUnavailableMessages";
+import UnavailableMessagesNotice from "../components/UnavailableMessagesNotice";
+import EncryptionSettingsPanel from "../components/EncryptionSettingsPanel";
+import Dialog from "../components/Dialog";
+import { useEncryption } from "../context/EncryptionContext";
 
 const MIN_USER_MENU_WIDTH = 180;
 const MAX_USER_MENU_WIDTH = 400;
@@ -169,6 +174,7 @@ export default function ChatView({
 
   const {
     messages,
+    latestEventId,
     loadOlder,
     loadNewer,
     hasOlder,
@@ -224,6 +230,9 @@ export default function ChatView({
   const [replyDraft, setReplyDraft] = useState<Message | null>(null);
   const [pinnedMenuOpen, setPinnedMenuOpen] = useState(false);
   const [messageSenderProfileUserId, setMessageSenderProfileUserId] = useState<string | null>(null);
+  const [recoveryOpen, setRecoveryOpen] = useState(false);
+  const encryption = useEncryption();
+  const unavailable = useUnavailableMessages(isDraft ? null : activeRoom?.id ?? null, userId, messages, isAtLatest, latestEventId);
 
   const containerRef = useRef<HTMLDivElement>(null);
   const messageListRef = useRef<MessageListHandle>(null);
@@ -266,6 +275,7 @@ export default function ChatView({
   useEffect(() => {
     setEditingMessage(null);
     setReplyDraft(null);
+    setRecoveryOpen(false);
   }, [activeRoom?.id, isDraft]);
 
   useEffect(() => {
@@ -635,6 +645,14 @@ export default function ChatView({
           minHeight: 0,
           backgroundColor: palette.bgPrimary,
         }}>
+          {unavailable.hasUnavailable && !unavailable.warningIgnored && !initialLoading && <UnavailableMessagesNotice
+            acknowledged={unavailable.acknowledged} busy={unavailable.busy} error={unavailable.error} isAtLatest={isAtLatest}
+            canClear={unavailable.canClear}
+            onClear={() => { void unavailable.clearNotification(); }}
+            onRecover={() => { setRecoveryOpen(true); void encryption.refresh(); }}
+            onIgnore={unavailable.ignoreWarning}
+            onJumpToRecent={() => { void jumpToRecent(); }}
+          />}
           <MessageList
             ref={messageListRef}
             messages={messages}
@@ -642,6 +660,9 @@ export default function ChatView({
             initialLoading={initialLoading}
             hasOlder={hasOlder}
             isAtLatest={isAtLatest}
+            automaticReadBlocked={unavailable.blocked}
+            privateReadOnly={unavailable.privateOnly}
+            acknowledgedThrough={unavailable.acknowledgedThrough}
             onLoadOlder={loadOlder}
             onLoadNewer={loadNewer}
             pendingRecentCount={pendingRecentCount}
@@ -759,6 +780,15 @@ export default function ChatView({
           />
         </SideDrawer>
       )}
+
+      {recoveryOpen && <Dialog aria-labelledby="chat-recovery-title"
+        onClose={() => { if (!encryption.busy) { setRecoveryOpen(false); void refresh(); } }} style={{ width: 480, padding: 24 }}>
+        <h2 id="chat-recovery-title" style={{ margin: "0 0 16px", fontSize: typography.fontSizeLarge }}>Recover encrypted messages</h2>
+        <EncryptionSettingsPanel compact />
+        <button type="button" disabled={!!encryption.busy} onClick={() => { setRecoveryOpen(false); void refresh(); }}
+          style={{ marginTop: 16, padding: "8px 12px", borderRadius: 8, border: `1px solid ${palette.border}`,
+            background: palette.bgTertiary, color: palette.textPrimary, font: "inherit", cursor: "pointer" }}>Close</button>
+      </Dialog>}
 
       {messageSenderProfileUserId && (
         <UserProfileDialog

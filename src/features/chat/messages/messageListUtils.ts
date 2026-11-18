@@ -50,12 +50,14 @@ export function clampFixedPopoverToViewport(
 
 export function shouldShowHeader(msg: Message, prevMsg: Message | null): boolean {
   if (!prevMsg) return true;
+  if (msg.decryptionFailed || prevMsg.decryptionFailed) return true;
   if (prevMsg.sender !== msg.sender) return true;
   if (msg.timestamp - prevMsg.timestamp > 5 * 60 * 1000) return true;
   return false;
 }
 
 export function replySnippetForMessage(m: Message): string {
+  if (m.decryptionFailed) return "Message unavailable on this device";
   if (m.imageMediaRequest || m.localImagePreviewObjectUrl) return "Image";
   if (m.videoMediaRequest) return "Video";
   if (m.fileMediaRequest) return m.fileDisplayName?.trim() || "File";
@@ -139,6 +141,7 @@ const NON_EDITABLE_BRACKET_PREFIXES = [
 ] as const;
 
 export function messageAllowsEdit(msg: Message, userId: string): boolean {
+  if (msg.decryptionFailed) return false;
   if (msg.eventId.startsWith("local:")) return false;
   if (msg.sender !== userId) return false;
   if (msg.imageMediaRequest != null) return false;

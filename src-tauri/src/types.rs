@@ -66,6 +66,8 @@ pub struct MessageReplyTo {
 #[derive(Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct MessageInfo {
+    /// Ciphertext retained as a timeline placeholder; no plaintext was recovered.
+    pub decryption_failed: bool,
     pub event_id: String,
     pub sender: String,
     pub sender_name: Option<String>,
@@ -132,6 +134,8 @@ pub struct MessageReactionDeltaPayload {
 pub struct MessageBatch {
     pub messages: Vec<MessageInfo>,
     pub prev_batch: Option<String>,
+    /// Newest observed server event; timestamps can be skewed between devices.
+    pub latest_event_id: Option<String>,
 }
 
 #[derive(Clone, Serialize)]

@@ -1857,9 +1857,13 @@ export default function RoomSidebar({
       {/* Room context menu */}
       {roomContextMenu && (
         <RoomContextMenu
+          key={roomContextMenu.roomId}
           x={roomContextMenu.x}
           y={roomContextMenu.y}
           roomName={roomContextMenu.roomName}
+          onClearNotification={async () => {
+            await invoke("clear_room_notification", { roomId: roomContextMenu.roomId, expectedUserId: userId });
+          }}
           onInvite={() => {
             const t = roomContextMenu;
             setInviteRoom({ id: t.roomId, name: t.roomName });
@@ -1874,7 +1878,7 @@ export default function RoomSidebar({
             setLeaveRoomError(null);
             setLeaveRoom({ id: t.roomId, name: t.roomName });
           }}
-          onClose={() => setRoomContextMenu(null)}
+          onClose={() => setRoomContextMenu((current) => current?.roomId === roomContextMenu.roomId ? null : current)}
         />
       )}
 

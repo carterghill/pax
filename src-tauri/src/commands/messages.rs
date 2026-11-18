@@ -49,6 +49,50 @@ use super::message_display::{
     extract_mentioned_user_ids, extract_message_display, reply_to_from_message_relation,
 };
 use super::{fmt_error_chain, get_client, resolve_room};
+
+/// Keep the envelope's public metadata when the SDK cannot decrypt an event.
+/// Never expose ciphertext as message text or confuse redactions with missing keys.
+pub(super) fn unavailable_message(raw: &serde_json::value::RawValue) -> Option<MessageInfo> {
+    let event: serde_json::Value = serde_json::from_str(raw.get()).ok()?;
+    if event["type"] != "m.room.encrypted"
+        || event["unsigned"].get("redacted_because").is_some()
+        || event["content"]["algorithm"].as_str().is_none()
+        || matches!(
+            event["content"]["m.relates_to"]["rel_type"].as_str(),
+            Some("m.replace" | "m.annotation")
+        )
+    {
+        return None;
+    }
+    let event_id = EventId::parse(event["event_id"].as_str()?)
+        .ok()?
+        .to_string();
+    let sender = UserId::parse(event["sender"].as_str()?).ok()?.to_string();
+    Some(MessageInfo {
+        decryption_failed: true,
+        event_id,
+        sender,
+        sender_name: None,
+        body: "Message unavailable on this device".into(),
+        timestamp: event["origin_server_ts"].as_u64()?,
+        avatar_url: None,
+        edited: false,
+        reply_to: None,
+        image_media_request: None,
+        image_width: None,
+        image_height: None,
+        image_blurhash: None,
+        video_media_request: None,
+        video_width: None,
+        video_height: None,
+        file_media_request: None,
+        file_mime: None,
+        file_display_name: None,
+        unsupported_matrix_msgtype: None,
+        reactions: None,
+        mentioned_user_ids: vec![],
+    })
+}
 /// Matrix user IDs are compared case-insensitively; event `sender` and `client.user_id()` can differ in casing.
 fn user_id_strings_equal(a: &str, b: &str) -> bool {
     a == b || a.to_lowercase() == b.to_lowercase()
@@ -251,6 +295,7 @@ pub async fn get_messages(
         mentioned_user_ids: Vec<String>,
     }
     let mut raw_msgs = Vec::new();
+    let mut unavailable = Vec::new();
     let mut unique_senders = Vec::new();
     let mut seen_senders = std::collections::HashSet::new();
     // target event id -> replacement fields + origin_server_ts; keep latest edit per target
@@ -349,6 +394,14 @@ pub async fn get_messages(
         };
 
         for event in chunk {
+            if let Some(message) = unavailable_message(event.raw().json()) {
+                let sender = UserId::parse(&message.sender).expect("validated sender");
+                if seen_senders.insert(message.sender.clone()) {
+                    unique_senders.push(sender);
+                }
+                unavailable.push(message);
+                continue;
+            }
             let raw = match event.raw().deserialize() {
                 Ok(e) => e,
                 Err(_) => continue,
@@ -429,7 +482,7 @@ pub async fn get_messages(
         // Keep paging until we have enough visible messages to overflow the
         // viewport (so the user can actually scroll and re-trigger pagination),
         // we truly run out of history, or we hit the per-call page cap.
-        if raw_msgs.len() >= target_visible || prev_batch.is_none() {
+        if raw_msgs.len() + unavailable.len() >= target_visible || prev_batch.is_none() {
             break;
         }
         if pages_scanned >= MAX_PAGES_PER_CALL {
@@ -464,7 +517,7 @@ pub async fn get_messages(
     }
 
     // Third pass: build final messages using the cached sender metadata
-    let messages: Vec<_> = raw_msgs
+    let mut messages: Vec<_> = raw_msgs
         .into_iter()
         .map(|m| {
             let (sender_name, avatar_url) =
@@ -485,22 +538,24 @@ pub async fn get_messages(
                 unsupported_matrix_msgtype,
             ) = latest_replacement
                 .get(&m.event_id)
-                .map(|(b, img, vid, file, fm, fd, iw, ih, ibh, vw, vh, unsup, _ts)| {
-                    (
-                        b.clone(),
-                        img.clone(),
-                        vid.clone(),
-                        file.clone(),
-                        fm.clone(),
-                        fd.clone(),
-                        *iw,
-                        *ih,
-                        ibh.clone(),
-                        *vw,
-                        *vh,
-                        unsup.clone(),
-                    )
-                })
+                .map(
+                    |(b, img, vid, file, fm, fd, iw, ih, ibh, vw, vh, unsup, _ts)| {
+                        (
+                            b.clone(),
+                            img.clone(),
+                            vid.clone(),
+                            file.clone(),
+                            fm.clone(),
+                            fd.clone(),
+                            *iw,
+                            *ih,
+                            ibh.clone(),
+                            *vw,
+                            *vh,
+                            unsup.clone(),
+                        )
+                    },
+                )
                 .unwrap_or_else(|| {
                     (
                         m.body.clone(),
@@ -519,6 +574,7 @@ pub async fn get_messages(
                 });
             let reactions = reaction_map.get(&m.event_id).cloned();
             MessageInfo {
+                decryption_failed: false,
                 event_id: m.event_id,
                 sender: m.sender,
                 sender_name,
@@ -544,6 +600,14 @@ pub async fn get_messages(
         })
         .collect();
 
+    for mut message in unavailable {
+        if let Some((name, avatar)) = sender_meta.get(&message.sender) {
+            message.sender_name = name.clone();
+            message.avatar_url = avatar.clone();
+        }
+        messages.push(message);
+    }
+    messages.sort_by_key(|m| std::cmp::Reverse(m.timestamp));
     let elapsed = t0.elapsed();
     let msg_count = messages.len();
     log::info!(
@@ -561,6 +625,20 @@ pub async fn get_messages(
     Ok(MessageBatch {
         messages,
         prev_batch,
+        latest_event_id: if from.is_none() {
+            events_for_reactions
+                .first()
+                .and_then(|event| {
+                    event
+                        .raw()
+                        .get_field::<OwnedEventId>("event_id")
+                        .ok()
+                        .flatten()
+                })
+                .map(|id| id.to_string())
+        } else {
+            None
+        },
     })
 }
 
@@ -716,6 +794,7 @@ async fn build_message_infos_from_timeline_events(
     }
 
     let mut raw_msgs = Vec::new();
+    let mut unavailable = Vec::new();
     let mut latest_replacement: HashMap<
         String,
         (
@@ -742,6 +821,14 @@ async fn build_message_infos_from_timeline_events(
     let reaction_map = aggregate_reactions_from_timeline(&timeline_events, me);
 
     for event in timeline_events {
+        if let Some(message) = unavailable_message(event.raw().json()) {
+            let sender = UserId::parse(&message.sender).expect("validated sender");
+            if seen_senders.insert(message.sender.clone()) {
+                unique_senders.push(sender);
+            }
+            unavailable.push(message);
+            continue;
+        }
         let raw = match event.kind.raw().deserialize() {
             Ok(e) => e,
             Err(_) => continue,
@@ -829,7 +916,7 @@ async fn build_message_infos_from_timeline_events(
         sender_meta.insert(uid.to_string(), meta);
     }
 
-    let messages: Vec<_> = raw_msgs
+    let mut messages: Vec<_> = raw_msgs
         .into_iter()
         .map(|m| {
             let (sender_name, avatar_url) =
@@ -850,22 +937,24 @@ async fn build_message_infos_from_timeline_events(
                 unsupported_matrix_msgtype,
             ) = latest_replacement
                 .get(&m.event_id)
-                .map(|(b, img, vid, file, fm, fd, iw, ih, ibh, vw, vh, unsup, _ts)| {
-                    (
-                        b.clone(),
-                        img.clone(),
-                        vid.clone(),
-                        file.clone(),
-                        fm.clone(),
-                        fd.clone(),
-                        *iw,
-                        *ih,
-                        ibh.clone(),
-                        *vw,
-                        *vh,
-                        unsup.clone(),
-                    )
-                })
+                .map(
+                    |(b, img, vid, file, fm, fd, iw, ih, ibh, vw, vh, unsup, _ts)| {
+                        (
+                            b.clone(),
+                            img.clone(),
+                            vid.clone(),
+                            file.clone(),
+                            fm.clone(),
+                            fd.clone(),
+                            *iw,
+                            *ih,
+                            ibh.clone(),
+                            *vw,
+                            *vh,
+                            unsup.clone(),
+                        )
+                    },
+                )
                 .unwrap_or_else(|| {
                     (
                         m.body.clone(),
@@ -884,6 +973,7 @@ async fn build_message_infos_from_timeline_events(
                 });
             let reactions = reaction_map.get(&m.event_id).cloned();
             MessageInfo {
+                decryption_failed: false,
                 event_id: m.event_id,
                 sender: m.sender,
                 sender_name,
@@ -909,6 +999,14 @@ async fn build_message_infos_from_timeline_events(
         })
         .collect();
 
+    for mut message in unavailable {
+        if let Some((name, avatar)) = sender_meta.get(&message.sender) {
+            message.sender_name = name.clone();
+            message.avatar_url = avatar.clone();
+        }
+        messages.push(message);
+    }
+    messages.sort_by_key(|m| m.timestamp);
     Ok(messages)
 }
 
@@ -1103,6 +1201,7 @@ pub async fn get_messages_around_event(
     Ok(MessageBatch {
         messages,
         prev_batch: response.prev_batch_token,
+        latest_event_id: None,
     })
 }
 
@@ -1281,11 +1380,13 @@ pub async fn start_sync(
     let app_handle = app.clone();
     let avatars = state.avatars.clone();
     let raw_unread_for_msg = state.raw_unread_messages.clone();
+    let pending_reads_for_msg = state.pending_unavailable_reads.clone();
     let self_user_id_for_msg = client.user_id().map(|u| u.to_owned());
     client.add_event_handler(move |ev: OriginalSyncRoomMessageEvent, room: Room| {
         let app = app_handle.clone();
         let avatars = avatars.clone();
         let raw_unread = raw_unread_for_msg.clone();
+        let pending_reads = pending_reads_for_msg.clone();
         let self_uid = self_user_id_for_msg.clone();
         async move {
             // Bump the raw-message counter for any non-self, non-edit message.
@@ -1298,6 +1399,7 @@ pub async fn start_sync(
                 Some(Relation::Replacement(_))
             );
             if !is_self && !is_edit {
+                super::unavailable_messages::note_incoming(&pending_reads, &room).await;
                 let mut map = raw_unread.lock().await;
                 *map.entry(room.room_id().to_owned()).or_insert(0) += 1;
             }
@@ -1434,6 +1536,7 @@ pub async fn start_sync(
                 room_ping,
                 is_dm,
                 message: MessageInfo {
+                    decryption_failed: false,
                     event_id: ev.event_id.to_string(),
                     sender,
                     sender_name,
@@ -1460,6 +1563,55 @@ pub async fn start_sync(
             let _ = app.emit("room-message", payload);
         }
     });
+
+    // Undecrypted events still have a sender, timestamp and event ID. Surface
+    // them instead of silently hiding a reply whose plaintext is unavailable.
+    {
+        let app = app.clone();
+        let pending = state.pending_unavailable_reads.clone();
+        let raw = state.raw_unread_messages.clone();
+        let avatars = state.avatars.clone();
+        client.add_event_handler(
+            move |ev: matrix_sdk::ruma::events::room::encrypted::OriginalSyncRoomEncryptedEvent,
+                  raw_event: matrix_sdk::event_handler::RawEvent,
+                  room: Room| {
+                let app = app.clone();
+                let pending = pending.clone();
+                let raw = raw.clone();
+                let avatars = avatars.clone();
+                async move {
+                    let Some(mut message) = unavailable_message(&raw_event.0) else {
+                        return;
+                    };
+                    if room
+                        .client()
+                        .user_id()
+                        .is_none_or(|u| u.as_str() != message.sender)
+                    {
+                        super::unavailable_messages::note_incoming(&pending, &room).await;
+                        *raw.lock()
+                            .await
+                            .entry(room.room_id().to_owned())
+                            .or_default() += 1;
+                    }
+                    if let Ok(Some(member)) = room.get_member_no_sync(&ev.sender).await {
+                        message.sender_name = member.display_name().map(str::to_owned);
+                        message.avatar_url = avatars.cached(member.avatar_url()).await;
+                    }
+                    let _ = app.emit(
+                        "room-message",
+                        RoomMessagePayload {
+                            room_id: room.room_id().to_string(),
+                            message,
+                            mentions_me: false,
+                            room_ping: false,
+                            is_dm: room.is_direct().await.unwrap_or(false),
+                        },
+                    );
+                }
+            },
+        );
+    }
 
     // Incoming emoji reactions (m.reaction) — keep message rows in sync.
     let app_handle = app.clone();
@@ -1496,7 +1648,11 @@ pub async fn start_sync(
             // through the SpaceChild handler. The old target may be unavailable.
             if room.is_space() && gate.load(Ordering::Relaxed) {
                 let _ = app.emit("rooms-changed", ());
-                state.notifications.schedule(&state, &app, super::reconciler::ReconcileScope::all());
+                state.notifications.schedule(
+                    &state,
+                    &app,
+                    super::reconciler::ReconcileScope::all(),
+                );
             }
             let room_id = room.room_id().to_string();
             let redacted = ev
@@ -1639,7 +1795,10 @@ pub async fn start_sync(
                         "room-members-changed",
                         RoomMembersChangedPayload {
                             room_id: room.room_id().to_string(),
-                            membership_changed: ev.unsigned.prev_content.as_ref()
+                            membership_changed: ev
+                                .unsigned
+                                .prev_content
+                                .as_ref()
                                 .map(|previous| previous.membership != ev.content.membership)
                                 .unwrap_or(true),
                         },
@@ -1670,7 +1829,8 @@ pub async fn start_sync(
         let app_h = app.clone();
         let gate_h = reconcile_gate.clone();
         client.add_event_handler(
-            move |ev: matrix_sdk::ruma::events::SyncStateEvent<SpaceChildEventContent>, _room: Room| {
+            move |ev: matrix_sdk::ruma::events::SyncStateEvent<SpaceChildEventContent>,
+                  _room: Room| {
                 let state = state_h.clone();
                 let app = app_h.clone();
                 let gate = gate_h.clone();
@@ -1681,8 +1841,11 @@ pub async fn start_sync(
                     let _ = app.emit("rooms-changed", ());
                     // The event's target must be reconciled even when the link
                     // was removed/redacted and is absent from the new graph.
-                    state.notifications.schedule(&state, &app,
-                        super::reconciler::ReconcileScope::room(ev.state_key().to_string()));
+                    state.notifications.schedule(
+                        &state,
+                        &app,
+                        super::reconciler::ReconcileScope::room(ev.state_key().to_string()),
+                    );
                 }
             },
         );
@@ -1701,7 +1864,11 @@ pub async fn start_sync(
                     return;
                 }
                 let _ = app.emit("rooms-changed", ());
-                state.notifications.schedule(&state, &app, super::reconciler::ReconcileScope::all());
+                state.notifications.schedule(
+                    &state,
+                    &app,
+                    super::reconciler::ReconcileScope::all(),
+                );
             }
         });
     }
@@ -1725,6 +1892,30 @@ pub async fn start_sync(
     }
 
     // Read-receipt handler — clears the raw-message counter for a room
+    {
+        let app = app.clone();
+        client.add_event_handler(
+            move |_event: matrix_sdk::ruma::events::AnyRoomAccountDataEvent,
+                  raw: matrix_sdk::event_handler::RawEvent,
+                  room: Room| {
+                let app = app.clone();
+                async move {
+                    let Ok(event) = serde_json::from_str::<serde_json::Value>(raw.0.get()) else {
+                        return;
+                    };
+                    let content = &event["content"];
+                    if event["type"] == "com.carter.pax.unavailable_messages"
+                        && content["roomId"].as_str() == Some(room.room_id().as_str())
+                        && content["userId"].as_str() == room.client().user_id().map(|u| u.as_str())
+                    {
+                        let _ = app.emit("room-unavailable-acknowledged", content);
+                    }
+                }
+            },
+        );
+    }
+
+    // Read-receipt handler — clears the raw-message counter for a room
     // whenever a receipt for our MXID arrives.  This covers two paths:
     //
     //   * Our own `send_single_receipt` echoes back through sync; that's
@@ -1740,23 +1931,25 @@ pub async fn start_sync(
     // our counter — they read the room, we haven't.
     {
         let raw_unread = state.raw_unread_messages.clone();
+        let pending = state.pending_unavailable_reads.clone();
         let self_uid = client.user_id().map(|u| u.to_owned());
         client.add_event_handler(
             move |ev: matrix_sdk::ruma::events::receipt::SyncReceiptEvent, room: Room| {
                 let raw_unread = raw_unread.clone();
+                let pending = pending.clone();
                 let self_uid = self_uid.clone();
                 async move {
                     let Some(me) = self_uid else { return };
                     // `ev.content.0` is `EventId → ReceiptType → UserId → Receipt`.
                     // We just need to know "was there any receipt for our MXID
                     // anywhere in this event?"  One walk is enough.
-                    let mine = ev
+                    let mine: Vec<OwnedEventId> = ev
                         .content
                         .0
-                        .values()
-                        .flat_map(|by_type| by_type.values())
-                        .any(|by_user| by_user.contains_key(&me));
-                    if mine {
+                        .iter()
+                        .filter(|(_, by_type)| by_type.iter().any(|(kind, by_user)| matches!(kind, matrix_sdk::ruma::events::receipt::ReceiptType::Read | matrix_sdk::ruma::events::receipt::ReceiptType::ReadPrivate) && by_user.contains_key(&me)))
+                        .map(|(id, _)| id.clone()).collect();
+                    if !mine.is_empty() && !super::unavailable_messages::note_receipt_echo(&pending, &room, &mine).await {
                         raw_unread.lock().await.remove(room.room_id());
                     }
                 }
@@ -1770,6 +1963,7 @@ pub async fn start_sync(
     let desired_presence = state.desired_presence.clone();
     let unread_cache = state.unread_cache.clone();
     let raw_unread = state.raw_unread_messages.clone();
+    let pending_unavailable_reads = state.pending_unavailable_reads.clone();
     let reconcile_state_arc = state_arc.clone();
     let reconcile_gate_for_loop = reconcile_gate.clone();
     let self_user_id = client.user_id().map(|u| u.to_string()).unwrap_or_default();
@@ -1827,13 +2021,20 @@ pub async fn start_sync(
                 let _ = app.emit("sync-ready", ());
 
                 reconcile_gate_for_loop.store(true, Ordering::Release);
-                reconcile_state_arc.notifications.schedule(&reconcile_state_arc, &app,
-                    super::reconciler::ReconcileScope::all());
+                reconcile_state_arc.notifications.schedule(
+                    &reconcile_state_arc,
+                    &app,
+                    super::reconciler::ReconcileScope::all(),
+                );
             }
 
             for event in &response.account_data {
                 if let Ok(value) = event.deserialize_as::<serde_json::Value>() {
-                    super::pax_settings::process_synced_settings(&reconcile_state_arc, &app, &value);
+                    super::pax_settings::process_synced_settings(
+                        &reconcile_state_arc,
+                        &app,
+                        &value,
+                    );
                 }
             }
 
@@ -1888,6 +2089,7 @@ pub async fn start_sync(
                 &client,
                 &unread_cache,
                 &raw_unread,
+                &pending_unavailable_reads,
                 &app,
             )
             .await;
@@ -1896,7 +2098,9 @@ pub async fn start_sync(
             if !voice_rooms.is_empty() {
                 let _ = app.emit(
                     "voice-participants-invalidated",
-                    VoiceParticipantsInvalidatedPayload { room_ids: voice_rooms },
+                    VoiceParticipantsInvalidatedPayload {
+                        room_ids: voice_rooms,
+                    },
                 );
             }
         }

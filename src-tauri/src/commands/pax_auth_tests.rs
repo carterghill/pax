@@ -109,6 +109,12 @@ pub(crate) struct ServerState {
     pub fail_signing: bool,
     pub login_status: Option<u16>,
     pub profile_status: Option<u16>,
+    pub joined_test_room: bool,
+    pub timeline: Vec<Value>,
+    pub unread_count: u64,
+    pub private_receipt: Option<String>,
+    pub fail_receipt: bool,
+    pub receipt_delay_ms: u64,
 }
 pub(crate) struct Server {
     pub home: String,
@@ -189,6 +195,10 @@ async fn serve(mut socket: TcpStream, state: Arc<Mutex<ServerState>>) {
         respond(&mut state, method, &path, &body)
     };
     let response = serde_json::to_vec(&response).unwrap();
+    if path.contains("/receipt/") {
+        let delay = state.lock().unwrap().receipt_delay_ms;
+        if delay > 0 { tokio::time::sleep(std::time::Duration::from_millis(delay)).await; }
+    }
     let header = format!("HTTP/1.1 {status} Result\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n", response.len());
     let _ = socket.write_all(header.as_bytes()).await;
     let _ = socket.write_all(&response).await;
@@ -196,6 +206,16 @@ async fn serve(mut socket: TcpStream, state: Arc<Mutex<ServerState>>) {
 
 fn respond(s: &mut ServerState, method: &str, path: &str, body: &Value) -> (u16, Value) {
     let missing = || (404, json!({"errcode":"M_NOT_FOUND", "error":"Missing"}));
+    if path.contains("/receipt/") {
+        if s.fail_receipt { return (500, json!({"errcode":"M_UNKNOWN"})); }
+        assert!(path.contains("/receipt/m.read.private/"), "Unavailable messages must never send a public read receipt");
+        s.private_receipt = path.rsplit('/').next().map(str::to_owned);
+        s.unread_count = 0;
+        return (200, json!({}));
+    }
+    if path.contains("/rooms/") && path.ends_with("/messages") {
+        return (200, json!({"start":"start", "chunk":s.timeline.iter().rev().cloned().collect::<Vec<_>>(),"end":null,"state":[]}));
+    }
     if path.ends_with("/versions") {
         return (
             200,
@@ -383,6 +403,21 @@ fn respond(s: &mut ServerState, method: &str, path: &str, body: &Value) -> (u16,
         return (200, json!({"rooms":s.rooms}));
     }
     if path.ends_with("/sync") {
+        if s.joined_test_room {
+            let receipts = s.private_receipt.as_ref().map(|id|json!({"type":"m.receipt","content":{id:{"m.read.private":{USER:{"ts":10}}}}}));
+            return (200,json!({"next_batch":"s1","rooms":{"join":{"!test:example.org":{
+                "state":{"events":[
+                    {"type":"m.room.create","state_key":"","sender":USER,"event_id":"$create","origin_server_ts":1,"content":{"creator":USER,"room_version":"10"}},
+                    {"type":"m.room.member","state_key":USER,"sender":USER,"event_id":"$me","origin_server_ts":2,"content":{"membership":"join","displayname":"Alice"}},
+                    {"type":"m.room.member","state_key":"@bob:example.org","sender":"@bob:example.org","event_id":"$bob","origin_server_ts":3,"content":{"membership":"join","displayname":"Bob"}},
+                    {"type":"m.room.encryption","state_key":"","sender":USER,"event_id":"$encryption","origin_server_ts":4,"content":{"algorithm":"m.megolm.v1.aes-sha2"}}
+                ]},
+                "timeline":{"events":s.timeline,"limited":false,"prev_batch":"p1"},
+                "ephemeral":{"events":receipts.into_iter().collect::<Vec<_>>()},
+                "account_data":{"events":[]},
+                "unread_notifications":{"notification_count":s.unread_count,"highlight_count":s.unread_count}
+            }}},"device_one_time_keys_count":{"signed_curve25519":50},"account_data":{"events":[]}}));
+        }
         return (
             200,
             json!({"next_batch":"s1", "rooms":{}, "device_one_time_keys_count":{"signed_curve25519":50},

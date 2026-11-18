@@ -51,6 +51,8 @@ export interface MessageReplyTo {
 }
 
 export interface Message {
+  /** An encrypted event whose contents are unavailable on this device. */
+  decryptionFailed?: boolean;
   eventId: string;
   sender: string;
   senderName: string | null;
@@ -107,6 +109,7 @@ export interface Message {
 export interface MessageBatch {
   messages: Message[];
   prevBatch: string | null;
+  latestEventId?: string | null;
 }
 
 export interface RoomRedactionPolicy {
