@@ -115,7 +115,15 @@ pub(crate) struct ServerState {
     pub private_receipt: Option<String>,
     pub fail_receipt: bool,
     pub receipt_delay_ms: u64,
+    pub rss_room: Option<RssTestRoom>,
 }
+
+pub(crate) struct RssTestRoom {
+    pub settings: Value,
+    pub memberships: HashMap<String, String>,
+    pub reject_invites: bool,
+}
+
 pub(crate) struct Server {
     pub home: String,
     pub state: Arc<Mutex<ServerState>>,
@@ -206,6 +214,38 @@ async fn serve(mut socket: TcpStream, state: Arc<Mutex<ServerState>>) {
 
 fn respond(s: &mut ServerState, method: &str, path: &str, body: &Value) -> (u16, Value) {
     let missing = || (404, json!({"errcode":"M_NOT_FOUND", "error":"Missing"}));
+    if let (Some(room), Some(path)) = (
+        s.rss_room.as_mut(),
+        path.strip_prefix("/_matrix/client/v3/rooms/!test:example.org/"),
+    ) {
+        let path = path.trim_end_matches('/');
+        if path == format!("state/{}", crate::commands::rss::RSS_FEED_EVENT) {
+            if method == "PUT" {
+                room.settings = body.clone();
+                return (200, json!({"event_id":"$rss-state"}));
+            }
+            return (200, room.settings.clone());
+        }
+        if let Some(user_id) = path.strip_prefix("state/m.room.member/") {
+            return room.memberships.get(user_id)
+                .map(|membership| (200, json!({"membership":membership})))
+                .unwrap_or_else(missing);
+        }
+        if path == "state/m.room.create" {
+            return (200, json!({"m.federate":true}));
+        }
+        if path == "kick" || path == "invite" {
+            if path == "invite" && room.reject_invites {
+                return (403, json!({"errcode":"M_FORBIDDEN","error":"Invite refused"}));
+            }
+            let membership = if path == "kick" { "leave" } else { "invite" };
+            room.memberships.insert(body["user_id"].as_str().unwrap().into(), membership.into());
+            return (200, json!({}));
+        }
+        if path.starts_with("send/m.room.message/") {
+            return (200, json!({"event_id":"$rss-subscribe"}));
+        }
+    }
     if path.contains("/receipt/") {
         if s.fail_receipt { return (500, json!({"errcode":"M_UNKNOWN"})); }
         assert!(path.contains("/receipt/m.read.private/"), "Unavailable messages must never send a public read receipt");
@@ -403,14 +443,18 @@ fn respond(s: &mut ServerState, method: &str, path: &str, body: &Value) -> (u16,
         return (200, json!({"rooms":s.rooms}));
     }
     if path.ends_with("/sync") {
-        if s.joined_test_room {
+        if s.joined_test_room || s.rss_room.is_some() {
             let receipts = s.private_receipt.as_ref().map(|id|json!({"type":"m.receipt","content":{id:{"m.read.private":{USER:{"ts":10}}}}}));
             return (200,json!({"next_batch":"s1","rooms":{"join":{"!test:example.org":{
                 "state":{"events":[
                     {"type":"m.room.create","state_key":"","sender":USER,"event_id":"$create","origin_server_ts":1,"content":{"creator":USER,"room_version":"10"}},
                     {"type":"m.room.member","state_key":USER,"sender":USER,"event_id":"$me","origin_server_ts":2,"content":{"membership":"join","displayname":"Alice"}},
                     {"type":"m.room.member","state_key":"@bob:example.org","sender":"@bob:example.org","event_id":"$bob","origin_server_ts":3,"content":{"membership":"join","displayname":"Bob"}},
-                    {"type":"m.room.encryption","state_key":"","sender":USER,"event_id":"$encryption","origin_server_ts":4,"content":{"algorithm":"m.megolm.v1.aes-sha2"}}
+                    if s.rss_room.is_some() {
+                        json!({"type":"m.room.power_levels","state_key":"","sender":USER,"event_id":"$power","origin_server_ts":4,"content":{"users":{USER:100}}})
+                    } else {
+                        json!({"type":"m.room.encryption","state_key":"","sender":USER,"event_id":"$encryption","origin_server_ts":4,"content":{"algorithm":"m.megolm.v1.aes-sha2"}})
+                    }
                 ]},
                 "timeline":{"events":s.timeline,"limited":false,"prev_batch":"p1"},
                 "ephemeral":{"events":receipts.into_iter().collect::<Vec<_>>()},

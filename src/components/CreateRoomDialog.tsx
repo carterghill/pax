@@ -106,6 +106,8 @@ type RoomKind = "text" | "voice" | "rss";
 type HistoryVisibility = "shared" | "joined" | "invited" | "world_readable";
 type SpaceRoomAccess = "space_members" | "public" | "invite";
 
+const DEFAULT_RSS_BOT = "@bot:nope.chat";
+
 interface CreateRoomDialogProps {
   /** Parent space when creating a channel in a space; `null` for global Home (standalone room). */
   spaceId: string | null;
@@ -144,7 +146,7 @@ export default function CreateRoomDialog({
   const [topic, setTopic] = useState("");
   const [roomKind, setRoomKind] = useState<RoomKind>("text");
   const [feedUrl, setFeedUrl] = useState("");
-  const [feedBot, setFeedBot] = useState("@rss:t2bot.io");
+  const [feedBot, setFeedBot] = useState(DEFAULT_RSS_BOT);
   const [pendingRoom, setPendingRoom] = useState<{ room: Room; topic: string | null } | null>(null);
   const creatingRef = useRef(false);
   const errorRef = useRef<HTMLDivElement>(null);
@@ -248,7 +250,7 @@ export default function CreateRoomDialog({
         return;
       }
       if (!/^@[^\s:]+:[^\s]+$/.test(feedBot.trim())) {
-        setError("Enter a Matrix bot address such as @rss:t2bot.io.");
+        setError("Enter a Matrix bot address in the form @bot:example.org.");
         return;
       }
     }
@@ -904,7 +906,7 @@ export default function CreateRoomDialog({
                     type="text"
                     value={feedBot}
                     onChange={(e) => setFeedBot(e.target.value)}
-                    placeholder="@rss:t2bot.io"
+                    placeholder={DEFAULT_RSS_BOT}
                     autoCapitalize="none"
                     spellCheck={false}
                     aria-describedby="rss-feed-bot-help"
@@ -912,7 +914,7 @@ export default function CreateRoomDialog({
                     style={inputStyle}
                   />
                   <div id="rss-feed-bot-help" style={{ marginTop: 6, color: palette.textSecondary, fontSize: typography.fontSizeSmall }}>
-                    The bot joins this room and posts feed updates. Use t2bot.io or another bot that supports !rss subscribe.
+                    The bot joins this room and posts feed updates. You can choose any bot that supports !rss subscribe.
                   </div>
                 </div>
               )}

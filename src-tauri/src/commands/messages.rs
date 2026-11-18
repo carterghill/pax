@@ -1635,6 +1635,22 @@ pub async fn start_sync(
     let state_arc: Arc<AppState> = (*state).clone();
     let reconcile_gate = Arc::new(AtomicBool::new(false));
 
+    {
+        let app = app.clone();
+        let feed_event = matrix_sdk::ruma::events::StateEventType::from(super::rss::RSS_FEED_EVENT);
+        client.add_event_handler(
+            move |event: matrix_sdk::ruma::events::AnySyncStateEvent, room: Room| {
+                let app = app.clone();
+                let changed = event.event_type() == feed_event && event.state_key().is_empty();
+                async move {
+                    if changed {
+                        let _ = app.emit(super::rss::RSS_FEED_CHANGED, room.room_id().as_str());
+                    }
+                }
+            },
+        );
+    }
+
     // Redactions (e.g. deleted messages): drop the target from the client timeline
     let app_handle = app.clone();
     let redaction_state = state_arc.clone();

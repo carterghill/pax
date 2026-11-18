@@ -1,23 +1,31 @@
 import { useEffect, useRef, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
+import { listen } from "@tauri-apps/api/event";
 import { CheckCircle2, RefreshCw, Rss } from "lucide-react";
 import { useTheme } from "../theme/ThemeContext";
 import type { Message } from "../types/matrix";
 
-export interface FeedStatus {
+export interface FeedSettings {
   url: string;
   botUserId: string;
+  revision: string | null;
+  invitationCancelled: boolean;
+  canEdit: boolean;
+}
+
+interface FeedStatus extends FeedSettings {
   membership: string;
   roomSynced: boolean;
   canManage: boolean;
   canInvite: boolean;
+  canCancelInvitation: boolean;
   autoSetup: boolean;
   subscriptionEventId: string | null;
   subscriptionConfirmed: boolean;
   confirmationError: string | null;
 }
 
-type Action = "check" | "setup" | "invite";
+type Action = "check" | "setup" | "invite" | "cancel";
 
 export default function RssFeedStatus({ roomId, messages }: { roomId: string; messages: Message[] }) {
   const { palette, typography, spacing } = useTheme();
@@ -27,20 +35,22 @@ export default function RssFeedStatus({ roomId, messages }: { roomId: string; me
   const [error, setError] = useState<string | null>(null);
   const [checkError, setCheckError] = useState<string | null>(null);
   const [waitingLong, setWaitingLong] = useState(false);
-  const runRef = useRef<(action: Action) => void>(() => {});
+  const runRef = useRef<(action: Action, displayedRevision?: string | null) => void>(() => {});
 
   useEffect(() => {
     let cancelled = false;
     let running = false;
+    let refreshQueued = false;
     let setupFailed = false;
     let timer: ReturnType<typeof setTimeout> | undefined;
-    const started = Date.now();
+    let revision: string | null | undefined;
+    let started = Date.now();
     setStatus(null);
     setError(null);
     setCheckError(null);
     setWaitingLong(false);
 
-    const run = async (action: Action = "check") => {
+    const run = async (action: Action = "check", displayedRevision?: string | null) => {
       if (cancelled || running) return;
       running = true;
       clearTimeout(timer);
@@ -50,28 +60,48 @@ export default function RssFeedStatus({ roomId, messages }: { roomId: string; me
       try {
         latest = await invoke<FeedStatus>("get_rss_feed_status", { roomId });
         if (cancelled) return;
+        if (revision !== latest.revision) {
+          revision = latest.revision;
+          started = Date.now();
+          setupFailed = false;
+          setError(null);
+          setWaitingLong(false);
+        }
         setStatus(latest);
         setCheckError(null);
+        if (action !== "check" && displayedRevision !== latest.revision) {
+          setError("Feed settings changed. Check the current provider and try again.");
+          return;
+        }
+        if (latest.invitationCancelled) return;
         if (latest.subscriptionEventId) {
           setupFailed = false;
           setError(null);
         }
-        if (action === "invite" && latest.canInvite && !["join", "ban"].includes(latest.membership)) {
-          operation = "invite";
-          await invoke("invite_user", { roomId, userId: latest.botUserId });
+        if (action === "invite" || action === "cancel") {
+          operation = action;
+          await invoke(action === "invite" ? "invite_rss_feed_provider" : "cancel_rss_feed_invitation", {
+            roomId, revision: latest.revision,
+          });
           if (cancelled) return;
           setError(null);
+          if (action === "cancel") {
+            latest = { ...latest, invitationCancelled: true };
+            setStatus(latest);
+            return;
+          }
           operation = "check";
           latest = await invoke<FeedStatus>("get_rss_feed_status", { roomId });
           if (cancelled) return;
           setStatus(latest);
+          if (latest.invitationCancelled) return;
         }
         if (action === "setup") setupFailed = false;
         if (latest.membership === "join" && latest.roomSynced && latest.canManage
           && !latest.subscriptionEventId && !setupFailed && (latest.autoSetup || action === "setup")) {
           operation = "setup";
           setSending(true);
-          await invoke("setup_rss_feed", { roomId });
+          await invoke("setup_rss_feed", { roomId, revision: latest.revision });
           if (cancelled) return;
           setError(null);
           operation = "check";
@@ -93,14 +123,31 @@ export default function RssFeedStatus({ roomId, messages }: { roomId: string; me
         if (!cancelled) {
           setChecking(false);
           setSending(false);
-          timer = setTimeout(() => { void run(); }, latest?.subscriptionEventId ? 30_000 : 5_000);
+          if (refreshQueued) {
+            refreshQueued = false;
+            timer = setTimeout(() => { void run(); }, 0);
+          } else if (!latest?.invitationCancelled) {
+            timer = setTimeout(() => { void run(); }, latest?.subscriptionEventId ? 30_000 : 5_000);
+          }
         }
       }
     };
-    runRef.current = (action) => { void run(action); };
+    runRef.current = (action, displayedRevision) => { void run(action, displayedRevision); };
+    const unlisten = listen<string>("rss-feed-changed", ({ payload }) => {
+      if (cancelled || payload !== roomId) return;
+      if (running) refreshQueued = true;
+      else void run();
+    });
+    void unlisten.catch(() => {});
     void run();
-    return () => { cancelled = true; clearTimeout(timer); };
+    return () => {
+      cancelled = true;
+      clearTimeout(timer);
+      void unlisten.then((stop) => stop(), () => {});
+    };
   }, [roomId]);
+
+  if (status?.invitationCancelled) return null;
 
   // A loaded timeline can reflect the acknowledgement before the next status poll.
   const command = status?.subscriptionEventId
@@ -193,13 +240,18 @@ export default function RssFeedStatus({ roomId, messages }: { roomId: string; me
           {checking ? "Checking…" : "Check status"}
         </button>
         {status?.canManage && joined && status.roomSynced && !status.subscriptionEventId && (
-          <button type="button" disabled={checking} onClick={() => runRef.current("setup")} style={buttonStyle}>
+          <button type="button" disabled={checking} onClick={() => runRef.current("setup", status.revision)} style={buttonStyle}>
             {error ? "Retry setup" : "Finish setup"}
           </button>
         )}
         {status?.canInvite && !joined && status.membership !== "ban" && (
-          <button type="button" disabled={checking} onClick={() => runRef.current("invite")} style={buttonStyle}>
+          <button type="button" disabled={checking} onClick={() => runRef.current("invite", status.revision)} style={buttonStyle}>
             {status.membership === "invite" ? "Retry invitation" : "Invite provider"}
+          </button>
+        )}
+        {status?.canCancelInvitation && status.membership === "invite" && (
+          <button type="button" disabled={checking} onClick={() => runRef.current("cancel", status.revision)} style={buttonStyle}>
+            Cancel invitation
           </button>
         )}
       </div>

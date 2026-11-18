@@ -1890,6 +1890,7 @@ export default function RoomSidebar({
         <RoomSettingsDialog
           roomId={settingsRoom.id}
           roomName={settingsRoom.name}
+          isRss={settingsRoom.isRss}
           moderationSpaceTreeRoomIds={moderationSpaceTreeRoomIds}
           moderationSpaceName={moderationSpaceName}
           moderationSpaceRootId={moderationSpaceRootId}

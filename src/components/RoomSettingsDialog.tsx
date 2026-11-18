@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
-import { X, Loader2, Users, Shield, Bell, Settings as SettingsIcon } from "lucide-react";
+import { X, Loader2, Users, Shield, Bell, Rss, Settings as SettingsIcon } from "lucide-react";
 import { useTheme } from "../theme/ThemeContext";
 import { paletteDialogShellBorderStyle } from "../theme/paletteBorder";
 import Dialog from "./Dialog";
@@ -8,6 +8,7 @@ import ModerationScopeDialog from "./ModerationScopeDialog";
 import SettingsMemberCategory from "./SettingsMemberCategory";
 import PowerLevelsSettingsPanel from "./PowerLevelsSettingsPanel";
 import NotificationSettingsPanel from "./NotificationSettingsPanel";
+import RssFeedSettingsPanel from "./RssFeedSettingsPanel";
 import type { RoomManagementMembersResponse } from "../types/matrix";
 
 type HistoryVisibility = "joined" | "shared" | "invited" | "world_readable";
@@ -43,7 +44,7 @@ const VISIBILITY_OPTIONS: {
   },
 ];
 
-type SettingsTab = "general" | "members" | "permissions" | "notifications";
+type SettingsTab = "general" | "members" | "permissions" | "notifications" | "rss";
 
 interface RoomGeneralSnapshot {
   roomId: string;
@@ -61,6 +62,7 @@ interface RoomGeneralPermissions {
 export interface RoomSettingsDialogProps {
   roomId: string;
   roomName: string;
+  isRss?: boolean;
   onClose: () => void;
   /** Room ids in the active space tree (for kick/ban/unban scope). */
   moderationSpaceTreeRoomIds?: string[] | null;
@@ -73,6 +75,7 @@ export interface RoomSettingsDialogProps {
 export default function RoomSettingsDialog({
   roomId,
   roomName,
+  isRss = false,
   onClose,
   moderationSpaceTreeRoomIds = null,
   moderationSpaceName = null,
@@ -438,6 +441,7 @@ export default function RoomSettingsDialog({
               </div>
               {[
                 { id: "general" as SettingsTab, label: "General", icon: SettingsIcon },
+                ...(isRss ? [{ id: "rss" as SettingsTab, label: "RSS Feed", icon: Rss }] : []),
                 { id: "notifications" as SettingsTab, label: "Notifications", icon: Bell },
                 { id: "members" as SettingsTab, label: "Members", icon: Users },
                 { id: "permissions" as SettingsTab, label: "Permissions", icon: Shield },
@@ -921,6 +925,9 @@ export default function RoomSettingsDialog({
 
                 {activeTab === "notifications" && (
                   <NotificationSettingsPanel scope="room" scopeId={roomId} />
+                )}
+                {activeTab === "rss" && isRss && (
+                  <RssFeedSettingsPanel key={roomId} roomId={roomId} />
                 )}
               </div>
 
