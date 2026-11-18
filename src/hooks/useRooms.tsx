@@ -101,7 +101,7 @@ function withStableRoomDisplayName(
   incoming: Room
 ): Room {
   if (!previous || previous.id !== incoming.id) return incoming;
-  if (!isPlaceholderRoomName(incoming.name)) return incoming;
+  if (incoming.hasExplicitName || !isPlaceholderRoomName(incoming.name)) return incoming;
   if (!isPlaceholderRoomName(previous.name)) {
     return { ...incoming, name: previous.name };
   }
@@ -332,11 +332,16 @@ export function useRooms(userId: string | null) {
   // Re-fetch whenever the sync loop signals a change (debounced to coalesce rapid events)
   useEffect(() => {
     let debounceTimer: ReturnType<typeof setTimeout> | null = null;
+    const refresh = () => {
+      if (fetchingRef.current) {
+        debounceTimer = setTimeout(refresh, 500);
+      } else {
+        void fetchRooms();
+      }
+    };
     const unlisten = listen("rooms-changed", () => {
       if (debounceTimer) clearTimeout(debounceTimer);
-      debounceTimer = setTimeout(() => {
-        fetchRooms();
-      }, 500);
+      debounceTimer = setTimeout(refresh, 500);
     });
 
     return () => {

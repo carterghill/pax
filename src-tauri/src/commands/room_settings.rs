@@ -2,6 +2,7 @@ use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 use std::time::Duration;
 
+use matrix_sdk::ruma::events::StateEventType;
 use tauri::State;
 
 use crate::types::{SpaceChildInfo, SpaceInfo};
@@ -530,12 +531,14 @@ pub(super) fn build_chat_room_creation_content(
     cc
 }
 
-// ─── Room general settings (address / federation display; federation is immutable) ───
+// ─── Room general settings ───
 
 #[derive(Debug, Clone, serde::Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct RoomGeneralSettingsSnapshot {
     pub room_id: String,
+    pub name: String,
+    pub topic: String,
     pub homeserver_name: String,
     /// From `m.room.create` (`m.federate`); defaults to true if absent.
     pub federate: bool,
@@ -548,6 +551,8 @@ pub struct RoomGeneralSettingsSnapshot {
 #[derive(Debug, Clone, serde::Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct RoomGeneralSettingsPermissions {
+    pub name: bool,
+    pub topic: bool,
     pub room_alias: bool,
 }
 
@@ -561,10 +566,12 @@ pub struct RoomGeneralSettingsData {
 #[derive(Debug, serde::Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ApplyRoomGeneralSettingsPatch {
+    pub name: Option<String>,
+    pub topic: Option<String>,
     pub room_alias_local: Option<String>,
 }
 
-/// Address, join rule, and federation (read-only) for a normal room.
+/// Room details and the current user's per-field edit permissions.
 #[tauri::command]
 pub async fn get_room_general_settings(
     state: State<'_, Arc<AppState>>,
@@ -573,50 +580,44 @@ pub async fn get_room_general_settings(
     let ac = get_authed_client(&state).await?;
     let parsed =
         matrix_sdk::ruma::RoomId::parse(&room_id).map_err(|e| format!("Invalid room ID: {e}"))?;
-    let _ = ac.client.get_room(&parsed).ok_or("Room not found")?;
-
-    let user_id = ac.client.user_id().ok_or("No user ID")?.to_string();
-
-    let pl_body = http_get_room_state(
-        &state.http_client,
-        &ac.homeserver,
-        &ac.access_token,
-        &room_id,
-        "m.room.power_levels/",
-    )
-    .await?;
-
-    let perms = if let Some(pl) = pl_body {
-        let u = power_level_for_user(&pl, &user_id);
-        RoomGeneralSettingsPermissions {
-            room_alias: u >= power_required_for_state_event(&pl, "m.room.canonical_alias"),
-        }
-    } else {
-        RoomGeneralSettingsPermissions { room_alias: false }
+    let room = ac.client.get_room(&parsed).ok_or("Room not found")?;
+    let member = room
+        .get_member_no_sync(room.own_user_id())
+        .await
+        .map_err(|e| e.to_string())?;
+    let can_edit = |event_type| {
+        member
+            .as_ref()
+            .is_some_and(|m| m.can_send_state(event_type))
+    };
+    let perms = RoomGeneralSettingsPermissions {
+        name: can_edit(StateEventType::RoomName),
+        topic: can_edit(StateEventType::RoomTopic),
+        room_alias: can_edit(StateEventType::RoomCanonicalAlias),
     };
 
-    let create_body = http_get_room_state(
-        &state.http_client,
-        &ac.homeserver,
-        &ac.access_token,
-        &room_id,
-        "m.room.create/",
-    )
-    .await?;
+    let get_state = |path| {
+        http_get_room_state(
+            &state.http_client,
+            &ac.homeserver,
+            &ac.access_token,
+            &room_id,
+            path,
+        )
+    };
+    let (name_body, topic_body, create_body, join_body, canon_body) = tokio::try_join!(
+        get_state("m.room.name/"),
+        get_state("m.room.topic/"),
+        get_state("m.room.create/"),
+        get_state("m.room.join_rules/"),
+        get_state("m.room.canonical_alias/"),
+    )?;
     let federate = create_body
         .as_ref()
         .and_then(|b| b.get("m.federate"))
         .and_then(|v| v.as_bool())
         .unwrap_or(true);
 
-    let join_body = http_get_room_state(
-        &state.http_client,
-        &ac.homeserver,
-        &ac.access_token,
-        &room_id,
-        "m.room.join_rules/",
-    )
-    .await?;
     let join_rule = join_body
         .as_ref()
         .and_then(|b| b.get("join_rule"))
@@ -624,14 +625,6 @@ pub async fn get_room_general_settings(
         .unwrap_or("invite")
         .to_string();
 
-    let canon_body = http_get_room_state(
-        &state.http_client,
-        &ac.homeserver,
-        &ac.access_token,
-        &room_id,
-        "m.room.canonical_alias/",
-    )
-    .await?;
     let canonical_alias = canon_body
         .as_ref()
         .and_then(|b| b.get("alias"))
@@ -644,7 +637,13 @@ pub async fn get_room_general_settings(
 
     Ok(RoomGeneralSettingsData {
         snapshot: RoomGeneralSettingsSnapshot {
-            room_id: room_id.clone(),
+            room_id,
+            name: name_body
+                .and_then(|body| body["name"].as_str().map(str::to_owned))
+                .unwrap_or_default(),
+            topic: topic_body
+                .and_then(|body| body["topic"].as_str().map(str::to_owned))
+                .unwrap_or_default(),
             homeserver_name,
             federate,
             join_rule,
@@ -664,7 +663,22 @@ pub async fn apply_room_general_settings(
     let ac = get_authed_client(&state).await?;
     let parsed =
         matrix_sdk::ruma::RoomId::parse(&room_id).map_err(|e| format!("Invalid room ID: {e}"))?;
-    ac.client.get_room(&parsed).ok_or("Room not found")?;
+    let room = ac.client.get_room(&parsed).ok_or("Room not found")?;
+
+    if let Some(name) = patch.name.as_deref() {
+        let name = name.trim();
+        if name.is_empty() {
+            return Err("Room name cannot be empty.".into());
+        }
+        room.set_name(name.to_owned())
+            .await
+            .map_err(|e| format!("Could not save the room name: {e}"))?;
+    }
+    if let Some(topic) = patch.topic.as_deref() {
+        room.set_room_topic(topic)
+            .await
+            .map_err(|e| format!("Could not save the room description: {e}"))?;
+    }
 
     let http = &state.http_client;
 

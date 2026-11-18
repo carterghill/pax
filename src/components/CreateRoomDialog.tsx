@@ -279,6 +279,7 @@ export default function CreateRoomDialog({
           room: {
             id: roomId,
             name: trimmedName,
+            topic: trimmedTopic,
             avatarUrl: null,
             isSpace: false,
             parentSpaceIds: spaceId ? [spaceId] : [],

@@ -29,6 +29,7 @@ use matrix_sdk::ruma::events::GlobalAccountDataEvent;
 use matrix_sdk::ruma::events::MessageLikeEventType;
 use matrix_sdk::ruma::events::OriginalSyncMessageLikeEvent;
 use matrix_sdk::ruma::events::OriginalSyncStateEvent;
+use matrix_sdk::ruma::events::StateEventType;
 use matrix_sdk::ruma::events::SyncMessageLikeEvent;
 use matrix_sdk::ruma::EventId;
 use matrix_sdk::ruma::OwnedEventId;
@@ -1637,14 +1638,24 @@ pub async fn start_sync(
 
     {
         let app = app.clone();
-        let feed_event = matrix_sdk::ruma::events::StateEventType::from(super::rss::RSS_FEED_EVENT);
+        let feed_event = StateEventType::from(super::rss::RSS_FEED_EVENT);
         client.add_event_handler(
             move |event: matrix_sdk::ruma::events::AnySyncStateEvent, room: Room| {
                 let app = app.clone();
-                let changed = event.event_type() == feed_event && event.state_key().is_empty();
+                let event_type = event.event_type();
+                let is_room_state = event.state_key().is_empty();
+                let feed_changed = is_room_state && event_type == feed_event;
+                let details_changed = is_room_state
+                    && matches!(
+                        event_type,
+                        StateEventType::RoomName | StateEventType::RoomTopic
+                    );
                 async move {
-                    if changed {
+                    if feed_changed {
                         let _ = app.emit(super::rss::RSS_FEED_CHANGED, room.room_id().as_str());
+                    }
+                    if details_changed {
+                        let _ = app.emit("rooms-changed", ());
                     }
                 }
             },

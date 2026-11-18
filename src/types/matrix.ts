@@ -14,6 +14,7 @@ export interface SpaceChildOrder {
 export interface Room {
   id: string;
   name: string;
+  hasExplicitName?: boolean;
   avatarUrl: string | null;
   isSpace: boolean;
   parentSpaceIds: string[];

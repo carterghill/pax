@@ -1,11 +1,11 @@
-import { useState, useEffect, useRef, useCallback, useMemo, type CSSProperties } from "react";
+import { useState, useEffect, useRef, useCallback, useMemo, useId, type CSSProperties } from "react";
 import { useRoomRedactionPolicy } from "../hooks/useRoomRedactionPolicy";
 import { useRoomCanSendMessages } from "../hooks/useRoomCanSendMessages";
 import { useRoomCanPinMessages } from "../hooks/useRoomCanPinMessages";
 import { useRoomPinnedEventIds } from "../hooks/useRoomPinnedEventIds";
 import { listen } from "@tauri-apps/api/event";
 import { ArrowLeft, Hash, MessageCircle, Rss, Users } from "lucide-react";
-import RssFeedStatus from "../components/RssFeedStatus";
+import { RssFeedStatusPanel, RssFeedStatusToggle, useRssFeedStatus } from "../components/RssFeedStatus";
 import NavBackButton from "../components/NavBackButton";
 import UserAvatar from "../components/UserAvatar";
 import MessageList, { type MessageListHandle } from "../components/MessageList";
@@ -14,6 +14,7 @@ import MessageInput, { type EditingMessageRef, type MessageFileSendBridge } from
 import UserMenu from "../components/UserMenu";
 import UserProfileDialog from "../components/UserProfileDialog";
 import RoomDownloadsButton from "../components/RoomDownloadsButton";
+import RoomHeaderTitle from "../components/RoomHeaderTitle";
 import SideDrawer from "../components/SideDrawer";
 import { useMessages } from "../hooks/useMessages";
 import { useMatrixUserProfile } from "../hooks/useMatrixUserProfile";
@@ -195,6 +196,9 @@ export default function ChatView({
     applyLocalReactionFromChip,
   } = useMessages(isDraft ? null : activeRoom!.id, isDraft ? null : userId);
 
+  const rssFeed = useRssFeedStatus(!isDraft && activeRoom?.isRss ? activeRoom.id : null, messages);
+  const rssPanelId = useId();
+  const rssButtonRef = useRef<HTMLButtonElement>(null);
   const selfProfile = useMatrixUserProfile(isDraft ? null : userId);
 
   const fileSendBridge: MessageFileSendBridge | null = useMemo(
@@ -508,6 +512,24 @@ export default function ChatView({
 
   if (!activeRoom) return null;
 
+  const isDm = isDmChatUi(activeRoom);
+  const roomHeading = (
+    <div style={{ flex: 1, minWidth: 0, display: "flex", alignItems: "center", gap: spacing.unit * 2 }}>
+      <RoomHeaderTitle
+        name={isDm ? effectiveDmTitle(activeRoom) : activeRoom.name}
+        caption={isDm ? activeRoom.topic?.trim() || "Direct message" : activeRoom.topic}
+        style={rssFeed ? { flex: "0 1 auto", maxWidth: "55%" } : undefined}
+      />
+      {rssFeed && (
+        <>
+          <span aria-hidden="true" style={{
+            width: 4, height: 4, flexShrink: 0, borderRadius: "50%", background: palette.textSecondary,
+          }} />
+          <RssFeedStatusToggle feed={rssFeed} panelId={rssPanelId} buttonRef={rssButtonRef} />
+        </>
+      )}
+    </div>
+  );
   const userMenuPanelWidth = Math.min(
     userMenuWidth,
     Math.max(MIN_USER_MENU_WIDTH, Math.floor(window.innerWidth * 0.92))
@@ -524,7 +546,7 @@ export default function ChatView({
       overflow: "hidden",
     }}>
       {/* Channel header — 1:1 DM matches draft banner (no member list toggle) */}
-      {isDmChatUi(activeRoom) ? (
+      {isDm ? (
         <div style={dmBannerStyle}>
           {isMobile && onOpenNavigation && (
             <NavBackButton onClick={onOpenNavigation} palette={palette} />
@@ -535,24 +557,7 @@ export default function ChatView({
             avatarUrlHint={activeRoom.isDirect ? activeRoom.avatarUrl : undefined}
             size={32}
           />
-          <div style={{ flex: 1, minWidth: 0 }}>
-            <div style={{
-              fontWeight: typography.fontWeightBold,
-              color: palette.textHeading,
-              fontSize: typography.fontSizeBase,
-              overflow: "hidden",
-              textOverflow: "ellipsis",
-              whiteSpace: "nowrap",
-            }}>
-              {effectiveDmTitle(activeRoom)}
-            </div>
-            <div style={{
-              fontSize: typography.fontSizeSmall,
-              color: palette.textSecondary,
-            }}>
-              Direct message
-            </div>
-          </div>
+          {roomHeading}
           <div style={{ display: "flex", alignItems: "center", gap: spacing.unit * 0.5, flexShrink: 0 }}>
             <PinnedMessagesMenu
               roomId={activeRoom.id}
@@ -581,18 +586,7 @@ export default function ChatView({
           {activeRoom.isRss
             ? <Rss size={20} color={palette.textSecondary} style={{ flexShrink: 0 }} />
             : <Hash size={20} color={palette.textSecondary} style={{ flexShrink: 0 }} />}
-          <span style={{
-            fontWeight: typography.fontWeightBold,
-            color: palette.textHeading,
-            fontSize: typography.fontSizeBase,
-            flex: 1,
-            minWidth: 0,
-            overflow: "hidden",
-            textOverflow: "ellipsis",
-            whiteSpace: "nowrap",
-          }}>
-            {activeRoom.name}
-          </span>
+          {roomHeading}
           <div style={{
             display: "flex",
             alignItems: "center",
@@ -656,7 +650,10 @@ export default function ChatView({
             onIgnore={unavailable.ignoreWarning}
             onJumpToRecent={() => { void jumpToRecent(); }}
           />}
-          {activeRoom.isRss && <RssFeedStatus key={activeRoom.id} roomId={activeRoom.id} messages={messages} />}
+          {rssFeed && <RssFeedStatusPanel feed={rssFeed} id={rssPanelId} onHide={() => {
+            rssFeed.setExpanded(false);
+            rssButtonRef.current?.focus();
+          }} />}
           <MessageList
             ref={messageListRef}
             messages={messages}

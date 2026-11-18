@@ -20,6 +20,7 @@ pub struct SpaceChildOrder {
 pub struct RoomInfo {
     pub id: String,
     pub name: String,
+    pub has_explicit_name: bool,
     pub avatar_url: Option<String>,
     pub is_space: bool,
     pub parent_space_ids: Vec<String>,

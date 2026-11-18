@@ -68,7 +68,11 @@ async fn build_room_info(
         });
     let topic = room.topic();
 
-    let mut name = room.name().unwrap_or_else(|| "Unnamed".to_string());
+    let explicit_name = room.name();
+    let has_explicit_name = explicit_name
+        .as_ref()
+        .is_some_and(|name| !name.trim().is_empty());
+    let mut name = explicit_name.unwrap_or_else(|| "Unnamed".to_string());
     let mut avatar_url = avatars.cached(room.avatar_url().as_deref()).await;
     let mut is_direct = false;
     let mut dm_peer_user_id: Option<String> = None;
@@ -89,6 +93,7 @@ async fn build_room_info(
     RoomInfo {
         id: room_id_str,
         name,
+        has_explicit_name,
         avatar_url,
         is_space: room.is_space(),
         parent_space_ids,

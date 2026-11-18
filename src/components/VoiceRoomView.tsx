@@ -11,6 +11,7 @@ import {
   normalizeUserId,
 } from "../utils/matrix";
 import UserAvatar from "./UserAvatar";
+import RoomHeaderTitle from "./RoomHeaderTitle";
 import { useUserVolume } from "../hooks/useUserVolume";
 import VolumeContextMenu from "./VolumeContextMenu";
 import VoiceAudioSettingsSection from "./VoiceAudioSettingsSection";
@@ -412,28 +413,22 @@ export default function VoiceRoomView({
     }}>
       {/* Header */}
       <div style={{
-        padding: `${spacing.unit * 4}px ${spacing.unit * 4}px`,
+        padding: `0 ${spacing.unit * 4}px`,
         borderBottom: `1px solid ${palette.border}`,
         height: spacing.headerHeight,
         display: "flex",
         alignItems: "center",
         gap: spacing.unit * 3,
       }}>
-        <Volume2 size={20} color={palette.textSecondary} />
-        <span style={{
-          fontWeight: typography.fontWeightBold,
-          color: palette.textHeading,
-          fontSize: typography.fontSizeBase,
-          flex: 1,
-        }}>
-          {room.name}
-        </span>
+        <Volume2 size={20} color={palette.textSecondary} style={{ flexShrink: 0 }} />
+        <RoomHeaderTitle name={room.name} caption={room.topic} />
         {isConnected && (
           <span style={{
             fontSize: typography.fontSizeSmall,
             color: "#23a55a",
             display: "flex",
             alignItems: "center",
+            flexShrink: 0,
             gap: spacing.unit,
           }}>
             <span style={{

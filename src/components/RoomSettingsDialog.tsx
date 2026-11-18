@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useState, type CSSProperties } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { X, Loader2, Users, Shield, Bell, Rss, Settings as SettingsIcon } from "lucide-react";
 import { useTheme } from "../theme/ThemeContext";
@@ -48,6 +48,8 @@ type SettingsTab = "general" | "members" | "permissions" | "notifications" | "rs
 
 interface RoomGeneralSnapshot {
   roomId: string;
+  name: string;
+  topic: string;
   homeserverName: string;
   federate: boolean;
   joinRule: string;
@@ -56,7 +58,14 @@ interface RoomGeneralSnapshot {
 }
 
 interface RoomGeneralPermissions {
+  name: boolean;
+  topic: boolean;
   roomAlias: boolean;
+}
+
+interface RoomGeneralSettings {
+  snapshot: RoomGeneralSnapshot;
+  permissions: RoomGeneralPermissions;
 }
 
 export interface RoomSettingsDialogProps {
@@ -112,6 +121,8 @@ export default function RoomSettingsDialog({
   const [roomGeneralLoading, setRoomGeneralLoading] = useState(true);
   const [roomSnap, setRoomSnap] = useState<RoomGeneralSnapshot | null>(null);
   const [roomPerms, setRoomPerms] = useState<RoomGeneralPermissions | null>(null);
+  const [nameDraft, setNameDraft] = useState("");
+  const [topicDraft, setTopicDraft] = useState("");
   const [roomAliasDraft, setRoomAliasDraft] = useState("");
 
   useEffect(() => {
@@ -121,14 +132,13 @@ export default function RoomSettingsDialog({
     setSaveError(null);
     setRoomSnap(null);
     setRoomPerms(null);
+    setNameDraft("");
+    setTopicDraft("");
     setRoomAliasDraft("");
 
     Promise.all([
       invoke<string>("get_history_visibility", { roomId }),
-      invoke<{ snapshot: RoomGeneralSnapshot; permissions: RoomGeneralPermissions }>(
-        "get_room_general_settings",
-        { roomId },
-      ),
+      invoke<RoomGeneralSettings>("get_room_general_settings", { roomId }),
     ])
       .then(([vis, general]) => {
         if (cancelled) return;
@@ -138,6 +148,8 @@ export default function RoomSettingsDialog({
         setVisibilityLoading(false);
         setRoomSnap(general.snapshot);
         setRoomPerms(general.permissions);
+        setNameDraft(general.snapshot.name);
+        setTopicDraft(general.snapshot.topic);
         setRoomAliasDraft(general.snapshot.roomAliasLocal ?? "");
         setRoomGeneralLoading(false);
       })
@@ -293,52 +305,55 @@ export default function RoomSettingsDialog({
   );
 
   async function handleSaveGeneral() {
-    if (!selectedVisibility) return;
-
-    const aliasTrim = roomAliasDraft.trim().toLowerCase().replace(/[^a-z0-9_-]/g, "");
-    const prevAlias = (roomSnap?.roomAliasLocal ?? "").trim().toLowerCase();
-    const hasAliasChange =
-      !!roomPerms?.roomAlias && aliasTrim !== prevAlias && aliasTrim.length > 0;
-
-    const hasVisibilityChange =
-      selectedVisibility !== null && selectedVisibility !== currentVisibility;
-
-    if (!hasVisibilityChange && !hasAliasChange) return;
+    if (!canSaveGeneral || saving) return;
 
     setSaving(true);
     setSaveError(null);
     setSuccess(false);
     try {
-      if (hasVisibilityChange) {
+      if (hasNameSave) {
+        await invoke("apply_room_general_settings", { roomId, patch: { name: nameForSave } });
+        setRoomSnap((snap) => snap && { ...snap, name: nameForSave });
+        setNameDraft(nameForSave);
+      }
+      if (hasTopicSave) {
+        await invoke("apply_room_general_settings", { roomId, patch: { topic: topicDraft } });
+        setRoomSnap((snap) => snap && { ...snap, topic: topicDraft });
+      }
+      if (hasVisibilityChanges) {
         await invoke("set_history_visibility", {
           roomId,
           visibility: selectedVisibility,
         });
         setCurrentVisibility(selectedVisibility);
       }
-      if (hasAliasChange) {
+      if (hasAliasSave) {
         await invoke("apply_room_general_settings", {
           roomId,
-          patch: { roomAliasLocal: aliasTrim },
+          patch: { roomAliasLocal: aliasTrimForSave },
         });
-        const refreshed = await invoke<{
-          snapshot: RoomGeneralSnapshot;
-          permissions: RoomGeneralPermissions;
-        }>("get_room_general_settings", { roomId });
+        const refreshed = await invoke<RoomGeneralSettings>("get_room_general_settings", { roomId });
         setRoomSnap(refreshed.snapshot);
         setRoomPerms(refreshed.permissions);
+        setNameDraft(refreshed.snapshot.name);
+        setTopicDraft(refreshed.snapshot.topic);
         setRoomAliasDraft(refreshed.snapshot.roomAliasLocal ?? "");
       }
       setSuccess(true);
       setTimeout(() => setSuccess(false), 2000);
     } catch (e) {
       setSaveError(String(e));
+    } finally {
+      setSaving(false);
     }
-    setSaving(false);
   }
 
   const hasVisibilityChanges =
     selectedVisibility !== null && selectedVisibility !== currentVisibility;
+  const nameForSave = nameDraft.trim();
+  const hasNameSave = !!roomPerms?.name && !!roomSnap && nameForSave !== roomSnap.name.trim();
+  const nameRequired = hasNameSave && !nameForSave;
+  const hasTopicSave = !!roomPerms?.topic && !!roomSnap && topicDraft !== roomSnap.topic;
 
   const aliasTrimForSave = roomAliasDraft
     .trim()
@@ -351,11 +366,22 @@ export default function RoomSettingsDialog({
     aliasTrimForSave !== prevAliasForSave &&
     aliasTrimForSave.length > 0;
 
-  const hasGeneralChanges = hasVisibilityChanges || hasAliasSave;
+  const canSaveGeneral = !nameRequired && (hasNameSave || hasTopicSave || hasVisibilityChanges || hasAliasSave);
 
   const showPublishAddress = !!roomPerms?.roomAlias && !!roomSnap;
 
-  const headerTitle = roomName;
+  const headerTitle = roomSnap?.name || roomName;
+  const detailInputStyle: CSSProperties = {
+    boxSizing: "border-box",
+    width: "100%",
+    padding: "8px 12px",
+    border: `1px solid ${palette.border}`,
+    borderRadius: 8,
+    backgroundColor: palette.bgPrimary,
+    color: palette.textPrimary,
+    fontFamily: typography.fontFamily,
+    fontSize: typography.fontSizeBase,
+  };
 
   const scopeDialogSpaceLabel = moderationSpaceName?.trim() || headerTitle;
 
@@ -497,6 +523,47 @@ export default function RoomSettingsDialog({
               >
                 {activeTab === "general" && (
                   <div>
+                    {roomSnap && roomPerms && (
+                      <div style={{ display: "grid", gap: spacing.unit * 3, marginBottom: spacing.unit * 4 }}>
+                        <label style={{ display: "grid", gap: 6, color: palette.textHeading }}>
+                          Room name
+                          <input
+                            type="text"
+                            value={nameDraft}
+                            onChange={(e) => setNameDraft(e.target.value)}
+                            placeholder="Room name"
+                            maxLength={255}
+                            readOnly={!roomPerms.name || saving}
+                            aria-invalid={nameRequired}
+                            style={detailInputStyle}
+                          />
+                        </label>
+                        {nameRequired && (
+                          <span role="alert" style={{ color: "#f38ba8", fontSize: typography.fontSizeSmall }}>
+                            Enter a room name.
+                          </span>
+                        )}
+                        <label style={{ display: "grid", gap: 6, color: palette.textHeading }}>
+                          Description
+                          <textarea
+                            value={topicDraft}
+                            onChange={(e) => setTopicDraft(e.target.value)}
+                            placeholder="Add a description"
+                            rows={3}
+                            maxLength={512}
+                            readOnly={!roomPerms.topic || saving}
+                            style={{ ...detailInputStyle, resize: "vertical" }}
+                          />
+                        </label>
+                        {(!roomPerms.name || !roomPerms.topic) && (
+                          <span style={{ color: palette.textSecondary, fontSize: typography.fontSizeSmall }}>
+                            {roomPerms.name ? "You can view the description." : roomPerms.topic
+                              ? "You can view the room name." : "You can view the room name and description."}
+                            {" Ask a room admin for permission to edit."}
+                          </span>
+                        )}
+                      </div>
+                    )}
                     {!roomGeneralLoading && roomSnap && (
                       <div style={{ marginBottom: spacing.unit * 4 }}>
                         <h3
@@ -603,7 +670,7 @@ export default function RoomSettingsDialog({
                               )
                             }
                             placeholder="room-name"
-                            disabled={!roomPerms?.roomAlias}
+                            disabled={!roomPerms?.roomAlias || saving}
                             style={{
                               flex: 1,
                               padding: "8px 12px 8px 4px",
@@ -976,21 +1043,21 @@ export default function RoomSettingsDialog({
                   <button
                     type="button"
                     onClick={() => void handleSaveGeneral()}
-                    disabled={!hasGeneralChanges || saving}
+                    disabled={!canSaveGeneral || saving}
                     style={{
                       padding: "8px 20px",
                       fontSize: typography.fontSizeBase,
                       fontFamily: typography.fontFamily,
                       fontWeight: typography.fontWeightMedium,
                       backgroundColor:
-                        !hasGeneralChanges || saving
+                        !canSaveGeneral || saving
                           ? palette.accent + "80"
                           : palette.accent,
                       border: "none",
                       borderRadius: 4,
                       color: "#fff",
                       cursor:
-                        !hasGeneralChanges || saving ? "not-allowed" : "pointer",
+                        !canSaveGeneral || saving ? "not-allowed" : "pointer",
                       display: "flex",
                       alignItems: "center",
                       gap: 8,
