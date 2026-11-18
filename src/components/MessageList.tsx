@@ -22,7 +22,8 @@ import MediaViewerModal, {
 import { fileNameFromImageUrl } from "../utils/directImageUrl";
 import { useReadReceiptSender } from "../hooks/useReadReceiptSender";
 import MessageRow from "../features/chat/messages/MessageRow";
-import { rssArticleCandidate, type RssProvider } from "../features/chat/messages/rssArticle";
+import { rssArticleCandidate, type RssArticleCandidate, type RssProvider } from "../features/chat/messages/rssArticle";
+import { rssThreadReplyCount } from "../features/chat/messages/rssThreads";
 import {
   shouldShowHeader,
   getReplyThreadPreview,
@@ -46,6 +47,12 @@ export type MessageListHandle = {
 interface MessageListProps {
   messages: Message[];
   rssProvider?: RssProvider;
+  rssReplies?: ReadonlyMap<string, Message[]>;
+  activeRssThreadId?: string;
+  onRssArticleConfirmed?: (eventId: string) => void;
+  onOpenRssThread?: (root: Message, article: RssArticleCandidate) => void;
+  replyDrawer?: boolean;
+  rssReplyCounts?: ReadonlyMap<string, number>;
   loadingOlder: boolean;
   initialLoading: boolean;
   hasOlder: boolean;
@@ -102,6 +109,12 @@ const MessageList = forwardRef<MessageListHandle, MessageListProps>(function Mes
   {
     messages,
     rssProvider,
+    rssReplies,
+    activeRssThreadId,
+    onRssArticleConfirmed,
+    onOpenRssThread,
+    replyDrawer = false,
+    rssReplyCounts,
     loadingOlder,
     initialLoading,
     hasOlder,
@@ -843,10 +856,22 @@ const MessageList = forwardRef<MessageListHandle, MessageListProps>(function Mes
         {hasOlder
           ? loadingOlder
             ? "Loading older messages..."
-            : "Scroll up for more"
+            : replyDrawer || rssProvider ? (
+              <button type="button" onClick={onLoadOlder} style={{
+                color: palette.textSecondary,
+                background: "none",
+                border: 0,
+                padding: spacing.unit,
+                font: "inherit",
+                textDecoration: "underline",
+                cursor: "pointer",
+              }}>
+                {replyDrawer ? "Load older replies" : "Load older messages"}
+              </button>
+            ) : "Scroll up for more"
           : messages.length > 0
-            ? "Beginning of conversation"
-            : "No messages yet"}
+            ? replyDrawer ? null : "Beginning of conversation"
+            : replyDrawer ? "No replies yet" : "No messages yet"}
       </div>
 
       {/* Skeleton rows when loading older */}
@@ -879,6 +904,10 @@ const MessageList = forwardRef<MessageListHandle, MessageListProps>(function Mes
             key={msg.eventId}
             msg={msg}
             rssArticle={article}
+            rssReplyCount={article ? rssReplyCounts?.get(msg.eventId) ?? rssThreadReplyCount(msg, rssReplies?.get(msg.eventId) ?? []) : 0}
+            rssThreadOpen={msg.eventId === activeRssThreadId}
+            onRssArticleConfirmed={onRssArticleConfirmed}
+            onOpenRssThread={onOpenRssThread}
             showHeader={showHeader}
             showReplyButton={showReplyButton}
             showOverflowMenu={showOverflowMenu}
@@ -903,7 +932,7 @@ const MessageList = forwardRef<MessageListHandle, MessageListProps>(function Mes
             palette={palette}
             typography={typography}
             resolvedColorScheme={resolvedColorScheme}
-            replyThread={getReplyThreadPreview(msg, messageByEventId)}
+            replyThread={replyDrawer ? null : getReplyThreadPreview(msg, messageByEventId)}
             onReplyThreadClick={onReplyPreviewClick}
             onOpenSenderProfile={onOpenSenderProfile}
             resolveMemberLabel={resolveMemberLabel}

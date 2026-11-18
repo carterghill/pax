@@ -36,6 +36,7 @@ export function rssArticleCandidate(
     !provider?.url ||
     message.sender !== provider.botUserId ||
     message.replyTo ||
+    message.threadRootId ||
     message.decryptionFailed ||
     message.imageMediaRequest ||
     message.videoMediaRequest ||

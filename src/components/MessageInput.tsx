@@ -21,6 +21,7 @@ import {
 } from "../utils/composerEditorDom";
 import { MODAL_LAYER_Z } from "./ModalLayer";
 import { useComposerFileUpload } from "../features/chat/composer/useComposerFileUpload";
+import type { MessageThreadTarget } from "../features/chat/api";
 import { getClipboardImageFile } from "../features/chat/composer/clipboardImage";
 import { useComposerTypingNotice } from "../features/chat/composer/useComposerTypingNotice";
 import { useComposerMentions } from "../features/chat/composer/useComposerMentions";
@@ -28,6 +29,7 @@ import {
   useComposerSubmit,
   type EditingMessageRef,
   type MessageFileSendBridge,
+  type SentThreadReply,
 } from "../features/chat/composer/useComposerSubmit";
 import { useComposerFormatting } from "../features/chat/composer/useComposerFormatting";
 import { useComposerPicker } from "../features/chat/composer/useComposerPicker";
@@ -43,7 +45,9 @@ export type { EditingMessageRef, MessageFileSendBridge };
 interface MessageInputProps {
   roomId: string;
   roomName: string;
-  onMessageSent: () => void;
+  onMessageSent: (reply?: SentThreadReply) => void;
+  onSendError?: (error: string | null) => void;
+  thread?: MessageThreadTarget;
   /** When set, the next text send is a Matrix rich reply to this message. */
   replyDraft?: Message | null;
   onCancelReply?: () => void;
@@ -70,6 +74,8 @@ export default function MessageInput({
   roomId,
   roomName,
   onMessageSent,
+  onSendError,
+  thread,
   replyDraft = null,
   onCancelReply,
   editingMessage = null,
@@ -110,6 +116,7 @@ export default function MessageInput({
     fileInputRef,
     pendingFile,
     pendingFileRef,
+    preparationRef,
     setPendingFile,
     attachFile,
     handleFileSelected,
@@ -122,6 +129,7 @@ export default function MessageInput({
     interactionLocked,
     editing: editingMessage != null,
     composerPermission,
+    enabled: !thread,
     onLocalTypingActive,
   });
 
@@ -301,6 +309,7 @@ export default function MessageInput({
     editorRef,
     pendingFile,
     pendingFileRef,
+    preparationRef,
     setPendingFile,
     fileSendBridge,
     selfUserId,
@@ -312,7 +321,9 @@ export default function MessageInput({
     onCancelReply,
     editingMessage,
     onCancelEdit,
+    thread,
     onMessageSent,
+    onSendError,
     setPlainText,
     setHasComposerMedia,
     setPickerOpen,
@@ -322,21 +333,30 @@ export default function MessageInput({
     syncHeight,
   });
 
+  function cancelEdit() {
+    const el = editorRef.current;
+    if (el) el.innerHTML = "";
+    refreshComposerDomState();
+    onCancelEdit?.();
+  }
+
   function handleKeyDown(e: React.KeyboardEvent) {
     if (interactionLocked) return;
     if (handleMentionKeyDown(e)) return;
 
-    if (e.key === "Enter" && !e.shiftKey) {
+    if (e.key === "Enter" && !e.shiftKey && !e.nativeEvent.isComposing) {
       e.preventDefault();
       handleSend();
       return;
     }
     if (e.key === "Escape") {
       if (pickerOpen) {
+        e.preventDefault();
         setPickerOpen(false);
         return;
       }
       if (formatOpen) {
+        e.preventDefault();
         setFormatOpen(false);
         return;
       }
@@ -347,11 +367,7 @@ export default function MessageInput({
       }
       if (editingMessage && onCancelEdit) {
         e.preventDefault();
-        const el = editorRef.current;
-        if (el) el.innerHTML = "";
-        setPlainText("");
-        setHasComposerMedia(false);
-        onCancelEdit();
+        cancelEdit();
       }
     }
   }
@@ -400,7 +416,9 @@ export default function MessageInput({
     !sending &&
     pendingFile?.phase !== "error";
 
-  const defaultPlaceholder = editingMessage ? "Edit message" : `Message #${roomName}`;
+  const defaultPlaceholder = editingMessage
+    ? "Edit message"
+    : thread ? "Reply in thread…" : `Message #${roomName}`;
   const placeholderText = interactionLocked
     ? composerPermission === "loading"
       ? "Loading…"
@@ -484,6 +502,7 @@ export default function MessageInput({
         <ComposerContextBar
           replyDraft={replyDraft}
           showReply={!!replyDraft && !!onCancelReply && !editingMessage}
+          onCancelEdit={thread && editingMessage && onCancelEdit ? cancelEdit : undefined}
           pendingFile={pendingFile}
           palette={palette}
           typography={typography}

@@ -12,6 +12,7 @@ interface ComposerContextBarProps {
   typography: ThemeTypography;
   spacing: ThemeSpacing;
   onCancelReply?: () => void;
+  onCancelEdit?: () => void;
   onClearPendingFile: () => void;
 }
 
@@ -37,11 +38,14 @@ export default function ComposerContextBar({
   typography,
   spacing,
   onCancelReply,
+  onCancelEdit,
   onClearPendingFile,
 }: ComposerContextBarProps) {
+  const replySummary = showReply && replyDraft && onCancelReply ? replyTargetSummary(replyDraft) : null;
+  const cancelContext = onCancelEdit ?? (replySummary ? onCancelReply : undefined);
   return (
     <>
-      {showReply && replyDraft && onCancelReply ? (
+      {cancelContext && (
         <div
           style={{
             display: "flex",
@@ -62,14 +66,15 @@ export default function ComposerContextBar({
               textOverflow: "ellipsis",
               whiteSpace: "nowrap",
             }}
-            title={replyTargetSummary(replyDraft)}
+            title={replySummary ?? undefined}
           >
-            Replying to {replyTargetSummary(replyDraft)}
+            {onCancelEdit ? "Editing reply" : `Replying to ${replySummary}`}
           </span>
           <button
             type="button"
-            onClick={() => onCancelReply()}
-            title="Cancel reply"
+            onClick={cancelContext}
+            title={onCancelEdit ? "Cancel edit" : "Cancel reply"}
+            aria-label={onCancelEdit ? "Cancel edit" : "Cancel reply"}
             style={{
               flexShrink: 0,
               display: "flex",
@@ -87,7 +92,7 @@ export default function ComposerContextBar({
             <X size={16} />
           </button>
         </div>
-      ) : null}
+      )}
 
       {pendingFile && (
         <div

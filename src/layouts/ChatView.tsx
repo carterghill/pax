@@ -27,12 +27,17 @@ import UnavailableMessagesNotice from "../components/UnavailableMessagesNotice";
 import EncryptionSettingsPanel from "../components/EncryptionSettingsPanel";
 import Dialog from "../components/Dialog";
 import { useEncryption } from "../context/EncryptionContext";
+import RssThreadDrawer from "../features/chat/messages/RssThreadDrawer";
+import type { RssArticleCandidate } from "../features/chat/messages/rssArticle";
+import { rssThreadReplyCount, type RssThread } from "../features/chat/messages/rssThreads";
+import { useRssThreads } from "../features/chat/messages/useRssThreads";
 
 const MIN_USER_MENU_WIDTH = 180;
 const MAX_USER_MENU_WIDTH = 400;
 const USER_MENU_RESIZE_HANDLE = 6;
 /** Typing strip inset: paint doesn’t cover the vertical scrollbar (no z-index for the thumb alone). */
 const TYPING_STRIP_SCROLLBAR_RESERVE_PX = 16;
+const NO_THREAD_REPLIES: Message[] = [];
 
 /** `#rrggbb` → RGB. Used so fade uses same-color alpha (plain `transparent` gradients tint gray). */
 function hexRgb(hex: string): [number, number, number] | null {
@@ -196,7 +201,10 @@ export default function ChatView({
     applyLocalReactionFromChip,
   } = useMessages(isDraft ? null : activeRoom!.id, isDraft ? null : userId);
 
-  const rssFeed = useRssFeedStatus(!isDraft && activeRoom?.isRss ? activeRoom.id : null, messages);
+  const rssRoomId = !isDraft && activeRoom?.isRss ? activeRoom.id : null;
+  const rssFeed = useRssFeedStatus(rssRoomId, messages);
+  const rssProvider = rssFeed?.status ?? undefined;
+  const rssThreads = useRssThreads(rssRoomId, rssProvider, messages);
   const rssPanelId = useId();
   const rssButtonRef = useRef<HTMLButtonElement>(null);
   const selfProfile = useMatrixUserProfile(isDraft ? null : userId);
@@ -233,6 +241,45 @@ export default function ChatView({
   const [showUsers, setShowUsers] = useState(!isMobile);
   const [editingMessage, setEditingMessage] = useState<EditingMessageRef | null>(null);
   const [replyDraft, setReplyDraft] = useState<Message | null>(null);
+  const [selectedThread, setSelectedThread] = useState<{
+    roomId: string;
+    thread: RssThread;
+    jumpEventId?: string;
+  } | null>(null);
+  const [threadCounts, setThreadCounts] = useState<{
+    roomId: string;
+    counts: Map<string, number>;
+  } | null>(null);
+  const activeThread = selectedThread && selectedThread.roomId === rssRoomId
+    && selectedThread.thread.root.sender === rssProvider?.botUserId
+    && selectedThread.thread.article.feedUrl === rssProvider.url
+    ? {
+      ...selectedThread.thread,
+      root: rssThreads.articles.get(selectedThread.thread.root.eventId)?.root ?? selectedThread.thread.root,
+    }
+    : null;
+  const closeThread = useCallback(() => setSelectedThread(null), []);
+  const openThread = useCallback((root: Message, article: RssArticleCandidate, jumpEventId?: string) => {
+    if (rssRoomId) setSelectedThread({ roomId: rssRoomId, thread: { root, article }, jumpEventId });
+  }, [rssRoomId]);
+  const updateThreadCount = useCallback((eventId: string, count: number) => {
+    if (!rssRoomId) return;
+    setThreadCounts((previous) => {
+      const counts = previous?.roomId === rssRoomId ? previous.counts : undefined;
+      if (counts?.get(eventId) === count) return previous;
+      return { roomId: rssRoomId, counts: new Map(counts).set(eventId, count) };
+    });
+  }, [rssRoomId]);
+  const replyCounts = useMemo(() => {
+    if (threadCounts?.roomId !== rssRoomId) return undefined;
+    const counts = new Map<string, number>();
+    for (const [id, count] of threadCounts.counts) {
+      const thread = rssThreads.articles.get(id);
+      const loadedCount = thread ? rssThreadReplyCount(thread.root, rssThreads.replies.get(id) ?? []) : 0;
+      counts.set(id, activeThread?.root.eventId === id ? count : Math.max(count, loadedCount));
+    }
+    return counts;
+  }, [activeThread?.root.eventId, rssRoomId, rssThreads, threadCounts]);
   const [pinnedMenuOpen, setPinnedMenuOpen] = useState(false);
   const [messageSenderProfileUserId, setMessageSenderProfileUserId] = useState<string | null>(null);
   const [recoveryOpen, setRecoveryOpen] = useState(false);
@@ -241,6 +288,8 @@ export default function ChatView({
 
   const containerRef = useRef<HTMLDivElement>(null);
   const messageListRef = useRef<MessageListHandle>(null);
+  const threadSnapshotRef = useRef(rssThreads);
+  threadSnapshotRef.current = rssThreads;
   const messagesSnapshotRef = useRef<Message[]>([]);
   messagesSnapshotRef.current = messages;
   const userMenuResize = useResizeHandle({
@@ -281,7 +330,9 @@ export default function ChatView({
     setEditingMessage(null);
     setReplyDraft(null);
     setRecoveryOpen(false);
-  }, [activeRoom?.id, isDraft]);
+    closeThread();
+    setThreadCounts(null);
+  }, [activeRoom?.id, closeThread, isDraft]);
 
   useEffect(() => {
     setMessageSenderProfileUserId(null);
@@ -297,12 +348,24 @@ export default function ChatView({
     setReplyDraft(msg);
   }, []);
 
+  const scrollToMessage = useCallback((eventId: string, highlight = false) => {
+    const { articles, rootByReply } = threadSnapshotRef.current;
+    const rootId = rootByReply.get(eventId);
+    const thread = rootId ? articles.get(rootId) : undefined;
+    if (thread) {
+      messageListRef.current?.scrollToEventId(thread.root.eventId);
+      openThread(thread.root, thread.article, eventId);
+    } else {
+      messageListRef.current?.scrollToEventId(eventId, highlight);
+    }
+  }, [openThread]);
+
   const handleReplyPreviewClick = useCallback(
     (eventId: string) => {
       if (isDraft || !activeRoom) return;
       const inWindow = messages.some((m) => m.eventId === eventId);
       if (inWindow) {
-        messageListRef.current?.scrollToEventId(eventId, true);
+        scrollToMessage(eventId, true);
         return;
       }
       void (async () => {
@@ -311,13 +374,13 @@ export default function ChatView({
         } finally {
           requestAnimationFrame(() => {
             requestAnimationFrame(() => {
-              messageListRef.current?.scrollToEventId(eventId, true);
+              scrollToMessage(eventId, true);
             });
           });
         }
       })();
     },
-    [isDraft, activeRoom, messages, loadMessagesAroundEvent],
+    [isDraft, activeRoom, messages, loadMessagesAroundEvent, scrollToMessage],
   );
 
   const handleCancelEdit = useCallback(() => {
@@ -331,17 +394,17 @@ export default function ChatView({
       if (isDraft || !activeRoom) return;
       const inWindow = messages.some((m) => m.eventId === eventId);
       if (inWindow) {
-        messageListRef.current?.scrollToEventId(eventId);
+        scrollToMessage(eventId);
         return;
       }
       await loadMessagesAroundEvent(eventId);
       requestAnimationFrame(() => {
         requestAnimationFrame(() => {
-          messageListRef.current?.scrollToEventId(eventId);
+          scrollToMessage(eventId);
         });
       });
     },
-    [isDraft, activeRoom, messages, loadMessagesAroundEvent],
+    [isDraft, activeRoom, messages, loadMessagesAroundEvent, scrollToMessage],
   );
 
   // Android / desktop notification tap: jump to the exact Matrix event when provided.
@@ -358,7 +421,7 @@ export default function ChatView({
     const inWindow = msgs.some((m) => m.eventId === eventId);
     if (inWindow) {
       requestAnimationFrame(() => {
-        messageListRef.current?.scrollToEventId(eventId);
+        scrollToMessage(eventId);
         finish();
       });
       return () => {
@@ -373,7 +436,7 @@ export default function ChatView({
         requestAnimationFrame(() => {
           requestAnimationFrame(() => {
             if (!cancelled) {
-              messageListRef.current?.scrollToEventId(eventId);
+              scrollToMessage(eventId);
               finish();
             }
           });
@@ -383,7 +446,7 @@ export default function ChatView({
     return () => {
       cancelled = true;
     };
-  }, [isDraft, activeRoom?.id, notificationJump, loadMessagesAroundEvent, onNotificationJumpConsumed]);
+  }, [isDraft, activeRoom?.id, notificationJump, loadMessagesAroundEvent, onNotificationJumpConsumed, scrollToMessage]);
 
   const handlePinnedStateChanged = useCallback(() => {
     void refreshPinned();
@@ -635,6 +698,7 @@ export default function ChatView({
       }}>
         {/* Messages column */}
         <div style={{
+          position: "relative",
           flex: 1,
           display: "flex",
           flexDirection: "column",
@@ -656,8 +720,13 @@ export default function ChatView({
           }} />}
           <MessageList
             ref={messageListRef}
-            messages={messages}
-            rssProvider={rssFeed?.status ?? undefined}
+            messages={rssThreads.visibleMessages}
+            rssProvider={rssProvider}
+            rssReplies={rssThreads.replies}
+            rssReplyCounts={replyCounts}
+            activeRssThreadId={activeThread?.root.eventId}
+            onRssArticleConfirmed={rssThreads.confirmArticle}
+            onOpenRssThread={rssRoomId ? openThread : undefined}
             loadingOlder={loadingOlder}
             initialLoading={initialLoading}
             hasOlder={hasOlder}
@@ -721,6 +790,30 @@ export default function ChatView({
               fileSendBridge={fileSendBridge}
             />
           </div>
+          {activeThread && (
+            <RssThreadDrawer
+              key={activeThread.root.eventId}
+              thread={activeThread}
+              roomId={activeRoom.id}
+              roomName={activeRoom.name}
+              userId={userId}
+              userName={selfProfile.displayName}
+              userAvatar={selfProfile.avatarUrl}
+              windowReplies={rssThreads.replies.get(activeThread.root.eventId) ?? NO_THREAD_REPLIES}
+              composerPermission={
+                canSendMessages === null
+                  ? "loading"
+                  : canSendMessages ? "allowed" : "forbidden"
+              }
+              fileSendBridge={fileSendBridge}
+              redactionPolicy={redactionPolicy}
+              onClose={closeThread}
+              onCountChange={updateThreadCount}
+              onOpenSenderProfile={setMessageSenderProfileUserId}
+              onRoomMessagesMutated={refresh}
+              jumpEventId={selectedThread?.jumpEventId}
+            />
+          )}
         </div>
 
         {/* User menu: inline on desktop, right drawer on mobile */}

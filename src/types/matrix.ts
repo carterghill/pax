@@ -64,6 +64,12 @@ export interface Message {
   avatarUrl: string | null;
   /** When set, this message is a reply to another timeline event. */
   replyTo?: MessageReplyTo;
+  threadRootId?: string;
+  threadSummary?: {
+    count: number;
+    latestEventId: string | null;
+    latestTimestamp: number | null;
+  };
   /** Aggregated m.reaction keys for this event (from server / sync). */
   reactions?: MessageReaction[];
   /**

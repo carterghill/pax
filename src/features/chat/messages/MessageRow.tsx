@@ -1,6 +1,7 @@
-import { memo } from "react";
+import { memo, useEffect } from "react";
 import {
   MoreVertical,
+  MessageSquare,
   Smile,
   Reply,
 } from "lucide-react";
@@ -17,7 +18,7 @@ import type { RssArticleCandidate } from "./rssArticle";
 /*  Helpers                                                            */
 /* ------------------------------------------------------------------ */
 
-function formatTime(timestamp: number): string {
+export function formatMessageTime(timestamp: number): string {
   const date = new Date(timestamp);
   const now = new Date();
   const isToday = date.toDateString() === now.toDateString();
@@ -40,6 +41,10 @@ function formatTime(timestamp: number): string {
 export interface MessageRowProps {
   msg: Message;
   rssArticle: RssArticleCandidate | null;
+  rssReplyCount: number;
+  rssThreadOpen: boolean;
+  onRssArticleConfirmed?: (eventId: string) => void;
+  onOpenRssThread?: (root: Message, article: RssArticleCandidate) => void;
   showHeader: boolean;
   /** Reply control in the hover bar (not the ⋮ menu). */
   showReplyButton: boolean;
@@ -81,6 +86,10 @@ export interface MessageRowProps {
 const MessageRow = memo(function MessageRow({
   msg,
   rssArticle,
+  rssReplyCount,
+  rssThreadOpen,
+  onRssArticleConfirmed,
+  onOpenRssThread,
   showHeader,
   showReplyButton,
   showOverflowMenu,
@@ -110,6 +119,13 @@ const MessageRow = memo(function MessageRow({
 }: MessageRowProps) {
   const { rowRef, preview } = useRssArticlePreview(rssArticle);
   const article = rssArticle && (rssArticle.headline || preview) ? rssArticle : null;
+  const openArticleThread = article && onOpenRssThread
+    ? () => onOpenRssThread(msg, { ...article, headline: preview?.title || article.headline })
+    : undefined;
+  const confirmedCustomArticle = Boolean(rssArticle && !rssArticle.headline && preview);
+  useEffect(() => {
+    if (confirmedCustomArticle) onRssArticleConfirmed?.(msg.eventId);
+  }, [confirmedCustomArticle, msg.eventId, onRssArticleConfirmed]);
   const menuBtn = spacingUnit * 7;
   const rowActive = isMenuOpen || isReactionPickerOpen;
   const groupShadow =
@@ -238,7 +254,7 @@ const MessageRow = memo(function MessageRow({
                 color: palette.textSecondary,
               }}
             >
-              {formatTime(msg.timestamp)}
+              {formatMessageTime(msg.timestamp)}
             </span>
           </div>
         )}
@@ -288,12 +304,39 @@ const MessageRow = memo(function MessageRow({
         ) : null}
 
         {article ? (
-          <RssArticleCard
-            candidate={article}
-            preview={preview}
-            sender={msg.sender}
-            postedAt={formatTime(msg.timestamp)}
-          />
+          <>
+            <RssArticleCard
+              candidate={article}
+              preview={preview}
+              sender={msg.sender}
+              postedAt={formatMessageTime(msg.timestamp)}
+            />
+            {openArticleThread && (rssReplyCount > 0 || showReplyButton) && (
+              <button
+                type="button"
+                aria-expanded={rssThreadOpen}
+                onClick={openArticleThread}
+                style={{
+                  display: "inline-flex",
+                  alignItems: "center",
+                  gap: spacingUnit * 1.5,
+                  marginTop: spacingUnit,
+                  padding: `${spacingUnit * 1.5}px ${spacingUnit * 2}px`,
+                  border: 0,
+                  borderRadius: spacingUnit * 1.5,
+                  backgroundColor: rssThreadOpen ? palette.bgActive : "transparent",
+                  color: palette.textSecondary,
+                  font: "inherit",
+                  fontSize: typography.fontSizeSmall,
+                  fontWeight: typography.fontWeightMedium,
+                  cursor: "pointer",
+                }}
+              >
+                <MessageSquare size={15} aria-hidden="true" />
+                {rssReplyCount === 0 ? "Reply in thread" : rssReplyCount === 1 ? "1 reply" : `${rssReplyCount} replies`}
+              </button>
+            )}
+          </>
         ) : (
           <MessageContent
             msg={msg}
@@ -428,10 +471,10 @@ const MessageRow = memo(function MessageRow({
                   <button
                     key="reply"
                     type="button"
-                    title="Reply"
-                    aria-label="Reply"
+                    title={openArticleThread ? "Reply in thread" : "Reply"}
+                    aria-label={openArticleThread ? "Reply in thread" : "Reply"}
                     onMouseDown={(e) => e.preventDefault()}
-                    onClick={onRequestReply}
+                    onClick={openArticleThread ?? onRequestReply}
                     style={{
                       ...segBtn,
                       backgroundColor: palette.bgTertiary,

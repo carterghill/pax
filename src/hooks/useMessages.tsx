@@ -8,12 +8,12 @@ import { Message, MessageBatch } from "../types/matrix";
 /*  Payload types for sync events                                      */
 /* ------------------------------------------------------------------ */
 
-interface RoomMessagePayload {
+export interface RoomMessagePayload {
   roomId: string;
   message: Message;
 }
 
-interface MessageEditPayload {
+export interface MessageEditPayload {
   roomId: string;
   targetEventId: string;
   body: string;
@@ -30,12 +30,12 @@ interface MessageEditPayload {
   unsupportedMatrixMsgtype: unknown | null;
 }
 
-interface MessageRedactedPayload {
+export interface MessageRedactedPayload {
   roomId: string;
   redactedEventId: string;
 }
 
-interface RoomMessageReactionPayload {
+export interface RoomMessageReactionPayload {
   roomId: string;
   targetEventId: string;
   key: string;
@@ -157,6 +157,7 @@ function removeMatchingLocalEchoes(
   const toRemove = prev.filter((m) => {
     if (!m.eventId.startsWith("local:")) return false;
     if (m.sender !== incoming.sender) return false;
+    if (m.threadRootId !== incoming.threadRootId) return false;
     if (m.body !== incoming.body) return false;
     if (incoming.fileMediaRequest) {
       return m.fileDisplayName === incoming.fileDisplayName;
@@ -214,7 +215,7 @@ function removeFromReactedBy(
   return next.length === 0 ? undefined : next;
 }
 
-function applyReactionDelta(
+export function applyReactionDelta(
   arr: Message[],
   payload: RoomMessageReactionPayload,
   currentUserId: string | null,
@@ -283,7 +284,7 @@ function editPayloadUnsupportedMatrixMsgtype(v: unknown): string | null {
   return null;
 }
 
-function applyMessageEdit(arr: Message[], payload: MessageEditPayload): Message[] {
+export function applyMessageEdit(arr: Message[], payload: MessageEditPayload): Message[] {
   const idx = arr.findIndex((m) => m.eventId === payload.targetEventId);
   if (idx === -1) return arr;
 
@@ -887,8 +888,14 @@ export function useMessages(roomId: string | null, currentUserId: string | null 
       setMessages((prev) => {
         const idx = prev.findIndex((m) => m.eventId === oldId);
         if (idx === -1) return prev;
-        const next = prev.slice();
-        next[idx] = { ...next[idx], ...patch, eventId: newId };
+        let next: Message[];
+        if (oldId !== newId && prev.some((message) => message.eventId === newId)) {
+          revokeLocalPreviewIfNeeded(prev[idx]);
+          next = prev.filter((message) => message.eventId !== oldId);
+        } else {
+          next = prev.slice();
+          next[idx] = { ...next[idx], ...patch, eventId: newId };
+        }
         messagesRef.current = next;
         return next;
       });

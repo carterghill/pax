@@ -1,9 +1,11 @@
 use matrix_sdk::media::{MediaFormat, MediaRequestParameters, MediaThumbnailSettings};
+use matrix_sdk::ruma::events::relation::{BundledThread, Thread};
 use matrix_sdk::ruma::events::room::message::Relation;
+use matrix_sdk::ruma::events::room::message::RoomMessageEventContent;
 use matrix_sdk::ruma::events::room::message::RoomMessageEventContentWithoutRelation;
-use matrix_sdk::ruma::UInt;
+use matrix_sdk::ruma::{OwnedEventId, UInt};
 
-use crate::types::MessageReplyTo;
+use crate::types::{MessageReplyTo, MessageThreadSummary};
 
 fn strip_rich_reply_plain_text(s: &str) -> String {
     if !s.contains('\n') {
@@ -28,13 +30,49 @@ pub(super) fn reply_to_from_message_relation(
     Some(MessageReplyTo { event_id })
 }
 
+pub(super) fn thread_root_from_message_relation(
+    rel: &Option<Relation<RoomMessageEventContentWithoutRelation>>,
+) -> Option<String> {
+    match rel {
+        Some(Relation::Thread(thread)) => Some(thread.event_id.to_string()),
+        _ => None,
+    }
+}
+
+#[derive(serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct MessageThreadTarget {
+    pub root_event_id: OwnedEventId,
+    pub latest_event_id: Option<OwnedEventId>,
+}
+
+impl MessageThreadTarget {
+    pub(super) fn apply(self, mut content: RoomMessageEventContent) -> RoomMessageEventContent {
+        let latest = self.latest_event_id.unwrap_or_else(|| self.root_event_id.clone());
+        content.relates_to = Some(Relation::Thread(Thread::plain(self.root_event_id, latest)));
+        content
+    }
+}
+
+pub(super) fn thread_summary_from_bundle(bundle: &BundledThread) -> MessageThreadSummary {
+    MessageThreadSummary {
+        count: bundle.count.into(),
+        latest_event_id: bundle.latest_event.get_field("event_id").ok().flatten(),
+        latest_timestamp: bundle
+            .latest_event
+            .get_field("origin_server_ts")
+            .ok()
+            .flatten(),
+    }
+}
+
 /// Whether the event is a *reply* that may embed a `> ` plain-text quote block.
 fn is_reply_plain_strip_context(
     rel: &Option<Relation<RoomMessageEventContentWithoutRelation>>,
 ) -> bool {
     match rel {
         Some(Relation::Reply { .. }) => true,
-        Some(Relation::Thread(t)) => t.in_reply_to.is_some(),
+        Some(Relation::Thread(t)) => t.in_reply_to.is_some() && !t.is_falling_back,
         _ => false,
     }
 }

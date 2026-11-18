@@ -9,6 +9,7 @@ import {
   formatBinaryBytes,
   extractImagePreviewMeta,
   streamFileToStaging,
+  type AttachmentPreparation,
   type PendingAttachment,
   UPLOAD_HTTP_END,
   UPLOAD_STAGING_END,
@@ -30,22 +31,28 @@ export function useComposerFileUpload({
   const fileInputRef = useRef<HTMLInputElement>(null);
   const [pendingFile, setPendingFile] = useState<PendingAttachment | null>(null);
   const pendingFileRef = useRef<PendingAttachment | null>(null);
+  const preparationRef = useRef<AttachmentPreparation | null>(null);
   const selectingFileRef = useRef<string | null>(null);
 
   useEffect(() => {
     pendingFileRef.current = pendingFile;
   }, [pendingFile]);
 
-  useEffect(() => {
-    return () => {
-      selectingFileRef.current = null;
-      const p = pendingFileRef.current;
-      if (p?.previewUrl) URL.revokeObjectURL(p.previewUrl);
-    };
+  const releasePendingFile = useCallback(() => {
+    selectingFileRef.current = null;
+    const pending = pendingFileRef.current;
+    pendingFileRef.current = null;
+    if (pending && preparationRef.current?.uploadId === pending.uploadId) {
+      preparationRef.current.controller.abort();
+      preparationRef.current = null;
+    }
+    if (pending?.previewUrl) URL.revokeObjectURL(pending.previewUrl);
   }, []);
+  useEffect(() => releasePendingFile, [releasePendingFile]);
 
   useEffect(() => {
     if (!roomId) return;
+    let disposed = false;
     let unlisten: (() => void) | undefined;
     void listen<{ uploadId: string; roomId: string; sent: number; total: number }>(
       "room-file-upload-progress",
@@ -65,76 +72,59 @@ export function useComposerFileUpload({
         });
       },
     ).then((fn) => {
-      unlisten = fn;
-    });
+      if (disposed) fn();
+      else unlisten = fn;
+    }).catch(() => {});
     return () => {
+      disposed = true;
       unlisten?.();
     };
   }, [roomId, fileSendBridge]);
 
   const prepareAttachment = useCallback(
-    async (uploadId: string) => {
+    async (attachment: PendingAttachment, signal: AbortSignal) => {
+      const { uploadId, sourceFile, name, mimeType } = attachment;
       try {
-        let cur = pendingFileRef.current;
-        if (!cur || cur.uploadId !== uploadId) return;
-
-        if (cur.contentUri) {
-          const ready: PendingAttachment = { ...cur, phase: "ready", progress01: 1 };
-          pendingFileRef.current = ready;
-          setPendingFile(ready);
-          return;
-        }
-
-        await streamFileToStaging(cur.sourceFile, uploadId, (f) => {
-          if (pendingFileRef.current?.uploadId !== uploadId) return;
+        await streamFileToStaging(sourceFile, uploadId, (f) => {
           const prog = f * UPLOAD_STAGING_END;
           setPendingFile((p) =>
             p?.uploadId === uploadId ? { ...p, phase: "reading", progress01: prog } : p,
           );
-        });
+          fileSendBridge?.patchMessageByUploadId(uploadId, {
+            localFileUpload: { phase: "encoding", progress: prog },
+          });
+        }, signal);
+        signal.throwIfAborted();
+        setPendingFile((p) => p?.uploadId === uploadId
+          ? { ...p, phase: "uploading", progress01: UPLOAD_STAGING_END }
+          : p);
 
-        cur = pendingFileRef.current;
-        if (!cur || cur.uploadId !== uploadId) return;
-
-        const uploading: PendingAttachment = {
-          ...cur,
-          phase: "uploading",
-          progress01: UPLOAD_STAGING_END,
-        };
-        pendingFileRef.current = uploading;
-        setPendingFile(uploading);
-
-        const [contentUri, byteSize] = await uploadRoomFile({
+        const uploaded = await uploadRoomFile({
           roomId,
-          uploadId: cur.uploadId,
-          fileName: cur.name,
-          mimeType: cur.mimeType,
+          uploadId,
+          fileName: name,
+          mimeType,
         });
-
-        cur = pendingFileRef.current;
-        if (!cur || cur.uploadId !== uploadId) return;
-
-        const done: PendingAttachment = {
-          ...cur,
-          contentUri,
-          byteSize,
-          phase: "ready",
-          progress01: 1,
-        };
-        pendingFileRef.current = done;
-        setPendingFile(done);
+        if (signal.aborted) return null;
+        const [contentUri, byteSize] = uploaded;
+        setPendingFile((p) => p?.uploadId === uploadId
+          ? { ...p, contentUri, byteSize, phase: "ready", progress01: 1 }
+          : p);
+        return uploaded;
       } catch (e) {
+        await roomFileStagingRemove(uploadId).catch(() => {});
+        if (signal.aborted) return null;
         const msg = formatInvokeErr(e);
         console.error("Attachment prepare failed:", e);
-        void roomFileStagingRemove(uploadId).catch(() => {});
         setPendingFile((p) =>
           p?.uploadId === uploadId
             ? { ...p, phase: "error", errorMessage: msg, progress01: 0 }
             : p,
         );
+        return null;
       }
     },
-    [roomId],
+    [fileSendBridge, roomId],
   );
 
   const attachFile = useCallback(
@@ -195,7 +185,8 @@ export function useComposerFileUpload({
         };
         pendingFileRef.current = next;
         setPendingFile(next);
-        void prepareAttachment(uploadId);
+        const controller = new AbortController();
+        preparationRef.current = { uploadId, controller, result: prepareAttachment(next, controller.signal) };
 
         if (previewUrl) {
           void extractImagePreviewMeta(previewUrl).then((meta) => {
@@ -232,20 +223,15 @@ export function useComposerFileUpload({
   );
 
   const clearPendingFile = useCallback(() => {
-    selectingFileRef.current = null;
-    const p = pendingFileRef.current;
-    if (p?.uploadId) {
-      void roomFileStagingRemove(p.uploadId).catch(() => {});
-    }
-    if (p?.previewUrl) URL.revokeObjectURL(p.previewUrl);
-    pendingFileRef.current = null;
+    releasePendingFile();
     setPendingFile(null);
-  }, []);
+  }, [releasePendingFile]);
 
   return {
     fileInputRef,
     pendingFile,
     pendingFileRef,
+    preparationRef,
     setPendingFile,
     attachFile,
     handleFileSelected,

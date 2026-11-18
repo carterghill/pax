@@ -40,14 +40,16 @@ use tauri::{Emitter, State};
 
 use crate::types::{
     MessageBatch, MessageEditPayload, MessageInfo, MessageReactionDeltaPayload,
-    MessageReactionSummary, MessageRedactedPayload, MessageReplyTo, PinnedMessagePreview,
-    PresencePayload, RoomMembersChangedPayload, RoomMessagePayload, RoomPinPermission,
-    RoomRedactionPolicy, RoomSendPermission, TypingPayload, VoiceParticipantsInvalidatedPayload,
+    MessageReactionSummary, MessageRedactedPayload, MessageReplyTo, MessageThreadSummary,
+    PinnedMessagePreview, PresencePayload, RoomMembersChangedPayload, RoomMessagePayload,
+    RoomPinPermission, RoomRedactionPolicy, RoomSendPermission, TypingPayload,
+    VoiceParticipantsInvalidatedPayload,
 };
 use crate::AppState;
 
 use super::message_display::{
     extract_mentioned_user_ids, extract_message_display, reply_to_from_message_relation,
+    thread_root_from_message_relation, thread_summary_from_bundle, MessageThreadTarget,
 };
 use super::{fmt_error_chain, get_client, resolve_room};
 
@@ -79,6 +81,12 @@ pub(super) fn unavailable_message(raw: &serde_json::value::RawValue) -> Option<M
         avatar_url: None,
         edited: false,
         reply_to: None,
+        thread_root_id: (event["content"]["m.relates_to"]["rel_type"] == "m.thread")
+            .then(|| event["content"]["m.relates_to"]["event_id"].as_str())
+            .flatten()
+            .and_then(|id| EventId::parse(id).ok())
+            .map(|id| id.to_string()),
+        thread_summary: None,
         image_media_request: None,
         image_width: None,
         image_height: None,
@@ -293,6 +301,8 @@ pub async fn get_messages(
         video_height: Option<u32>,
         unsupported_matrix_msgtype: Option<String>,
         reply_to: Option<MessageReplyTo>,
+        thread_root_id: Option<String>,
+        thread_summary: Option<MessageThreadSummary>,
         mentioned_user_ids: Vec<String>,
     }
     let mut raw_msgs = Vec::new();
@@ -475,6 +485,13 @@ pub async fn get_messages(
                     video_height: ext.video_height,
                     unsupported_matrix_msgtype: ext.unsupported_matrix_msgtype,
                     reply_to,
+                    thread_root_id: thread_root_from_message_relation(&original.content.relates_to),
+                    thread_summary: original
+                        .unsigned
+                        .relations
+                        .thread
+                        .as_deref()
+                        .map(thread_summary_from_bundle),
                     mentioned_user_ids,
                 });
             }
@@ -584,6 +601,8 @@ pub async fn get_messages(
                 avatar_url,
                 edited,
                 reply_to: m.reply_to,
+                thread_root_id: m.thread_root_id,
+                thread_summary: m.thread_summary,
                 image_media_request,
                 image_width,
                 image_height,
@@ -791,6 +810,8 @@ async fn build_message_infos_from_timeline_events(
         video_height: Option<u32>,
         unsupported_matrix_msgtype: Option<String>,
         reply_to: Option<MessageReplyTo>,
+        thread_root_id: Option<String>,
+        thread_summary: Option<MessageThreadSummary>,
         mentioned_user_ids: Vec<String>,
     }
 
@@ -896,6 +917,15 @@ async fn build_message_infos_from_timeline_events(
                         video_height: ext.video_height,
                         unsupported_matrix_msgtype: ext.unsupported_matrix_msgtype,
                         reply_to,
+                        thread_root_id: thread_root_from_message_relation(
+                            &original.content.relates_to,
+                        ),
+                        thread_summary: original
+                            .unsigned
+                            .relations
+                            .thread
+                            .as_deref()
+                            .map(thread_summary_from_bundle),
                         mentioned_user_ids,
                     });
                 }
@@ -983,6 +1013,8 @@ async fn build_message_infos_from_timeline_events(
                 avatar_url,
                 edited,
                 reply_to: m.reply_to,
+                thread_root_id: m.thread_root_id,
+                thread_summary: m.thread_summary,
                 image_media_request,
                 image_width,
                 image_height,
@@ -1204,6 +1236,142 @@ pub async fn get_messages_around_event(
         prev_batch: response.prev_batch_token,
         latest_event_id: None,
     })
+}
+
+#[tauri::command]
+pub async fn get_room_message(
+    state: State<'_, Arc<AppState>>,
+    room_id: String,
+    event_id: String,
+) -> Result<Option<MessageInfo>, String> {
+    let client = get_client(&state).await?;
+    let room = resolve_room(&client, &room_id)?;
+    let id = EventId::parse(&event_id).map_err(|e| format!("Invalid event ID: {e}"))?;
+    let event = room
+        .load_or_fetch_event(&id, None)
+        .await
+        .map_err(|e| format!("Failed to load message: {}", fmt_error_chain(&e)))?;
+    let messages =
+        build_message_infos_from_timeline_events(&room, vec![event], &state.avatars).await?;
+    Ok(messages.into_iter().next())
+}
+
+#[tauri::command]
+pub async fn get_rss_thread_replies(
+    state: State<'_, Arc<AppState>>,
+    room_id: String,
+    event_id: String,
+    from: Option<String>,
+) -> Result<MessageBatch, String> {
+    let client = get_client(&state).await?;
+    let room = resolve_room(&client, &room_id)?;
+    let root = EventId::parse(&event_id).map_err(|e| format!("Invalid event ID: {e}"))?;
+    let relations = room.relations(
+        root.clone(),
+        RelationsOptions {
+            from: from.clone(),
+            limit: Some(UInt::from(50u32)),
+            recurse: true,
+            ..Default::default()
+        },
+    );
+    // Plain rich replies predate this feature and aren't indexed by the relations endpoint.
+    // Include those around the article as well as the ones already in the client's room window.
+    let context = async {
+        if from.is_some() {
+            return Vec::new();
+        }
+        room.event_with_context(&root, false, UInt::from(50u32), None)
+            .await
+            .map(|context| context.events_after)
+            .unwrap_or_default()
+    };
+    let (response, context) = tokio::join!(relations, context);
+    let response =
+        response.map_err(|e| format!("Failed to load thread: {}", fmt_error_chain(&e)))?;
+    let mut ids = HashSet::new();
+    let events = response
+        .chunk
+        .into_iter()
+        .chain(context)
+        .filter(|event| {
+            let id = event
+                .raw()
+                .get_field::<OwnedEventId>("event_id")
+                .ok()
+                .flatten();
+            id.is_some_and(|id| ids.insert(id))
+        })
+        .collect();
+    let mut messages =
+        build_message_infos_from_timeline_events(&room, events, &state.avatars).await?;
+    messages.sort_by_key(|message| message.timestamp);
+    let mut reply_ids = HashSet::from([event_id.clone()]);
+    messages.retain(|message| {
+        let belongs = if let Some(thread_id) = &message.thread_root_id {
+            thread_id == &event_id
+        } else {
+            message
+                .reply_to
+                .as_ref()
+                .is_some_and(|reply| reply_ids.contains(&reply.event_id))
+        };
+        if belongs {
+            reply_ids.insert(message.event_id.clone());
+        }
+        belongs
+    });
+    Ok(MessageBatch {
+        messages,
+        prev_batch: response
+            .next_batch_token
+            .filter(|next| Some(next) != from.as_ref()),
+        latest_event_id: None,
+    })
+}
+
+#[tauri::command]
+pub async fn send_rss_thread_reply(
+    state: State<'_, Arc<AppState>>,
+    room_id: String,
+    thread: MessageThreadTarget,
+    body: String,
+) -> Result<String, String> {
+    let body = body.trim();
+    if body.is_empty() {
+        return Err("Enter a reply.".into());
+    }
+    let client = get_client(&state).await?;
+    let room = resolve_room(&client, &room_id)?;
+    let content = thread.apply(RoomMessageEventContent::text_plain(body));
+    let response = room
+        .send(content)
+        .await
+        .map_err(|e| format!("Failed to send reply: {}", fmt_error_chain(&e)))?;
+    Ok(response.event_id.to_string())
+}
+
+#[cfg(test)]
+#[test]
+fn rss_thread_reply_keeps_the_root_separate_from_the_fallback_reply() {
+    let thread = MessageThreadTarget {
+        root_event_id: EventId::parse("$article").unwrap(),
+        latest_event_id: Some(EventId::parse("$previous-reply").unwrap()),
+    };
+    let content = thread.apply(RoomMessageEventContent::text_plain("A reply"));
+    let json = serde_json::to_value(&content).unwrap();
+    assert_eq!(json["body"], "A reply");
+    assert_eq!(json["m.relates_to"]["rel_type"], "m.thread");
+    assert_eq!(json["m.relates_to"]["event_id"], "$article");
+    assert_eq!(
+        json["m.relates_to"]["m.in_reply_to"]["event_id"],
+        "$previous-reply"
+    );
+    assert_eq!(json["m.relates_to"]["is_falling_back"], true);
+    assert_eq!(
+        thread_root_from_message_relation(&content.relates_to).as_deref(),
+        Some("$article")
+    );
 }
 
 #[tauri::command]
@@ -1546,6 +1714,8 @@ pub async fn start_sync(
                     avatar_url,
                     edited: false,
                     reply_to,
+                    thread_root_id: thread_root_from_message_relation(&ev.content.relates_to),
+                    thread_summary: ev.unsigned.relations.thread.as_deref().map(thread_summary_from_bundle),
                     image_media_request: ext.image_media_request,
                     image_width: ext.image_width,
                     image_height: ext.image_height,

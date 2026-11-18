@@ -3,6 +3,7 @@ import {
   roomFileStagingAppendBase64,
   roomFileStagingByteLen,
   roomFileStagingReset,
+  type UploadRoomFileResult,
 } from "../api";
 
 export const UPLOAD_STAGING_END = 0.15;
@@ -22,6 +23,12 @@ export type PendingAttachment = {
   phase: "reading" | "uploading" | "ready" | "error";
   progress01: number;
   errorMessage?: string;
+};
+
+export type AttachmentPreparation = {
+  uploadId: string;
+  controller: AbortController;
+  result: Promise<UploadRoomFileResult | null>;
 };
 
 /** Human-readable size (binary units) for upload limit messaging. */
@@ -98,7 +105,9 @@ export async function streamFileToStaging(
   file: File,
   uploadId: string,
   onFraction: (f: number) => void,
+  signal?: AbortSignal,
 ): Promise<void> {
+  signal?.throwIfAborted();
   const size = file.size;
   if (size === 0) {
     await roomFileStagingReset(uploadId);
@@ -108,8 +117,10 @@ export async function streamFileToStaging(
   await roomFileStagingReset(uploadId);
   let offset = 0;
   while (offset < size) {
+    signal?.throwIfAborted();
     const end = Math.min(offset + STAGING_CHUNK, size);
     const buf = await file.slice(offset, end).arrayBuffer();
+    signal?.throwIfAborted();
     const u8 = new Uint8Array(buf);
     await roomFileStagingAppendBase64(uploadId, uint8ToBase64Chunk(u8));
     offset = end;

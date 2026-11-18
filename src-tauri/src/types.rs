@@ -67,6 +67,14 @@ pub struct MessageReplyTo {
 
 #[derive(Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
+pub struct MessageThreadSummary {
+    pub count: u64,
+    pub latest_event_id: Option<String>,
+    pub latest_timestamp: Option<u64>,
+}
+
+#[derive(Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
 pub struct MessageInfo {
     /// Ciphertext retained as a timeline placeholder; no plaintext was recovered.
     pub decryption_failed: bool,
@@ -79,6 +87,10 @@ pub struct MessageInfo {
     pub edited: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub reply_to: Option<MessageReplyTo>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub thread_root_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub thread_summary: Option<MessageThreadSummary>,
     /// When set, the message is an image; the frontend fetches a temp path via `get_matrix_image_path`.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub image_media_request: Option<serde_json::Value>,

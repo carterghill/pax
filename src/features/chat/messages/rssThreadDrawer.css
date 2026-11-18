@@ -1,0 +1,59 @@
+.pax-rss-thread-layer {
+  position: absolute;
+  inset: 0;
+  z-index: 4;
+  overflow: hidden;
+  overflow: clip;
+  contain: paint;
+}
+
+.pax-rss-thread-backdrop {
+  position: absolute;
+  inset: 0;
+  background: rgb(0 0 0 / 24%);
+  animation: pax-fade-in-thread-backdrop 180ms ease-out;
+}
+
+.pax-rss-thread-drawer {
+  position: absolute;
+  inset: 0 0 0 auto;
+  box-sizing: border-box;
+  width: 410px;
+  max-width: 100%;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+  animation: pax-slide-in-thread 180ms ease-out;
+}
+
+.pax-rss-thread-button {
+  display: inline-grid;
+  place-items: center;
+  flex-shrink: 0;
+  padding: 6px;
+  border: 0;
+  border-radius: 6px;
+  background: transparent;
+  color: inherit;
+  font: inherit;
+  cursor: pointer;
+}
+
+@keyframes pax-slide-in-thread {
+  from { transform: translateX(100%); }
+  to { transform: translateX(0); }
+}
+
+@keyframes pax-fade-in-thread-backdrop {
+  from { opacity: 0; }
+  to { opacity: 1; }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .pax-rss-thread-drawer,
+  .pax-rss-thread-backdrop { animation: none; }
+}
+
+@media (max-width: 600px) {
+  .pax-rss-thread-drawer { width: 100%; }
+}

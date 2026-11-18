@@ -6,11 +6,14 @@ import {
   sendFileMessage,
   sendFirstDirectMessage,
   sendMessage,
+  sendRssThreadReply,
   uploadRoomFile,
+  type MessageThreadTarget,
 } from "../api";
 import {
   stagingByteLenMatchesFile,
   streamFileToStaging,
+  type AttachmentPreparation,
   type PendingAttachment,
   UPLOAD_STAGING_END,
 } from "./fileUpload";
@@ -21,6 +24,11 @@ import {
 import { formatInvokeErr } from "../formatInvokeErr";
 
 export interface EditingMessageRef {
+  eventId: string;
+  body: string;
+}
+
+export interface SentThreadReply {
   eventId: string;
   body: string;
 }
@@ -41,6 +49,7 @@ type UseComposerSubmitArgs = {
   editorRef: RefObject<HTMLDivElement | null>;
   pendingFile: PendingAttachment | null;
   pendingFileRef: RefObject<PendingAttachment | null>;
+  preparationRef: RefObject<AttachmentPreparation | null>;
   setPendingFile: (file: PendingAttachment | null) => void;
   fileSendBridge: MessageFileSendBridge | null;
   selfUserId: string;
@@ -52,7 +61,9 @@ type UseComposerSubmitArgs = {
   onCancelReply?: () => void;
   editingMessage?: EditingMessageRef | null;
   onCancelEdit?: () => void;
-  onMessageSent: () => void;
+  thread?: MessageThreadTarget;
+  onMessageSent: (reply?: SentThreadReply) => void;
+  onSendError?: (error: string | null) => void;
   setPlainText: (text: string) => void;
   setHasComposerMedia: (hasMedia: boolean) => void;
   setPickerOpen: (open: boolean) => void;
@@ -114,6 +125,7 @@ export function useComposerSubmit({
   editorRef,
   pendingFile,
   pendingFileRef,
+  preparationRef,
   setPendingFile,
   fileSendBridge,
   selfUserId,
@@ -125,7 +137,9 @@ export function useComposerSubmit({
   onCancelReply,
   editingMessage,
   onCancelEdit,
+  thread,
   onMessageSent,
+  onSendError,
   setPlainText,
   setHasComposerMedia,
   setPickerOpen,
@@ -140,10 +154,12 @@ export function useComposerSubmit({
       snapshot: PendingAttachment,
       caption: string,
       bridge: MessageFileSendBridge,
+      prepared?: AttachmentPreparation["result"],
     ) => {
       try {
-        let contentUri = snapshot.contentUri;
-        let byteSize = snapshot.byteSize;
+        const uploaded = snapshot.contentUri ? null : await prepared;
+        let contentUri = snapshot.contentUri ?? uploaded?.[0];
+        let byteSize = snapshot.byteSize ?? uploaded?.[1];
         if (!contentUri) {
           const ok = await stagingByteLenMatchesFile(snapshot.uploadId, snapshot.sourceFile.size);
           if (!ok) {
@@ -185,6 +201,7 @@ export function useComposerSubmit({
           blurhash: snapshot.blurhash,
           imageWidth: snapshot.imageWidth,
           imageHeight: snapshot.imageHeight,
+          thread,
         });
 
         bridge.replaceMessageEventId(localEventId, serverEventId, {
@@ -200,7 +217,7 @@ export function useComposerSubmit({
         });
       }
     },
-    [roomId],
+    [roomId, thread],
   );
 
   const handleSend = useCallback(async () => {
@@ -216,6 +233,7 @@ export function useComposerSubmit({
     clearTypingTimeout();
 
     setSending(true);
+    onSendError?.(null);
     try {
       if (draftDmPeerUserId) {
         if (pendingFile || !trimmed || editingMessage) {
@@ -272,14 +290,18 @@ export function useComposerSubmit({
             progress: Math.min(1, snap.progress01),
           },
           localImagePreviewObjectUrl: snap.previewUrl,
+          threadRootId: thread?.rootEventId,
         });
 
+        const preparation = preparationRef.current;
+        preparationRef.current = null;
         pendingFileRef.current = null;
         setPendingFile(null);
         const prevFormats = clearEditorAfterSend(el, setPlainText, setHasComposerMedia);
         restoreEditorAfterSend(el, prevFormats, refreshFormats, syncHeight);
 
-        void runFileSendPipeline(localEventId, snap, cap, fileSendBridge).finally(() => {
+        const prepared = preparation?.uploadId === snap.uploadId ? preparation.result : undefined;
+        void runFileSendPipeline(localEventId, snap, cap, fileSendBridge, prepared).finally(() => {
           onMessageSent();
         });
 
@@ -287,6 +309,7 @@ export function useComposerSubmit({
         return;
       }
 
+      let sentReply: SentThreadReply | undefined;
       if (trimmed) {
         if (editingMessage) {
           await editMessage({
@@ -295,6 +318,9 @@ export function useComposerSubmit({
             body: trimmed,
           });
           onCancelEdit?.();
+        } else if (thread) {
+          const eventId = await sendRssThreadReply({ roomId, thread, body: trimmed });
+          sentReply = { eventId, body: trimmed };
         } else {
           await sendMessage({
             roomId,
@@ -306,10 +332,11 @@ export function useComposerSubmit({
       }
 
       const prevFormats = clearEditorAfterSend(el, setPlainText, setHasComposerMedia);
-      onMessageSent();
+      onMessageSent(sentReply);
       restoreEditorAfterSend(el, prevFormats, refreshFormats, syncHeight);
     } catch (e) {
       console.error(editingMessage ? "Failed to edit:" : "Failed to send:", e);
+      onSendError?.(formatInvokeErr(e));
     }
     setSending(false);
   }, [
@@ -323,8 +350,10 @@ export function useComposerSubmit({
     onCancelReply,
     onDraftDmFirstMessage,
     onMessageSent,
+    onSendError,
     pendingFile,
     pendingFileRef,
+    preparationRef,
     refreshFormats,
     replyDraft?.eventId,
     roomId,
@@ -340,6 +369,7 @@ export function useComposerSubmit({
     setPlainText,
     setSending,
     syncHeight,
+    thread,
   ]);
 
   return { handleSend };

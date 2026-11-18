@@ -7,6 +7,7 @@ interface UseComposerTypingNoticeOptions {
   interactionLocked: boolean;
   editing: boolean;
   composerPermission: "loading" | "allowed" | "forbidden";
+  enabled?: boolean;
   onLocalTypingActive?: (active: boolean) => void;
 }
 
@@ -21,6 +22,7 @@ export function useComposerTypingNotice({
   interactionLocked,
   editing,
   composerPermission,
+  enabled = true,
   onLocalTypingActive,
 }: UseComposerTypingNoticeOptions) {
   const typingTimeout = useRef<ReturnType<typeof setTimeout> | null>(null);
@@ -38,7 +40,7 @@ export function useComposerTypingNotice({
 
   const sendTyping = useCallback(
     (typing: boolean, options?: { force?: boolean }) => {
-      if (draftDmPeerUserId) return;
+      if (!enabled || draftDmPeerUserId) return;
       if (interactionLockedRef.current && !options?.force) return;
 
       if (typing) {
@@ -58,13 +60,13 @@ export function useComposerTypingNotice({
         sendTypingNotice({ roomId, typing: false }).catch(() => {});
       }
     },
-    [roomId, onLocalTypingActive, draftDmPeerUserId],
+    [roomId, onLocalTypingActive, draftDmPeerUserId, enabled],
   );
 
   const handleComposerActivity = useCallback(
     ({ text, hasMedia }: ComposerActivity) => {
       if (editing) return;
-      if (draftDmPeerUserId) return;
+      if (!enabled || draftDmPeerUserId) return;
 
       if (text.trim().length > 0 || hasMedia) {
         sendTyping(true);
@@ -77,7 +79,7 @@ export function useComposerTypingNotice({
         clearTypingTimeout();
       }
     },
-    [clearTypingTimeout, draftDmPeerUserId, editing, sendTyping],
+    [clearTypingTimeout, draftDmPeerUserId, editing, enabled, sendTyping],
   );
 
   useEffect(() => {

@@ -25,7 +25,7 @@ use super::media_protocol::{
     get_matrix_media_bytes_with_timeout, get_plain_matrix_file_bytes_direct,
     MATRIX_IMAGE_FULL_FETCH_TIMEOUT, MATRIX_IMAGE_THUMB_FETCH_TIMEOUT,
 };
-use super::message_display::mime_to_file_ext;
+use super::message_display::{mime_to_file_ext, MessageThreadTarget};
 use super::{fmt_error_chain, get_authed_client, get_client, resolve_room, sniff_media_mime};
 
 /// Acquire a file for a mounted media consumer. The lease protects its path
@@ -142,6 +142,7 @@ fn build_file_room_message(
     blurhash: Option<String>,
     image_width: Option<u32>,
     image_height: Option<u32>,
+    thread: Option<MessageThreadTarget>,
 ) -> RoomMessageEventContent {
     use matrix_sdk::ruma::events::room::message::MessageType;
     use matrix_sdk::ruma::events::room::MediaSource;
@@ -153,7 +154,7 @@ fn build_file_room_message(
         .unwrap_or_else(|| file_name.clone());
     let has_caption = caption.as_deref().map_or(false, |c| !c.is_empty());
 
-    if content_type.type_() == mime::IMAGE {
+    let content = if content_type.type_() == mime::IMAGE {
         use matrix_sdk::ruma::events::room::message::ImageMessageEventContent;
         use matrix_sdk::ruma::events::room::ImageInfo;
 
@@ -206,7 +207,39 @@ fn build_file_room_message(
             file_msg.filename = Some(file_name);
         }
         RoomMessageEventContent::new(MessageType::File(file_msg))
+    };
+    match thread {
+        Some(thread) => thread.apply(content),
+        None => content,
     }
+}
+
+#[cfg(test)]
+#[test]
+fn rss_thread_attachment_keeps_its_media_and_thread_relationship() {
+    let thread: MessageThreadTarget = serde_json::from_value(serde_json::json!({
+        "rootEventId": "$article",
+        "latestEventId": "$last"
+    }))
+    .unwrap();
+    let content = build_file_room_message(
+        "mxc://example.org/photo".into(),
+        "photo.png".into(),
+        mime::IMAGE_PNG,
+        Some(UInt::from(128u32)),
+        Some("Attached photo".into()),
+        None,
+        Some(32),
+        Some(24),
+        Some(thread),
+    );
+    let json = serde_json::to_value(content).unwrap();
+    assert_eq!(json["msgtype"], "m.image");
+    assert_eq!(json["url"], "mxc://example.org/photo");
+    assert_eq!(json["body"], "Attached photo");
+    assert_eq!(json["m.relates_to"]["rel_type"], "m.thread");
+    assert_eq!(json["m.relates_to"]["event_id"], "$article");
+    assert_eq!(json["m.relates_to"]["m.in_reply_to"]["event_id"], "$last");
 }
 
 fn validate_upload_id(upload_id: &str) -> Result<(), String> {
@@ -527,6 +560,7 @@ async fn send_file_message_impl(
     blurhash: Option<&str>,
     image_width: Option<u32>,
     image_height: Option<u32>,
+    thread: Option<MessageThreadTarget>,
 ) -> Result<String, String> {
     let client = get_client(state).await?;
     let room = resolve_room(&client, room_id)?;
@@ -546,6 +580,7 @@ async fn send_file_message_impl(
         blurhash.map(|s| s.to_string()),
         image_width,
         image_height,
+        thread,
     );
 
     let response = room
@@ -583,6 +618,7 @@ pub async fn send_file_message(
     blurhash: Option<String>,
     image_width: Option<u32>,
     image_height: Option<u32>,
+    thread: Option<MessageThreadTarget>,
 ) -> Result<String, String> {
     send_file_message_impl(
         &state,
@@ -595,6 +631,7 @@ pub async fn send_file_message(
         blurhash.as_deref(),
         image_width,
         image_height,
+        thread,
     )
     .await
 }
@@ -642,6 +679,7 @@ pub async fn upload_and_send_file(
         &mime_type,
         Some(byte_size),
         caption.as_deref(),
+        None,
         None,
         None,
         None,

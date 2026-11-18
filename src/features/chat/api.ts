@@ -1,6 +1,7 @@
 import { invoke } from "@tauri-apps/api/core";
 import type {
   MessageBatch,
+  Message,
   PinnedMessagePreview,
   RoomPinPermission,
   RoomRedactionPolicy,
@@ -22,6 +23,11 @@ export interface SendMessageRequest {
 export interface SendFirstDirectMessageRequest {
   peerUserId: string;
   body: string;
+}
+
+export interface MessageThreadTarget {
+  rootEventId: string;
+  latestEventId?: string | null;
 }
 
 export interface MessageEventRequest {
@@ -67,6 +73,7 @@ export interface SendFileMessageRequest {
   blurhash?: string | null;
   imageWidth?: number | null;
   imageHeight?: number | null;
+  thread?: MessageThreadTarget | null;
 }
 
 export interface UploadAndSendFileRequest {
@@ -89,6 +96,22 @@ export function getMessages(request: GetMessagesRequest): Promise<MessageBatch> 
 
 export function getMessagesAroundEvent(request: MessageEventRequest): Promise<MessageBatch> {
   return invoke<MessageBatch>("get_messages_around_event", invokeArgs(request));
+}
+
+export function getRoomMessage(request: MessageEventRequest): Promise<Message | null> {
+  return invoke("get_room_message", invokeArgs(request));
+}
+
+export function getRssThreadReplies(request: MessageEventRequest & { from?: string | null }): Promise<MessageBatch> {
+  return invoke("get_rss_thread_replies", { ...request, from: request.from ?? null });
+}
+
+export function sendRssThreadReply(request: {
+  roomId: string;
+  thread: MessageThreadTarget;
+  body: string;
+}): Promise<string> {
+  return invoke("send_rss_thread_reply", invokeArgs(request));
 }
 
 export function sendMessage(request: SendMessageRequest): Promise<void> {
@@ -207,6 +230,7 @@ export function sendFileMessage(request: SendFileMessageRequest): Promise<string
     blurhash: request.blurhash ?? null,
     imageWidth: request.imageWidth ?? null,
     imageHeight: request.imageHeight ?? null,
+    thread: request.thread ?? null,
   });
 }
 
