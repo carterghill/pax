@@ -287,7 +287,7 @@ export default function ChatView({
       if (isDraft || !activeRoom) return;
       const inWindow = messages.some((m) => m.eventId === eventId);
       if (inWindow) {
-        messageListRef.current?.scrollToEventId(eventId);
+        messageListRef.current?.scrollToEventId(eventId, true);
         return;
       }
       void (async () => {
@@ -296,7 +296,7 @@ export default function ChatView({
         } finally {
           requestAnimationFrame(() => {
             requestAnimationFrame(() => {
-              messageListRef.current?.scrollToEventId(eventId);
+              messageListRef.current?.scrollToEventId(eventId, true);
             });
           });
         }

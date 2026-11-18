@@ -39,7 +39,7 @@ import { useMessageScrollAnimation } from "../features/chat/messages/useMessageS
 /* ------------------------------------------------------------------ */
 
 export type MessageListHandle = {
-  scrollToEventId: (eventId: string) => void;
+  scrollToEventId: (eventId: string, highlight?: boolean) => void;
 };
 
 interface MessageListProps {
@@ -138,7 +138,7 @@ const MessageList = forwardRef<MessageListHandle, MessageListProps>(function Mes
     useMessageScrollAnimation(scrollContainerRef);
 
   useImperativeHandle(ref, () => ({
-    scrollToEventId: (eventId: string) => {
+    scrollToEventId: (eventId: string, highlight = false) => {
       const root = scrollContainerRef.current;
       if (!root) return;
       const el = root.querySelector(
@@ -149,6 +149,14 @@ const MessageList = forwardRef<MessageListHandle, MessageListProps>(function Mes
       shouldAutoScrollRef.current = false;
       setAtBottom(false);
       el.scrollIntoView({ block: "center", behavior: "smooth" });
+      if (highlight) {
+        root.querySelectorAll(".pax-message-jump-highlight").forEach((row) => {
+          row.classList.remove("pax-message-jump-highlight");
+        });
+        // Restart the animation when the same reply is clicked again.
+        void el.offsetWidth;
+        el.classList.add("pax-message-jump-highlight");
+      }
     },
   }));
   const shouldAutoScrollRef = useRef(true);
@@ -756,6 +764,29 @@ const MessageList = forwardRef<MessageListHandle, MessageListProps>(function Mes
       <style>{`
         .pax-message-row:hover {
           background-color: ${rowHighlight} !important;
+        }
+        .pax-message-jump-highlight::after {
+          content: "";
+          position: absolute;
+          inset: 0;
+          border-radius: inherit;
+          background-color: ${rowHighlight};
+          pointer-events: none;
+          opacity: 0;
+          animation: pax-message-jump-flash 1.5s ease 0.25s;
+        }
+        @keyframes pax-message-jump-flash {
+          0%, 50%, 100% { opacity: 0; }
+          20%, 70% { opacity: 1; }
+        }
+        @media (prefers-reduced-motion: reduce) {
+          .pax-message-jump-highlight::after {
+            animation: pax-message-jump-flash-reduced 1.5s ease;
+          }
+          @keyframes pax-message-jump-flash-reduced {
+            0%, 80% { opacity: 1; }
+            100% { opacity: 0; }
+          }
         }
         .pax-message-row .pax-message-actions {
           opacity: 0;
