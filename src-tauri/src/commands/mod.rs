@@ -30,6 +30,7 @@ pub mod room_listing;
 pub mod room_membership;
 pub mod room_settings;
 pub mod rss;
+pub mod rss_preview;
 pub mod space_order;
 pub mod tray_indicator;
 pub mod unread;

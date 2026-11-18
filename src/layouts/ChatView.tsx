@@ -657,6 +657,7 @@ export default function ChatView({
           <MessageList
             ref={messageListRef}
             messages={messages}
+            rssProvider={rssFeed?.status ?? undefined}
             loadingOlder={loadingOlder}
             initialLoading={initialLoading}
             hasOlder={hasOlder}

@@ -22,6 +22,7 @@ import MediaViewerModal, {
 import { fileNameFromImageUrl } from "../utils/directImageUrl";
 import { useReadReceiptSender } from "../hooks/useReadReceiptSender";
 import MessageRow from "../features/chat/messages/MessageRow";
+import { rssArticleCandidate, type RssProvider } from "../features/chat/messages/rssArticle";
 import {
   shouldShowHeader,
   getReplyThreadPreview,
@@ -44,6 +45,7 @@ export type MessageListHandle = {
 
 interface MessageListProps {
   messages: Message[];
+  rssProvider?: RssProvider;
   loadingOlder: boolean;
   initialLoading: boolean;
   hasOlder: boolean;
@@ -99,6 +101,7 @@ const REACTION_POPOVER_IGNORE = ["[data-message-reaction-popover]"];
 const MessageList = forwardRef<MessageListHandle, MessageListProps>(function MessageList(
   {
     messages,
+    rssProvider,
     loadingOlder,
     initialLoading,
     hasOlder,
@@ -133,6 +136,13 @@ const MessageList = forwardRef<MessageListHandle, MessageListProps>(function Mes
     () => new Set(pinnedEventIds),
     [pinnedEventIds],
   );
+  const feedUrl = rssProvider?.url;
+  const botUserId = rssProvider?.botUserId;
+  const rssArticles = useMemo(() => {
+    if (!feedUrl || !botUserId) return [];
+    const provider = { url: feedUrl, botUserId };
+    return messages.map((message) => rssArticleCandidate(message, provider));
+  }, [botUserId, feedUrl, messages]);
 
   const { resolveMemberLabel } = useResolveMemberLabel(roomId);
 
@@ -853,7 +863,8 @@ const MessageList = forwardRef<MessageListHandle, MessageListProps>(function Mes
       {/* Messages */}
       {messages.map((msg, i) => {
         const prevMsg = i > 0 ? messages[i - 1] : null;
-        const showHeader = shouldShowHeader(msg, prevMsg);
+        const article = rssArticles[i] ?? null;
+        const showHeader = Boolean(article || rssArticles[i - 1]) || shouldShowHeader(msg, prevMsg);
         const canEdit = messageAllowsEdit(msg, userId);
         const canDelete = messageAllowsDelete(msg, userId, redactionPolicy);
         const showReplyButton =
@@ -867,6 +878,7 @@ const MessageList = forwardRef<MessageListHandle, MessageListProps>(function Mes
           <MessageRow
             key={msg.eventId}
             msg={msg}
+            rssArticle={article}
             showHeader={showHeader}
             showReplyButton={showReplyButton}
             showOverflowMenu={showOverflowMenu}

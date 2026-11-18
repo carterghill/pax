@@ -39,6 +39,8 @@ reqwest = { version = "0.12", default-features = false, features = [
   "json",
   "rustls-tls",
 ] }
+kuchikiki = "=0.8.8-speedreader"
+quick-xml = { version = "0.38.4", features = ["serialize", "overlapped-lists"] }
 reqwest-middleware = { version = "0.4", default-features = false, features = [
   "json",
 ] }

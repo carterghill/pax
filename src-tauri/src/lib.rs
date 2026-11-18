@@ -556,6 +556,8 @@ pub fn run() {
             commands::profile::set_user_avatar,
             commands::profile::remove_user_avatar,
             commands::embed::fetch_url_metadata,
+            commands::rss_preview::get_rss_article_preview,
+            commands::rss_preview::get_rss_preview_image,
             commands::embed::proxy_media,
             commands::embed::cleanup_proxy_media,
             commands::embed::cleanup_all_proxy_media,

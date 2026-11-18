@@ -10,6 +10,8 @@ import type { useTheme } from "../../../theme/ThemeContext";
 import type { MediaViewerOpenPayload } from "../../../components/MediaViewerModal";
 import UserAvatar from "../../../components/UserAvatar";
 import MessageContent from "./MessageContent";
+import { RssArticleCard, useRssArticlePreview } from "./RssArticleCard";
+import type { RssArticleCandidate } from "./rssArticle";
 
 /* ------------------------------------------------------------------ */
 /*  Helpers                                                            */
@@ -37,6 +39,7 @@ function formatTime(timestamp: number): string {
 
 export interface MessageRowProps {
   msg: Message;
+  rssArticle: RssArticleCandidate | null;
   showHeader: boolean;
   /** Reply control in the hover bar (not the ⋮ menu). */
   showReplyButton: boolean;
@@ -77,6 +80,7 @@ export interface MessageRowProps {
 
 const MessageRow = memo(function MessageRow({
   msg,
+  rssArticle,
   showHeader,
   showReplyButton,
   showOverflowMenu,
@@ -104,6 +108,8 @@ const MessageRow = memo(function MessageRow({
   onOpenSenderProfile,
   resolveMemberLabel,
 }: MessageRowProps) {
+  const { rowRef, preview } = useRssArticlePreview(rssArticle);
+  const article = rssArticle && (rssArticle.headline || preview) ? rssArticle : null;
   const menuBtn = spacingUnit * 7;
   const rowActive = isMenuOpen || isReactionPickerOpen;
   const groupShadow =
@@ -118,6 +124,7 @@ const MessageRow = memo(function MessageRow({
 
   return (
     <div
+      ref={rowRef}
       data-message-event-id={msg.eventId}
       className="pax-message-row"
       style={{
@@ -147,44 +154,46 @@ const MessageRow = memo(function MessageRow({
       }}
     >
       {/* Avatar column */}
-      <div style={{ width: 40, flexShrink: 0 }}>
-        {showHeader &&
-          (onOpenSenderProfile ? (
-            <button
-              type="button"
-              title="View profile"
-              onClick={() => onOpenSenderProfile(msg.sender)}
-              style={{
-                display: "block",
-                margin: 0,
-                padding: 0,
-                border: "none",
-                background: "none",
-                cursor: "pointer",
-                borderRadius: "50%",
-                lineHeight: 0,
-              }}
-            >
+      {!article && (
+        <div style={{ width: 40, flexShrink: 0 }}>
+          {showHeader &&
+            (onOpenSenderProfile ? (
+              <button
+                type="button"
+                title="View profile"
+                onClick={() => onOpenSenderProfile(msg.sender)}
+                style={{
+                  display: "block",
+                  margin: 0,
+                  padding: 0,
+                  border: "none",
+                  background: "none",
+                  cursor: "pointer",
+                  borderRadius: "50%",
+                  lineHeight: 0,
+                }}
+              >
+                <UserAvatar
+                  userId={msg.sender}
+                  displayName={msg.senderName ?? msg.sender}
+                  avatarUrlHint={msg.avatarUrl}
+                  size={40}
+                />
+              </button>
+            ) : (
               <UserAvatar
                 userId={msg.sender}
                 displayName={msg.senderName ?? msg.sender}
                 avatarUrlHint={msg.avatarUrl}
                 size={40}
               />
-            </button>
-          ) : (
-            <UserAvatar
-              userId={msg.sender}
-              displayName={msg.senderName ?? msg.sender}
-              avatarUrlHint={msg.avatarUrl}
-              size={40}
-            />
-          ))}
-      </div>
+            ))}
+        </div>
+      )}
 
       {/* Content column */}
       <div style={{ flex: 1, minWidth: 0 }}>
-        {showHeader && (
+        {!article && showHeader && (
           <div
             style={{
               display: "flex",
@@ -278,16 +287,25 @@ const MessageRow = memo(function MessageRow({
           </button>
         ) : null}
 
-        <MessageContent
-          msg={msg}
-          spacingUnit={spacingUnit}
-          palette={palette}
-          typography={typography}
-          onOpenMediaViewer={onOpenMediaViewer}
-          onOpenDirectImage={onOpenDirectImage}
-          onOpenSenderProfile={onOpenSenderProfile}
-          resolveMemberLabel={resolveMemberLabel}
-        />
+        {article ? (
+          <RssArticleCard
+            candidate={article}
+            preview={preview}
+            sender={msg.sender}
+            postedAt={formatTime(msg.timestamp)}
+          />
+        ) : (
+          <MessageContent
+            msg={msg}
+            spacingUnit={spacingUnit}
+            palette={palette}
+            typography={typography}
+            onOpenMediaViewer={onOpenMediaViewer}
+            onOpenDirectImage={onOpenDirectImage}
+            onOpenSenderProfile={onOpenSenderProfile}
+            resolveMemberLabel={resolveMemberLabel}
+          />
+        )}
         {msg.reactions && msg.reactions.length > 0 ? (
           <div
             style={{
