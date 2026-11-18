@@ -3,6 +3,7 @@ import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import {
   Hash,
+  Rss,
   MessageCircle,
   Volume2,
   Users,
@@ -49,6 +50,7 @@ function roomToSpaceChildInfo(r: Room, fromHierarchy?: SpaceChildInfo): SpaceChi
     membership: r.membership,
     joinRule: fromHierarchy?.joinRule ?? null,
     roomType: r.roomType,
+    isRss: r.isRss,
     numJoinedMembers: fromHierarchy?.numJoinedMembers ?? 0,
     isDirect: r.isDirect ?? false,
     dmPeerUserId: r.dmPeerUserId ?? null,
@@ -66,6 +68,7 @@ function childInfoToRoom(child: SpaceChildInfo, parentSpaceId: string): Room | n
     isSpace: child.roomType === SPACE_ROOM_TYPE,
     parentSpaceIds: [parentSpaceId],
     roomType: child.roomType,
+    isRss: child.isRss,
     topic: child.topic,
     membership: "joined",
     isDirect: child.isDirect,
@@ -125,6 +128,7 @@ function mergeCreatedChildIntoSpaceInfo(
     membership: "joined",
     joinRule: null,
     roomType: room.roomType,
+    isRss: room.isRss,
     numJoinedMembers: 1,
   };
   const others = prev.children.filter((c) => c.id !== child.id);
@@ -1597,6 +1601,8 @@ function RoomRow({
 
   const nonDmFallbackIcon = isVoice ? (
     <Volume2 size={18} color={palette.textSecondary} />
+  ) : room.isRss ? (
+    <Rss size={18} color={palette.textSecondary} />
   ) : (
     <Hash size={18} color={palette.textSecondary} />
   );

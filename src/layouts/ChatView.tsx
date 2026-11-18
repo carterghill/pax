@@ -4,7 +4,8 @@ import { useRoomCanSendMessages } from "../hooks/useRoomCanSendMessages";
 import { useRoomCanPinMessages } from "../hooks/useRoomCanPinMessages";
 import { useRoomPinnedEventIds } from "../hooks/useRoomPinnedEventIds";
 import { listen } from "@tauri-apps/api/event";
-import { ArrowLeft, Hash, MessageCircle, Users } from "lucide-react";
+import { ArrowLeft, Hash, MessageCircle, Rss, Users } from "lucide-react";
+import RssFeedStatus from "../components/RssFeedStatus";
 import NavBackButton from "../components/NavBackButton";
 import UserAvatar from "../components/UserAvatar";
 import MessageList, { type MessageListHandle } from "../components/MessageList";
@@ -567,7 +568,9 @@ export default function ChatView({
           {isMobile && onOpenNavigation && (
             <NavBackButton onClick={onOpenNavigation} palette={palette} />
           )}
-          <Hash size={20} color={palette.textSecondary} style={{ flexShrink: 0 }} />
+          {activeRoom.isRss
+            ? <Rss size={20} color={palette.textSecondary} style={{ flexShrink: 0 }} />
+            : <Hash size={20} color={palette.textSecondary} style={{ flexShrink: 0 }} />}
           <span style={{
             fontWeight: typography.fontWeightBold,
             color: palette.textHeading,
@@ -635,6 +638,7 @@ export default function ChatView({
           minHeight: 0,
           backgroundColor: palette.bgPrimary,
         }}>
+          {activeRoom.isRss && <RssFeedStatus key={activeRoom.id} roomId={activeRoom.id} messages={messages} />}
           <MessageList
             ref={messageListRef}
             messages={messages}

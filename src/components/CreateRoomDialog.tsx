@@ -6,6 +6,7 @@ import {
   Loader2,
   Hash,
   Volume2,
+  Rss,
   Users,
   Globe,
   Lock,
@@ -101,7 +102,7 @@ function buildOptimisticJoinedChatRoom(
   };
 }
 
-type RoomKind = "text" | "voice";
+type RoomKind = "text" | "voice" | "rss";
 type HistoryVisibility = "shared" | "joined" | "invited" | "world_readable";
 type SpaceRoomAccess = "space_members" | "public" | "invite";
 
@@ -142,6 +143,11 @@ export default function CreateRoomDialog({
   const [name, setName] = useState("");
   const [topic, setTopic] = useState("");
   const [roomKind, setRoomKind] = useState<RoomKind>("text");
+  const [feedUrl, setFeedUrl] = useState("");
+  const [feedBot, setFeedBot] = useState("@rss:t2bot.io");
+  const [pendingRoom, setPendingRoom] = useState<{ room: Room; topic: string | null } | null>(null);
+  const creatingRef = useRef(false);
+  const errorRef = useRef<HTMLDivElement>(null);
   const [roomAccess, setRoomAccess] = useState<SpaceRoomAccess>("space_members");
   const [historyVisibility, setHistoryVisibility] =
     useState<HistoryVisibility>("shared");
@@ -150,6 +156,10 @@ export default function CreateRoomDialog({
   const [advancedOpen, setAdvancedOpen] = useState(false);
   const [creating, setCreating] = useState(false);
   const [error, setError] = useState<string | null>(null);
+
+  useEffect(() => {
+    if (error) errorRef.current?.scrollIntoView({ block: "nearest" });
+  }, [error]);
 
   const [searchTerm, setSearchTerm] = useState("");
   const [searchServer, setSearchServer] = useState("");
@@ -217,77 +227,86 @@ export default function CreateRoomDialog({
   }, [searchServer, currentHomeserver]);
 
   const handleCreate = useCallback(async () => {
-    if (!name.trim()) {
+    if (creatingRef.current) return;
+    if (!pendingRoom && !name.trim()) {
       setError("Room name is required.");
       return;
     }
+    if (!pendingRoom && roomKind === "rss") {
+      try {
+        const url = new URL(feedUrl.trim());
+        if (!/^https?:$/.test(url.protocol) || !url.hostname || /\s/.test(feedUrl.trim())) {
+          throw new Error("Enter a valid feed URL starting with https:// or http://.");
+        }
+        if (url.username || url.password) {
+          throw new Error("Feed URLs cannot contain a username or password.");
+        }
+      } catch (e) {
+        setError(e instanceof TypeError
+          ? "Enter a valid feed URL starting with https:// or http://."
+          : String(e).replace(/^Error: /, ""));
+        return;
+      }
+      if (!/^@[^\s:]+:[^\s]+$/.test(feedBot.trim())) {
+        setError("Enter a Matrix bot address such as @rss:t2bot.io.");
+        return;
+      }
+    }
+    creatingRef.current = true;
     setCreating(true);
     setError(null);
 
+    let created = pendingRoom;
     try {
-      const roomType = roomKind === "voice" ? VOICE_ROOM_TYPE : null;
-      const trimmedName = name.trim();
-      const trimmedTopic = topic.trim() || null;
-      const aliasLocal = roomAlias.trim().toLowerCase().replace(/[^a-z0-9_-]/g, "");
-
-      if (spaceId) {
-        const roomId = await invoke<string>("create_room_in_space", {
-          spaceId,
+      if (!created) {
+        const roomType = roomKind === "voice" ? VOICE_ROOM_TYPE : null;
+        const trimmedName = name.trim();
+        const trimmedTopic = topic.trim() || null;
+        const aliasLocal = roomAlias.trim().toLowerCase().replace(/[^a-z0-9_-]/g, "");
+        const roomId = await invoke<string>(spaceId ? "create_room_in_space" : "create_standalone_room", {
+          ...(spaceId ? { spaceId, spaceRoomAccess: roomAccess } : { roomAccess }),
           name: trimmedName,
           topic: trimmedTopic,
-          spaceRoomAccess: roomAccess,
           roomType,
           roomAlias: aliasLocal || null,
           historyVisibility,
           federate,
+          rssFeed: roomKind === "rss" ? { url: feedUrl.trim(), botUserId: feedBot.trim() } : null,
         });
-        const optimisticRoom: Room = {
-          id: roomId,
-          name: trimmedName,
-          avatarUrl: null,
-          isSpace: false,
-          parentSpaceIds: [spaceId],
-          roomType,
-          membership: "joined",
-        };
-        await onCreated({
-          optimisticRoom,
-          newSpaceChildTopic: trimmedTopic,
-        });
-      } else {
-        const roomId = await invoke<string>("create_standalone_room", {
-          name: trimmedName,
+        created = {
+          room: {
+            id: roomId,
+            name: trimmedName,
+            avatarUrl: null,
+            isSpace: false,
+            parentSpaceIds: spaceId ? [spaceId] : [],
+            roomType,
+            isRss: roomKind === "rss",
+            membership: "joined",
+          },
           topic: trimmedTopic,
-          roomAccess,
-          roomType,
-          roomAlias: aliasLocal || null,
-          historyVisibility,
-          federate,
-        });
-        const optimisticRoom: Room = {
-          id: roomId,
-          name: trimmedName,
-          avatarUrl: null,
-          isSpace: false,
-          parentSpaceIds: [],
-          roomType,
-          membership: "joined",
         };
-        await onCreated({
-          optimisticRoom,
-          newSpaceChildTopic: trimmedTopic,
-        });
+        setPendingRoom(created);
       }
       onClose();
+      await onCreated({
+        optimisticRoom: created.room,
+        newSpaceChildTopic: created.topic,
+        openRoomId: created.room.isRss ? created.room.id : undefined,
+      });
     } catch (e) {
-      setError(String(e));
+      setError(created ? `The room was created, but could not be opened. ${String(e)}` : String(e));
     } finally {
+      creatingRef.current = false;
       setCreating(false);
     }
   }, [
     name,
     topic,
     roomKind,
+    feedUrl,
+    feedBot,
+    pendingRoom,
     roomAccess,
     historyVisibility,
     roomAlias,
@@ -296,6 +315,14 @@ export default function CreateRoomDialog({
     onCreated,
     onClose,
   ]);
+
+  const handleClose = useCallback(async () => {
+    if (creatingRef.current) return;
+    if (pendingRoom) {
+      await onCreated({ optimisticRoom: pendingRoom.room, newSpaceChildTopic: pendingRoom.topic, openRoomId: pendingRoom.room.id });
+    }
+    onClose();
+  }, [pendingRoom, onCreated, onClose]);
 
   const handleSearch = useCallback(async () => {
     homeserverAutoStaleRef.current = true;
@@ -487,10 +514,13 @@ export default function CreateRoomDialog({
   };
 
   const showJoinOnly = !allowCreate;
+  const createDisabled = creating || (!pendingRoom && (
+    !name.trim() || (roomKind === "rss" && (!feedUrl.trim() || !feedBot.trim()))
+  ));
 
   return (
     <Dialog
-      onClose={onClose}
+      onClose={() => { void handleClose().catch((e) => setError(String(e))); }}
       aria-label="Join or create a room"
       style={{
         backgroundColor: palette.bgSecondary,
@@ -523,7 +553,9 @@ export default function CreateRoomDialog({
             {allowCreate ? "Add a Room" : "Join a Room"}
           </h2>
           <button
-            onClick={onClose}
+            onClick={() => { void handleClose().catch((e) => setError(String(e))); }}
+            disabled={creating}
+            aria-label="Close"
             style={{
               background: "none",
               border: "none",
@@ -552,6 +584,7 @@ export default function CreateRoomDialog({
               <button
                 key={tab}
                 type="button"
+                disabled={creating || !!pendingRoom}
                 onClick={() => {
                   setActiveTab(tab);
                   setError(null);
@@ -811,6 +844,7 @@ export default function CreateRoomDialog({
 
           {allowCreate && activeTab === "create" && (
             <>
+              <fieldset disabled={creating || !!pendingRoom} style={{ border: 0, margin: 0, padding: 0, minWidth: 0 }}>
               <div style={{ marginBottom: 16 }}>
                 <label style={labelStyle}>Room Type</label>
                 <div style={{ display: "flex", gap: 8 }}>
@@ -832,8 +866,56 @@ export default function CreateRoomDialog({
                     palette={palette}
                     typography={typography}
                   />
+                  <KindButton
+                    icon={<Rss size={18} />}
+                    label="RSS Feed"
+                    description="Updates from an RSS feed"
+                    selected={roomKind === "rss"}
+                    onClick={() => setRoomKind("rss")}
+                    palette={palette}
+                    typography={typography}
+                  />
                 </div>
               </div>
+
+              {roomKind === "rss" && (
+                <div style={{ marginBottom: 16, padding: 12, border: `1px solid ${palette.border}`, borderRadius: 8 }}>
+                  <div style={{ marginBottom: 12 }}>
+                    <label htmlFor="rss-feed-url" style={labelStyle}>
+                      Feed URL <span style={{ color: "#ed4245" }}>*</span>
+                    </label>
+                    <input
+                      id="rss-feed-url"
+                      type="url"
+                      value={feedUrl}
+                      onChange={(e) => setFeedUrl(e.target.value)}
+                      placeholder="https://example.com/feed.xml"
+                      autoCapitalize="none"
+                      spellCheck={false}
+                      required
+                      style={inputStyle}
+                    />
+                  </div>
+                  <label htmlFor="rss-feed-bot" style={labelStyle}>
+                    Feed Bot <span style={{ color: "#ed4245" }}>*</span>
+                  </label>
+                  <input
+                    id="rss-feed-bot"
+                    type="text"
+                    value={feedBot}
+                    onChange={(e) => setFeedBot(e.target.value)}
+                    placeholder="@rss:t2bot.io"
+                    autoCapitalize="none"
+                    spellCheck={false}
+                    aria-describedby="rss-feed-bot-help"
+                    required
+                    style={inputStyle}
+                  />
+                  <div id="rss-feed-bot-help" style={{ marginTop: 6, color: palette.textSecondary, fontSize: typography.fontSizeSmall }}>
+                    The bot joins this room and posts feed updates. Use t2bot.io or another bot that supports !rss subscribe.
+                  </div>
+                </div>
+              )}
 
               <div style={{ marginBottom: 16 }}>
                 <label style={labelStyle}>
@@ -843,7 +925,7 @@ export default function CreateRoomDialog({
                   type="text"
                   value={name}
                   onChange={(e) => setName(e.target.value)}
-                  placeholder={roomKind === "voice" ? "General Voice" : "general"}
+                  placeholder={roomKind === "voice" ? "General Voice" : roomKind === "rss" ? "News feed" : "general"}
                   maxLength={255}
                   style={inputStyle}
                   autoFocus
@@ -1071,8 +1153,11 @@ export default function CreateRoomDialog({
                 )}
               </div>
 
+              </fieldset>
               {error && (
                 <div
+                  ref={errorRef}
+                  role="alert"
                   style={{
                     padding: "8px 12px",
                     backgroundColor: "rgba(237,66,69,0.15)",
@@ -1103,7 +1188,7 @@ export default function CreateRoomDialog({
           >
             <button
               type="button"
-              onClick={onClose}
+              onClick={() => { void handleClose().catch((e) => setError(String(e))); }}
               disabled={creating}
               style={{
                 padding: "8px 16px",
@@ -1118,23 +1203,23 @@ export default function CreateRoomDialog({
                 opacity: creating ? 0.5 : 1,
               }}
             >
-              Cancel
+              {pendingRoom ? "Open Room" : "Cancel"}
             </button>
             <button
               type="button"
               onClick={handleCreate}
-              disabled={creating || !name.trim()}
+              disabled={createDisabled}
               style={{
                 padding: "8px 20px",
                 fontSize: typography.fontSizeBase,
                 fontFamily: typography.fontFamily,
                 fontWeight: typography.fontWeightMedium,
                 backgroundColor:
-                  creating || !name.trim() ? palette.accent + "80" : palette.accent,
+                  createDisabled ? palette.accent + "80" : palette.accent,
                 border: "none",
                 borderRadius: 4,
                 color: "#fff",
-                cursor: creating || !name.trim() ? "not-allowed" : "pointer",
+                cursor: createDisabled ? "not-allowed" : "pointer",
                 display: "flex",
                 alignItems: "center",
                 gap: 8,
@@ -1148,7 +1233,7 @@ export default function CreateRoomDialog({
               ) : (
                 <>
                   <Plus size={16} />
-                  Create Room
+                  {pendingRoom ? "Open Room" : "Create Room"}
                 </>
               )}
             </button>
@@ -1182,9 +1267,11 @@ function KindButton({
   return (
     <button
       type="button"
+      aria-pressed={selected}
       onClick={onClick}
       style={{
         flex: fullWidth ? undefined : 1,
+        minWidth: 0,
         width: fullWidth ? "100%" : undefined,
         boxSizing: "border-box",
         display: "flex",
