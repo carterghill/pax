@@ -104,8 +104,8 @@ async fn fetch_matrix_media(
                     }
                 }
             } else {
-                let msg = format!("Failed to load image: {e}");
-                log::warn!("Matrix image: {msg}");
+                let msg = format!("Failed to load attachment: {e}");
+                log::warn!("Matrix media: {msg}");
                 return Err(msg);
             }
         }

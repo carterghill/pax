@@ -17,10 +17,10 @@ export function inlineMediaAspectBoxStyle(
   ) {
     return null;
   }
-  const maxWidthPx = (naturalWidth / naturalHeight) * maxHeightPx;
+  const fittedWidth = (naturalWidth / naturalHeight) * maxHeightPx;
   return {
-    width: "100%",
-    maxWidth: maxWidthPx,
+    width: Math.min(naturalWidth, fittedWidth),
+    maxWidth: "100%",
     aspectRatio: `${naturalWidth} / ${naturalHeight}`,
     maxHeight: maxHeightPx,
   };
