@@ -6,6 +6,7 @@ import {
   setStoredDeafenPreference,
 } from "./voicePreferences";
 import type { AudioDeviceList } from "./useVoiceAudioDevices";
+import type { VoiceCallActions } from "./useVoiceCall";
 
 export interface AudioControls {
   isMuted: boolean;
@@ -24,7 +25,7 @@ interface VoiceCallSlice {
   toggleMic: () => void;
   toggleDeafen: () => void;
   listAudioDevices: () => Promise<AudioDeviceList>;
-  connect: (roomId: string, options?: { forceReconnect?: boolean }) => Promise<void>;
+  connect: VoiceCallActions["connect"];
 }
 
 export function useAudioControls(voiceCall: VoiceCallSlice): AudioControls {

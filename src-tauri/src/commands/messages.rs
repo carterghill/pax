@@ -2348,6 +2348,9 @@ pub async fn start_sync(
                 }
             };
 
+            super::direct_calls::receive_signals(&reconcile_state_arc, &client, &app, &response)
+                .await;
+
             let sync_elapsed = sync_t0.elapsed();
             let presence_count = response.presence.len();
             log::info!(

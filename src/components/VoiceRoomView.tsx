@@ -1203,7 +1203,7 @@ export default function VoiceRoomView({
 
           {/* Disconnect */}
           <button
-            onClick={onDisconnect}
+            onClick={() => void onDisconnect()}
             title="Disconnect"
             style={{
               width: 48,

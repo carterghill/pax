@@ -3,6 +3,7 @@ import RoomSidebar from "../components/RoomSidebar";
 import DiscoverView from "../components/DiscoverView";
 import ChatView from "../layouts/ChatView";
 import VoiceRoomView from "../components/VoiceRoomView";
+import DirectCallControls, { DirectCallError } from "../components/DirectCallControls";
 import InvitationView from "../layouts/InvitationView";
 import SpaceHomeView from "../layouts/SpaceHomeView";
 import type { RoomsForLayout } from "../hooks/useRooms";
@@ -10,7 +11,8 @@ import type { RoomsChangedPayload } from "../types/roomsChanged";
 import type { Room } from "../types/matrix";
 import { usePresence } from "../hooks/usePresence";
 import { useVoiceParticipants } from "../hooks/useVoiceParticipants";
-import { useVoiceCall } from "../hooks/useVoiceCall";
+import { useVoiceCall, type VoiceCallActions } from "../hooks/useVoiceCall";
+import { useDirectCall } from "../hooks/useDirectCall";
 import { useAudioControls } from "../hooks/useAudioControls";
 import { useUnreadRooms, useSpaceUnreadRollup } from "../hooks/useUnreadRooms";
 import {
@@ -38,6 +40,7 @@ import { useUserAvatar } from "../hooks/useUserAvatar";
 import { useResizeHandle } from "../hooks/useResizeHandle";
 import { useSpaceOrder, applyStoredSpaceOrder } from "../hooks/useSpaceOrder";
 import { useIsMobile } from "../hooks/useIsMobile";
+import { effectiveDmTitle } from "../utils/dmDisplay";
 import SideDrawer from "../components/SideDrawer";
 import NavBackButton from "../components/NavBackButton";
 
@@ -140,6 +143,11 @@ export default function MainLayout({
 
   const { manualStatus, setManualStatus, effectivePresence, statusMessage, setStatusMessage } = usePresence();
   const voiceCall = useVoiceCall();
+  const {
+    call: directCall, error: directCallError, peerJoined: directCallPeerJoined,
+    start: startDirectCall, answer: answerDirectCall,
+    end: endDirectCall, clearError: clearDirectCallError,
+  } = useDirectCall(voiceCall);
   const audioControls = useAudioControls(voiceCall);
   // Unread state for every joined room, used by the sidebar to paint rooms in
   // the primary colour when they have unread activity.  The hook is scoped to
@@ -748,7 +756,14 @@ export default function MainLayout({
     voiceCall.connectedRoomId,
   ]);
 
-  const { connect: connectVoiceCall, connectedRoomId: connectedVoiceRoomId } = voiceCall;
+  const { connect: connectVoice, disconnect: disconnectVoice, connectedRoomId: connectedVoiceRoomId } = voiceCall;
+  const connectVoiceCall = useCallback<VoiceCallActions["connect"]>(async (roomId, options) => {
+    await endDirectCall();
+    return connectVoice(roomId, options);
+  }, [connectVoice, endDirectCall]);
+  const disconnectVoiceCall = useCallback(() => {
+    return directCall?.roomId === connectedVoiceRoomId ? endDirectCall() : disconnectVoice();
+  }, [directCall?.roomId, connectedVoiceRoomId, disconnectVoice, endDirectCall]);
 
   // Handle room selection — clicking a voice room joins the call (only if already joined/member)
   const handleSelectRoom = useCallback((roomId: string) => {
@@ -911,15 +926,14 @@ export default function MainLayout({
 
   const handleLeftRoom = useCallback(
     (roomId: string) => {
-      if (voiceCall.connectedRoomId === roomId) {
-        voiceCall.disconnect();
-      }
+      if (directCall?.roomId === roomId) void endDirectCall();
+      else if (connectedVoiceRoomId === roomId) void disconnectVoice();
       void fetchRooms();
       if (activeRoomId === roomId) {
         setActiveRoomId(null);
       }
     },
-    [fetchRooms, activeRoomId, setActiveRoomId, voiceCall.connectedRoomId, voiceCall.disconnect]
+    [fetchRooms, activeRoomId, setActiveRoomId, connectedVoiceRoomId, disconnectVoice, directCall?.roomId, endDirectCall]
   );
 
   const handleLeftSpace = useCallback(
@@ -935,9 +949,8 @@ export default function MainLayout({
   const handleRoomsLeft = useCallback(
     (roomIds: string[]) => {
       const set = new Set(roomIds);
-      if (voiceCall.connectedRoomId && set.has(voiceCall.connectedRoomId)) {
-        voiceCall.disconnect();
-      }
+      if (directCall && set.has(directCall.roomId)) void endDirectCall();
+      else if (connectedVoiceRoomId && set.has(connectedVoiceRoomId)) void disconnectVoice();
       void fetchRooms();
       if (activeRoomId && set.has(activeRoomId)) {
         setActiveRoomId(null);
@@ -951,8 +964,10 @@ export default function MainLayout({
       activeRoomId,
       setActiveRoomId,
       activeSpaceId,
-      voiceCall.connectedRoomId,
-      voiceCall.disconnect,
+      connectedVoiceRoomId,
+      disconnectVoice,
+      directCall,
+      endDirectCall,
     ]
   );
 
@@ -1256,7 +1271,7 @@ export default function MainLayout({
         voiceParticipantStatesByRoom={voiceParticipantStatesByRoom}
         onSetParticipantVolume={voiceCall.setParticipantVolume}
         audioControls={audioControls}
-        onDisconnectVoice={voiceCall.disconnect}
+        onDisconnectVoice={disconnectVoiceCall}
         onLeftRoom={handleLeftRoom}
         activeSpaceId={activeSpaceId}
         roomsBySpace={roomsBySpace}
@@ -1299,6 +1314,12 @@ export default function MainLayout({
       )}
     </>
   );
+
+  const directCallRoom = directCall && getRoom(directCall.roomId);
+  const activeDmPeer = activeRoom?.dmPeerUserId;
+  const callUnavailable = directCall || connectedVoiceRoomId || voiceCall.isConnecting
+    ? "End the current call before starting another"
+    : activeRoom?.upgradePending || !activeDmPeer ? "Open a joined direct message to call" : undefined;
 
   return (
     <PresenceContext.Provider value={{ manualStatus, setManualStatus, effectivePresence, statusMessage, setStatusMessage }}>
@@ -1350,6 +1371,19 @@ export default function MainLayout({
           flexDirection: "column",
           paddingBottom: isMobile ? "env(safe-area-inset-bottom, 0px)" : 0,
         }}>
+          {directCall && (
+            <DirectCallControls
+              call={directCall}
+              name={directCallRoom ? effectiveDmTitle(directCallRoom) : directCall.peerUserId}
+              avatarUrl={directCallRoom?.avatarUrl}
+              isMicEnabled={voiceCall.isMicEnabled}
+              peerJoined={directCallPeerJoined && !voiceCall.isConnecting}
+              onAnswer={answerDirectCall}
+              onEnd={endDirectCall}
+              onToggleMic={voiceCall.toggleMic}
+            />
+          )}
+          {directCallError && <DirectCallError message={directCallError} onDismiss={clearDirectCallError} />}
           <div style={{
             flex: 1,
             minHeight: 0,
@@ -1384,7 +1418,7 @@ export default function MainLayout({
             ) : activeRoom && !activeRoom.upgradePending && activeRoom.roomType === VOICE_ROOM_TYPE ? (
               <VoiceRoomView
                 room={activeRoom}
-                voiceCall={voiceCall}
+                voiceCall={{ ...voiceCall, connect: connectVoiceCall }}
                 voiceParticipants={voiceParticipants[activeRoom.id] ?? []}
                 livekitInRoom={livekitByRoom[activeRoom.id] ?? []}
                 userId={userId}
@@ -1402,6 +1436,9 @@ export default function MainLayout({
                   setUserMenuWidth(clamped);
                 }}
                 onStartDirectMessage={handleStartDirectMessage}
+                onStartCall={activeDmPeer && !callUnavailable
+                  ? () => startDirectCall(activeRoom.id, activeDmPeer) : undefined}
+                callUnavailable={callUnavailable}
                 moderationSpaceTreeRoomIds={moderationSpaceTreeRoomIds}
                 moderationSpaceName={moderationSpaceName}
                 onOpenNavigation={openMobileNavDrawer}

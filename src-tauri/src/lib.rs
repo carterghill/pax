@@ -60,6 +60,7 @@ pub struct AppState {
     pub attachments: Arc<attachments::AttachmentCache>,
     pub notifications: commands::reconciler::NotificationService,
     pub voice_presence: voice_presence::VoicePresenceService,
+    direct_calls: commands::direct_calls::PendingDirectCalls,
     pub sync_running: Arc<Mutex<bool>>,
     /// Background `sync_with_callback` task — must be aborted before deleting the SQLite store
     /// or replacing `client`, otherwise the DB stays locked (especially on Windows).
@@ -312,6 +313,7 @@ pub fn run() {
         attachments: Arc::new(attachments::AttachmentCache::new(attachments::RETAINED_BYTES)),
         notifications: commands::reconciler::NotificationService::default(),
         voice_presence: voice_presence::VoicePresenceService::default(),
+        direct_calls: Default::default(),
         file_cache,
         sync_running: Arc::new(Mutex::new(false)),
         sync_join: Mutex::new(None),
@@ -503,6 +505,8 @@ pub fn run() {
             commands::voice_matrix::get_all_voice_participants,
             commands::voice_matrix::get_livekit_voice_room_snapshot,
             commands::voice_matrix::get_all_livekit_voice_snapshots,
+            commands::direct_calls::send_direct_call_signal,
+            commands::direct_calls::take_direct_call_signals,
             commands::voice_matrix::voice_connect,
             commands::voice_matrix::voice_disconnect,
             commands::voice_matrix::voice_toggle_mic,

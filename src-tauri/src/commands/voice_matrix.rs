@@ -69,6 +69,7 @@ pub(crate) async fn discover_livekit_service_url(
 ) -> Result<DiscoveredLivekitServiceUrl, String> {
     // ── 1. Room state scan (existing call.member events) ────────────────
     if !skip_room_state {
+        let mut previous_focus = None;
         for event_type_str in &["org.matrix.msc3401.call.member", "m.call.member"] {
             let event_type: StateEventType = event_type_str.to_string().into();
             if let Ok(events) = room.get_state_events(event_type).await {
@@ -103,13 +104,16 @@ pub(crate) async fn discover_livekit_service_url(
                         .and_then(|foci| foci.get("livekit_service_url"))
                         .and_then(|u| u.as_str())
                     {
-                        return Ok(DiscoveredLivekitServiceUrl {
-                            url: url.to_string(),
-                            from_room_state: true,
-                        });
+                        previous_focus.get_or_insert_with(|| url.to_string());
                     }
                 }
             }
+        }
+        if let Some(url) = previous_focus {
+            return Ok(DiscoveredLivekitServiceUrl {
+                url,
+                from_room_state: true,
+            });
         }
     }
 

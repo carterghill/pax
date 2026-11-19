@@ -61,9 +61,9 @@ export interface ScreenShareWindowOption {
 export interface VoiceCallActions {
   connect: (
     roomId: string,
-    options?: { forceReconnect?: boolean },
-  ) => Promise<void>;
-  disconnect: () => void;
+    options?: { forceReconnect?: boolean; replaceOtherSessions?: boolean },
+  ) => Promise<boolean>;
+  disconnect: (expectedRoomId?: string) => Promise<void>;
   toggleMic: () => void;
   toggleDeafen: () => void;
   toggleNoiseSuppression: () => void;
@@ -285,14 +285,15 @@ export function useVoiceCall() {
 
   const connect = useCallback(async (
     roomId: string,
-    options?: { forceReconnect?: boolean },
+    options?: { forceReconnect?: boolean; replaceOtherSessions?: boolean },
   ) => {
     const forceReconnect = options?.forceReconnect ?? false;
-    if (!forceReconnect && connectedRoomIdRef.current === roomId) return;
-    if (isConnectingRef.current) return;
+    if (isConnectingRef.current) return false;
+    if (!forceReconnect && connectedRoomIdRef.current === roomId) return true;
     // Cancel any in-progress auto-rejoin (e.g. user connects to a different room)
     rejoinRoomRef.current = null;
     isConnectingRef.current = true;
+    connectedRoomIdRef.current = roomId;
     const { inputDeviceId, outputDeviceId } = getStoredAudioDevicePreferences();
     setState((prev) => ({
       ...prev,
@@ -301,11 +302,15 @@ export function useVoiceCall() {
       connectedRoomId: roomId,
     }));
     try {
-      await invoke("voice_connect", { roomId, inputDeviceId, outputDeviceId });
+      await invoke("voice_connect", {
+        roomId, inputDeviceId, outputDeviceId, replaceOtherSessions: options?.replaceOtherSessions,
+      });
       isConnectingRef.current = false;
       // State will be updated via the event listener
+      return true;
     } catch (e) {
       isConnectingRef.current = false;
+      connectedRoomIdRef.current = null;
       setState((prev) => ({
         ...prev,
         connectedRoomId: null,
@@ -318,12 +323,14 @@ export function useVoiceCall() {
         error: String(e),
         participants: [],
       }));
+      return false;
     }
   }, []);
 
-  const disconnect = useCallback(async () => {
+  const disconnect = useCallback(async (expectedRoomId?: string) => {
     const roomId = connectedRoomIdRef.current;
-    if (!roomId) return;
+    if (!roomId || (expectedRoomId && roomId !== expectedRoomId)) return;
+    connectedRoomIdRef.current = null;
     // Cancel any in-progress auto-rejoin
     rejoinRoomRef.current = null;
     playSound("ui/pop_close");
@@ -341,7 +348,7 @@ export function useVoiceCall() {
       participants: [],
       disconnectingFromRoomId: roomId,
     }));
-    invoke("voice_disconnect", { roomId }).catch((e) => {
+    await invoke("voice_disconnect", { roomId }).catch((e) => {
       console.error("Failed to disconnect:", e);
     });
     // Clear disconnecting state after Matrix has had time to sync
