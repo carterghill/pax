@@ -22,7 +22,11 @@ interface LatestTimelineFetch {
 export interface MessageEditPayload {
   roomId: string;
   targetEventId: string;
+  sender: string;
   body: string;
+  formattedBody: string | null;
+  mentionedUserIds: string[] | null;
+  mentionsRoom: boolean;
   imageMediaRequest: unknown | null;
   videoMediaRequest: unknown | null;
   fileMediaRequest: unknown | null;
@@ -295,7 +299,7 @@ export function applyMessageEdit(arr: Message[], payload: MessageEditPayload): M
   if (idx === -1) return arr;
 
   const current = arr[idx];
-  if (current.membershipNotice) return arr;
+  if (current.membershipNotice || current.sender !== payload.sender) return arr;
   const {
     body,
     imageMediaRequest,
@@ -317,8 +321,14 @@ export function applyMessageEdit(arr: Message[], payload: MessageEditPayload): M
     videoWidth: _ovw,
     videoHeight: _ovh,
     unsupportedMatrixMsgtype: _ou,
-    ...rest
+    ...otherFields
   } = current;
+  const rest = {
+    ...otherFields,
+    formattedBody: payload.formattedBody ?? undefined,
+    mentionedUserIds: payload.mentionedUserIds ?? undefined,
+    mentionsRoom: payload.mentionsRoom,
+  };
 
   const unsupportedMatrixMsgtype =
     payload.unsupportedMatrixMsgtype !== undefined

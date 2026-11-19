@@ -1,5 +1,6 @@
-import React, { useMemo, useCallback, isValidElement, cloneElement, memo, type MouseEvent, type ReactElement, type ReactNode } from "react";
-import ReactMarkdown from "react-markdown";
+import React, { useMemo, useCallback, isValidElement, memo, type MouseEvent, type ReactNode } from "react";
+import ReactMarkdown, { defaultUrlTransform } from "react-markdown";
+import type { Element, ElementContent, Root } from "hast";
 import remarkGfm from "remark-gfm";
 import type { Components } from "react-markdown";
 import {
@@ -28,10 +29,17 @@ import {
   hrefLooksLikeDirectImageUrl,
   normalizeImageSrcHref,
 } from "../utils/directImageUrl";
-import { MATRIX_BODY_MXID_RE_GLOBAL } from "../utils/matrixBodyMxid";
+import { MATRIX_BODY_MXID_RE_GLOBAL, mentionDisplayName, mentionPillLabel } from "../utils/matrixBodyMxid";
+import {
+  matrixHtmlToHast,
+  matrixUserHref,
+  matrixUserIdFromHref,
+  mergeFormattedMentions,
+  parseMatrixMessageHtml,
+} from "../utils/matrixMessageHtml";
 
-/** Word joiner–wrapped `(edited)` inside markdown emphasis so we can style it without matching user italics. */
-const EDITED_EMPHASIS = ` *\u2060(edited)\u2060*`;
+/** Word joiners distinguish the edit label from message content. */
+const EDITED_LABEL = "\u2060(edited)\u2060";
 
 interface MessageMarkdownProps {
   children: string;
@@ -39,9 +47,10 @@ interface MessageMarkdownProps {
   edited?: boolean;
   /** When set, https image/GIF links (inline previews) open in the app media viewer instead of the browser. */
   onOpenDirectImage?: (url: string, title: string) => void;
-  /** MXIDs from `m.mentions.user_ids`.  Only MXIDs in this list are pill-ified
-   *  when found in the body text — avoids false positives from substring matching. */
+  formattedBody?: string;
   mentionedUserIds?: string[];
+  mentionsRoom?: boolean;
+  selfUserId?: string;
   /** Resolve a user MXID to a display name for the pill label. */
   resolveMemberLabel?: (userId: string) => string;
   /** Called when a mention pill is clicked (opens the user's profile). */
@@ -52,6 +61,7 @@ function flattenTextNode(value: ReactNode): string {
   if (value == null || typeof value === "boolean") return "";
   if (typeof value === "string" || typeof value === "number") return String(value);
   if (Array.isArray(value)) return value.map(flattenTextNode).join("");
+  if (isValidElement<{ children?: ReactNode }>(value)) return flattenTextNode(value.props.children);
   return "";
 }
 
@@ -75,81 +85,6 @@ function isExternalHref(href: string | undefined): boolean {
   return /^https?:\/\//i.test(href) || href.startsWith("//");
 }
 
-/* ------------------------------------------------------------------ */
-/*  Mention pill processing                                            */
-/* ------------------------------------------------------------------ */
-
-const MXID_RE = MATRIX_BODY_MXID_RE_GLOBAL;
-
-/**
- * Split a plain string at Matrix user ID boundaries, returning a mix of
- * text and pill React elements.
- *
- * Full MXIDs (`@localpart:server.tld`) in body text are always intentional
- * mentions — nobody types them by accident.  The regex is specific enough
- * to avoid false positives on plain words.
- *
- * When `mentionSet` is populated (from `m.mentions.user_ids`), only MXIDs
- * in that set are pill-ified — the tightest possible filter.  When it's
- * empty (older clients, ruma round-trip limitation), all regex-matched
- * MXIDs are pill-ified.  `@room` is always pill-ified.
- */
-function mentionifyString(
-  text: string,
-  mentionSet: Set<string>,
-  resolveLabel: (userId: string) => string,
-  onMentionClick: ((userId: string) => void) | undefined,
-  pillStyle: React.CSSProperties,
-  pillHoverBg: string,
-): ReactNode {
-  MXID_RE.lastIndex = 0;
-  const nodes: ReactNode[] = [];
-  let cursor = 0;
-  let m: RegExpExecArray | null;
-  const hasStructuredMentions = mentionSet.size > 0;
-
-  while ((m = MXID_RE.exec(text)) !== null) {
-    const mxid = m[0];
-    const isRoom = mxid === "@room";
-
-    // When structured m.mentions is available, only pill-ify listed MXIDs.
-    if (!isRoom && hasStructuredMentions && !mentionSet.has(mxid)) continue;
-
-    if (m.index > cursor) nodes.push(text.slice(cursor, m.index));
-
-    let label: string;
-    if (isRoom) {
-      label = "@room";
-    } else {
-      const resolved = resolveLabel(mxid);
-      // resolveLabel returns the raw MXID when the user isn't in the member
-      // map.  In that case, use the localpart as a clean fallback label
-      // (e.g. "@carter" from "@carter:matrix.example.com") rather than
-      // doubling the @ or showing the full server name.
-      label = resolved.startsWith("@")
-        ? resolved.split(":")[0]  // "@carter"
-        : `@${resolved}`;        // "@Carter" from display name "Carter"
-    }
-
-    nodes.push(
-      <MentionPillSpan
-        key={`mp-${m.index}`}
-        label={label}
-        userId={isRoom ? null : mxid}
-        onClick={onMentionClick}
-        style={pillStyle}
-        hoverBg={pillHoverBg}
-      />,
-    );
-    cursor = m.index + mxid.length;
-  }
-
-  if (nodes.length === 0) return text;
-  if (cursor < text.length) nodes.push(text.slice(cursor));
-  return <>{nodes}</>;
-}
-
-/** Minimal pill span — avoids a full component to keep the render tree light. */
 function MentionPillSpan({
   label,
   userId,
@@ -199,110 +134,131 @@ function MentionPillSpan({
   );
 }
 
-/**
- * Walk a React node tree and replace text nodes that contain Matrix user IDs
- * with a mix of text and `MentionPillSpan` elements.  Mirrors the structure
- * of `emojifyReactNode` in emojifyTwemoji — recurse into children of valid
- * elements, leave code blocks untouched, process raw strings.
- */
-function mentionifyReactNode(
-  node: ReactNode,
-  inCode: boolean,
-  mentionSet: Set<string>,
-  resolveLabel: (userId: string) => string,
-  onMentionClick: ((userId: string) => void) | undefined,
-  pillStyle: React.CSSProperties,
-  pillHoverBg: string,
-): ReactNode {
-  if (inCode) return node;
-  if (node == null || typeof node === "boolean") return node;
-  if (typeof node === "string") {
-    return mentionifyString(node, mentionSet, resolveLabel, onMentionClick, pillStyle, pillHoverBg);
-  }
-  if (typeof node === "number") return node;
-  if (Array.isArray(node)) {
-    return node.map((child) =>
-      mentionifyReactNode(child, inCode, mentionSet, resolveLabel, onMentionClick, pillStyle, pillHoverBg),
-    );
-  }
-  if (isValidElement(node)) {
-    const el = node as ReactElement;
-    const tag = typeof el.type === "string" ? el.type : "";
-    const nowInCode = inCode || tag === "code" || tag === "pre";
-    const props = el.props as { children?: ReactNode };
-    if (props.children != null) {
-      const processed = mentionifyReactNode(
-        props.children, nowInCode, mentionSet, resolveLabel, onMentionClick, pillStyle, pillHoverBg,
-      );
-      if (processed !== props.children) {
-        return cloneElement(el, {}, processed);
-      }
-    }
-  }
-  return node;
-}
-
 export default memo(function MessageMarkdown({
   children,
   edited = false,
   onOpenDirectImage,
+  formattedBody,
   mentionedUserIds,
+  mentionsRoom,
+  selfUserId,
   resolveMemberLabel,
   onMentionClick,
 }: MessageMarkdownProps) {
   const { palette, typography, spacing, resolvedColorScheme } = useTheme();
 
-  // Pill styles — computed once and stable across renders.
-  const pillStyle = useMemo<React.CSSProperties>(
-    () => ({
-      display: "inline",
-      padding: "1px 6px",
-      borderRadius: 4,
-      backgroundColor: `${palette.accent}22`,
-      color: palette.accent,
-      fontWeight: 500,
-      cursor: onMentionClick ? "pointer" : "default",
-      userSelect: "text" as const,
-      transition: "background-color 120ms ease",
-    }),
-    [palette.accent, onMentionClick],
-  );
-  const pillHoverBg = useMemo(() => `${palette.accent}38`, [palette.accent]);
+  const mentionSet = useMemo(() => new Set(mentionedUserIds), [mentionedUserIds]);
+  const legacyMentions = mentionedUserIds == null;
+  const renderMention = useCallback((userId: string | null, label: string) => {
+    const isSelf = userId != null && userId === selfUserId && mentionSet.has(userId);
+    return (
+      <MentionPillSpan
+        userId={userId}
+        label={label}
+        onClick={onMentionClick}
+        hoverBg={`${palette.accent}38`}
+        style={{
+          display: "inline",
+          padding: "1px 6px",
+          borderRadius: 4,
+          backgroundColor: `${palette.accent}22`,
+          boxShadow: isSelf ? `inset 0 0 0 1px ${palette.accent}80` : undefined,
+          color: palette.accent,
+          fontWeight: 500,
+          cursor: userId && onMentionClick ? "pointer" : "default",
+          userSelect: "text",
+          transition: "background-color 120ms ease",
+        }}
+      />
+    );
+  }, [palette.accent, selfUserId, mentionSet, onMentionClick]);
 
-  // Unified child-processing function: emoji first, then mention pills.
-  const mentionSet = useMemo(
-    () => new Set(mentionedUserIds ?? []),
-    [mentionedUserIds],
-  );
+  const messagePlugins = useMemo(() => [() => (tree: Root) => {
+    const formattedFallback = formattedBody && mentionSet.size > 0
+      ? mergeFormattedMentions(tree, {
+          type: "root",
+          children: matrixHtmlToHast(parseMatrixMessageHtml(formattedBody)),
+        }, mentionSet, edited ? EDITED_LABEL : undefined)
+      : undefined;
+    if (formattedFallback) {
+      tree.children = formattedFallback;
+      if (edited) {
+        const label: Element = {
+          type: "element",
+          tagName: "em",
+          properties: {},
+          children: [{ type: "text", value: EDITED_LABEL }],
+        };
+        const last = tree.children[tree.children.length - 1];
+        if (last?.type === "element" && last.tagName === "p") {
+          last.children.push({ type: "text", value: " " }, label);
+        } else {
+          tree.children.push({ type: "text", value: " " }, label);
+        }
+      }
+    }
+    if (!mentionsRoom && !legacyMentions && mentionSet.size === 0) return;
 
-  const processNode = useCallback(
-    (node: ReactNode): ReactNode => {
-      const emojified = emojifyMarkdownChildren(node);
-      if (!resolveMemberLabel) return emojified;
-      return mentionifyReactNode(
-        emojified, false, mentionSet, resolveMemberLabel, onMentionClick, pillStyle, pillHoverBg,
-      );
-    },
-    [mentionSet, resolveMemberLabel, onMentionClick, pillStyle, pillHoverBg],
-  );
+    function markMentions(parent: Root | Element) {
+      let index = 0;
+      while (index < parent.children.length) {
+        const child = parent.children[index];
+        if (child.type === "element" && !["a", "code", "pre"].includes(child.tagName)) {
+          markMentions(child);
+        }
+        if (child.type !== "text") {
+          index++;
+          continue;
+        }
+
+        const parts: ElementContent[] = [];
+        let offset = 0;
+        for (const match of child.value.matchAll(MATRIX_BODY_MXID_RE_GLOBAL)) {
+          const id = match[0];
+          if (id === "@room" ? !mentionsRoom : !legacyMentions && !mentionSet.has(id)) continue;
+          if (match.index > offset) parts.push({ type: "text", value: child.value.slice(offset, match.index) });
+          parts.push({
+            type: "element",
+            tagName: "span",
+            properties: { dataMentionId: id },
+            children: [],
+          });
+          offset = match.index + id.length;
+        }
+        if (parts.length === 0) {
+          index++;
+          continue;
+        }
+        if (offset < child.value.length) parts.push({ type: "text", value: child.value.slice(offset) });
+        parent.children.splice(index, 1, ...parts);
+        index += parts.length;
+      }
+    }
+    markMentions(tree);
+  }], [edited, formattedBody, legacyMentions, mentionSet, mentionsRoom]);
 
   const markdownSource = useMemo(() => {
     if (!edited) return children;
-    return `${children.trimEnd()}${EDITED_EMPHASIS}`;
+    return `${children.trimEnd()} *${EDITED_LABEL}*`;
   }, [children, edited]);
 
   const emojiOnlyBody = useMemo(() => isOnlyEmojisAndWhitespace(children), [children]);
 
   const components = useMemo<Components>(
     () => {
-      // Local E wrapper: runs emoji + mention pill processing on children.
-      // Defined here so it closes over `processNode` without needing a
-      // separate component identity that would invalidate React's reconciler.
       const E = ({ children: c }: { children: ReactNode }) => (
-        <>{processNode(c)}</>
+        <>{emojifyMarkdownChildren(c)}</>
       );
 
       return {
+      span: ({ node, children: c }) => {
+        const id = node?.properties.dataMentionId;
+        if (id === "@room") return renderMention(null, id);
+        if (typeof id === "string" && (legacyMentions || mentionSet.has(id))) {
+          return renderMention(id, mentionPillLabel(id, mentionDisplayName(id, resolveMemberLabel?.(id))));
+        }
+        return <span><E>{c}</E></span>;
+      },
       p: ({ children: c }) => (
         <p
           style={{
@@ -349,6 +305,14 @@ export default memo(function MessageMarkdown({
         </del>
       ),
       a: ({ href, children: c }) => {
+        const userId = href ? matrixUserIdFromHref(href) : null;
+        if (userId && mentionSet.has(userId)) {
+          const displayName = mentionDisplayName(userId, resolveMemberLabel?.(userId), flattenTextNode(c));
+          const label = mentionPillLabel(userId, displayName);
+          return onMentionClick
+            ? renderMention(userId, label)
+            : <a href={matrixUserHref(userId)}>{renderMention(userId, label)}</a>;
+        }
         const src = href ? normalizeImageSrcHref(href) : null;
         if (src && href && hrefLooksLikeDirectImageUrl(href)) {
           const alt = flattenTextNode(c).trim() || "Image";
@@ -406,7 +370,7 @@ export default memo(function MessageMarkdown({
               wordBreak: "break-all",
             }}
           >
-            <E>{c}</E>
+            {emojifyMarkdownChildren(c)}
             <LinkIcon
               size={Math.round(typography.fontSizeSmall)}
               strokeWidth={2}
@@ -834,7 +798,7 @@ export default memo(function MessageMarkdown({
       },
     };
     },
-    [palette, typography, spacing, resolvedColorScheme, edited, onOpenDirectImage, processNode],
+    [palette, typography, spacing, resolvedColorScheme, edited, onOpenDirectImage, onMentionClick, legacyMentions, mentionSet, renderMention, resolveMemberLabel],
   );
 
   // Extract embeddable URLs from the raw text and render them below the markdown.
@@ -867,7 +831,12 @@ export default memo(function MessageMarkdown({
         ...(emojiOnlyBody ? { zoom: EMOJI_ONLY_DISPLAY_SCALE } : {}),
       }}
     >
-      <ReactMarkdown remarkPlugins={[remarkGfm]} components={components}>
+      <ReactMarkdown
+        remarkPlugins={[remarkGfm]}
+        rehypePlugins={messagePlugins}
+        urlTransform={(url) => matrixUserIdFromHref(url) ? url : defaultUrlTransform(url)}
+        components={components}
+      >
         {markdownSource}
       </ReactMarkdown>
       {embeds.map(({ href, embed }) => (

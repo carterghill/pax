@@ -7,6 +7,9 @@ import type {
   RoomRedactionPolicy,
   RoomSendPermission,
 } from "../../types/matrix";
+import type { ComposerMessageContent } from "../../utils/composerEditorDom";
+
+type MessageFormatting = Partial<Pick<ComposerMessageContent, "formattedBody" | "mentions">>;
 
 export interface GetMessagesRequest {
   roomId: string;
@@ -14,13 +17,13 @@ export interface GetMessagesRequest {
   limit: number;
 }
 
-export interface SendMessageRequest {
+export interface SendMessageRequest extends MessageFormatting {
   roomId: string;
   body: string;
   replyToEventId?: string | null;
 }
 
-export interface SendFirstDirectMessageRequest {
+export interface SendFirstDirectMessageRequest extends MessageFormatting {
   peerUserId: string;
   body: string;
 }
@@ -35,8 +38,9 @@ export interface MessageEventRequest {
   eventId: string;
 }
 
-export interface EditMessageRequest extends MessageEventRequest {
+export interface EditMessageRequest extends MessageEventRequest, MessageFormatting {
   body: string;
+  previousMentions?: ComposerMessageContent["mentions"];
 }
 
 export interface SendReactionRequest {
@@ -63,7 +67,7 @@ export interface UploadRoomFileRequest {
   mimeType: string;
 }
 
-export interface SendFileMessageRequest {
+export interface SendFileMessageRequest extends MessageFormatting {
   roomId: string;
   contentUri: string;
   fileName: string;
@@ -110,14 +114,13 @@ export function sendRssThreadReply(request: {
   roomId: string;
   thread: MessageThreadTarget;
   body: string;
-}): Promise<string> {
+} & MessageFormatting): Promise<string> {
   return invoke("send_rss_thread_reply", invokeArgs(request));
 }
 
 export function sendMessage(request: SendMessageRequest): Promise<void> {
   return invoke("send_message", {
-    roomId: request.roomId,
-    body: request.body,
+    ...request,
     replyToEventId: request.replyToEventId ?? null,
   });
 }
@@ -227,6 +230,8 @@ export function sendFileMessage(request: SendFileMessageRequest): Promise<string
     mimeType: request.mimeType,
     fileSize: request.fileSize ?? null,
     caption: request.caption ?? null,
+    formattedBody: request.formattedBody ?? null,
+    mentions: request.mentions ?? null,
     blurhash: request.blurhash ?? null,
     imageWidth: request.imageWidth ?? null,
     imageHeight: request.imageHeight ?? null,

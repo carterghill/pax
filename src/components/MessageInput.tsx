@@ -13,7 +13,7 @@ import { paletteComposerOuterBorderStyle } from "../theme/paletteBorder";
 import { EMOJI_ONLY_DISPLAY_SCALE, isOnlyEmojisAndWhitespace } from "../utils/emojifyTwemoji";
 import { hrefLooksLikeDirectImageUrl } from "../utils/directImageUrl";
 import {
-  fillComposerEditorFromMarkdown,
+  fillComposerEditorForEdit,
   getEditorPlainText,
   insertPlainTextAtSelection,
   insertImageAtSelection,
@@ -205,7 +205,8 @@ export default function MessageInput({
 
   const {
     mentionMenuProps,
-    getComposerMentionVisibleLabel,
+    resolveMemberLabel,
+    getComposerMentionDisplayName,
     makeComposerMentionSpan,
     handleComposerInputMentions,
     handleMentionKeyDown,
@@ -272,8 +273,8 @@ export default function MessageInput({
     if (!editingMessage) return;
     const el = editorRef.current;
     if (!el) return;
-    fillComposerEditorFromMarkdown(el, editingMessage.body, composerImgStyle, {
-      getPillLabel: getComposerMentionVisibleLabel,
+    fillComposerEditorForEdit(el, editingMessage, composerImgStyle, {
+      getDisplayName: getComposerMentionDisplayName,
       makeSpan: makeComposerMentionSpan,
     });
     const text = getEditorPlainText(el);
@@ -291,10 +292,9 @@ export default function MessageInput({
       }
     });
   }, [
-    editingMessage?.eventId,
-    editingMessage?.body,
+    editingMessage,
     composerImgStyle,
-    getComposerMentionVisibleLabel,
+    getComposerMentionDisplayName,
     makeComposerMentionSpan,
     syncHeight,
   ]);
@@ -313,6 +313,7 @@ export default function MessageInput({
     setPendingFile,
     fileSendBridge,
     selfUserId,
+    resolveMemberLabel,
     selfDisplayName,
     selfAvatarUrl,
     draftDmPeerUserId,

@@ -945,6 +945,7 @@ const MessageList = forwardRef<MessageListHandle, MessageListProps>(function Mes
             {crossedUpgrade && upgradeDivider}
             <MessageRow
               msg={msg}
+              selfUserId={userId}
               rssArticle={article}
               rssReplyCount={article ? rssReplyCounts?.get(msg.eventId) ?? rssThreadReplyCount(msg, rssReplies?.get(msg.eventId) ?? []) : 0}
               rssThreadOpen={msg.eventId === activeRssThreadId}

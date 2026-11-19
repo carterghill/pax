@@ -1,7 +1,7 @@
 use matrix_sdk::media::{MediaFormat, MediaRequestParameters, MediaThumbnailSettings};
 use matrix_sdk::ruma::events::relation::{BundledThread, Thread};
 use matrix_sdk::ruma::events::room::member::{MembershipChange, OriginalSyncRoomMemberEvent};
-use matrix_sdk::ruma::events::room::message::Relation;
+use matrix_sdk::ruma::events::room::message::{MessageFormat, Relation};
 use matrix_sdk::ruma::events::room::message::RoomMessageEventContent;
 use matrix_sdk::ruma::events::room::message::RoomMessageEventContentWithoutRelation;
 use matrix_sdk::ruma::{OwnedEventId, UInt};
@@ -68,7 +68,9 @@ pub(super) fn membership_notice(event: &OriginalSyncRoomMemberEvent) -> Option<M
         file_display_name: None,
         unsupported_matrix_msgtype: None,
         reactions: None,
-        mentioned_user_ids: Vec::new(),
+        formatted_body: None,
+        mentioned_user_ids: None,
+        mentions_room: false,
     })
 }
 
@@ -143,9 +145,12 @@ fn is_reply_plain_strip_context(
 }
 
 /// Body text for the timeline plus optional image / video / file download descriptors (`m.room.message`).
-#[derive(Clone)]
+#[derive(Clone, Default)]
 pub(super) struct MessageDisplayExtract {
     pub(super) body: String,
+    pub(super) formatted_body: Option<String>,
+    pub(super) mentioned_user_ids: Option<Vec<String>>,
+    pub(super) mentions_room: bool,
     pub(super) image_media_request: Option<serde_json::Value>,
     pub(super) video_media_request: Option<serde_json::Value>,
     pub(super) file_media_request: Option<serde_json::Value>,
@@ -238,30 +243,6 @@ fn body_for_unhandled_room_message(
     )
 }
 
-/// Extract the list of mentioned user MXIDs from a message's `m.mentions.user_ids`.
-///
-/// Uses the same `serde_json::to_value` round-trip as the notification payload's
-/// `mentions_me` / `room_ping` extraction.  Returns an empty vec when the event
-/// has no structured mentions (old client, plain text, etc.).
-pub(super) fn extract_mentioned_user_ids(
-    content: &matrix_sdk::ruma::events::room::message::RoomMessageEventContent,
-) -> Vec<String> {
-    let Ok(val) = serde_json::to_value(content) else {
-        return Vec::new();
-    };
-    let Some(user_ids) = val
-        .get("m.mentions")
-        .and_then(|m| m.get("user_ids"))
-        .and_then(|v| v.as_array())
-    else {
-        return Vec::new();
-    };
-    user_ids
-        .iter()
-        .filter_map(|v| v.as_str().map(|s| s.to_owned()))
-        .collect()
-}
-
 pub(super) fn extract_message_display(
     content: &matrix_sdk::ruma::events::room::message::RoomMessageEventContent,
 ) -> MessageDisplayExtract {
@@ -274,7 +255,7 @@ pub(super) fn extract_message_display(
             s.to_string()
         }
     };
-    let out = match &content.msgtype {
+    let mut out = match &content.msgtype {
         MessageType::Image(img) => {
             let body = apply_reply_strip(&img.caption().map(|s| s.to_string()).unwrap_or_default());
             // Thumbnails are often a single static frame for GIFs (and sometimes transcoded to PNG/JPEG).
@@ -302,16 +283,10 @@ pub(super) fn extract_message_display(
             MessageDisplayExtract {
                 body,
                 image_media_request: json,
-                video_media_request: None,
-                file_media_request: None,
-                file_mime: None,
-                file_display_name: None,
                 image_width,
                 image_height,
                 image_blurhash,
-                video_width: None,
-                video_height: None,
-                unsupported_matrix_msgtype: None,
+                ..Default::default()
             }
         }
         MessageType::Video(vid) => {
@@ -328,60 +303,23 @@ pub(super) fn extract_message_display(
                 .unwrap_or((None, None));
             MessageDisplayExtract {
                 body,
-                image_media_request: None,
                 video_media_request: json,
-                file_media_request: None,
-                file_mime: None,
-                file_display_name: None,
-                image_width: None,
-                image_height: None,
-                image_blurhash: None,
                 video_width,
                 video_height,
-                unsupported_matrix_msgtype: None,
+                ..Default::default()
             }
         }
         MessageType::Text(text) => MessageDisplayExtract {
             body: apply_reply_strip(&text.body),
-            image_media_request: None,
-            video_media_request: None,
-            file_media_request: None,
-            file_mime: None,
-            file_display_name: None,
-            image_width: None,
-            image_height: None,
-            image_blurhash: None,
-            video_width: None,
-            video_height: None,
-            unsupported_matrix_msgtype: None,
+            ..Default::default()
         },
         MessageType::Notice(notice) => MessageDisplayExtract {
             body: apply_reply_strip(&notice.body),
-            image_media_request: None,
-            video_media_request: None,
-            file_media_request: None,
-            file_mime: None,
-            file_display_name: None,
-            image_width: None,
-            image_height: None,
-            image_blurhash: None,
-            video_width: None,
-            video_height: None,
-            unsupported_matrix_msgtype: None,
+            ..Default::default()
         },
         MessageType::Emote(emote) => MessageDisplayExtract {
             body: format!("* {}", apply_reply_strip(&emote.body)),
-            image_media_request: None,
-            video_media_request: None,
-            file_media_request: None,
-            file_mime: None,
-            file_display_name: None,
-            image_width: None,
-            image_height: None,
-            image_blurhash: None,
-            video_width: None,
-            video_height: None,
-            unsupported_matrix_msgtype: None,
+            ..Default::default()
         },
         MessageType::File(f) => {
             let display_name = f
@@ -407,32 +345,15 @@ pub(super) fn extract_message_display(
             let json = serde_json::to_value(&req).ok();
             MessageDisplayExtract {
                 body,
-                image_media_request: None,
-                video_media_request: None,
                 file_media_request: json,
                 file_mime: mime,
                 file_display_name: Some(display_name),
-                image_width: None,
-                image_height: None,
-                image_blurhash: None,
-                video_width: None,
-                video_height: None,
-                unsupported_matrix_msgtype: None,
+                ..Default::default()
             }
         }
         MessageType::Audio(_) => MessageDisplayExtract {
             body: "[Audio]".to_string(),
-            image_media_request: None,
-            video_media_request: None,
-            file_media_request: None,
-            file_mime: None,
-            file_display_name: None,
-            image_width: None,
-            image_height: None,
-            image_blurhash: None,
-            video_width: None,
-            video_height: None,
-            unsupported_matrix_msgtype: None,
+            ..Default::default()
         },
         _ => {
             let stripped = apply_reply_strip(content.body());
@@ -440,20 +361,30 @@ pub(super) fn extract_message_display(
                 body_for_unhandled_room_message(content.msgtype(), stripped);
             MessageDisplayExtract {
                 body,
-                image_media_request: None,
-                video_media_request: None,
-                file_media_request: None,
-                file_mime: None,
-                file_display_name: None,
-                image_width: None,
-                image_height: None,
-                image_blurhash: None,
-                video_width: None,
-                video_height: None,
                 unsupported_matrix_msgtype,
+                ..Default::default()
             }
         }
     };
+    let formatted = match &content.msgtype {
+        MessageType::Text(text) => text.formatted.as_ref(),
+        MessageType::Notice(notice) => notice.formatted.as_ref(),
+        MessageType::Emote(emote) => emote.formatted.as_ref(),
+        MessageType::Image(image) => image.formatted_caption(),
+        MessageType::Video(video) => video.formatted_caption(),
+        MessageType::File(file) => file.formatted_caption(),
+        _ => None,
+    };
+    out.formatted_body = formatted
+        .filter(|formatted| formatted.format == MessageFormat::Html)
+        .map(|formatted| match &content.msgtype {
+            MessageType::Emote(_) => format!("* {}", formatted.body),
+            _ => formatted.body.clone(),
+        });
+    if let Some(mentions) = &content.mentions {
+        out.mentioned_user_ids = Some(mentions.user_ids.iter().map(ToString::to_string).collect());
+        out.mentions_room = mentions.room;
+    }
     out
 }
 

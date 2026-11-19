@@ -16,7 +16,7 @@ function shouldShowCaptionBelowMedia(msg: Message): boolean {
   const body = msg.body.trim();
   if (!body) return false;
   const fname = (msg.fileDisplayName ?? "").trim();
-  if (fname && body === fname) {
+  if (fname && body === fname && !msg.mentionedUserIds?.length && !msg.mentionsRoom) {
     const hasAttachmentUi =
       msg.localImagePreviewObjectUrl != null ||
       msg.imageMediaRequest != null ||
@@ -30,6 +30,7 @@ function shouldShowCaptionBelowMedia(msg: Message): boolean {
 
 interface MessageContentProps {
   msg: Message;
+  selfUserId: string;
   spacingUnit: number;
   palette: ReturnType<typeof useTheme>["palette"];
   typography: ReturnType<typeof useTheme>["typography"];
@@ -41,6 +42,7 @@ interface MessageContentProps {
 
 export default function MessageContent({
   msg,
+  selfUserId,
   spacingUnit,
   palette,
   typography,
@@ -253,6 +255,9 @@ export default function MessageContent({
           edited={Boolean(msg.edited)}
           onOpenDirectImage={onOpenDirectImage}
           mentionedUserIds={msg.mentionedUserIds}
+          mentionsRoom={msg.mentionsRoom}
+          formattedBody={msg.formattedBody}
+          selfUserId={selfUserId}
           resolveMemberLabel={resolveMemberLabel}
           onMentionClick={onOpenSenderProfile}
         >

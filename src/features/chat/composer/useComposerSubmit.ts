@@ -20,18 +20,15 @@ import {
 import {
   getActiveFormats,
   serializeComposerEditor,
+  type ComposerMessageContent,
 } from "../../../utils/composerEditorDom";
 import { formatInvokeErr } from "../formatInvokeErr";
 
-export interface EditingMessageRef {
-  eventId: string;
-  body: string;
-}
+export type EditingMessageRef = Pick<Message,
+  "eventId" | "body" | "formattedBody" | "mentionedUserIds" | "mentionsRoom" | "edited"
+>;
 
-export interface SentThreadReply {
-  eventId: string;
-  body: string;
-}
+export type SentThreadReply = Pick<Message, "eventId" | "body" | "formattedBody" | "mentionedUserIds">;
 
 export type MessageFileSendBridge = {
   addOptimistic: (msg: Message) => void;
@@ -53,6 +50,7 @@ type UseComposerSubmitArgs = {
   setPendingFile: (file: PendingAttachment | null) => void;
   fileSendBridge: MessageFileSendBridge | null;
   selfUserId: string;
+  resolveMemberLabel: (userId: string) => string;
   selfDisplayName: string | null;
   selfAvatarUrl: string | null;
   draftDmPeerUserId: string | null;
@@ -129,6 +127,7 @@ export function useComposerSubmit({
   setPendingFile,
   fileSendBridge,
   selfUserId,
+  resolveMemberLabel,
   selfDisplayName,
   selfAvatarUrl,
   draftDmPeerUserId,
@@ -152,7 +151,7 @@ export function useComposerSubmit({
     async (
       localEventId: string,
       snapshot: PendingAttachment,
-      caption: string,
+      caption: ComposerMessageContent,
       bridge: MessageFileSendBridge,
       prepared?: AttachmentPreparation["result"],
     ) => {
@@ -190,14 +189,15 @@ export function useComposerSubmit({
           localFileUpload: { phase: "sending", progress: 0.92 },
         });
 
-        const cap = caption.trim();
         const serverEventId = await sendFileMessage({
           roomId,
           contentUri,
           fileName: snapshot.name,
           mimeType: snapshot.mimeType,
           fileSize: byteSize ?? null,
-          caption: cap.length > 0 ? cap : null,
+          caption: caption.body || null,
+          formattedBody: caption.formattedBody,
+          mentions: caption.mentions,
           blurhash: snapshot.blurhash,
           imageWidth: snapshot.imageWidth,
           imageHeight: snapshot.imageHeight,
@@ -224,9 +224,8 @@ export function useComposerSubmit({
     if (interactionLocked) return;
     const el = editorRef.current;
     if (!el) return;
-    const markdown = serializeComposerEditor(el);
-    const trimmed = markdown.trim();
-    if ((!trimmed && !pendingFile) || sending) return;
+    const content = serializeComposerEditor(el, resolveMemberLabel);
+    if ((!content.body && !pendingFile) || sending) return;
 
     setPickerOpen(false);
     sendTyping(false);
@@ -236,13 +235,13 @@ export function useComposerSubmit({
     onSendError?.(null);
     try {
       if (draftDmPeerUserId) {
-        if (pendingFile || !trimmed || editingMessage) {
+        if (pendingFile || !content.body || editingMessage) {
           setSending(false);
           return;
         }
         const rid = await sendFirstDirectMessage({
           peerUserId: draftDmPeerUserId,
-          body: trimmed,
+          ...content,
         });
         const prevFormats = clearEditorAfterSend(el, setPlainText, setHasComposerMedia);
         await onDraftDmFirstMessage?.(rid);
@@ -263,9 +262,6 @@ export function useComposerSubmit({
           return;
         }
         const localEventId = `local:${crypto.randomUUID()}`;
-        const cap = trimmed;
-        const body = cap.trim().length > 0 ? cap.trim() : "";
-
         const optimPhase =
           snap.phase === "ready"
             ? "sending"
@@ -279,7 +275,9 @@ export function useComposerSubmit({
           eventId: localEventId,
           sender: selfUserId,
           senderName: selfDisplayName?.trim() || selfUserId,
-          body,
+          body: content.body,
+          formattedBody: content.formattedBody,
+          mentionedUserIds: content.mentions.userIds,
           timestamp: Date.now(),
           avatarUrl: selfAvatarUrl ?? null,
           fileDisplayName: snap.name,
@@ -301,7 +299,7 @@ export function useComposerSubmit({
         restoreEditorAfterSend(el, prevFormats, refreshFormats, syncHeight);
 
         const prepared = preparation?.uploadId === snap.uploadId ? preparation.result : undefined;
-        void runFileSendPipeline(localEventId, snap, cap, fileSendBridge, prepared).finally(() => {
+        void runFileSendPipeline(localEventId, snap, content, fileSendBridge, prepared).finally(() => {
           onMessageSent();
         });
 
@@ -310,21 +308,30 @@ export function useComposerSubmit({
       }
 
       let sentReply: SentThreadReply | undefined;
-      if (trimmed) {
+      if (content.body) {
         if (editingMessage) {
           await editMessage({
             roomId,
             eventId: editingMessage.eventId,
-            body: trimmed,
+            ...content,
+            previousMentions: editingMessage.edited ? {
+              userIds: editingMessage.mentionedUserIds ?? [],
+              room: Boolean(editingMessage.mentionsRoom),
+            } : undefined,
           });
           onCancelEdit?.();
         } else if (thread) {
-          const eventId = await sendRssThreadReply({ roomId, thread, body: trimmed });
-          sentReply = { eventId, body: trimmed };
+          const eventId = await sendRssThreadReply({ roomId, thread, ...content });
+          sentReply = {
+            eventId,
+            body: content.body,
+            formattedBody: content.formattedBody,
+            mentionedUserIds: content.mentions.userIds,
+          };
         } else {
           await sendMessage({
             roomId,
-            body: trimmed,
+            ...content,
             replyToEventId: replyDraft?.eventId ?? null,
           });
           onCancelReply?.();
@@ -355,6 +362,7 @@ export function useComposerSubmit({
     pendingFileRef,
     preparationRef,
     refreshFormats,
+    resolveMemberLabel,
     replyDraft?.eventId,
     roomId,
     runFileSendPipeline,

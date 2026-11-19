@@ -158,12 +158,12 @@ pub struct MessageInfo {
     /// Aggregated `m.reaction` annotations for this event (Matrix annotation key → senders).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub reactions: Option<Vec<MessageReactionSummary>>,
-    /// MXIDs from `m.mentions.user_ids` on this event.  Used by the frontend
-    /// to render mention pills: only MXIDs that appear in this list AND in the
-    /// body text are pill-ified, avoiding false positives from body-substring
-    /// matching alone.  Empty vec when the event has no structured mentions.
-    #[serde(skip_serializing_if = "Vec::is_empty")]
-    pub mentioned_user_ids: Vec<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub formatted_body: Option<String>,
+    /// MXIDs from `m.mentions.user_ids`. Absent for messages without mention metadata.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub mentioned_user_ids: Option<Vec<String>>,
+    pub mentions_room: bool,
 }
 
 /// Live sync: add or remove one reaction annotation on `target_event_id`.
@@ -296,7 +296,11 @@ pub struct RoomMembershipNoticePayload {
 pub struct MessageEditPayload {
     pub room_id: String,
     pub target_event_id: String,
+    pub sender: String,
     pub body: String,
+    pub formatted_body: Option<String>,
+    pub mentioned_user_ids: Option<Vec<String>>,
+    pub mentions_room: bool,
     /// `null` when the edited event is no longer an image; otherwise the same shape as `MessageInfo.image_media_request`.
     pub image_media_request: serde_json::Value,
     /// `null` when the edited event is no longer a video; otherwise the same shape as `MessageInfo.video_media_request`.

@@ -11,7 +11,7 @@ use tokio::time::MissedTickBehavior;
 use tokio_util::io::ReaderStream;
 
 use matrix_sdk::media::{MediaFormat, MediaRequestParameters};
-use matrix_sdk::ruma::events::room::message::RoomMessageEventContent;
+use matrix_sdk::ruma::events::room::message::{FormattedBody, RoomMessageEventContent};
 use matrix_sdk::ruma::events::room::MediaSource;
 use matrix_sdk::ruma::UInt;
 use matrix_sdk::Client;
@@ -26,6 +26,7 @@ use super::media_protocol::{
     MATRIX_IMAGE_FULL_FETCH_TIMEOUT, MATRIX_IMAGE_THUMB_FETCH_TIMEOUT,
 };
 use super::message_display::{mime_to_file_ext, MessageThreadTarget};
+use super::messages::ComposerMentions;
 use super::{fmt_error_chain, get_authed_client, get_client, resolve_room, sniff_media_mime};
 
 /// Acquire a file for a mounted media consumer. The lease protects its path
@@ -139,6 +140,7 @@ fn build_file_room_message(
     content_type: mime::Mime,
     file_size: Option<UInt>,
     caption: Option<String>,
+    formatted_body: Option<String>,
     blurhash: Option<String>,
     image_width: Option<u32>,
     image_height: Option<u32>,
@@ -153,6 +155,7 @@ fn build_file_room_message(
         .map(|c| c.to_string())
         .unwrap_or_else(|| file_name.clone());
     let has_caption = caption.as_deref().map_or(false, |c| !c.is_empty());
+    let formatted = formatted_body.map(FormattedBody::html).filter(|_| has_caption);
 
     let content = if content_type.type_() == mime::IMAGE {
         use matrix_sdk::ruma::events::room::message::ImageMessageEventContent;
@@ -169,6 +172,7 @@ fn build_file_room_message(
         img.info = Some(Box::new(info));
         if has_caption {
             img.filename = Some(file_name);
+            img.formatted = formatted;
         }
         RoomMessageEventContent::new(MessageType::Image(img))
     } else if content_type.type_() == mime::VIDEO {
@@ -181,6 +185,7 @@ fn build_file_room_message(
         vid.info = Some(info);
         if has_caption {
             vid.filename = Some(file_name);
+            vid.formatted = formatted;
         }
         RoomMessageEventContent::new(MessageType::Video(vid))
     } else if content_type.type_() == mime::AUDIO {
@@ -193,6 +198,7 @@ fn build_file_room_message(
         aud.info = Some(info);
         if has_caption {
             aud.filename = Some(file_name);
+            aud.formatted = formatted;
         }
         RoomMessageEventContent::new(MessageType::Audio(aud))
     } else {
@@ -205,6 +211,7 @@ fn build_file_room_message(
         file_msg.info = Some(info);
         if has_caption {
             file_msg.filename = Some(file_name);
+            file_msg.formatted = formatted;
         }
         RoomMessageEventContent::new(MessageType::File(file_msg))
     };
@@ -228,6 +235,7 @@ fn rss_thread_attachment_keeps_its_media_and_thread_relationship() {
         mime::IMAGE_PNG,
         Some(UInt::from(128u32)),
         Some("Attached photo".into()),
+        None,
         None,
         Some(32),
         Some(24),
@@ -557,6 +565,8 @@ async fn send_file_message_impl(
     mime_type: &str,
     file_size_bytes: Option<u64>,
     caption: Option<&str>,
+    formatted_body: Option<String>,
+    mentions: Option<ComposerMentions>,
     blurhash: Option<&str>,
     image_width: Option<u32>,
     image_height: Option<u32>,
@@ -577,11 +587,13 @@ async fn send_file_message_impl(
         content_type,
         file_size,
         caption.map(|s| s.to_string()),
+        formatted_body,
         blurhash.map(|s| s.to_string()),
         image_width,
         image_height,
         thread,
-    );
+    )
+    .add_mentions(mentions.unwrap_or_default().into_matrix(&room).await);
 
     let response = room
         .send(content)
@@ -615,6 +627,8 @@ pub async fn send_file_message(
     mime_type: String,
     file_size: Option<u64>,
     caption: Option<String>,
+    formatted_body: Option<String>,
+    mentions: Option<ComposerMentions>,
     blurhash: Option<String>,
     image_width: Option<u32>,
     image_height: Option<u32>,
@@ -628,6 +642,8 @@ pub async fn send_file_message(
         &mime_type,
         file_size,
         caption.as_deref(),
+        formatted_body,
+        mentions,
         blurhash.as_deref(),
         image_width,
         image_height,
@@ -679,6 +695,8 @@ pub async fn upload_and_send_file(
         &mime_type,
         Some(byte_size),
         caption.as_deref(),
+        None,
+        None,
         None,
         None,
         None,

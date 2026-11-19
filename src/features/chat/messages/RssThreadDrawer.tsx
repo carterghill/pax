@@ -276,7 +276,7 @@ export default function RssThreadDrawer({
           redactionPolicy={redactionPolicy}
           onRequestEdit={(message) => {
             setSendError(null);
-            setEditingMessage({ eventId: message.eventId, body: message.body });
+            setEditingMessage(message);
           }}
           onRequestReply={() => {}}
           onReplyPreviewClick={() => {}}

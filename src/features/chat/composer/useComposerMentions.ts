@@ -12,10 +12,12 @@ import type { ThemePalette, ThemeTypography } from "../../../theme/types";
 import { useRoomMembers } from "../../../hooks/useRoomMembers";
 import {
   createComposerMentionSpan,
+  refreshComposerMentionLabels,
   replaceBareMxidsWithPillsInComposer,
   type ComposerMentionPillStyle,
 } from "../../../utils/composerEditorDom";
 import { localpartFromUserId } from "../../../utils/matrix";
+import { mentionDisplayName } from "../../../utils/matrixBodyMxid";
 
 type UseComposerMentionsArgs = {
   roomId: string;
@@ -36,15 +38,19 @@ export function useComposerMentions({
 }: UseComposerMentionsArgs) {
   const { members: roomMembers, resolveMemberLabel } = useRoomMembers(roomId);
 
-  const getComposerMentionVisibleLabel = useCallback(
-    (mxid: string) => {
-      if (mxid === "@room") return "@room";
-      const resolved = resolveMemberLabel(mxid);
-      if (resolved.startsWith("@")) return resolved.split(":")[0];
-      return `@${resolved}`;
-    },
-    [resolveMemberLabel],
+  // Keep edit loading stable when the room's member names are refreshed.
+  const resolveMemberLabelRef = useRef(resolveMemberLabel);
+  resolveMemberLabelRef.current = resolveMemberLabel;
+  const getComposerMentionDisplayName = useCallback(
+    (mxid: string, linkedName?: string | null) =>
+      mentionDisplayName(mxid, resolveMemberLabelRef.current(mxid), linkedName),
+    [],
   );
+
+  useEffect(() => {
+    const el = editorRef.current;
+    if (el && refreshComposerMentionLabels(el, resolveMemberLabel)) refreshComposerDomState();
+  }, [editorRef, resolveMemberLabel, refreshComposerDomState]);
 
   const composerMentionPillStyle = useMemo<ComposerMentionPillStyle>(
     () => ({
@@ -56,7 +62,7 @@ export function useComposerMentions({
   );
 
   const makeComposerMentionSpan = useCallback(
-    (mxid: string, label: string) => createComposerMentionSpan(mxid, label, composerMentionPillStyle),
+    (mxid: string, displayName: string) => createComposerMentionSpan(mxid, displayName, composerMentionPillStyle),
     [composerMentionPillStyle],
   );
 
@@ -186,7 +192,7 @@ export function useComposerMentions({
         replaceRange.deleteContents();
         const span = makeComposerMentionSpan(
           member.userId,
-          getComposerMentionVisibleLabel(member.userId),
+          getComposerMentionDisplayName(member.userId, member.displayName),
         );
         replaceRange.insertNode(span);
         const space = document.createTextNode(" ");
@@ -207,7 +213,7 @@ export function useComposerMentions({
     },
     [
       editorRef,
-      getComposerMentionVisibleLabel,
+      getComposerMentionDisplayName,
       makeComposerMentionSpan,
       refreshComposerDomState,
     ],
@@ -219,7 +225,7 @@ export function useComposerMentions({
 
     replaceBareMxidsWithPillsInComposer(
       el,
-      getComposerMentionVisibleLabel,
+      getComposerMentionDisplayName,
       makeComposerMentionSpan,
     );
 
@@ -256,7 +262,7 @@ export function useComposerMentions({
     completeMention,
     editorRef,
     findExactMemberMatch,
-    getComposerMentionVisibleLabel,
+    getComposerMentionDisplayName,
     getMentionContext,
     makeComposerMentionSpan,
   ]);
@@ -293,6 +299,7 @@ export function useComposerMentions({
   );
 
   return {
+    resolveMemberLabel,
     mentionMenuProps: {
       open: mentionMenuOpen,
       candidates: mentionCandidates,
@@ -301,7 +308,7 @@ export function useComposerMentions({
       onSelectIndex: setMentionIndex,
       onCompleteMention: completeMention,
     },
-    getComposerMentionVisibleLabel,
+    getComposerMentionDisplayName,
     makeComposerMentionSpan,
     handleComposerInputMentions,
     handleMentionKeyDown,

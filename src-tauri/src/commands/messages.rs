@@ -27,6 +27,7 @@ use matrix_sdk::ruma::events::AnySyncMessageLikeEvent;
 use matrix_sdk::ruma::events::AnySyncStateEvent;
 use matrix_sdk::ruma::events::AnySyncTimelineEvent;
 use matrix_sdk::ruma::events::GlobalAccountDataEvent;
+use matrix_sdk::ruma::events::Mentions;
 use matrix_sdk::ruma::events::MessageLikeEventType;
 use matrix_sdk::ruma::events::OriginalSyncMessageLikeEvent;
 use matrix_sdk::ruma::events::OriginalSyncStateEvent;
@@ -51,9 +52,9 @@ use crate::types::{
 use crate::AppState;
 
 use super::message_display::{
-    extract_mentioned_user_ids, extract_message_display, membership_notice,
+    extract_message_display, membership_notice,
     reply_to_from_message_relation, thread_root_from_message_relation, thread_summary_from_bundle,
-    MessageThreadTarget,
+    MessageDisplayExtract, MessageThreadTarget,
 };
 use super::{fmt_error_chain, get_client, resolve_room};
 
@@ -104,7 +105,9 @@ pub(super) fn unavailable_message(raw: &serde_json::value::RawValue) -> Option<M
         file_display_name: None,
         unsupported_matrix_msgtype: None,
         reactions: None,
-        mentioned_user_ids: vec![],
+        formatted_body: None,
+        mentioned_user_ids: None,
+        mentions_room: false,
     })
 }
 
@@ -374,47 +377,19 @@ pub async fn get_messages(
         position: usize,
         event_id: String,
         sender: String,
-        body: String,
         timestamp: u64,
-        image_media_request: Option<serde_json::Value>,
-        video_media_request: Option<serde_json::Value>,
-        file_media_request: Option<serde_json::Value>,
-        file_mime: Option<String>,
-        file_display_name: Option<String>,
-        image_width: Option<u32>,
-        image_height: Option<u32>,
-        image_blurhash: Option<String>,
-        video_width: Option<u32>,
-        video_height: Option<u32>,
-        unsupported_matrix_msgtype: Option<String>,
+        display: MessageDisplayExtract,
+        bundled_edit_ts: Option<u64>,
         reply_to: Option<MessageReplyTo>,
         thread_root_id: Option<String>,
         thread_summary: Option<MessageThreadSummary>,
-        mentioned_user_ids: Vec<String>,
     }
     let mut raw_msgs = Vec::new();
     let mut other_entries = Vec::new();
     let mut unique_senders = Vec::new();
     let mut seen_senders = std::collections::HashSet::new();
     // target event id -> replacement fields + origin_server_ts; keep latest edit per target
-    let mut latest_replacement: HashMap<
-        String,
-        (
-            String,
-            Option<serde_json::Value>,
-            Option<serde_json::Value>,
-            Option<serde_json::Value>,
-            Option<String>,
-            Option<String>,
-            Option<u32>,
-            Option<u32>,
-            Option<String>,
-            Option<u32>,
-            Option<u32>,
-            Option<String>,
-            u64,
-        ),
-    > = HashMap::new();
+    let mut latest_replacement: HashMap<(String, String), (u64, MessageDisplayExtract)> = HashMap::new();
 
     let mut current_from = from.clone();
     let mut pages_scanned: usize = 0;
@@ -520,34 +495,13 @@ pub async fn get_messages(
                 };
 
                 if let Some(Relation::Replacement(repl)) = &original.content.relates_to {
-                    let target = repl.event_id.to_string();
+                    let target = (repl.event_id.to_string(), original.sender.to_string());
                     let ext = extract_message_display(&RoomMessageEventContent::from(
                         repl.new_content.clone(),
                     ));
                     let ts: u64 = original.origin_server_ts.0.into();
-                    let replace = match latest_replacement.get(&target) {
-                        None => true,
-                        Some((_, _, _, _, _, _, _, _, _, _, _, _, prev_ts)) => ts >= *prev_ts,
-                    };
-                    if replace {
-                        latest_replacement.insert(
-                            target,
-                            (
-                                ext.body.clone(),
-                                ext.image_media_request.clone(),
-                                ext.video_media_request.clone(),
-                                ext.file_media_request.clone(),
-                                ext.file_mime.clone(),
-                                ext.file_display_name.clone(),
-                                ext.image_width,
-                                ext.image_height,
-                                ext.image_blurhash.clone(),
-                                ext.video_width,
-                                ext.video_height,
-                                ext.unsupported_matrix_msgtype.clone(),
-                                ts,
-                            ),
-                        );
+                    if latest_replacement.get(&target).is_none_or(|(previous_ts, _)| ts >= *previous_ts) {
+                        latest_replacement.insert(target, (ts, ext));
                     }
                     continue;
                 }
@@ -557,26 +511,15 @@ pub async fn get_messages(
                     unique_senders.push(original.sender.clone());
                 }
 
-                let ext = extract_message_display(&original.content);
+                let (ext, bundled_edit_ts) = bundled_message_display(&original);
                 let reply_to = reply_to_from_message_relation(&original.content.relates_to);
-                let mentioned_user_ids = extract_mentioned_user_ids(&original.content);
                 raw_msgs.push(RawMsg {
                     position,
                     event_id: original.event_id.to_string(),
                     sender: sender_str,
-                    body: ext.body,
                     timestamp: original.origin_server_ts.0.into(),
-                    image_media_request: ext.image_media_request,
-                    video_media_request: ext.video_media_request,
-                    file_media_request: ext.file_media_request,
-                    file_mime: ext.file_mime,
-                    file_display_name: ext.file_display_name,
-                    image_width: ext.image_width,
-                    image_height: ext.image_height,
-                    image_blurhash: ext.image_blurhash,
-                    video_width: ext.video_width,
-                    video_height: ext.video_height,
-                    unsupported_matrix_msgtype: ext.unsupported_matrix_msgtype,
+                    display: ext,
+                    bundled_edit_ts,
                     reply_to,
                     thread_root_id: thread_root_from_message_relation(&original.content.relates_to),
                     thread_summary: original
@@ -585,7 +528,6 @@ pub async fn get_messages(
                         .thread
                         .as_deref()
                         .map(thread_summary_from_bundle),
-                    mentioned_user_ids,
                 });
             }
         }
@@ -633,56 +575,11 @@ pub async fn get_messages(
         .map(|m| {
             let (sender_name, avatar_url) =
                 sender_meta.get(&m.sender).cloned().unwrap_or((None, None));
-            let edited = latest_replacement.contains_key(&m.event_id);
-            let (
-                body,
-                image_media_request,
-                video_media_request,
-                file_media_request,
-                file_mime,
-                file_display_name,
-                image_width,
-                image_height,
-                image_blurhash,
-                video_width,
-                video_height,
-                unsupported_matrix_msgtype,
-            ) = latest_replacement
-                .get(&m.event_id)
-                .map(
-                    |(b, img, vid, file, fm, fd, iw, ih, ibh, vw, vh, unsup, _ts)| {
-                        (
-                            b.clone(),
-                            img.clone(),
-                            vid.clone(),
-                            file.clone(),
-                            fm.clone(),
-                            fd.clone(),
-                            *iw,
-                            *ih,
-                            ibh.clone(),
-                            *vw,
-                            *vh,
-                            unsup.clone(),
-                        )
-                    },
-                )
-                .unwrap_or_else(|| {
-                    (
-                        m.body.clone(),
-                        m.image_media_request.clone(),
-                        m.video_media_request.clone(),
-                        m.file_media_request.clone(),
-                        m.file_mime.clone(),
-                        m.file_display_name.clone(),
-                        m.image_width,
-                        m.image_height,
-                        m.image_blurhash.clone(),
-                        m.video_width,
-                        m.video_height,
-                        m.unsupported_matrix_msgtype.clone(),
-                    )
-                });
+            let replacement = latest_replacement
+                .get(&(m.event_id.clone(), m.sender.clone()))
+                .filter(|(ts, _)| m.bundled_edit_ts.is_none_or(|bundled_ts| *ts >= bundled_ts));
+            let edited = replacement.is_some() || m.bundled_edit_ts.is_some();
+            let display = replacement.map(|(_, display)| display.clone()).unwrap_or(m.display);
             let reactions = reaction_map.get(&m.event_id).cloned();
             let message = MessageInfo {
                 decryption_failed: false,
@@ -690,26 +587,28 @@ pub async fn get_messages(
                 event_id: m.event_id,
                 sender: m.sender,
                 sender_name,
-                body,
+                body: display.body,
                 timestamp: m.timestamp,
                 avatar_url,
                 edited,
                 reply_to: m.reply_to,
                 thread_root_id: m.thread_root_id,
                 thread_summary: m.thread_summary,
-                image_media_request,
-                image_width,
-                image_height,
-                image_blurhash,
-                video_media_request,
-                video_width,
-                video_height,
-                file_media_request,
-                file_mime,
-                file_display_name,
-                unsupported_matrix_msgtype,
+                image_media_request: display.image_media_request,
+                image_width: display.image_width,
+                image_height: display.image_height,
+                image_blurhash: display.image_blurhash,
+                video_media_request: display.video_media_request,
+                video_width: display.video_width,
+                video_height: display.video_height,
+                file_media_request: display.file_media_request,
+                file_mime: display.file_mime,
+                file_display_name: display.file_display_name,
+                unsupported_matrix_msgtype: display.unsupported_matrix_msgtype,
                 reactions,
-                mentioned_user_ids: m.mentioned_user_ids,
+                formatted_body: display.formatted_body,
+                mentioned_user_ids: display.mentioned_user_ids,
+                mentions_room: display.mentions_room,
             };
             (m.position, message)
         })
@@ -752,6 +651,22 @@ pub async fn get_messages(
     })
 }
 
+fn bundled_message_display(
+    event: &OriginalSyncRoomMessageEvent,
+) -> (MessageDisplayExtract, Option<u64>) {
+    if let Some(edit) = &event.unsigned.relations.replace {
+        if edit.sender == event.sender {
+            if let Some(Relation::Replacement(replacement)) = &edit.content.relates_to {
+                if replacement.event_id == event.event_id {
+                    let content = RoomMessageEventContent::from(replacement.new_content.clone());
+                    return (extract_message_display(&content), Some(edit.origin_server_ts.0.into()));
+                }
+            }
+        }
+    }
+    (extract_message_display(&event.content), None)
+}
+
 fn extend_timeline_entries(
     messages: &mut Vec<(usize, MessageInfo)>,
     other_entries: Vec<(usize, MessageInfo)>,
@@ -768,11 +683,106 @@ fn extend_timeline_entries(
     }));
 }
 
+#[derive(Default, serde::Deserialize)]
+#[serde(default, rename_all = "camelCase")]
+pub struct ComposerMentions {
+    user_ids: Vec<String>,
+    room: bool,
+}
+
+impl ComposerMentions {
+    pub(super) async fn into_matrix(self, room: &Room) -> Mentions {
+        let own_user_id = room.own_user_id();
+        let mut mentions = Mentions::with_user_ids(
+            self.user_ids
+                .into_iter()
+                .filter(|id| id != own_user_id.as_str())
+                .filter_map(|id| UserId::parse(id).ok()),
+        );
+        mentions.room = self.room && can_notify_room(room, own_user_id).await;
+        mentions
+    }
+}
+
+async fn can_notify_room(room: &Room, sender: &UserId) -> bool {
+    room.power_levels_or_default()
+        .await
+        .user_can_trigger_room_notification(sender)
+}
+
+fn composer_text(
+    body: String,
+    formatted_body: Option<String>,
+    mentions: Mentions,
+) -> RoomMessageEventContentWithoutRelation {
+    let content = match formatted_body {
+        Some(html) => RoomMessageEventContentWithoutRelation::text_html(body, html),
+        None => RoomMessageEventContentWithoutRelation::text_plain(body),
+    };
+    content.add_mentions(mentions)
+}
+
+#[cfg(test)]
+#[test]
+fn composer_text_sends_structured_mentions_with_a_formatted_link() {
+    let user_id = UserId::parse("@alice:example.org").unwrap();
+    let mut mentions = Mentions::with_user_ids([user_id.clone(), user_id]);
+    mentions.room = true;
+    let html = "Hey <a href=\"https://matrix.to/#/@alice:example.org\">Alice</a> and @room";
+    let content = composer_text("Hey Alice and @room".into(), Some(html.into()), mentions);
+    let event = serde_json::to_value(RoomMessageEventContent::from(content)).unwrap();
+    assert_eq!(event["body"], "Hey Alice and @room");
+    assert_eq!(event["format"], "org.matrix.custom.html");
+    assert_eq!(event["formatted_body"], html);
+    assert_eq!(
+        event["m.mentions"],
+        serde_json::json!({ "user_ids": ["@alice:example.org"], "room": true })
+    );
+
+    let plain = RoomMessageEventContent::from(composer_text("Literal @room".into(), None, Mentions::new()));
+    let event = serde_json::to_value(&plain).unwrap();
+    assert_eq!(event["m.mentions"], serde_json::json!({}));
+    assert_eq!(extract_message_display(&plain).mentioned_user_ids, Some(vec![]));
+
+    let legacy = RoomMessageEventContent::text_plain("Hey @alice:example.org");
+    assert_eq!(extract_message_display(&legacy).mentioned_user_ids, None);
+}
+
+#[cfg(test)]
+#[test]
+fn edit_uses_effective_mentions_for_display_and_added_mentions_for_push() {
+    use matrix_sdk::ruma::events::room::message::ReplacementMetadata;
+
+    let alice = UserId::parse("@alice:example.org").unwrap();
+    let bob = UserId::parse("@bob:example.org").unwrap();
+    let original_mentions = Mentions::with_user_ids([alice.clone()]);
+    let new_mentions = Mentions::with_user_ids([alice, bob]);
+    let html = "Hey <a href=\"matrix:u/alice:example.org\">Alice</a> and Bob";
+    let edit = composer_text("Hey Alice and Bob".into(), Some(html.into()), new_mentions)
+        .make_replacement(ReplacementMetadata::new(
+            EventId::parse("$original").unwrap(),
+            Some(original_mentions),
+        ));
+    let event = serde_json::to_value(&edit).unwrap();
+    assert_eq!(event["m.mentions"], serde_json::json!({ "user_ids": ["@bob:example.org"] }));
+    let Some(Relation::Replacement(replacement)) = edit.relates_to else {
+        panic!("expected an edit");
+    };
+    let display = extract_message_display(&RoomMessageEventContent::from(replacement.new_content));
+    assert_eq!(display.formatted_body.as_deref(), Some(html));
+    assert_eq!(
+        display.mentioned_user_ids.unwrap(),
+        ["@alice:example.org", "@bob:example.org"]
+    );
+}
+
 #[tauri::command]
 pub async fn send_message(
     state: State<'_, Arc<AppState>>,
     room_id: String,
     body: String,
+    formatted_body: Option<String>,
+    mentions: Option<ComposerMentions>,
     reply_to_event_id: Option<String>,
 ) -> Result<(), String> {
     let client = get_client(&state).await?;
@@ -781,6 +791,8 @@ pub async fn send_message(
         return Err("This room was upgraded. Send new messages in its replacement.".into());
     }
 
+    let mentions = mentions.unwrap_or_default().into_matrix(&room).await;
+    let without = composer_text(body, formatted_body, mentions);
     let content = if let Some(raw) = reply_to_event_id {
         let id_str = raw.trim();
         if id_str.is_empty() {
@@ -793,12 +805,11 @@ pub async fn send_message(
             event_id: eid,
             enforce_thread: EnforceThread::MaybeThreaded,
         };
-        let without = RoomMessageEventContentWithoutRelation::text_plain(&body);
         room.make_reply_event(without, reply)
             .await
             .map_err(|e| format!("Failed to build reply: {}", fmt_error_chain(&e)))?
     } else {
-        RoomMessageEventContent::text_plain(&body)
+        RoomMessageEventContent::from(without)
     };
 
     room.send(content)
@@ -815,6 +826,8 @@ pub async fn send_first_direct_message(
     state: State<'_, Arc<AppState>>,
     peer_user_id: String,
     body: String,
+    formatted_body: Option<String>,
+    mentions: Option<ComposerMentions>,
 ) -> Result<String, String> {
     let client = get_client(&state).await?;
     let me = client.user_id().ok_or("Not logged in")?;
@@ -832,8 +845,8 @@ pub async fn send_first_direct_message(
             .map_err(|e| format!("Failed to create direct message: {}", fmt_error_chain(&e)))?
     };
     let room_id = room.room_id().to_string();
-    let content =
-        matrix_sdk::ruma::events::room::message::RoomMessageEventContent::text_plain(&body);
+    let mentions = mentions.unwrap_or_default().into_matrix(&room).await;
+    let content = RoomMessageEventContent::from(composer_text(body, formatted_body, mentions));
     room.send(content)
         .await
         .map_err(|e| format!("Failed to send message: {}", fmt_error_chain(&e)))?;
@@ -906,45 +919,17 @@ async fn build_message_infos_from_timeline_events(
         position: usize,
         event_id: String,
         sender: String,
-        body: String,
         timestamp: u64,
-        image_media_request: Option<serde_json::Value>,
-        video_media_request: Option<serde_json::Value>,
-        file_media_request: Option<serde_json::Value>,
-        file_mime: Option<String>,
-        file_display_name: Option<String>,
-        image_width: Option<u32>,
-        image_height: Option<u32>,
-        image_blurhash: Option<String>,
-        video_width: Option<u32>,
-        video_height: Option<u32>,
-        unsupported_matrix_msgtype: Option<String>,
+        display: MessageDisplayExtract,
+        bundled_edit_ts: Option<u64>,
         reply_to: Option<MessageReplyTo>,
         thread_root_id: Option<String>,
         thread_summary: Option<MessageThreadSummary>,
-        mentioned_user_ids: Vec<String>,
     }
 
     let mut raw_msgs = Vec::new();
     let mut other_entries = Vec::new();
-    let mut latest_replacement: HashMap<
-        String,
-        (
-            String,
-            Option<serde_json::Value>,
-            Option<serde_json::Value>,
-            Option<serde_json::Value>,
-            Option<String>,
-            Option<String>,
-            Option<u32>,
-            Option<u32>,
-            Option<String>,
-            Option<u32>,
-            Option<u32>,
-            Option<String>,
-            u64,
-        ),
-    > = HashMap::new();
+    let mut latest_replacement: HashMap<(String, String), (u64, MessageDisplayExtract)> = HashMap::new();
     let mut unique_senders = Vec::new();
     let mut seen_senders = HashSet::new();
 
@@ -974,34 +959,13 @@ async fn build_message_infos_from_timeline_events(
             match msg {
                 SyncMessageLikeEvent::Original(original) => {
                     if let Some(Relation::Replacement(repl)) = &original.content.relates_to {
-                        let target = repl.event_id.to_string();
+                        let target = (repl.event_id.to_string(), original.sender.to_string());
                         let ext = extract_message_display(&RoomMessageEventContent::from(
                             repl.new_content.clone(),
                         ));
                         let ts: u64 = original.origin_server_ts.0.into();
-                        let replace = match latest_replacement.get(&target) {
-                            None => true,
-                            Some((_, _, _, _, _, _, _, _, _, _, _, _, prev_ts)) => ts >= *prev_ts,
-                        };
-                        if replace {
-                            latest_replacement.insert(
-                                target,
-                                (
-                                    ext.body.clone(),
-                                    ext.image_media_request.clone(),
-                                    ext.video_media_request.clone(),
-                                    ext.file_media_request.clone(),
-                                    ext.file_mime.clone(),
-                                    ext.file_display_name.clone(),
-                                    ext.image_width,
-                                    ext.image_height,
-                                    ext.image_blurhash.clone(),
-                                    ext.video_width,
-                                    ext.video_height,
-                                    ext.unsupported_matrix_msgtype.clone(),
-                                    ts,
-                                ),
-                            );
+                        if latest_replacement.get(&target).is_none_or(|(previous_ts, _)| ts >= *previous_ts) {
+                            latest_replacement.insert(target, (ts, ext));
                         }
                         continue;
                     }
@@ -1011,26 +975,15 @@ async fn build_message_infos_from_timeline_events(
                         unique_senders.push(original.sender.clone());
                     }
 
-                    let ext = extract_message_display(&original.content);
+                    let (ext, bundled_edit_ts) = bundled_message_display(&original);
                     let reply_to = reply_to_from_message_relation(&original.content.relates_to);
-                    let mentioned_user_ids = extract_mentioned_user_ids(&original.content);
                     raw_msgs.push(RawMsg {
                         position,
                         event_id: original.event_id.to_string(),
                         sender: sender_str,
-                        body: ext.body,
                         timestamp: original.origin_server_ts.0.into(),
-                        image_media_request: ext.image_media_request,
-                        video_media_request: ext.video_media_request,
-                        file_media_request: ext.file_media_request,
-                        file_mime: ext.file_mime,
-                        file_display_name: ext.file_display_name,
-                        image_width: ext.image_width,
-                        image_height: ext.image_height,
-                        image_blurhash: ext.image_blurhash,
-                        video_width: ext.video_width,
-                        video_height: ext.video_height,
-                        unsupported_matrix_msgtype: ext.unsupported_matrix_msgtype,
+                        display: ext,
+                        bundled_edit_ts,
                         reply_to,
                         thread_root_id: thread_root_from_message_relation(
                             &original.content.relates_to,
@@ -1041,7 +994,6 @@ async fn build_message_infos_from_timeline_events(
                             .thread
                             .as_deref()
                             .map(thread_summary_from_bundle),
-                        mentioned_user_ids,
                     });
                 }
                 _ => {}
@@ -1067,56 +1019,11 @@ async fn build_message_infos_from_timeline_events(
         .map(|m| {
             let (sender_name, avatar_url) =
                 sender_meta.get(&m.sender).cloned().unwrap_or((None, None));
-            let edited = latest_replacement.contains_key(&m.event_id);
-            let (
-                body,
-                image_media_request,
-                video_media_request,
-                file_media_request,
-                file_mime,
-                file_display_name,
-                image_width,
-                image_height,
-                image_blurhash,
-                video_width,
-                video_height,
-                unsupported_matrix_msgtype,
-            ) = latest_replacement
-                .get(&m.event_id)
-                .map(
-                    |(b, img, vid, file, fm, fd, iw, ih, ibh, vw, vh, unsup, _ts)| {
-                        (
-                            b.clone(),
-                            img.clone(),
-                            vid.clone(),
-                            file.clone(),
-                            fm.clone(),
-                            fd.clone(),
-                            *iw,
-                            *ih,
-                            ibh.clone(),
-                            *vw,
-                            *vh,
-                            unsup.clone(),
-                        )
-                    },
-                )
-                .unwrap_or_else(|| {
-                    (
-                        m.body.clone(),
-                        m.image_media_request.clone(),
-                        m.video_media_request.clone(),
-                        m.file_media_request.clone(),
-                        m.file_mime.clone(),
-                        m.file_display_name.clone(),
-                        m.image_width,
-                        m.image_height,
-                        m.image_blurhash.clone(),
-                        m.video_width,
-                        m.video_height,
-                        m.unsupported_matrix_msgtype.clone(),
-                    )
-                });
+            let replacement = latest_replacement
+                .get(&(m.event_id.clone(), m.sender.clone()))
+                .filter(|(ts, _)| m.bundled_edit_ts.is_none_or(|bundled_ts| *ts >= bundled_ts));
+            let edited = replacement.is_some() || m.bundled_edit_ts.is_some();
+            let display = replacement.map(|(_, display)| display.clone()).unwrap_or(m.display);
             let reactions = reaction_map.get(&m.event_id).cloned();
             let message = MessageInfo {
                 decryption_failed: false,
@@ -1124,26 +1031,28 @@ async fn build_message_infos_from_timeline_events(
                 event_id: m.event_id,
                 sender: m.sender,
                 sender_name,
-                body,
+                body: display.body,
                 timestamp: m.timestamp,
                 avatar_url,
                 edited,
                 reply_to: m.reply_to,
                 thread_root_id: m.thread_root_id,
                 thread_summary: m.thread_summary,
-                image_media_request,
-                image_width,
-                image_height,
-                image_blurhash,
-                video_media_request,
-                video_width,
-                video_height,
-                file_media_request,
-                file_mime,
-                file_display_name,
-                unsupported_matrix_msgtype,
+                image_media_request: display.image_media_request,
+                image_width: display.image_width,
+                image_height: display.image_height,
+                image_blurhash: display.image_blurhash,
+                video_media_request: display.video_media_request,
+                video_width: display.video_width,
+                video_height: display.video_height,
+                file_media_request: display.file_media_request,
+                file_mime: display.file_mime,
+                file_display_name: display.file_display_name,
+                unsupported_matrix_msgtype: display.unsupported_matrix_msgtype,
                 reactions,
-                mentioned_user_ids: m.mentioned_user_ids,
+                formatted_body: display.formatted_body,
+                mentioned_user_ids: display.mentioned_user_ids,
+                mentions_room: display.mentions_room,
             };
             (m.position, message)
         })
@@ -1447,6 +1356,8 @@ pub async fn send_rss_thread_reply(
     room_id: String,
     thread: MessageThreadTarget,
     body: String,
+    formatted_body: Option<String>,
+    mentions: Option<ComposerMentions>,
 ) -> Result<String, String> {
     let body = body.trim();
     if body.is_empty() {
@@ -1454,7 +1365,8 @@ pub async fn send_rss_thread_reply(
     }
     let client = get_client(&state).await?;
     let room = resolve_room(&client, &room_id)?;
-    let content = thread.apply(RoomMessageEventContent::text_plain(body));
+    let mentions = mentions.unwrap_or_default().into_matrix(&room).await;
+    let content = thread.apply(composer_text(body.to_owned(), formatted_body, mentions).into());
     let response = room
         .send(content)
         .await
@@ -1491,6 +1403,9 @@ pub async fn edit_message(
     room_id: String,
     event_id: String,
     body: String,
+    formatted_body: Option<String>,
+    mentions: Option<ComposerMentions>,
+    previous_mentions: Option<ComposerMentions>,
 ) -> Result<(), String> {
     let client = get_client(&state).await?;
     let room = resolve_room(&client, &room_id)?;
@@ -1498,7 +1413,8 @@ pub async fn edit_message(
     let event_id_parsed =
         EventId::parse(&event_id).map_err(|e| format!("Invalid event ID: {e}"))?;
 
-    let new_content = RoomMessageEventContentWithoutRelation::text_plain(&body);
+    let mentions = mentions.unwrap_or_default().into_matrix(&room).await;
+    let new_content = composer_text(body, formatted_body, mentions.clone());
 
     let edit_content = room
         .make_edit_event(&event_id_parsed, EditedContent::RoomMessage(new_content))
@@ -1506,7 +1422,17 @@ pub async fn edit_message(
         .map_err(|e| format!("Failed to prepare edit: {}", fmt_error_chain(&e)))?;
 
     match edit_content {
-        AnyMessageLikeEventContent::RoomMessage(content) => {
+        AnyMessageLikeEventContent::RoomMessage(mut content) => {
+            if let Some(previous) = previous_mentions {
+                // The SDK compares with the original event. For subsequent edits,
+                // compare with the effective content that was opened in the editor.
+                let mut added = mentions;
+                added.user_ids.retain(|id| {
+                    !previous.user_ids.iter().any(|previous_id| previous_id == id.as_str())
+                });
+                added.room &= !previous.room;
+                content.mentions = Some(added);
+            }
             room.send(content)
                 .await
                 .map_err(|e| format!("Failed to send edit: {}", fmt_error_chain(&e)))?;
@@ -1731,7 +1657,11 @@ pub async fn start_sync(
                 let payload = MessageEditPayload {
                     room_id,
                     target_event_id: repl.event_id.to_string(),
+                    sender: ev.sender.to_string(),
                     body: ext.body,
+                    formatted_body: ext.formatted_body,
+                    mentioned_user_ids: ext.mentioned_user_ids,
+                    mentions_room: ext.mentions_room,
                     image_media_request,
                     video_media_request,
                     file_media_request,
@@ -1749,7 +1679,6 @@ pub async fn start_sync(
             }
 
             let ext = extract_message_display(&ev.content);
-            let mentioned_user_ids = extract_mentioned_user_ids(&ev.content);
             let reply_to = reply_to_from_message_relation(&ev.content.relates_to);
             let sender = ev.sender.to_string();
 
@@ -1764,39 +1693,10 @@ pub async fn start_sync(
 
             let timestamp: u64 = ev.origin_server_ts.0.into();
 
-            // --- Extract structured m.mentions ---
-            //
-            // `RoomMessageEventContent` in ruma-common 0.17 doesn't expose
-            // `m.mentions` as a public field on the struct, but the data IS
-            // round-tripped through (de)serialization.  Re-serializing the
-            // already-deserialized content to JSON and plucking the field is
-            // cheap (in-memory, no network) and guaranteed to preserve
-            // whatever the sending client included.
-            //
-            // This gives us the same mention signal the server uses for
-            // push-rule highlight evaluation — aligning desktop notifications
-            // with the red-badge mention count.
-            let (mentions_me, room_ping) = {
-                let mut me = false;
-                let mut rp = false;
-                if let Ok(val) = serde_json::to_value(&ev.content) {
-                    if let Some(mentions) = val.get("m.mentions") {
-                        if let Some(user_ids) =
-                            mentions.get("user_ids").and_then(|v| v.as_array())
-                        {
-                            if let Some(uid) = self_uid.as_deref().map(|u| u.as_str()) {
-                                me = user_ids
-                                    .iter()
-                                    .any(|v| v.as_str() == Some(uid));
-                            }
-                        }
-                        if let Some(r) = mentions.get("room").and_then(|v| v.as_bool()) {
-                            rp = r;
-                        }
-                    }
-                }
-                (me, rp)
-            };
+            let mentions_me = self_uid.as_ref().is_some_and(|uid| {
+                ev.content.mentions.as_ref().is_some_and(|mentions| mentions.user_ids.contains(uid))
+            });
+            let room_ping = ext.mentions_room && can_notify_room(&room, &ev.sender).await;
 
             let is_dm = room.is_direct().await.unwrap_or(false);
 
@@ -1840,7 +1740,9 @@ pub async fn start_sync(
                     file_display_name: ext.file_display_name,
                     unsupported_matrix_msgtype: ext.unsupported_matrix_msgtype,
                     reactions: None,
-                    mentioned_user_ids,
+                    formatted_body: ext.formatted_body,
+                    mentioned_user_ids: ext.mentioned_user_ids,
+                    mentions_room: ext.mentions_room,
                 },
             };
             let _ = app.emit("room-message", payload);

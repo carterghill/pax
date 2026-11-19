@@ -40,6 +40,7 @@ export function formatMessageTime(timestamp: number): string {
 
 export interface MessageRowProps {
   msg: Message;
+  selfUserId: string;
   rssArticle: RssArticleCandidate | null;
   rssReplyCount: number;
   rssThreadOpen: boolean;
@@ -85,6 +86,7 @@ export interface MessageRowProps {
 
 const MessageRow = memo(function MessageRow({
   msg,
+  selfUserId,
   rssArticle,
   rssReplyCount,
   rssThreadOpen,
@@ -340,6 +342,7 @@ const MessageRow = memo(function MessageRow({
         ) : (
           <MessageContent
             msg={msg}
+            selfUserId={selfUserId}
             spacingUnit={spacingUnit}
             palette={palette}
             typography={typography}

@@ -366,7 +366,7 @@ export default function ChatView({
 
   const handleRequestEdit = useCallback((msg: Message) => {
     setReplyDraft(null);
-    setEditingMessage({ eventId: msg.eventId, body: msg.body });
+    setEditingMessage(msg);
   }, []);
 
   const handleRequestReply = useCallback((msg: Message) => {

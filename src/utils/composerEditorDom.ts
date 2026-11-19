@@ -1,8 +1,13 @@
+import { micromark } from "micromark";
+import { gfm, gfmHtml } from "micromark-extension-gfm";
+import type { Message } from "../types/matrix";
 import { normalizeImageSrcHref } from "./directImageUrl";
-import { MATRIX_BODY_MXID_PATTERN } from "./matrixBodyMxid";
+import { MATRIX_BODY_MXID_RE_GLOBAL, mentionDisplayName, mentionPillLabel } from "./matrixBodyMxid";
+import { matrixUserHref, matrixUserIdFromHref, parseMatrixMessageHtml } from "./matrixMessageHtml";
 
 /** Serialized Matrix mention: full MXID (or `@room`) stored on the span; visible label is separate. */
 export const PAX_COMPOSER_MENTION_USER_ID_ATTR = "data-pax-mention-user-id";
+const PAX_COMPOSER_MENTION_DISPLAY_NAME_ATTR = "data-pax-mention-display-name";
 
 export type ComposerMentionPillStyle = {
   backgroundColor: string;
@@ -13,13 +18,14 @@ export type ComposerMentionPillStyle = {
 /** Inline mention chip for the rich-text composer (matches MessageMarkdown pill look). */
 export function createComposerMentionSpan(
   userId: string,
-  visibleLabel: string,
+  displayName: string,
   style: ComposerMentionPillStyle,
 ): HTMLSpanElement {
   const span = document.createElement("span");
   span.setAttribute(PAX_COMPOSER_MENTION_USER_ID_ATTR, userId);
+  span.setAttribute(PAX_COMPOSER_MENTION_DISPLAY_NAME_ATTR, displayName);
   span.contentEditable = "false";
-  span.textContent = visibleLabel;
+  span.textContent = mentionPillLabel(userId, displayName);
   Object.assign(span.style, {
     display: "inline",
     padding: "1px 6px",
@@ -35,12 +41,33 @@ export function createComposerMentionSpan(
   return span;
 }
 
+export function refreshComposerMentionLabels(
+  root: HTMLElement,
+  resolveMemberLabel: (userId: string) => string,
+): boolean {
+  let changed = false;
+  for (const pill of root.querySelectorAll(`span[${PAX_COMPOSER_MENTION_USER_ID_ATTR}]`)) {
+    const userId = pill.getAttribute(PAX_COMPOSER_MENTION_USER_ID_ATTR)!;
+    const storedName = pill.getAttribute(PAX_COMPOSER_MENTION_DISPLAY_NAME_ATTR);
+    const displayName = mentionDisplayName(userId, resolveMemberLabel(userId), storedName);
+    const label = mentionPillLabel(userId, displayName);
+    if (displayName !== storedName) {
+      pill.setAttribute(PAX_COMPOSER_MENTION_DISPLAY_NAME_ATTR, displayName);
+    }
+    if (label !== pill.textContent) {
+      pill.textContent = label;
+      changed = true;
+    }
+  }
+  return changed;
+}
+
 function composerTextNodeIsMxidExempt(textNode: Text): boolean {
   let p: Node | null = textNode.parentElement;
   while (p) {
     if (!(p instanceof HTMLElement)) break;
     const tag = p.tagName;
-    if (tag === "CODE" || tag === "PRE") return true;
+    if (tag === "A" || tag === "CODE" || tag === "PRE") return true;
     if (p.hasAttribute(PAX_COMPOSER_MENTION_USER_ID_ATTR)) return true;
     p = p.parentElement;
   }
@@ -67,16 +94,21 @@ export function setCaretPlainTextOffset(root: HTMLElement, offset: number): void
     const len = (tn.textContent ?? "").replace(/\u200b/g, "").length;
     if (charCount + len >= offset) {
       const cleanTarget = offset - charCount;
-      let rawOffset = 0;
-      let cleanSeen = 0;
-      const raw = tn.textContent ?? "";
-      for (let i = 0; i < raw.length; i++) {
-        if (cleanSeen === cleanTarget) break;
-        if (raw[i] !== "\u200b") cleanSeen++;
-        rawOffset = i + 1;
-      }
       const r = document.createRange();
-      r.setStart(tn, Math.min(rawOffset, raw.length));
+      const pill = tn.parentElement?.closest(`[${PAX_COMPOSER_MENTION_USER_ID_ATTR}]`);
+      if (pill) {
+        if (cleanTarget === 0) r.setStartBefore(pill);
+        else r.setStartAfter(pill);
+      } else {
+        let rawOffset = 0;
+        let cleanSeen = 0;
+        const raw = tn.textContent ?? "";
+        while (cleanSeen < cleanTarget && rawOffset < raw.length) {
+          if (raw[rawOffset] !== "\u200b") cleanSeen++;
+          rawOffset++;
+        }
+        r.setStart(tn, rawOffset);
+      }
       r.collapse(true);
       sel.removeAllRanges();
       sel.addRange(r);
@@ -97,13 +129,26 @@ export function setCaretPlainTextOffset(root: HTMLElement, offset: number): void
  */
 export function replaceBareMxidsWithPillsInComposer(
   root: HTMLElement,
-  getPillLabel: (mxid: string) => string,
-  makeSpan: (mxid: string, label: string) => HTMLSpanElement,
+  getDisplayName: (mxid: string) => string,
+  makeSpan: (mxid: string, displayName: string) => HTMLSpanElement,
+  isMention: (mxid: string) => boolean = () => true,
 ): boolean {
   const sel = window.getSelection();
   let caretBefore: number | null = null;
   if (sel && sel.rangeCount > 0 && sel.isCollapsed && sel.anchorNode && root.contains(sel.anchorNode)) {
     caretBefore = getCaretPlainTextOffset(root, sel);
+  }
+
+  let changed = false;
+  // Typing a longer word after an automatic @room pill turns it back into text.
+  for (const pill of root.querySelectorAll(`[${PAX_COMPOSER_MENTION_USER_ID_ATTR}="@room"]`)) {
+    const next = pill.nextSibling;
+    if (next?.nodeType !== Node.TEXT_NODE) continue;
+    const text = `@room${(next.textContent ?? "").replace(/\u200b/g, "")}`;
+    if (text.match(MATRIX_BODY_MXID_RE_GLOBAL)?.[0] === "@room") continue;
+    (next as Text).insertData(0, "@room");
+    pill.remove();
+    changed = true;
   }
 
   const textNodes: Text[] = [];
@@ -114,11 +159,11 @@ export function replaceBareMxidsWithPillsInComposer(
     textNodes.push(tn);
   }
 
-  let changed = false;
   for (const tn of textNodes) {
     if (!tn.isConnected || !tn.parentNode) continue;
     const text = tn.textContent ?? "";
-    const matches = [...text.matchAll(new RegExp(MATRIX_BODY_MXID_PATTERN, "g"))];
+    const matches = [...text.matchAll(MATRIX_BODY_MXID_RE_GLOBAL)]
+      .filter((match) => isMention(match[0]));
     if (matches.length === 0) continue;
 
     const frag = document.createDocumentFragment();
@@ -127,7 +172,7 @@ export function replaceBareMxidsWithPillsInComposer(
       const idx = m.index!;
       const mxid = m[0];
       if (idx > last) frag.appendChild(document.createTextNode(text.slice(last, idx)));
-      frag.appendChild(makeSpan(mxid, getPillLabel(mxid)));
+      frag.appendChild(makeSpan(mxid, getDisplayName(mxid)));
       last = idx + mxid.length;
       changed = true;
     }
@@ -143,16 +188,28 @@ export function replaceBareMxidsWithPillsInComposer(
   return changed;
 }
 
-export type FillComposerMentionPills = {
-  getPillLabel: (mxid: string) => string;
-  makeSpan: (mxid: string, label: string) => HTMLSpanElement;
+type FillComposerMentionPills = {
+  getDisplayName: (mxid: string, linkedName?: string | null) => string;
+  makeSpan: (mxid: string, displayName: string) => HTMLSpanElement;
 };
 
 // ─── Serialize (rich DOM → markdown) ────────────────────────────────────────
 
-/** Walk the rich contenteditable DOM and produce a markdown string for sending. */
-export function serializeComposerEditor(root: HTMLElement): string {
-  function visit(node: Node): string {
+export interface ComposerMessageContent {
+  body: string;
+  formattedBody?: string;
+  mentions: { userIds: string[]; room: boolean };
+}
+
+/** Serialize text and explicitly marked mentions from the editable DOM. */
+export function serializeComposerEditor(
+  root: HTMLElement,
+  resolveMemberLabel: (userId: string) => string,
+): ComposerMessageContent {
+  const userIds = new Set<string>();
+  let room = false;
+
+  function visit(node: Node, formatted: boolean, allowMentions: boolean): string {
     if (node.nodeType === Node.TEXT_NODE) return node.textContent ?? "";
     if (node.nodeType !== Node.ELEMENT_NODE) return "";
     const el = node as HTMLElement;
@@ -161,11 +218,24 @@ export function serializeComposerEditor(root: HTMLElement): string {
     if (tag === "IMG") return el.getAttribute("data-url") ?? "";
     if (tag === "BR") return "\n";
     if (tag === "SPAN" && el.hasAttribute(PAX_COMPOSER_MENTION_USER_ID_ATTR)) {
-      return el.getAttribute(PAX_COMPOSER_MENTION_USER_ID_ATTR) ?? "";
+      const userId = el.getAttribute(PAX_COMPOSER_MENTION_USER_ID_ATTR)!;
+      if (!allowMentions) return userId;
+      if (userId === "@room") {
+        room = true;
+        return userId;
+      }
+      userIds.add(userId);
+      const label = mentionDisplayName(
+        userId, resolveMemberLabel(userId), el.getAttribute(PAX_COMPOSER_MENTION_DISPLAY_NAME_ATTR),
+      ).replace(/\s*\n\s*/g, " ").trim();
+      if (!formatted) return label;
+      const escapedLabel = label.replace(/[!-\/:-@[-`{-~]/g, "\\$&");
+      return `[${escapedLabel}](${matrixUserHref(userId)})`;
     }
 
     let inner = "";
-    for (const c of el.childNodes) inner += visit(c);
+    const mentionsInChildren = allowMentions && tag !== "A" && tag !== "CODE" && tag !== "PRE";
+    for (const c of el.childNodes) inner += visit(c, formatted, mentionsInChildren);
 
     if (tag === "B" || tag === "STRONG") return inner ? `**${inner}**` : "";
     if (tag === "I" || tag === "EM") return inner ? `_${inner}_` : "";
@@ -205,19 +275,24 @@ export function serializeComposerEditor(root: HTMLElement): string {
     return inner;
   }
 
-  let result = "";
-  for (const c of root.childNodes) result += visit(c);
-  return result.replace(/\u200b/g, "").replace(/\n+$/, "");
+  const markdown = (formatted: boolean) =>
+    Array.from(root.childNodes, (node) => visit(node, formatted, true))
+      .join("").replace(/\u200b/g, "").trim();
+
+  const body = markdown(false);
+  const formattedBody = userIds.size > 0
+    ? micromark(markdown(true), { extensions: [gfm()], htmlExtensions: [gfmHtml()] })
+    : undefined;
+  return { body, formattedBody, mentions: { userIds: [...userIds], room } };
 }
 
 // ─── Fill (markdown → rich DOM, for loading edits) ──────────────────────────
 
 /** Parse a markdown string into rich HTML and set it on the editor root. */
-export function fillComposerEditorFromMarkdown(
+function fillComposerEditorFromMarkdown(
   root: HTMLElement,
   markdown: string,
   imgStyle: { borderRadius: number; maxWidth: string },
-  mentionPills?: FillComposerMentionPills,
 ): void {
   let html = markdown;
 
@@ -266,9 +341,43 @@ export function fillComposerEditorFromMarkdown(
   html = html.replace(/\n/g, "<br>");
 
   root.innerHTML = html || "\u200b";
-  if (mentionPills) {
-    replaceBareMxidsWithPillsInComposer(root, mentionPills.getPillLabel, mentionPills.makeSpan);
+}
+
+export function fillComposerEditorForEdit(
+  root: HTMLElement,
+  message: Pick<Message, "body" | "formattedBody" | "mentionedUserIds" | "mentionsRoom">,
+  imgStyle: { borderRadius: number; maxWidth: string },
+  mentionPills: FillComposerMentionPills,
+): void {
+  const userIds = new Set(message.mentionedUserIds);
+  const fragment = message.formattedBody && userIds.size > 0
+    ? parseMatrixMessageHtml(message.formattedBody)
+    : null;
+  let hasMentionLinks = false;
+  if (fragment) {
+    for (const anchor of fragment.querySelectorAll("a[href]")) {
+      const userId = matrixUserIdFromHref(anchor.getAttribute("href")!);
+      if (userId && userIds.has(userId) && !anchor.closest("code, pre")) {
+        const displayName = mentionPills.getDisplayName(userId, anchor.textContent);
+        anchor.replaceWith(mentionPills.makeSpan(userId, displayName));
+        hasMentionLinks = true;
+      }
+    }
   }
+  if (fragment && hasMentionLinks) {
+    for (const image of fragment.querySelectorAll("img")) {
+      image.setAttribute("data-url", image.getAttribute("src")!);
+      image.contentEditable = "false";
+      image.style.maxWidth = imgStyle.maxWidth;
+      image.style.borderRadius = `${imgStyle.borderRadius}px`;
+    }
+    root.replaceChildren(fragment);
+  } else {
+    fillComposerEditorFromMarkdown(root, message.body, imgStyle);
+  }
+  replaceBareMxidsWithPillsInComposer(root, mentionPills.getDisplayName, mentionPills.makeSpan,
+    (userId) => userId === "@room" ? Boolean(message.mentionsRoom) : userIds.has(userId),
+  );
 }
 
 // ─── Plain text ─────────────────────────────────────────────────────────────
