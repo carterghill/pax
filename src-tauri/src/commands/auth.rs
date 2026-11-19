@@ -16,6 +16,8 @@ use super::fmt_error_chain;
 use super::pax_auth::{self, AccountMode, Descriptor, Enrollment};
 
 const CREDENTIALS_FILENAME: &str = "credentials.json";
+const PAX_SETUP_REQUIRED: &str = "Sign in with your password to finish encrypted account setup.";
+const PAX_RECOVERY_REQUIRED: &str = "Sign in with your Pax password to restore encrypted history.";
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SavedSession {
@@ -738,20 +740,14 @@ pub(super) struct PasswordAuthentication {
     pub descriptor: Option<Descriptor>,
 }
 
-/// Mode discovery and network authentication share one path in the UI and
-/// integration tests. No Tauri or disk state is needed until authentication.
-pub(super) async fn authenticate_password(
+async fn discover_sign_in(
     http: &reqwest::Client,
     home: &str,
     user: &str,
-    matrix_identifier: &str,
-    password: &str,
-    device: Option<&str>,
-    config: &crate::AuthConfig,
     pinned: bool,
-) -> Result<PasswordAuthentication, String> {
-    // A local Pax pin can safely keep using derived authentication during a
-    // discovery outage. It never permits sending the memorable password.
+) -> Result<Option<Descriptor>, String> {
+    // During a discovery outage, only installations with a known Pax mode can
+    // proceed without a descriptor.
     let descriptor = match pax_auth::discover(http, home, user).await {
         Ok(d) => d,
         Err(pax_auth::DiscoveryError::Unavailable(_)) if pinned => None,
@@ -767,6 +763,22 @@ pub(super) async fn authenticate_password(
     {
         return Err("This account's sign-in settings changed unexpectedly. Pax has kept your password private. Check with your homeserver administrator.".into());
     }
+    Ok(descriptor)
+}
+
+/// Mode discovery and network authentication share one path in the UI and
+/// integration tests. No Tauri or disk state is needed until authentication.
+pub(super) async fn authenticate_password(
+    http: &reqwest::Client,
+    home: &str,
+    user: &str,
+    matrix_identifier: &str,
+    password: &str,
+    device: Option<&str>,
+    config: &crate::AuthConfig,
+    pinned: bool,
+) -> Result<PasswordAuthentication, String> {
+    let descriptor = discover_sign_in(http, home, user, pinned).await?;
     let desired = if pinned {
         Some(AccountMode::Pax)
     } else {
@@ -963,9 +975,25 @@ pub async fn login(
     install_session(&state, client, mode, rel).await
 }
 
-/// Fast-path boot: restore a previously saved session from the SQLite store.
-/// Skips authentication and sync_once entirely -- rooms are available from the
-/// persisted store, and start_sync picks up incrementally.
+async fn saved_session_mode(
+    http: &reqwest::Client,
+    home: &str,
+    user: &str,
+    config: &crate::AuthConfig,
+    pinned: bool,
+) -> Result<AccountMode, String> {
+    let descriptor = discover_sign_in(http, home, user, pinned).await?;
+    if pinned || descriptor.as_ref().is_some_and(|d| d.mode == AccountMode::Pax) {
+        pax_auth::ensure_trusted(home, config)?;
+        if descriptor.is_some_and(|d| d.state == "pending") {
+            return Err(PAX_SETUP_REQUIRED.into());
+        }
+        return Ok(AccountMode::Pax);
+    }
+    Ok(AccountMode::Matrix)
+}
+
+/// Resume a saved device session without a password request or an initial sync.
 #[tauri::command]
 pub async fn restore_session(
     state: State<'_, Arc<AppState>>,
@@ -973,17 +1001,10 @@ pub async fn restore_session(
 ) -> Result<String, String> {
     let _operation = state.encryption.operation.lock().await;
     let creds = load_credentials(app.clone())?.ok_or("No saved credentials")?;
+    let sd = creds.session.as_ref().ok_or("No saved session")?;
     if creds.pax_enrollment_pending {
-        return Err("Sign in with your password to finish encrypted account setup.".into());
+        return Err(PAX_SETUP_REQUIRED.into());
     }
-    let sp = sqlite_path_for_restore(&app, &creds)?;
-    if creds.account_mode == AccountMode::Pax && !sp.exists() {
-        return Err(
-            "Sign in with your Pax password to restore encrypted history on this installation."
-                .into(),
-        );
-    }
-    let sd = creds.session.ok_or("No saved session")?;
 
     // If a compile-time homeserver is configured, reject saved sessions that
     // point at a different server — the baked-in value is the source of truth.
@@ -997,21 +1018,43 @@ pub async fn restore_session(
         }
     }
 
-    log::info!("restore_session: building client for {}", creds.homeserver);
-    let client = build_client_for_mode(&creds.homeserver, &sp, creds.account_mode).await?;
-
     let user_id = matrix_sdk::ruma::UserId::parse(&sd.user_id)
         .map_err(|e| format!("Invalid user ID: {e}"))?;
+    if super::account_conversion::read_journal(&app, &creds.homeserver, user_id.as_str())?
+        .is_some_and(|j| !j.record.complete)
+    {
+        return Err(super::account_conversion::PENDING_MESSAGE.into());
+    }
+    let pinned = creds.account_mode == AccountMode::Pax
+        || pax_auth::read_enrollment(&app, &creds.homeserver, user_id.as_str())?
+            .is_some_and(|e| e.registered || e.ready);
+    let mode = saved_session_mode(
+        &state.http_client,
+        &creds.homeserver,
+        user_id.as_str(),
+        &state.auth_config,
+        pinned,
+    )
+    .await?;
+
+    // Determine the mode before opening the SDK store, where Matrix mode can
+    // automatically initialize encryption state.
+    let sp = sqlite_path_for_restore(&app, &creds)?;
+    if mode == AccountMode::Pax && !sp.exists() {
+        return Err(PAX_RECOVERY_REQUIRED.into());
+    }
+    log::info!("restore_session: building {mode:?} client for {}", creds.homeserver);
+    let client = build_client_for_mode(&creds.homeserver, &sp, mode).await?;
 
     log::info!("restore_session: restoring session...");
     client
         .restore_session(MatrixSession {
             meta: SessionMeta {
                 user_id: user_id.clone(),
-                device_id: sd.device_id.into(),
+                device_id: sd.device_id.clone().into(),
             },
             tokens: SessionTokens {
-                access_token: sd.access_token,
+                access_token: sd.access_token.clone(),
                 refresh_token: None,
             },
         })
@@ -1024,7 +1067,10 @@ pub async fn restore_session(
         let mut succeeded = false;
         for attempt in 0u32..3 {
             match tokio::time::timeout(Duration::from_secs(5), client.whoami()).await {
-                Ok(Ok(_)) => {
+                Ok(Ok(response)) => {
+                    if response.user_id != user_id {
+                        return Err("The saved session belongs to a different account.".into());
+                    }
                     succeeded = true;
                     break;
                 }
@@ -1066,7 +1112,17 @@ pub async fn restore_session(
     }
 
     log::info!("restore_session: valid — user_id={}", user_id);
-    if creds.account_mode == AccountMode::Pax {
+    if mode != creds.account_mode {
+        save_session_to_credentials(
+            &app,
+            &creds.homeserver,
+            sd.clone(),
+            creds.sqlite_store_dir.clone(),
+            mode,
+            false,
+        )?;
+    }
+    if mode == AccountMode::Pax {
         client
             .encryption()
             .wait_for_e2ee_initialization_tasks()
@@ -1078,10 +1134,10 @@ pub async fn restore_session(
             .is_some_and(|s| s.is_complete())
             || !client.encryption().backups().are_enabled().await
         {
-            return Err("Sign in with your Pax password to restore encrypted history.".into());
+            return Err(PAX_RECOVERY_REQUIRED.into());
         }
     }
-    *state.account_mode.lock().await = creds.account_mode;
+    *state.account_mode.lock().await = mode;
     *state.session_store_dir.lock().await = Some(creds.sqlite_store_dir.clone().unwrap_or_else(|| "matrix_store".into()));
     state.notifications.reset();
     state.voice_presence.reset();
@@ -1099,14 +1155,61 @@ pub async fn restore_session(
 #[cfg(test)]
 mod encryption_tests {
     use super::*;
+    use crate::commands::pax_auth::tests::{Server, USER};
     use matrix_sdk::config::RequestConfig;
     use matrix_sdk::ruma::api::MatrixVersion;
+    use serde_json::json;
 
     struct TestDir(std::path::PathBuf);
     impl Drop for TestDir {
         fn drop(&mut self) {
             let _ = std::fs::remove_dir_all(&self.0);
         }
+    }
+
+    #[tokio::test]
+    async fn saved_matrix_session_follows_profile_conversion() {
+        let server = Server::start().await;
+        let http = reqwest::Client::new();
+        let config = crate::AuthConfig::default();
+        let discover_mode = || saved_session_mode(&http, &server.home, USER, &config, false);
+        assert_eq!(discover_mode().await.unwrap(), AccountMode::Matrix);
+
+        let mut descriptor = Descriptor::new(USER, AccountMode::Pax, false);
+        server.state.lock().unwrap().profile = json!({pax_auth::PROFILE_FIELD:&descriptor});
+        assert_eq!(discover_mode().await.unwrap_err(), PAX_SETUP_REQUIRED);
+
+        descriptor.state = "converting".into();
+        descriptor.conversion_id = Some(uuid::Uuid::new_v4().to_string());
+        server.state.lock().unwrap().profile = json!({pax_auth::PROFILE_FIELD:&descriptor});
+        assert_eq!(
+            discover_mode().await.unwrap_err(),
+            super::super::account_conversion::PENDING_MESSAGE
+        );
+
+        descriptor.state = "ready".into();
+        descriptor.conversion_id = None;
+        server.state.lock().unwrap().profile = json!({pax_auth::PROFILE_FIELD:descriptor});
+        assert_eq!(discover_mode().await.unwrap(), AccountMode::Pax);
+    }
+
+    #[tokio::test]
+    async fn saved_session_does_not_assume_matrix_when_discovery_fails() {
+        let server = Server::start().await;
+        let http = reqwest::Client::new();
+        let config = crate::AuthConfig::default();
+        let discover_mode = |pinned| saved_session_mode(&http, &server.home, USER, &config, pinned);
+
+        server.state.lock().unwrap().profile_status = Some(503);
+        assert!(discover_mode(false).await.is_err());
+        assert_eq!(discover_mode(true).await.unwrap(), AccountMode::Pax);
+
+        server.state.lock().unwrap().profile_status = None;
+        server.state.lock().unwrap().profile = json!({pax_auth::PROFILE_FIELD: {"schema_version": 999}});
+        assert!(discover_mode(true).await.is_err());
+        server.state.lock().unwrap().profile =
+            json!({pax_auth::PROFILE_FIELD: Descriptor::new(USER, AccountMode::Matrix, true)});
+        assert!(discover_mode(true).await.is_err());
     }
 
     #[test]

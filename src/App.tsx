@@ -363,6 +363,7 @@ function App() {
     autoLoginAttemptedRef.current = true;
 
     (async () => {
+      let restoreError: string;
       try {
         const id = await invoke<string>("restore_session");
         if (!syncStartedRef.current) {
@@ -371,8 +372,8 @@ function App() {
         }
         setUserId(id);
         return;
-      } catch {
-        // No saved session or token expired — show login screen
+      } catch (e) {
+        restoreError = String(e);
       }
 
       try {
@@ -384,7 +385,14 @@ function App() {
             setHomeserver(creds.homeserver);
           }
           setRememberMe(true);
-          if (creds.session?.user_id) setUsername(creds.session.user_id);
+          if (creds.session?.user_id) {
+            setUsername(creds.session.user_id);
+            if (restoreError.startsWith("PAX_CONVERSION_PENDING:")) {
+              setConversionOpen(true);
+            } else {
+              setError(restoreError);
+            }
+          }
         }
       } catch {
         // No saved credentials

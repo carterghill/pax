@@ -3,6 +3,8 @@ import { useTheme } from "../../../theme/ThemeContext";
 import type { MembershipNotice } from "../../../types/matrix";
 import { formatMessageTime } from "./MessageRow";
 
+const ONE_DAY_MS = 24 * 60 * 60 * 1000;
+
 interface MembershipNoticeRowProps {
   eventId: string;
   timestamp: number;
@@ -71,7 +73,9 @@ export default function MembershipNoticeRow({
           title={formatMessageTime(timestamp)}
           style={{ whiteSpace: "nowrap" }}
         >
-          {date.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}
+          {Date.now() - timestamp > ONE_DAY_MS
+            ? date.toLocaleDateString()
+            : date.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}
         </time>
       )}
     </div>
