@@ -21,6 +21,7 @@ import MediaViewerModal, {
 } from "./MediaViewerModal";
 import { fileNameFromImageUrl } from "../utils/directImageUrl";
 import { useReadReceiptSender } from "../hooks/useReadReceiptSender";
+import MembershipNoticeRow from "../features/chat/messages/MembershipNoticeRow";
 import MessageRow from "../features/chat/messages/MessageRow";
 import { rssArticleCandidate, type RssArticleCandidate, type RssProvider } from "../features/chat/messages/rssArticle";
 import { rssThreadReplyCount } from "../features/chat/messages/rssThreads";
@@ -372,16 +373,20 @@ const MessageList = forwardRef<MessageListHandle, MessageListProps>(function Mes
   /* ================================================================ */
 
   const lastId = messages[messages.length - 1]?.eventId ?? null;
+  let lastChatIndex = messages.length - 1;
+  while (messages[lastChatIndex]?.membershipNotice) lastChatIndex -= 1;
+  const lastChatId = messages[lastChatIndex]?.eventId ?? null;
   const scrollContextRef = useRef<{
     roomId: string;
     initialLoading: boolean;
     isAtLatest: boolean;
     lastId: string | null;
+    lastChatId: string | null;
   } | null>(null);
 
   useLayoutEffect(() => {
     const previous = scrollContextRef.current;
-    scrollContextRef.current = { roomId, initialLoading, isAtLatest, lastId };
+    scrollContextRef.current = { roomId, initialLoading, isAtLatest, lastId, lastChatId };
     if (initialLoading) return;
 
     const continuingTimeline = previous?.roomId === roomId && !previous.initialLoading;
@@ -390,8 +395,8 @@ const MessageList = forwardRef<MessageListHandle, MessageListProps>(function Mes
       // Prepending history, edits, and replacing local echoes don't count.
       if (
         continuingTimeline && previous.isAtLatest && isAtLatest &&
-        previous.lastId !== lastId &&
-        messages.some((message) => message.eventId === previous.lastId)
+        previous.lastChatId !== lastChatId &&
+        messages.some((message) => message.eventId === (previous.lastChatId ?? previous.lastId))
       ) {
         setHasNewMessages(true);
       }
@@ -402,7 +407,7 @@ const MessageList = forwardRef<MessageListHandle, MessageListProps>(function Mes
     scrollToBottom(continuingTimeline);
     setAtBottom(true);
     if (isAtLatest) setHasNewMessages(false);
-  }, [lastId, messages, initialLoading, isAtLatest, roomId, scrollToBottom]);
+  }, [lastId, lastChatId, messages, initialLoading, isAtLatest, roomId, scrollToBottom]);
 
   /* ================================================================ */
   /*  Preserve scroll position on prepend                              */
@@ -856,7 +861,7 @@ const MessageList = forwardRef<MessageListHandle, MessageListProps>(function Mes
         {hasOlder
           ? loadingOlder
             ? "Loading older messages..."
-            : replyDrawer || rssProvider ? (
+            : replyDrawer || rssProvider || messages.some((msg) => msg.membershipNotice) ? (
               <button type="button" onClick={onLoadOlder} style={{
                 color: palette.textSecondary,
                 background: "none",
@@ -887,6 +892,19 @@ const MessageList = forwardRef<MessageListHandle, MessageListProps>(function Mes
 
       {/* Messages */}
       {messages.map((msg, i) => {
+        const notice = msg.membershipNotice;
+        if (notice) {
+          return (
+            <MembershipNoticeRow
+              key={msg.eventId}
+              eventId={msg.eventId}
+              timestamp={msg.timestamp}
+              notice={notice}
+              actorLabel={msg.senderName?.trim() || resolveMemberLabel(msg.sender)}
+              targetLabel={notice.targetName?.trim() || resolveMemberLabel(notice.targetUserId)}
+            />
+          );
+        }
         const prevMsg = i > 0 ? messages[i - 1] : null;
         const article = rssArticles[i] ?? null;
         const showHeader = Boolean(article || rssArticles[i - 1]) || shouldShowHeader(msg, prevMsg);

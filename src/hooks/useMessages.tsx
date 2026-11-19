@@ -13,6 +13,12 @@ export interface RoomMessagePayload {
   message: Message;
 }
 
+interface LatestTimelineFetch {
+  roomId: string;
+  updates: Map<string, Message | null>;
+  latestEventId: string | null;
+}
+
 export interface MessageEditPayload {
   roomId: string;
   targetEventId: string;
@@ -225,7 +231,7 @@ export function applyReactionDelta(
   const fromMe =
     me != null && payload.sender.trim().toLowerCase() === me;
   return arr.map((m) => {
-    if (m.eventId !== payload.targetEventId) return m;
+    if (m.eventId !== payload.targetEventId || m.membershipNotice) return m;
     const list = m.reactions ? [...m.reactions] : [];
     const i = list.findIndex((r) => reactionKeysEqual(r.key, payload.key));
 
@@ -289,6 +295,7 @@ export function applyMessageEdit(arr: Message[], payload: MessageEditPayload): M
   if (idx === -1) return arr;
 
   const current = arr[idx];
+  if (current.membershipNotice) return arr;
   const {
     body,
     imageMediaRequest,
@@ -387,7 +394,8 @@ export function useMessages(roomId: string | null, currentUserId: string | null 
     (msgs: Message[]) => {
       if (!userAvatarStore || msgs.length === 0) return;
       userAvatarStore.primeMany(
-        msgs.map((m) => ({ userId: m.sender, avatarUrl: m.avatarUrl })),
+        msgs.filter((m) => !m.membershipNotice)
+          .map((m) => ({ userId: m.sender, avatarUrl: m.avatarUrl })),
       );
     },
     [userAvatarStore],
@@ -415,6 +423,7 @@ export function useMessages(roomId: string | null, currentUserId: string | null 
   activeRoomIdRef.current = roomId;
   const loadingLockRef = useRef(false);
   const initialFetchingRef = useRef(false);
+  const latestFetchRef = useRef<LatestTimelineFetch | null>(null);
   /** True after `loadOlder` / `loadMessagesAroundEvent` — tail-only cache would have wrong pagination. */
   const hasLoadedOlderRef = useRef(false);
   const prevRoomIdRef = useRef<string | null>(null);
@@ -435,6 +444,40 @@ export function useMessages(roomId: string | null, currentUserId: string | null 
     [],
   );
 
+  const fetchLatest = useCallback(async (target: string) => {
+    const fetch: LatestTimelineFetch = { roomId: target, updates: new Map(), latestEventId: null };
+    latestFetchRef.current = fetch;
+    try {
+      const batch = await invoke<MessageBatch>("get_messages", {
+        roomId: target,
+        from: null,
+        limit: INITIAL_LOAD_SIZE,
+      });
+      if (latestFetchRef.current !== fetch || activeRoomIdRef.current !== target) return null;
+
+      const recent = batch.messages.slice().reverse();
+      const byId = new Map(recent.map((message) => [message.eventId, message]));
+      // Keep sync updates that arrived while the history request was in flight.
+      const latestEventId = fetch.latestEventId && !byId.has(fetch.latestEventId)
+        ? fetch.latestEventId
+        : batch.latestEventId ?? null;
+      for (const [id, message] of fetch.updates) {
+        if (message === null) {
+          byId.delete(id);
+        } else if (!byId.has(id)) {
+          byId.set(id, message);
+        }
+      }
+      return {
+        messages: [...byId.values()].sort((a, b) => a.timestamp - b.timestamp).slice(-WINDOW_SIZE),
+        prevBatch: batch.prevBatch,
+        latestEventId,
+      };
+    } finally {
+      if (latestFetchRef.current === fetch) latestFetchRef.current = null;
+    }
+  }, []);
+
   /* ================================================================ */
   /*  Room switch: synchronous blank before paint                      */
   /* ================================================================ */
@@ -454,6 +497,7 @@ export function useMessages(roomId: string | null, currentUserId: string | null 
 
     loadingLockRef.current = false;
     initialFetchingRef.current = false;
+    latestFetchRef.current = null;
     setLoadingOlder(false);
     setPendingRecentCount(0);
 
@@ -495,14 +539,10 @@ export function useMessages(roomId: string | null, currentUserId: string | null 
     // can load messages immediately without clearing or scanning media files.
     void (async () => {
       try {
-        const batch = await invoke<MessageBatch>("get_messages", {
-          roomId: target,
-          from: null,
-          limit: INITIAL_LOAD_SIZE,
-        });
-        if (cancelled || activeRoomIdRef.current !== target) return;
-        const msgs = batch.messages.slice().reverse();
-        setLatestCursor({ roomId: target, eventId: batch.latestEventId ?? null });
+        const batch = await fetchLatest(target);
+        if (!batch || cancelled || activeRoomIdRef.current !== target) return;
+        const msgs = batch.messages;
+        setLatestCursor({ roomId: target, eventId: batch.latestEventId });
         commit(msgs, batch.prevBatch, true);
         primeAvatarsFromMessagesRef.current(msgs);
         putRoomMessagesSnapshot(target, {
@@ -526,7 +566,7 @@ export function useMessages(roomId: string | null, currentUserId: string | null 
       cancelled = true;
       initialFetchingRef.current = false;
     };
-  }, [roomId, commit]);
+  }, [roomId, commit, fetchLatest]);
 
   /* ================================================================ */
   /*  Sync event listeners                                             */
@@ -535,20 +575,25 @@ export function useMessages(roomId: string | null, currentUserId: string | null 
   useEffect(() => {
     if (!roomId) return;
 
-    const unMsg = listen<RoomMessagePayload>("room-message", (event) => {
-      const { roomId: rid, message } = event.payload;
-      if (rid !== roomId) return;
-      if (!messagesRef.current.some((m) => m.eventId === message.eventId)) {
+    const onTimelineEntry = ({ roomId: rid, message }: RoomMessagePayload) => {
+      if (rid !== roomId || activeRoomIdRef.current !== roomId) return;
+      const alreadyVisible = messagesRef.current.some((m) => m.eventId === message.eventId);
+      const fetch = latestFetchRef.current;
+      if (fetch?.roomId === roomId) {
+        fetch.updates.set(message.eventId, message);
+        if (!alreadyVisible) fetch.latestEventId = message.eventId;
+      }
+      if (!alreadyVisible) {
         setLatestCursor({ roomId, eventId: message.eventId });
       }
 
       if (!isAtLatestRef.current) {
-        setPendingRecentCount((c) => c + 1);
+        if (!alreadyVisible && !message.membershipNotice) setPendingRecentCount((c) => c + 1);
         return;
       }
 
       let prev = messagesRef.current;
-      prev = removeMatchingLocalEchoes(prev, message, currentUserId);
+      if (!message.membershipNotice) prev = removeMatchingLocalEchoes(prev, message, currentUserId);
 
       const idx = prev.findIndex((m) => m.eventId === message.eventId);
 
@@ -559,6 +604,7 @@ export function useMessages(roomId: string | null, currentUserId: string | null 
         revokeLocalPreviewIfNeeded(old);
         next[idx] = {
           ...message,
+          senderName: message.membershipNotice ? message.senderName ?? old.senderName : message.senderName,
           reactions: message.reactions ?? old.reactions,
         };
       } else {
@@ -576,7 +622,9 @@ export function useMessages(roomId: string | null, currentUserId: string | null 
       primeAvatarsFromMessagesRef.current([message]);
       messagesRef.current = next;
       setMessages(next);
-    });
+    };
+    const unMsg = listen<RoomMessagePayload>("room-message", ({ payload }) => onTimelineEntry(payload));
+    const unMembership = listen<RoomMessagePayload>("room-membership-notice", ({ payload }) => onTimelineEntry(payload));
 
     const unEdit = listen<MessageEditPayload>("room-message-edit", (event) => {
       if (event.payload.roomId !== roomId) return;
@@ -592,6 +640,8 @@ export function useMessages(roomId: string | null, currentUserId: string | null 
       (event) => {
         if (event.payload.roomId !== roomId) return;
         const eid = event.payload.redactedEventId;
+        const fetch = latestFetchRef.current;
+        if (fetch?.roomId === roomId) fetch.updates.set(eid, null);
         const next = messagesRef.current.filter((m) => m.eventId !== eid);
         if (next.length !== messagesRef.current.length) {
           messagesRef.current = next;
@@ -617,6 +667,7 @@ export function useMessages(roomId: string | null, currentUserId: string | null 
 
     return () => {
       unMsg.then((fn) => fn());
+      unMembership.then((fn) => fn());
       unEdit.then((fn) => fn());
       unRedact.then((fn) => fn());
       unReact.then((fn) => fn());
@@ -698,15 +749,11 @@ export function useMessages(roomId: string | null, currentUserId: string | null 
     loadingLockRef.current = true;
 
     try {
-      const batch = await invoke<MessageBatch>("get_messages", {
-        roomId: target,
-        from: null,
-        limit: INITIAL_LOAD_SIZE,
-      });
-      if (activeRoomIdRef.current !== target) return;
+      const batch = await fetchLatest(target);
+      if (!batch || activeRoomIdRef.current !== target) return;
 
-      const msgs = batch.messages.slice().reverse();
-      setLatestCursor({ roomId: target, eventId: batch.latestEventId ?? null });
+      const msgs = batch.messages;
+      setLatestCursor({ roomId: target, eventId: batch.latestEventId });
       commit(msgs, batch.prevBatch, true);
       primeAvatarsFromMessagesRef.current(msgs);
       hasLoadedOlderRef.current = false;
@@ -721,7 +768,7 @@ export function useMessages(roomId: string | null, currentUserId: string | null 
     } finally {
       loadingLockRef.current = false;
     }
-  }, [roomId, commit]);
+  }, [roomId, commit, fetchLatest]);
 
   /* ================================================================ */
   /*  loadNewer — reload latest window when scrolled back              */

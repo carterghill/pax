@@ -24,6 +24,7 @@ use matrix_sdk::ruma::events::space::child::SpaceChildEventContent;
 use matrix_sdk::ruma::events::typing::SyncTypingEvent;
 use matrix_sdk::ruma::events::AnyMessageLikeEventContent;
 use matrix_sdk::ruma::events::AnySyncMessageLikeEvent;
+use matrix_sdk::ruma::events::AnySyncStateEvent;
 use matrix_sdk::ruma::events::AnySyncTimelineEvent;
 use matrix_sdk::ruma::events::GlobalAccountDataEvent;
 use matrix_sdk::ruma::events::MessageLikeEventType;
@@ -31,6 +32,8 @@ use matrix_sdk::ruma::events::OriginalSyncMessageLikeEvent;
 use matrix_sdk::ruma::events::OriginalSyncStateEvent;
 use matrix_sdk::ruma::events::StateEventType;
 use matrix_sdk::ruma::events::SyncMessageLikeEvent;
+use matrix_sdk::ruma::events::SyncStateEvent;
+use matrix_sdk::ruma::serde::Raw;
 use matrix_sdk::ruma::EventId;
 use matrix_sdk::ruma::OwnedEventId;
 use matrix_sdk::ruma::UInt;
@@ -41,15 +44,16 @@ use tauri::{Emitter, State};
 use crate::types::{
     MessageBatch, MessageEditPayload, MessageInfo, MessageReactionDeltaPayload,
     MessageReactionSummary, MessageRedactedPayload, MessageReplyTo, MessageThreadSummary,
-    PinnedMessagePreview, PresencePayload, RoomMembersChangedPayload, RoomMessagePayload,
-    RoomPinPermission, RoomRedactionPolicy, RoomSendPermission, TypingPayload,
+    PinnedMessagePreview, PresencePayload, RoomMembersChangedPayload, RoomMembershipNoticePayload,
+    RoomMessagePayload, RoomPinPermission, RoomRedactionPolicy, RoomSendPermission, TypingPayload,
     VoiceParticipantsInvalidatedPayload,
 };
 use crate::AppState;
 
 use super::message_display::{
-    extract_mentioned_user_ids, extract_message_display, reply_to_from_message_relation,
-    thread_root_from_message_relation, thread_summary_from_bundle, MessageThreadTarget,
+    extract_mentioned_user_ids, extract_message_display, membership_notice,
+    reply_to_from_message_relation, thread_root_from_message_relation, thread_summary_from_bundle,
+    MessageThreadTarget,
 };
 use super::{fmt_error_chain, get_client, resolve_room};
 
@@ -73,6 +77,7 @@ pub(super) fn unavailable_message(raw: &serde_json::value::RawValue) -> Option<M
     let sender = UserId::parse(event["sender"].as_str()?).ok()?.to_string();
     Some(MessageInfo {
         decryption_failed: true,
+        membership_notice: None,
         event_id,
         sender,
         sender_name: None,
@@ -102,6 +107,87 @@ pub(super) fn unavailable_message(raw: &serde_json::value::RawValue) -> Option<M
         mentioned_user_ids: vec![],
     })
 }
+
+fn timeline_membership_notice(event: &AnySyncTimelineEvent) -> Option<MessageInfo> {
+    let AnySyncTimelineEvent::State(AnySyncStateEvent::RoomMember(SyncStateEvent::Original(
+        member,
+    ))) = event else {
+        return None;
+    };
+    membership_notice(member)
+}
+
+#[cfg(test)]
+mod membership_notice_tests {
+    use super::timeline_membership_notice;
+    use crate::types::MembershipNoticeAction as Action;
+    use matrix_sdk::ruma::events::AnySyncTimelineEvent;
+    use serde_json::{json, Value};
+
+    fn member_event(sender: &str, previous: Option<&str>, membership: &str) -> Value {
+        json!({
+            "type": "m.room.member",
+            "event_id": "$membership",
+            "origin_server_ts": 42,
+            "sender": sender,
+            "state_key": "@bob:example.org",
+            "content": { "membership": membership, "reason": "Room rules" },
+            "unsigned": { "prev_content": previous.map(|value| json!({
+                "membership": value, "displayname": "Bob"
+            })) },
+        })
+    }
+
+    #[test]
+    fn membership_notice_distinguishes_removals_from_other_transitions() {
+        let bob = "@bob:example.org";
+        let alice = "@alice:example.org";
+        for (sender, previous, membership, expected) in [
+            (bob, None, "join", Action::Joined),
+            (bob, Some("invite"), "join", Action::Joined),
+            (bob, Some("join"), "leave", Action::Left),
+            (alice, Some("join"), "leave", Action::Kicked),
+            (alice, Some("invite"), "leave", Action::InviteRevoked),
+            (bob, Some("invite"), "leave", Action::InviteDeclined),
+            (alice, Some("leave"), "invite", Action::Invited),
+            (alice, Some("join"), "ban", Action::Banned),
+            (alice, Some("ban"), "leave", Action::Unbanned),
+            (bob, Some("leave"), "knock", Action::Knocked),
+            (alice, Some("knock"), "invite", Action::KnockAccepted),
+            (alice, Some("knock"), "leave", Action::KnockDenied),
+        ] {
+            let event: AnySyncTimelineEvent =
+                serde_json::from_value(member_event(sender, previous, membership)).unwrap();
+            let message = timeline_membership_notice(&event).unwrap();
+            let notice = message.membership_notice.unwrap();
+
+            assert_eq!(notice.action, expected);
+            assert_eq!(notice.target_user_id, bob);
+            assert_eq!(notice.target_name.as_deref(), previous.map(|_| "Bob"));
+            assert_eq!(notice.reason.as_deref(), Some("Room rules"));
+            assert_eq!(message.sender, sender);
+            assert_eq!(message.event_id, "$membership");
+            assert_eq!(message.timestamp, 42);
+        }
+    }
+
+    #[test]
+    fn membership_notice_skips_profile_updates_and_redactions() {
+        let mut profile = member_event("@bob:example.org", Some("join"), "join");
+        profile["content"]["displayname"] = json!("Robert");
+        assert!(timeline_membership_notice(&serde_json::from_value(profile).unwrap()).is_none());
+
+        let mut redacted = member_event("@alice:example.org", Some("join"), "ban");
+        redacted["content"] = json!({ "membership": "ban" });
+        redacted["unsigned"] = json!({ "redacted_because": {
+            "type": "m.room.redaction", "event_id": "$redaction",
+            "origin_server_ts": 43, "sender": "@alice:example.org",
+            "content": { "redacts": "$membership" }
+        } });
+        assert!(timeline_membership_notice(&serde_json::from_value(redacted).unwrap()).is_none());
+    }
+}
+
 /// Matrix user IDs are compared case-insensitively; event `sender` and `client.user_id()` can differ in casing.
 fn user_id_strings_equal(a: &str, b: &str) -> bool {
     a == b || a.to_lowercase() == b.to_lowercase()
@@ -285,6 +371,7 @@ pub async fn get_messages(
 
     // First pass: extract message data and collect unique senders
     struct RawMsg {
+        position: usize,
         event_id: String,
         sender: String,
         body: String,
@@ -306,7 +393,7 @@ pub async fn get_messages(
         mentioned_user_ids: Vec<String>,
     }
     let mut raw_msgs = Vec::new();
-    let mut unavailable = Vec::new();
+    let mut other_entries = Vec::new();
     let mut unique_senders = Vec::new();
     let mut seen_senders = std::collections::HashSet::new();
     // target event id -> replacement fields + origin_server_ts; keep latest edit per target
@@ -344,7 +431,7 @@ pub async fn get_messages(
     // practice.
     const MAX_PAGES_PER_CALL: usize = 20;
 
-    // How many *visible* (`m.room.message`) events we want to surface before
+    // How many visible timeline entries we want to surface before
     // returning.  A Matrix `/messages` page is a page of *timeline events*, so
     // a federated or state-heavy room (membership churn, reactions, receipts,
     // non-message state) can easily come back with only 1–3 actual messages
@@ -396,7 +483,6 @@ pub async fn get_messages(
         //   * the chunk was completely empty (no events at all — treat as end,
         //     otherwise an endlessly-repeating `end` token could spin us).
         let chunk_len = chunk.len();
-        timeline_event_count_total += chunk_len;
         let end_advanced = pagination_end.as_deref() != current_from.as_deref();
         prev_batch = if chunk_len == 0 || !end_advanced {
             None
@@ -405,18 +491,24 @@ pub async fn get_messages(
         };
 
         for event in chunk {
+            let position = timeline_event_count_total;
+            timeline_event_count_total += 1;
             if let Some(message) = unavailable_message(event.raw().json()) {
                 let sender = UserId::parse(&message.sender).expect("validated sender");
                 if seen_senders.insert(message.sender.clone()) {
                     unique_senders.push(sender);
                 }
-                unavailable.push(message);
+                other_entries.push((position, message));
                 continue;
             }
             let raw = match event.raw().deserialize() {
                 Ok(e) => e,
                 Err(_) => continue,
             };
+            if let Some(notice) = timeline_membership_notice(&raw) {
+                other_entries.push((position, notice));
+                continue;
+            }
 
             if let matrix_sdk::ruma::events::AnySyncTimelineEvent::MessageLike(
                 matrix_sdk::ruma::events::AnySyncMessageLikeEvent::RoomMessage(msg),
@@ -469,6 +561,7 @@ pub async fn get_messages(
                 let reply_to = reply_to_from_message_relation(&original.content.relates_to);
                 let mentioned_user_ids = extract_mentioned_user_ids(&original.content);
                 raw_msgs.push(RawMsg {
+                    position,
                     event_id: original.event_id.to_string(),
                     sender: sender_str,
                     body: ext.body,
@@ -500,7 +593,7 @@ pub async fn get_messages(
         // Keep paging until we have enough visible messages to overflow the
         // viewport (so the user can actually scroll and re-trigger pagination),
         // we truly run out of history, or we hit the per-call page cap.
-        if raw_msgs.len() + unavailable.len() >= target_visible || prev_batch.is_none() {
+        if raw_msgs.len() + other_entries.len() >= target_visible || prev_batch.is_none() {
             break;
         }
         if pages_scanned >= MAX_PAGES_PER_CALL {
@@ -591,8 +684,9 @@ pub async fn get_messages(
                     )
                 });
             let reactions = reaction_map.get(&m.event_id).cloned();
-            MessageInfo {
+            let message = MessageInfo {
                 decryption_failed: false,
+                membership_notice: None,
                 event_id: m.event_id,
                 sender: m.sender,
                 sender_name,
@@ -616,18 +710,14 @@ pub async fn get_messages(
                 unsupported_matrix_msgtype,
                 reactions,
                 mentioned_user_ids: m.mentioned_user_ids,
-            }
+            };
+            (m.position, message)
         })
         .collect();
 
-    for mut message in unavailable {
-        if let Some((name, avatar)) = sender_meta.get(&message.sender) {
-            message.sender_name = name.clone();
-            message.avatar_url = avatar.clone();
-        }
-        messages.push(message);
-    }
-    messages.sort_by_key(|m| std::cmp::Reverse(m.timestamp));
+    extend_timeline_entries(&mut messages, other_entries, &sender_meta);
+    messages.sort_by_key(|(position, message)| (std::cmp::Reverse(message.timestamp), *position));
+    let messages: Vec<_> = messages.into_iter().map(|(_, message)| message).collect();
     let elapsed = t0.elapsed();
     let msg_count = messages.len();
     log::info!(
@@ -660,6 +750,22 @@ pub async fn get_messages(
             None
         },
     })
+}
+
+fn extend_timeline_entries(
+    messages: &mut Vec<(usize, MessageInfo)>,
+    other_entries: Vec<(usize, MessageInfo)>,
+    sender_meta: &HashMap<String, (Option<String>, Option<String>)>,
+) {
+    messages.extend(other_entries.into_iter().map(|(position, mut message)| {
+        if let Some((name, avatar)) = sender_meta.get(&message.sender) {
+            message.sender_name = name.clone();
+            if message.decryption_failed {
+                message.avatar_url = avatar.clone();
+            }
+        }
+        (position, message)
+    }));
 }
 
 #[tauri::command]
@@ -794,6 +900,7 @@ async fn build_message_infos_from_timeline_events(
     avatars: &std::sync::Arc<crate::avatars::AvatarService>,
 ) -> Result<Vec<MessageInfo>, String> {
     struct RawMsg {
+        position: usize,
         event_id: String,
         sender: String,
         body: String,
@@ -816,7 +923,7 @@ async fn build_message_infos_from_timeline_events(
     }
 
     let mut raw_msgs = Vec::new();
-    let mut unavailable = Vec::new();
+    let mut other_entries = Vec::new();
     let mut latest_replacement: HashMap<
         String,
         (
@@ -842,19 +949,23 @@ async fn build_message_infos_from_timeline_events(
     let me = client.user_id();
     let reaction_map = aggregate_reactions_from_timeline(&timeline_events, me);
 
-    for event in timeline_events {
+    for (position, event) in timeline_events.into_iter().enumerate() {
         if let Some(message) = unavailable_message(event.raw().json()) {
             let sender = UserId::parse(&message.sender).expect("validated sender");
             if seen_senders.insert(message.sender.clone()) {
                 unique_senders.push(sender);
             }
-            unavailable.push(message);
+            other_entries.push((position, message));
             continue;
         }
         let raw = match event.kind.raw().deserialize() {
             Ok(e) => e,
             Err(_) => continue,
         };
+        if let Some(notice) = timeline_membership_notice(&raw) {
+            other_entries.push((position, notice));
+            continue;
+        }
 
         if let AnySyncTimelineEvent::MessageLike(AnySyncMessageLikeEvent::RoomMessage(msg)) = raw {
             match msg {
@@ -901,6 +1012,7 @@ async fn build_message_infos_from_timeline_events(
                     let reply_to = reply_to_from_message_relation(&original.content.relates_to);
                     let mentioned_user_ids = extract_mentioned_user_ids(&original.content);
                     raw_msgs.push(RawMsg {
+                        position,
                         event_id: original.event_id.to_string(),
                         sender: sender_str,
                         body: ext.body,
@@ -1003,8 +1115,9 @@ async fn build_message_infos_from_timeline_events(
                     )
                 });
             let reactions = reaction_map.get(&m.event_id).cloned();
-            MessageInfo {
+            let message = MessageInfo {
                 decryption_failed: false,
+                membership_notice: None,
                 event_id: m.event_id,
                 sender: m.sender,
                 sender_name,
@@ -1028,19 +1141,14 @@ async fn build_message_infos_from_timeline_events(
                 unsupported_matrix_msgtype,
                 reactions,
                 mentioned_user_ids: m.mentioned_user_ids,
-            }
+            };
+            (m.position, message)
         })
         .collect();
 
-    for mut message in unavailable {
-        if let Some((name, avatar)) = sender_meta.get(&message.sender) {
-            message.sender_name = name.clone();
-            message.avatar_url = avatar.clone();
-        }
-        messages.push(message);
-    }
-    messages.sort_by_key(|m| m.timestamp);
-    Ok(messages)
+    extend_timeline_entries(&mut messages, other_entries, &sender_meta);
+    messages.sort_by_key(|(position, message)| (message.timestamp, *position));
+    Ok(messages.into_iter().map(|(_, message)| message).collect())
 }
 
 #[tauri::command]
@@ -1229,7 +1337,7 @@ pub async fn get_messages_around_event(
 
     let avatars = state.avatars.clone();
     let mut messages = build_message_infos_from_timeline_events(&room, ordered, &avatars).await?;
-    messages.sort_by(|a, b| b.timestamp.cmp(&a.timestamp));
+    messages.reverse();
 
     Ok(MessageBatch {
         messages,
@@ -1706,6 +1814,7 @@ pub async fn start_sync(
                 is_dm,
                 message: MessageInfo {
                     decryption_failed: false,
+                    membership_notice: None,
                     event_id: ev.event_id.to_string(),
                     sender,
                     sender_name,
@@ -1734,6 +1843,35 @@ pub async fn start_sync(
             let _ = app.emit("room-message", payload);
         }
     });
+
+    // A typed member-state handler would also see the sync state snapshot.
+    // Only events in the room's timeline belong in the chat history.
+    {
+        let app = app.clone();
+        client.add_event_handler(move |event: Raw<AnySyncTimelineEvent>, room: Room| {
+            let app = app.clone();
+            async move {
+                if room.is_space()
+                    || event.get_field::<&str>("type").ok().flatten() != Some("m.room.member")
+                {
+                    return;
+                }
+                let Ok(event) = event.deserialize() else {
+                    return;
+                };
+                let Some(message) = timeline_membership_notice(&event) else {
+                    return;
+                };
+                let _ = app.emit(
+                    "room-membership-notice",
+                    RoomMembershipNoticePayload {
+                        room_id: room.room_id().to_string(),
+                        message,
+                    },
+                );
+            }
+        });
+    }
 
     // Undecrypted events still have a sender, timestamp and event ID. Surface
     // them instead of silently hiding a reply whose plaintext is unavailable.
@@ -1810,7 +1948,7 @@ pub async fn start_sync(
         let app = app.clone();
         let feed_event = StateEventType::from(super::rss::RSS_FEED_EVENT);
         client.add_event_handler(
-            move |event: matrix_sdk::ruma::events::AnySyncStateEvent, room: Room| {
+            move |event: AnySyncStateEvent, room: Room| {
                 let app = app.clone();
                 let event_type = event.event_type();
                 let is_room_state = event.state_key().is_empty();

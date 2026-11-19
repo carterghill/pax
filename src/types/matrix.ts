@@ -53,9 +53,29 @@ export interface MessageReplyTo {
   eventId: string;
 }
 
+export interface MembershipNotice {
+  action:
+    | "joined"
+    | "left"
+    | "invited"
+    | "inviteDeclined"
+    | "inviteRevoked"
+    | "kicked"
+    | "banned"
+    | "unbanned"
+    | "knocked"
+    | "knockAccepted"
+    | "knockRetracted"
+    | "knockDenied";
+  targetUserId: string;
+  targetName: string | null;
+  reason: string | null;
+}
+
 export interface Message {
   /** An encrypted event whose contents are unavailable on this device. */
   decryptionFailed?: boolean;
+  membershipNotice?: MembershipNotice;
   eventId: string;
   sender: string;
   senderName: string | null;

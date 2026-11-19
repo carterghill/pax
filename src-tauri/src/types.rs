@@ -73,11 +73,39 @@ pub struct MessageThreadSummary {
     pub latest_timestamp: Option<u64>,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub enum MembershipNoticeAction {
+    Joined,
+    Left,
+    Invited,
+    InviteDeclined,
+    InviteRevoked,
+    Kicked,
+    Banned,
+    Unbanned,
+    Knocked,
+    KnockAccepted,
+    KnockRetracted,
+    KnockDenied,
+}
+
+#[derive(Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct MembershipNotice {
+    pub action: MembershipNoticeAction,
+    pub target_user_id: String,
+    pub target_name: Option<String>,
+    pub reason: Option<String>,
+}
+
 #[derive(Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct MessageInfo {
     /// Ciphertext retained as a timeline placeholder; no plaintext was recovered.
     pub decryption_failed: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub membership_notice: Option<MembershipNotice>,
     pub event_id: String,
     pub sender: String,
     pub sender_name: Option<String>,
@@ -247,6 +275,13 @@ pub struct RoomMessagePayload {
     /// DM, every message is treated as notification-worthy for levels that care
     /// about mentions, matching `effectiveMentionCount` behaviour.
     pub is_dm: bool,
+}
+
+#[derive(Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RoomMembershipNoticePayload {
+    pub room_id: String,
+    pub message: MessageInfo,
 }
 
 /// Live edit: merge into the existing timeline row with `target_event_id` (do not append).

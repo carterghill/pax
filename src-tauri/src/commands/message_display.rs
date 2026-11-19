@@ -1,11 +1,76 @@
 use matrix_sdk::media::{MediaFormat, MediaRequestParameters, MediaThumbnailSettings};
 use matrix_sdk::ruma::events::relation::{BundledThread, Thread};
+use matrix_sdk::ruma::events::room::member::{MembershipChange, OriginalSyncRoomMemberEvent};
 use matrix_sdk::ruma::events::room::message::Relation;
 use matrix_sdk::ruma::events::room::message::RoomMessageEventContent;
 use matrix_sdk::ruma::events::room::message::RoomMessageEventContentWithoutRelation;
 use matrix_sdk::ruma::{OwnedEventId, UInt};
 
-use crate::types::{MessageReplyTo, MessageThreadSummary};
+use crate::types::{
+    MembershipNotice, MembershipNoticeAction, MessageInfo, MessageReplyTo, MessageThreadSummary,
+};
+
+pub(super) fn membership_notice(event: &OriginalSyncRoomMemberEvent) -> Option<MessageInfo> {
+    use MembershipChange as Change;
+    use MembershipNoticeAction as Action;
+
+    let action = match event.membership_change() {
+        Change::Joined | Change::InvitationAccepted => Action::Joined,
+        Change::Left => Action::Left,
+        Change::Invited => Action::Invited,
+        Change::InvitationRejected => Action::InviteDeclined,
+        Change::InvitationRevoked => Action::InviteRevoked,
+        Change::Kicked => Action::Kicked,
+        Change::Banned | Change::KickedAndBanned => Action::Banned,
+        Change::Unbanned => Action::Unbanned,
+        Change::Knocked => Action::Knocked,
+        Change::KnockAccepted => Action::KnockAccepted,
+        Change::KnockRetracted => Action::KnockRetracted,
+        Change::KnockDenied => Action::KnockDenied,
+        _ => return None,
+    };
+
+    let target_name = event
+        .content
+        .displayname
+        .as_deref()
+        .filter(|name| !name.trim().is_empty())
+        .or_else(|| event.prev_content()?.displayname.as_deref())
+        .map(str::to_owned);
+
+    Some(MessageInfo {
+        decryption_failed: false,
+        membership_notice: Some(MembershipNotice {
+            action,
+            target_user_id: event.state_key.to_string(),
+            target_name,
+            reason: event.content.reason.clone(),
+        }),
+        event_id: event.event_id.to_string(),
+        sender: event.sender.to_string(),
+        sender_name: None,
+        body: String::new(),
+        timestamp: event.origin_server_ts.0.into(),
+        avatar_url: None,
+        edited: false,
+        reply_to: None,
+        thread_root_id: None,
+        thread_summary: None,
+        image_media_request: None,
+        image_width: None,
+        image_height: None,
+        image_blurhash: None,
+        video_media_request: None,
+        video_width: None,
+        video_height: None,
+        file_media_request: None,
+        file_mime: None,
+        file_display_name: None,
+        unsupported_matrix_msgtype: None,
+        reactions: None,
+        mentioned_user_ids: Vec::new(),
+    })
+}
 
 fn strip_rich_reply_plain_text(s: &str) -> String {
     if !s.contains('\n') {
