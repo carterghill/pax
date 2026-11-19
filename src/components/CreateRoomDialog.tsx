@@ -466,10 +466,6 @@ export default function CreateRoomDialog({
       setSearchError("Room aliases must look like #name:server.com");
       return;
     }
-    if (addr.startsWith("!") && !addr.includes(":")) {
-      setSearchError("Room IDs must look like !opaqueid:server.com");
-      return;
-    }
     setSearchError(null);
     setJoinSuccess(null);
     setJoiningId(addr);

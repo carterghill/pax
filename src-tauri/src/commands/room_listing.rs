@@ -102,6 +102,9 @@ async fn build_room_info(
         is_rss,
         topic,
         membership: membership.to_string(),
+        replacement_room_id: None,
+        history_room_ids: Vec::new(),
+        upgrade_pending: !room.is_space() && room.is_tombstoned(),
         is_direct,
         dm_peer_user_id,
         dm_peer_presence,
@@ -300,6 +303,12 @@ pub async fn get_rooms(state: State<'_, Arc<AppState>>) -> Result<Vec<RoomInfo>,
 
     invited_parts.sort_by_key(|(i, _)| *i);
     room_list.extend(invited_parts.into_iter().map(|(_, r)| r));
+
+    let (mut replacements, mut histories) = super::room_upgrades::joined_upgrade_links(&client).await;
+    for room in &mut room_list {
+        room.replacement_room_id = replacements.remove(&room.id);
+        room.history_room_ids = histories.remove(&room.id).unwrap_or_default();
+    }
 
     Ok(room_list)
 }

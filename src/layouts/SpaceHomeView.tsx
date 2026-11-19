@@ -49,6 +49,7 @@ function roomToSpaceChildInfo(r: Room, fromHierarchy?: SpaceChildInfo): SpaceChi
     avatarUrl: r.avatarUrl,
     membership: r.membership,
     joinRule: fromHierarchy?.joinRule ?? null,
+    viaServers: fromHierarchy?.viaServers,
     roomType: r.roomType,
     isRss: r.isRss,
     numJoinedMembers: fromHierarchy?.numJoinedMembers ?? 0,
@@ -90,6 +91,7 @@ function mergeSubSpaceChannels(
   }
   for (const r of syncRooms) {
     if (r.isSpace) continue;
+    for (const previous of r.historyRoomIds ?? []) byId.delete(previous);
     const fromH = byId.get(r.id);
     byId.set(r.id, roomToSpaceChildInfo(r, fromH));
   }
@@ -184,6 +186,7 @@ export default function SpaceHomeView({
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [joiningRoomId, setJoiningRoomId] = useState<string | null>(null);
+  const [joinError, setJoinError] = useState<string | null>(null);
   /** Always matches the latest `space.id` so in-flight fetches for an old space are ignored. */
   const activeSpaceIdRef = useRef(space.id);
   activeSpaceIdRef.current = space.id;
@@ -470,10 +473,10 @@ export default function SpaceHomeView({
 
   const joinedRoomsDirectFiltered = useMemo(() => {
     if (!info) return [];
-    const joinedChildren = info.children.filter((c) => c.membership === "joined");
-    const joinedRoomsDirect = joinedChildren.filter((c) => !isChildMatrixSpace(c));
+    const joinedRoomsDirect = mergeSubSpaceChannels(getRoomsInChildSpace(space.id), info.children)
+      .filter((child) => child.membership === "joined");
     return joinedRoomsDirect.filter((c) => !roomIdsListedUnderSubspaces.has(c.id));
-  }, [info, roomIdsListedUnderSubspaces]);
+  }, [info, roomIdsListedUnderSubspaces, getRoomsInChildSpace, space.id]);
 
   const directMessageRoomsHome = useMemo(
     () => joinedRoomsDirectFiltered.filter((c) => c.isDirect),
@@ -527,6 +530,7 @@ export default function SpaceHomeView({
   const handleJoinRoom = useCallback(
     async (roomId: string, optimisticParentSpaceId?: string) => {
       setJoiningRoomId(roomId);
+      setJoinError(null);
       const parentForOptimistic = optimisticParentSpaceId ?? space.id;
       const childMeta =
         info?.children.find((c) => c.id === roomId) ??
@@ -542,9 +546,18 @@ export default function SpaceHomeView({
           return undefined;
         })();
       try {
-        await invoke("join_room", { roomId });
+        let joinedId: string;
+        try {
+          joinedId = await invoke<string>("join_room", { roomId, viaServers: childMeta?.viaServers });
+        } catch (error) {
+          if (!childMeta?.upgradeJoinFrom) throw error;
+          joinedId = await invoke<string>("join_room", {
+            roomId: childMeta.upgradeJoinFrom,
+            viaServers: childMeta.viaServers,
+          });
+        }
         const optimisticRoom: Room = {
-          id: roomId,
+          id: joinedId,
           name: childMeta?.name ?? roomId,
           avatarUrl: childMeta?.avatarUrl ?? null,
           isSpace: childMeta?.roomType === SPACE_ROOM_TYPE,
@@ -556,7 +569,7 @@ export default function SpaceHomeView({
         await onRoomsChanged({ optimisticRoom });
         setInfo((prev) => {
           if (!prev) return prev;
-          const next = mergeJoinedChildIntoSpaceInfo(prev, roomId);
+          const next = mergeJoinedChildIntoSpaceInfo(prev, joinedId);
           setCachedSpaceInfo(space.id, next);
           return next;
         });
@@ -573,7 +586,7 @@ export default function SpaceHomeView({
         }
         fetchInfo({ background: true });
       } catch (e) {
-        console.error("Failed to join room:", e);
+        setJoinError(String(e));
       }
       setJoiningRoomId(null);
     },
@@ -1414,6 +1427,7 @@ export default function SpaceHomeView({
           </div>
         )}
 
+        {joinError && <p role="alert">{joinError}</p>}
         {info.children.length === 0 && (
           <div style={{
             color: palette.textSecondary,

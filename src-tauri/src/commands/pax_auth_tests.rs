@@ -92,6 +92,7 @@ fn envelope_rejects_wrong_password_tampering_and_account_or_key_substitution() {
 #[derive(Default)]
 pub(crate) struct ServerState {
     versions: Option<Value>,
+    pub route_overrides: HashMap<(String, String), (u16, Value)>,
     pub requests: Vec<(String, String, Value)>,
     pub credential: Option<String>,
     required_login_identifier: Option<String>,
@@ -213,6 +214,9 @@ async fn serve(mut socket: TcpStream, state: Arc<Mutex<ServerState>>) {
 }
 
 fn respond(s: &mut ServerState, method: &str, path: &str, body: &Value) -> (u16, Value) {
+    if let Some(response) = s.route_overrides.get(&(method.to_owned(), path.to_owned())) {
+        return response.clone();
+    }
     let missing = || (404, json!({"errcode":"M_NOT_FOUND", "error":"Missing"}));
     if let (Some(room), Some(path)) = (
         s.rss_room.as_mut(),

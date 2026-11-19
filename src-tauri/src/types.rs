@@ -37,6 +37,12 @@ pub struct RoomInfo {
     pub topic: Option<String>,
     /// "joined" or "invited"
     pub membership: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub replacement_room_id: Option<String>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub history_room_ids: Vec<String>,
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub upgrade_pending: bool,
     /// True when this is a 1:1 DM (name/avatar are the peer).
     pub is_direct: bool,
     /// Other participant in a 1:1 DM (for presence / display).
@@ -402,6 +408,10 @@ pub struct SpaceChildInfo {
     /// "joined", "invited", or "none"
     pub membership: String,
     pub join_rule: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub upgrade_join_from: Option<String>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub via_servers: Vec<String>,
     pub room_type: Option<String>,
     pub num_joined_members: u64,
     #[serde(skip_serializing_if = "std::ops::Not::not")]

@@ -7,6 +7,7 @@ import {
   useCallback,
   forwardRef,
   useImperativeHandle,
+  Fragment,
 } from "react";
 import { createPortal } from "react-dom";
 import { invoke } from "@tauri-apps/api/core";
@@ -57,6 +58,8 @@ interface MessageListProps {
   loadingOlder: boolean;
   initialLoading: boolean;
   hasOlder: boolean;
+  hasUpgradeHistory?: boolean;
+  historyError?: string | null;
   isAtLatest: boolean;
   automaticReadBlocked?: boolean;
   privateReadOnly?: boolean;
@@ -72,7 +75,7 @@ interface MessageListProps {
   onRequestEdit: (msg: Message) => void;
   /** Reply composer target (cleared on send or Escape in composer). */
   onRequestReply: (msg: Message) => void;
-  onReplyPreviewClick: (eventId: string) => void;
+  onReplyPreviewClick: (eventId: string, sourceRoomId?: string) => void;
   /** When false, the reply action is hidden (e.g. read-only room). */
   allowReply: boolean;
   onMessagesMutated: () => void;
@@ -119,6 +122,8 @@ const MessageList = forwardRef<MessageListHandle, MessageListProps>(function Mes
     loadingOlder,
     initialLoading,
     hasOlder,
+    hasUpgradeHistory,
+    historyError,
     isAtLatest,
     automaticReadBlocked = false,
     privateReadOnly = false,
@@ -479,7 +484,7 @@ const MessageList = forwardRef<MessageListHandle, MessageListProps>(function Mes
   const onLoadNewerRef = useRef(onLoadNewer);
   onLoadNewerRef.current = onLoadNewer;
   const hasOlderRef = useRef(hasOlder);
-  hasOlderRef.current = hasOlder;
+  hasOlderRef.current = hasOlder && !historyError;
   const isAtLatestRef = useRef(isAtLatest);
   isAtLatestRef.current = isAtLatest;
   const loadingOlderRef = useRef(loadingOlder);
@@ -503,7 +508,7 @@ const MessageList = forwardRef<MessageListHandle, MessageListProps>(function Mes
   useReadReceiptSender(
     roomId,
     {
-      latestVisibleEventId: lastId,
+      latestVisibleEventId: messages[messages.length - 1]?.historyRoomId ? null : lastId,
       atBottom: isAtLatest && atBottom,
       blocked: automaticReadBlocked,
       privateOnly: privateReadOnly,
@@ -742,6 +747,19 @@ const MessageList = forwardRef<MessageListHandle, MessageListProps>(function Mes
       ? "rgba(0, 0, 0, 0.055)"
       : "rgba(255, 255, 255, 0.06)";
 
+  const upgradeDivider = (
+    <div role="separator" aria-label="Room upgraded" style={{
+      margin: `${spacing.unit * 3}px ${spacing.unit * 4}px`,
+      borderTop: `1px solid ${palette.border}`,
+      paddingTop: spacing.unit,
+      textAlign: "center",
+      color: palette.textSecondary,
+      fontSize: typography.fontSizeSmall,
+    }}>
+      Room upgraded
+    </div>
+  );
+
   const hasUnreadMessages = hasNewMessages || pendingRecentCount > 0;
   const showRecentNotice = showJumpToRecent || (!atBottom && hasUnreadMessages);
   const jumpToRecentLabel = hasUnreadMessages ? "New messages" : "Jump to recent";
@@ -861,7 +879,7 @@ const MessageList = forwardRef<MessageListHandle, MessageListProps>(function Mes
         {hasOlder
           ? loadingOlder
             ? "Loading older messages..."
-            : replyDrawer || rssProvider || messages.some((msg) => msg.membershipNotice) ? (
+            : replyDrawer || rssProvider || hasUpgradeHistory || messages.some((msg) => msg.membershipNotice) ? (
               <button type="button" onClick={onLoadOlder} style={{
                 color: palette.textSecondary,
                 background: "none",
@@ -878,6 +896,7 @@ const MessageList = forwardRef<MessageListHandle, MessageListProps>(function Mes
             ? replyDrawer ? null : "Beginning of conversation"
             : replyDrawer ? "No replies yet" : "No messages yet"}
       </div>
+      {historyError && <div role="status" style={{ padding: spacing.unit, textAlign: "center", color: palette.textSecondary }}>{historyError}</div>}
 
       {/* Skeleton rows when loading older */}
       {loadingOlder && (
@@ -892,71 +911,82 @@ const MessageList = forwardRef<MessageListHandle, MessageListProps>(function Mes
 
       {/* Messages */}
       {messages.map((msg, i) => {
+        const prevMsg = i > 0 ? messages[i - 1] : null;
+        const crossedUpgrade = prevMsg?.historyRoomId && prevMsg.historyRoomId !== msg.historyRoomId;
         const notice = msg.membershipNotice;
         if (notice) {
           return (
-            <MembershipNoticeRow
-              key={msg.eventId}
-              eventId={msg.eventId}
-              timestamp={msg.timestamp}
-              notice={notice}
-              actorLabel={msg.senderName?.trim() || resolveMemberLabel(msg.sender)}
-              targetLabel={notice.targetName?.trim() || resolveMemberLabel(notice.targetUserId)}
-            />
+            <Fragment key={msg.eventId}>
+              {crossedUpgrade && upgradeDivider}
+              <MembershipNoticeRow
+                eventId={msg.eventId}
+                timestamp={msg.timestamp}
+                notice={notice}
+                actorLabel={msg.senderName?.trim() || resolveMemberLabel(msg.sender)}
+                targetLabel={notice.targetName?.trim() || resolveMemberLabel(notice.targetUserId)}
+              />
+            </Fragment>
           );
         }
-        const prevMsg = i > 0 ? messages[i - 1] : null;
-        const article = rssArticles[i] ?? null;
-        const showHeader = Boolean(article || rssArticles[i - 1]) || shouldShowHeader(msg, prevMsg);
-        const canEdit = messageAllowsEdit(msg, userId);
-        const canDelete = messageAllowsDelete(msg, userId, redactionPolicy);
+        const isHistorical = !!msg.historyRoomId;
+        const article = isHistorical ? null : rssArticles[i] ?? null;
+        const showHeader = Boolean(crossedUpgrade || article || rssArticles[i - 1]) || shouldShowHeader(msg, prevMsg);
+        const canEdit = !isHistorical && messageAllowsEdit(msg, userId);
+        const canDelete = !isHistorical && messageAllowsDelete(msg, userId, redactionPolicy);
         const showReplyButton =
-          allowReply && !msg.decryptionFailed && !msg.eventId.startsWith("local:");
-        const showOverflowMenu = !msg.decryptionFailed && (canEdit || canDelete || canPinMessages);
-        const canReact = !msg.decryptionFailed && !msg.eventId.startsWith("local:");
+          !isHistorical && allowReply && !msg.decryptionFailed && !msg.eventId.startsWith("local:");
+        const showOverflowMenu = !isHistorical && !msg.decryptionFailed && (canEdit || canDelete || canPinMessages);
+        const canReact = !isHistorical && !msg.decryptionFailed && !msg.eventId.startsWith("local:");
         const showHoverActions =
           showReplyButton || canReact || showOverflowMenu;
 
         return (
-          <MessageRow
-            key={msg.eventId}
-            msg={msg}
-            rssArticle={article}
-            rssReplyCount={article ? rssReplyCounts?.get(msg.eventId) ?? rssThreadReplyCount(msg, rssReplies?.get(msg.eventId) ?? []) : 0}
-            rssThreadOpen={msg.eventId === activeRssThreadId}
-            onRssArticleConfirmed={onRssArticleConfirmed}
-            onOpenRssThread={onOpenRssThread}
-            showHeader={showHeader}
-            showReplyButton={showReplyButton}
-            showOverflowMenu={showOverflowMenu}
-            showHoverActions={showHoverActions}
-            canReact={canReact}
-            isMenuOpen={menu.openId === msg.eventId}
-            isReactionPickerOpen={reactionPicker.openId === msg.eventId}
-            onRequestReply={() => onRequestReply(msg)}
-            onOpenMenu={handleOpenMenu}
-            onToggleReactionPicker={handleToggleReactionPicker}
-            onOpenMediaViewer={openMediaViewer}
-            onOpenDirectImage={openDirectImage}
-            menuAnchorRef={menu.anchorRef}
-            reactionPickerAnchorRef={reactionPicker.anchorRef}
-            onReactionChipClick={(key, reactedByMe) => {
-              void handleReactionChipClick(msg.eventId, key, reactedByMe);
-            }}
-            onReactionChipHover={handleReactionChipHover}
-            onReactionChipHoverEnd={handleReactionChipHoverEnd}
-            rowHighlight={rowHighlight}
-            spacingUnit={spacing.unit}
-            palette={palette}
-            typography={typography}
-            resolvedColorScheme={resolvedColorScheme}
-            replyThread={replyDrawer ? null : getReplyThreadPreview(msg, messageByEventId)}
-            onReplyThreadClick={onReplyPreviewClick}
-            onOpenSenderProfile={onOpenSenderProfile}
-            resolveMemberLabel={resolveMemberLabel}
-          />
+          <Fragment key={msg.eventId}>
+            {crossedUpgrade && upgradeDivider}
+            <MessageRow
+              msg={msg}
+              rssArticle={article}
+              rssReplyCount={article ? rssReplyCounts?.get(msg.eventId) ?? rssThreadReplyCount(msg, rssReplies?.get(msg.eventId) ?? []) : 0}
+              rssThreadOpen={msg.eventId === activeRssThreadId}
+              onRssArticleConfirmed={onRssArticleConfirmed}
+              onOpenRssThread={onOpenRssThread}
+              showHeader={showHeader}
+              showReplyButton={showReplyButton}
+              showOverflowMenu={showOverflowMenu}
+              showHoverActions={showHoverActions}
+              canReact={canReact}
+              isMenuOpen={menu.openId === msg.eventId}
+              isReactionPickerOpen={reactionPicker.openId === msg.eventId}
+              onRequestReply={() => onRequestReply(msg)}
+              onOpenMenu={handleOpenMenu}
+              onToggleReactionPicker={handleToggleReactionPicker}
+              onOpenMediaViewer={msg.historyRoomId
+                ? (payload) => setMediaViewer({ ...payload, roomId: msg.historyRoomId })
+                : openMediaViewer}
+              onOpenDirectImage={openDirectImage}
+              menuAnchorRef={menu.anchorRef}
+              reactionPickerAnchorRef={reactionPicker.anchorRef}
+              onReactionChipClick={(key, reactedByMe) => {
+                if (isHistorical) return;
+                void handleReactionChipClick(msg.eventId, key, reactedByMe);
+              }}
+              onReactionChipHover={handleReactionChipHover}
+              onReactionChipHoverEnd={handleReactionChipHoverEnd}
+              rowHighlight={rowHighlight}
+              spacingUnit={spacing.unit}
+              palette={palette}
+              typography={typography}
+              resolvedColorScheme={resolvedColorScheme}
+              replyThread={replyDrawer ? null : getReplyThreadPreview(msg, messageByEventId)}
+              onReplyThreadClick={(id) => onReplyPreviewClick(id, msg.historyRoomId)}
+              onOpenSenderProfile={onOpenSenderProfile}
+              resolveMemberLabel={resolveMemberLabel}
+            />
+          </Fragment>
         );
       })}
+
+      {messages[messages.length - 1]?.historyRoomId && upgradeDivider}
 
       {/* Skeleton rows at bottom when not at latest */}
       {!isAtLatest && (

@@ -9,6 +9,7 @@ import SettingsMemberCategory from "./SettingsMemberCategory";
 import PowerLevelsSettingsPanel from "./PowerLevelsSettingsPanel";
 import NotificationSettingsPanel from "./NotificationSettingsPanel";
 import RssFeedSettingsPanel from "./RssFeedSettingsPanel";
+import RoomUpgradeSettings from "./RoomUpgradeSettings";
 import type { RoomManagementMembersResponse } from "../types/matrix";
 
 type HistoryVisibility = "joined" | "shared" | "invited" | "world_readable";
@@ -73,6 +74,7 @@ export interface RoomSettingsDialogProps {
   roomName: string;
   isRss?: boolean;
   onClose: () => void;
+  onUpgraded: (roomId: string) => void;
   /** Room ids in the active space tree (for kick/ban/unban scope). */
   moderationSpaceTreeRoomIds?: string[] | null;
   /** Space display name for the scope dialog. */
@@ -86,6 +88,7 @@ export default function RoomSettingsDialog({
   roomName,
   isRss = false,
   onClose,
+  onUpgraded,
   moderationSpaceTreeRoomIds = null,
   moderationSpaceName = null,
   moderationSpaceRootId = null,
@@ -862,6 +865,7 @@ export default function RoomSettingsDialog({
                       </div>
                     </div>
 
+                    <RoomUpgradeSettings key={roomId} roomId={roomId} roomName={roomName} onDone={onUpgraded} />
                     {saveError && activeTab === "general" && (
                       <div
                         style={{

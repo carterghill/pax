@@ -777,6 +777,9 @@ pub async fn send_message(
 ) -> Result<(), String> {
     let client = get_client(&state).await?;
     let room = resolve_room(&client, &room_id)?;
+    if !room.is_space() && room.is_tombstoned() {
+        return Err("This room was upgraded. Send new messages in its replacement.".into());
+    }
 
     let content = if let Some(raw) = reply_to_event_id {
         let id_str = raw.trim();
@@ -872,7 +875,7 @@ pub async fn get_room_can_send_messages(
         .await
         .map_err(|e| format!("Failed to load membership: {}", fmt_error_chain(&e)))?;
 
-    let can_send = member
+    let can_send = !room.is_tombstoned() && member
         .map(|m| m.can_send_message(MessageLikeEventType::RoomMessage))
         .unwrap_or(false);
 
@@ -1957,6 +1960,7 @@ pub async fn start_sync(
                     && matches!(
                         event_type,
                         StateEventType::RoomName | StateEventType::RoomTopic
+                            | StateEventType::RoomCreate | StateEventType::RoomTombstone
                     );
                 async move {
                     if feed_changed {
@@ -2311,6 +2315,8 @@ pub async fn start_sync(
     let join = tokio::spawn(async move {
         let mut first_sync_done = false;
         let mut sync_count: u64 = 0;
+        let mut room_upgrade_attempts = super::room_upgrades::UpgradeAttempts::default();
+        let mut room_upgrade_tasks = tokio::task::JoinSet::new();
 
         loop {
             sync_count += 1;
@@ -2361,6 +2367,23 @@ pub async fn start_sync(
                     &app,
                     super::reconciler::ReconcileScope::all(),
                 );
+            }
+
+            if let Some(Ok(attempts)) = room_upgrade_tasks.try_join_next() {
+                room_upgrade_attempts = attempts;
+            }
+            if room_upgrade_tasks.is_empty() {
+                let mut attempts = std::mem::take(&mut room_upgrade_attempts);
+                let state = reconcile_state_arc.clone();
+                let client = client.clone();
+                let app = app.clone();
+                room_upgrade_tasks.spawn(async move {
+                    let _guard = state.room_upgrade_operation.lock().await;
+                    if attempts.reconcile(&state.http_client, &client).await {
+                        let _ = app.emit("rooms-changed", ());
+                    }
+                    attempts
+                });
             }
 
             for event in &response.account_data {

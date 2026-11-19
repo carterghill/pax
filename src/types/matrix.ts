@@ -32,6 +32,10 @@ export interface Room {
   topic?: string | null;
   /** "joined" or "invited" */
   membership: string;
+  replacementRoomId?: string;
+  /** Joined predecessor room IDs, from newest to oldest. */
+  historyRoomIds?: string[];
+  upgradePending?: boolean;
   /** 1:1 DM: `name` / `avatarUrl` are the peer; use for sidebar/home display. */
   isDirect?: boolean;
   dmPeerUserId?: string | null;
@@ -73,6 +77,8 @@ export interface MembershipNotice {
 }
 
 export interface Message {
+  /** Set for a message displayed from a predecessor room. */
+  historyRoomId?: string;
   /** An encrypted event whose contents are unavailable on this device. */
   decryptionFailed?: boolean;
   membershipNotice?: MembershipNotice;

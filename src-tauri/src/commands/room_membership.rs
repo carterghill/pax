@@ -11,10 +11,12 @@ use super::room_discovery::{discover_federation_server_names, push_unique};
 #[tauri::command]
 pub async fn join_room(
     state: State<'_, Arc<AppState>>,
+    app: tauri::AppHandle,
     room_id: String,
     via_servers: Option<Vec<String>>,
 ) -> Result<String, String> {
-    let client = super::get_client(&state).await?;
+    let ac = super::get_authed_client(&state).await?;
+    let client = &ac.client;
 
     let room_or_alias = <&matrix_sdk::ruma::RoomOrAliasId>::try_from(room_id.as_str())
         .map_err(|e| format!("Invalid room ID or alias: {e}"))?;
@@ -50,17 +52,37 @@ pub async fn join_room(
         .await
         .map_err(|e| format!("Failed to join room: {}", fmt_error_chain(&e)))?;
 
-    Ok(room.room_id().to_string())
+    let _guard = state.room_upgrade_operation.lock().await;
+    let (latest, changed) =
+        super::room_upgrades::follow_room_upgrades(&state.http_client, &ac, room, true).await;
+    if changed {
+        use tauri::Emitter;
+        let _ = app.emit("rooms-changed", ());
+    }
+    Ok(latest.room_id().to_string())
 }
 
 #[tauri::command]
 pub async fn leave_room(state: State<'_, Arc<AppState>>, room_id: String) -> Result<(), String> {
+    let _guard = state.room_upgrade_operation.lock().await;
     let ac = super::get_authed_client(&state).await?;
-    let encoded_room = urlencoding::encode(&room_id);
+    let (_, mut histories) = super::room_upgrades::joined_upgrade_links(&ac.client).await;
+    if let Some(history) = histories.remove(&room_id) {
+        for id in history {
+            leave_single_room(&state.http_client, &ac, &id).await?;
+        }
+    }
+    leave_single_room(&state.http_client, &ac, &room_id).await
+}
 
+pub(super) async fn leave_single_room(
+    http: &reqwest::Client,
+    ac: &super::AuthedClient,
+    room_id: &str,
+) -> Result<(), String> {
+    let encoded_room = urlencoding::encode(room_id);
     let url = format!("{}/_matrix/client/v3/rooms/{}/leave", ac.homeserver, encoded_room);
-    let resp = state
-        .http_client
+    let resp = http
         .post(&url)
         .timeout(Duration::from_secs(30))
         .bearer_auth(&ac.access_token)

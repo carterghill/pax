@@ -239,7 +239,8 @@ export default function MainLayout({
   } | null>(null);
 
   const spaceKey = activeSpaceId ?? "";
-  const activeRoomId = activeRoomBySpace[spaceKey] ?? null;
+  const selectedRoomId = activeRoomBySpace[spaceKey] ?? null;
+  const activeRoomId = selectedRoomId ? getRoom(selectedRoomId)?.id ?? selectedRoomId : null;
 
   const isMobile = useIsMobile();
   const [mobileNavDrawerOpen, setMobileNavDrawerOpen] = useState(false);
@@ -276,10 +277,10 @@ export default function MainLayout({
 
   useEffect(() => {
     if (!notificationJump) return;
-    if (activeRoomId !== notificationJump.roomId) {
+    if (activeRoomId !== (getRoom(notificationJump.roomId)?.id ?? notificationJump.roomId)) {
       setNotificationJump(null);
     }
-  }, [activeRoomId, notificationJump]);
+  }, [activeRoomId, getRoom, notificationJump]);
 
   const setActiveRoomId = useCallback((roomId: string | null) => {
     startTransition(() => {
@@ -335,6 +336,7 @@ export default function MainLayout({
       if (!targetRoomId) return;
       const room = getRoom(targetRoomId);
       if (!room) return;
+      e.preventDefault();
       const scrollEventId = ce.detail?.eventId?.trim();
       // Pick any joined parent space — if none, null (DMs / orphaned rooms).
       const parentSpaceId = room.parentSpaceIds.find((pid) =>
@@ -349,14 +351,17 @@ export default function MainLayout({
         setActiveSpaceId(parentSpaceId);
         setActiveRoomBySpace((prev) => ({
           ...prev,
-          [parentSpaceId ?? ""]: targetRoomId,
+          [parentSpaceId ?? ""]: room.id,
         }));
       });
       if (isMobile) setMobileNavDrawerOpen(false);
     }
     window.addEventListener("pax-notification-clicked", onClicked);
-    return () =>
+    window.addEventListener("pax-room-event-link", onClicked);
+    return () => {
       window.removeEventListener("pax-notification-clicked", onClicked);
+      window.removeEventListener("pax-room-event-link", onClicked);
+    };
   }, [getRoom, joinedSpaceIdSet, isMobile, setMobileNavDrawerOpen]);
 
   // Clicking the already-active space clears room selection to show the space home
@@ -1376,7 +1381,7 @@ export default function MainLayout({
               />
             ) : activeRoom && activeRoom.membership === "invited" ? (
               <InvitationView room={activeRoom} onJoined={fetchRooms} />
-            ) : activeRoom && activeRoom.roomType === VOICE_ROOM_TYPE ? (
+            ) : activeRoom && !activeRoom.upgradePending && activeRoom.roomType === VOICE_ROOM_TYPE ? (
               <VoiceRoomView
                 room={activeRoom}
                 voiceCall={voiceCall}

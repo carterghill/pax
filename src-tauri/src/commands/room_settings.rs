@@ -96,6 +96,7 @@ pub async fn get_space_info(
 
     let mut children = Vec::new();
     let mut media_base_url_cache = std::collections::HashMap::new();
+    let mut upgrade_hints = HashMap::new();
 
     if let Some(rooms) = body["rooms"].as_array() {
         let mut room_index_by_id: HashMap<String, usize> = HashMap::new();
@@ -106,6 +107,7 @@ pub async fn get_space_info(
         }
 
         let mut direct_child_ids: Vec<String> = Vec::new();
+        let mut routes = HashMap::new();
         if let Some(root) = rooms
             .iter()
             .find(|room_data| room_data["room_id"].as_str() == Some(space_id.as_str()))
@@ -119,12 +121,14 @@ pub async fn get_space_info(
                     let Some(child_id) = event["state_key"].as_str() else {
                         continue;
                     };
-                    let has_via = event["content"]["via"]
-                        .as_array()
-                        .map(|arr| !arr.is_empty())
-                        .unwrap_or(false);
-                    if !has_via || !seen.insert(child_id.to_string()) {
+                    let via: Vec<_> = event["content"]["via"].as_array().into_iter().flatten()
+                        .filter_map(|entry| entry.as_str().map(str::to_owned)).collect();
+                    if via.is_empty() || !seen.insert(child_id.to_string()) {
                         continue;
+                    }
+                    routes.insert(child_id, via);
+                    if let Some(old_id) = event["content"][super::room_upgrades::SPACE_PREDECESSOR].as_str() {
+                        upgrade_hints.insert(old_id.to_owned(), child_id.to_owned());
                     }
                     direct_child_ids.push(child_id.to_string());
                 }
@@ -232,12 +236,14 @@ pub async fn get_space_info(
             }
 
             children.push(SpaceChildInfo {
+                via_servers: routes.remove(child_id.as_str()).unwrap_or_default(),
                 id: child_id,
                 name,
                 topic,
                 avatar_url,
                 membership,
                 join_rule,
+                upgrade_join_from: None,
                 room_type,
                 num_joined_members,
                 is_direct,
@@ -248,12 +254,57 @@ pub async fn get_space_info(
         }
     }
 
+    if !children.is_empty() {
+        let (verified, _) = super::room_upgrades::joined_upgrade_links(&ac.client).await;
+        upgrade_hints.extend(verified);
+        children = collapse_upgraded_children(children, &upgrade_hints);
+    }
     Ok(SpaceInfo {
         name: space_name,
         topic: space_topic,
         avatar_url: space_avatar,
         children,
     })
+}
+
+fn collapse_upgraded_children(
+    mut children: Vec<SpaceChildInfo>,
+    replacements: &HashMap<String, String>,
+) -> Vec<SpaceChildInfo> {
+    let indices: HashMap<_, _> = children.iter().enumerate()
+        .filter(|(_, child)| child.room_type.as_deref() != Some("m.space"))
+        .map(|(index, child)| (child.id.clone(), index)).collect();
+    let mut hidden = HashSet::new();
+    for old in 0..children.len() {
+        if !indices.contains_key(&children[old].id) {
+            continue;
+        }
+        let mut latest = old;
+        let mut seen = HashSet::from([old]);
+        while let Some(&next) = replacements.get(&children[latest].id).and_then(|id| indices.get(id)) {
+            if !seen.insert(next) {
+                latest = old;
+                break;
+            }
+            latest = next;
+        }
+        if latest == old {
+            continue;
+        }
+        if children[latest].membership != "joined" && children[old].membership == "joined" {
+            // Keep the usable room visible while a replacement join is pending.
+            hidden.insert(latest);
+            continue;
+        }
+        if children[latest].membership == "none"
+            && (children[old].membership == "invited"
+                || matches!(children[old].join_rule.as_deref(), Some("public" | "restricted" | "knock_restricted")))
+        {
+            children[latest].upgrade_join_from = Some(children[old].id.clone());
+        }
+        hidden.insert(old);
+    }
+    children.into_iter().enumerate().filter_map(|(index, child)| (!hidden.contains(&index)).then_some(child)).collect()
 }
 
 #[tauri::command]

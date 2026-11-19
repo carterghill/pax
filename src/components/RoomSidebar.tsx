@@ -189,7 +189,7 @@ interface RoomSidebarProps {
    * don't pay the sort cost.
    */
   getSubSpaceRoomsOrdered: (subSpaceId: string) => Room[];
-  getRoom: (roomId: string) => Room | null;
+  getRoom: (roomId: string, includeHistory?: boolean) => Room | null;
   /** Optional: open sub-space home (small control only; row click toggles expand/collapse). */
   onOpenSubSpace?: (spaceId: string) => void;
   activeRoomId: string | null;
@@ -748,7 +748,7 @@ export default function RoomSidebar({
   const [leaveRoomSubmitting, setLeaveRoomSubmitting] = useState(false);
   const [parentSpacesRoom, setParentSpacesRoom] = useState<{ id: string; name: string } | null>(null);
   const [showAddRoomDialog, setShowAddRoomDialog] = useState(false);
-  const settingsRoom = settingsRoomId ? getRoom(settingsRoomId) : null;
+  const settingsRoom = settingsRoomId ? getRoom(settingsRoomId, true) : null;
 
   useEffect(() => {
     if (!showHomeAddRoom) setShowAddRoomDialog(false);
@@ -1895,6 +1895,10 @@ export default function RoomSidebar({
           moderationSpaceName={moderationSpaceName}
           moderationSpaceRootId={moderationSpaceRootId}
           onClose={() => setSettingsRoomId(null)}
+          onUpgraded={(roomId) => {
+            setSettingsRoomId(null);
+            onSelectRoom(roomId);
+          }}
         />
       )}
 

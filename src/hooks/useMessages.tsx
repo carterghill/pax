@@ -705,8 +705,8 @@ export function useMessages(roomId: string | null, currentUserId: string | null 
 
       const older = batch.messages.slice().reverse();
       if (older.length === 0) {
-        olderTokenRef.current = null;
-        setOlderToken(null);
+        olderTokenRef.current = batch.prevBatch;
+        setOlderToken(batch.prevBatch);
         return;
       }
 

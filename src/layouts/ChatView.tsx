@@ -4,6 +4,7 @@ import { useRoomCanSendMessages } from "../hooks/useRoomCanSendMessages";
 import { useRoomCanPinMessages } from "../hooks/useRoomCanPinMessages";
 import { useRoomPinnedEventIds } from "../hooks/useRoomPinnedEventIds";
 import { listen } from "@tauri-apps/api/event";
+import { invoke } from "@tauri-apps/api/core";
 import { ArrowLeft, Hash, MessageCircle, Rss, Users } from "lucide-react";
 import { RssFeedStatusPanel, RssFeedStatusToggle, useRssFeedStatus } from "../components/RssFeedStatus";
 import NavBackButton from "../components/NavBackButton";
@@ -17,6 +18,7 @@ import RoomDownloadsButton from "../components/RoomDownloadsButton";
 import RoomHeaderTitle from "../components/RoomHeaderTitle";
 import SideDrawer from "../components/SideDrawer";
 import { useMessages } from "../hooks/useMessages";
+import { useRoomUpgradeHistory } from "../hooks/useRoomUpgradeHistory";
 import { useMatrixUserProfile } from "../hooks/useMatrixUserProfile";
 import { useTheme } from "../theme/ThemeContext";
 import { Message, Room } from "../types/matrix";
@@ -200,6 +202,26 @@ export default function ChatView({
     loadMessagesAroundEvent,
     applyLocalReactionFromChip,
   } = useMessages(isDraft ? null : activeRoom!.id, isDraft ? null : userId);
+  const history = useRoomUpgradeHistory(activeRoom?.id ?? null, activeRoom?.historyRoomIds);
+  const loadHistoryAround = history.loadAround;
+  const [retryingUpgrade, setRetryingUpgrade] = useState(false);
+  const [upgradeResult, setUpgradeResult] = useState<{ roomId: string; message: string } | null>(null);
+  const retryUpgrade = async () => {
+    if (!activeRoom) return;
+    const id = activeRoom.id;
+    setRetryingUpgrade(true);
+    setUpgradeResult(null);
+    try {
+      const latest = await invoke<string>("join_room", { roomId: id });
+      if (latest === id) {
+        setUpgradeResult({ roomId: id, message: "The replacement may require an invitation." });
+      }
+    } catch (error) {
+      setUpgradeResult({ roomId: id, message: String(error) });
+    } finally {
+      setRetryingUpgrade(false);
+    }
+  };
 
   const rssRoomId = !isDraft && activeRoom?.isRss ? activeRoom.id : null;
   const rssFeed = useRssFeedStatus(rssRoomId, messages);
@@ -291,7 +313,7 @@ export default function ChatView({
   const threadSnapshotRef = useRef(rssThreads);
   threadSnapshotRef.current = rssThreads;
   const messagesSnapshotRef = useRef<Message[]>([]);
-  messagesSnapshotRef.current = messages;
+  messagesSnapshotRef.current = [...history.messages, ...messages];
   const userMenuResize = useResizeHandle({
     width: userMenuWidth,
     onWidthChange: onUserMenuWidthChange,
@@ -361,16 +383,17 @@ export default function ChatView({
   }, [openThread]);
 
   const handleReplyPreviewClick = useCallback(
-    (eventId: string) => {
+    (eventId: string, sourceRoomId?: string) => {
       if (isDraft || !activeRoom) return;
-      const inWindow = messages.some((m) => m.eventId === eventId);
+      const inWindow = messagesSnapshotRef.current.some((m) => m.eventId === eventId);
       if (inWindow) {
         scrollToMessage(eventId, true);
         return;
       }
       void (async () => {
         try {
-          await loadMessagesAroundEvent(eventId);
+          if (sourceRoomId) await loadHistoryAround(sourceRoomId, eventId);
+          else await loadMessagesAroundEvent(eventId);
         } finally {
           requestAnimationFrame(() => {
             requestAnimationFrame(() => {
@@ -380,7 +403,7 @@ export default function ChatView({
         }
       })();
     },
-    [isDraft, activeRoom, messages, loadMessagesAroundEvent, scrollToMessage],
+    [isDraft, activeRoom, loadMessagesAroundEvent, loadHistoryAround, scrollToMessage],
   );
 
   const handleCancelEdit = useCallback(() => {
@@ -410,7 +433,7 @@ export default function ChatView({
   // Android / desktop notification tap: jump to the exact Matrix event when provided.
   useEffect(() => {
     if (isDraft || !activeRoom || !notificationJump) return;
-    if (notificationJump.roomId !== activeRoom.id) return;
+    if (notificationJump.roomId !== activeRoom.id && !activeRoom.historyRoomIds?.includes(notificationJump.roomId)) return;
     const eventId = notificationJump.eventId;
     if (!eventId) return;
     let cancelled = false;
@@ -430,7 +453,11 @@ export default function ChatView({
     }
     void (async () => {
       try {
-        await loadMessagesAroundEvent(eventId);
+        if (notificationJump.roomId === activeRoom.id) {
+          await loadMessagesAroundEvent(eventId);
+        } else {
+          await loadHistoryAround(notificationJump.roomId, eventId);
+        }
       } finally {
         if (cancelled) return;
         requestAnimationFrame(() => {
@@ -446,7 +473,7 @@ export default function ChatView({
     return () => {
       cancelled = true;
     };
-  }, [isDraft, activeRoom?.id, notificationJump, loadMessagesAroundEvent, onNotificationJumpConsumed, scrollToMessage]);
+  }, [isDraft, activeRoom?.id, activeRoom?.historyRoomIds, notificationJump, loadMessagesAroundEvent, loadHistoryAround, onNotificationJumpConsumed, scrollToMessage]);
 
   const handlePinnedStateChanged = useCallback(() => {
     void refreshPinned();
@@ -718,23 +745,34 @@ export default function ChatView({
             rssFeed.setExpanded(false);
             rssButtonRef.current?.focus();
           }} />}
+          {activeRoom.upgradePending && (
+            <div style={{ padding: spacing.unit * 2, borderBottom: `1px solid ${palette.border}` }}>
+              This room was upgraded.{" "}
+              <button type="button" disabled={retryingUpgrade} onClick={() => void retryUpgrade()}>
+                {retryingUpgrade ? "Joining…" : "Open replacement"}
+              </button>
+              {upgradeResult?.roomId === activeRoom.id && <div role="status">{upgradeResult.message}</div>}
+            </div>
+          )}
           <MessageList
             ref={messageListRef}
-            messages={rssThreads.visibleMessages}
+            messages={[...history.messages, ...rssThreads.visibleMessages]}
             rssProvider={rssProvider}
             rssReplies={rssThreads.replies}
             rssReplyCounts={replyCounts}
             activeRssThreadId={activeThread?.root.eventId}
             onRssArticleConfirmed={rssThreads.confirmArticle}
             onOpenRssThread={rssRoomId ? openThread : undefined}
-            loadingOlder={loadingOlder}
+            loadingOlder={loadingOlder || history.loading}
             initialLoading={initialLoading}
-            hasOlder={hasOlder}
+            hasOlder={hasOlder || history.hasOlder}
+            historyError={history.error}
+            hasUpgradeHistory={!!activeRoom.historyRoomIds?.length}
             isAtLatest={isAtLatest}
             automaticReadBlocked={unavailable.blocked}
             privateReadOnly={unavailable.privateOnly}
             acknowledgedThrough={unavailable.acknowledgedThrough}
-            onLoadOlder={loadOlder}
+            onLoadOlder={hasOlder ? loadOlder : history.loadOlder}
             onLoadNewer={loadNewer}
             pendingRecentCount={pendingRecentCount}
             showJumpToRecent={showJumpToRecent}
@@ -745,7 +783,7 @@ export default function ChatView({
             onRequestEdit={handleRequestEdit}
             onRequestReply={handleRequestReply}
             onReplyPreviewClick={handleReplyPreviewClick}
-            allowReply={canSendMessages === true}
+            allowReply={!activeRoom.upgradePending && canSendMessages === true}
             onMessagesMutated={refresh}
             onMessageRemoved={removeMessageById}
             onLocalReactionFromChip={applyLocalReactionFromChip}
@@ -772,7 +810,9 @@ export default function ChatView({
               roomId={activeRoom.id}
               roomName={activeRoom.name}
               composerPermission={
-                canSendMessages === null
+                activeRoom.upgradePending
+                  ? "forbidden"
+                  : canSendMessages === null
                   ? "loading"
                   : canSendMessages
                     ? "allowed"

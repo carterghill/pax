@@ -154,7 +154,7 @@ function mergeFetchedRoomsPreserveNames(
 export type RoomsForLayout = {
   spaces: Room[];
   roomsBySpace: (spaceId: string | null) => Room[];
-  getRoom: (roomId: string) => Room | null;
+  getRoom: (roomId: string, includeHistory?: boolean) => Room | null;
   fetchRooms: () => Promise<Room[]>;
   upsertOptimisticRoom: (room: Room) => void;
 };
@@ -350,11 +350,33 @@ export function useRooms(userId: string | null) {
     };
   }, [fetchRooms]);
 
-  const rooms = useMemo(
+  const allRooms = useMemo(
     () => mergeRooms(fetchedRooms, optimisticRooms),
     [fetchedRooms, optimisticRooms, mergeRooms]
   );
 
+  const roomsById = useMemo(() => {
+    const byId = new Map(allRooms.map((room) => [room.id, room]));
+    for (const room of allRooms) {
+      if (!room.historyRoomIds?.length) continue;
+      const parents = new Set(room.parentSpaceIds);
+      const orders = { ...room.spaceChildOrders };
+      for (const id of room.historyRoomIds) {
+        const historical = byId.get(id);
+        if (!historical) continue;
+        for (const parent of historical.parentSpaceIds) {
+          parents.add(parent);
+          const historicalOrder = historical.spaceChildOrders?.[parent];
+          if (historicalOrder) orders[parent] = historicalOrder;
+        }
+      }
+      byId.set(room.id, { ...room, parentSpaceIds: [...parents], spaceChildOrders: orders });
+    }
+    return byId;
+  }, [allRooms]);
+  const rooms = useMemo(() => Array.from(roomsById.values()).filter((room) =>
+    !room.replacementRoomId || !roomsById.has(room.replacementRoomId)
+  ), [roomsById]);
   const spaces = useMemo(() => rooms.filter((r) => r.isSpace), [rooms]);
 
   const roomsBySpaceMap = useMemo(() => {
@@ -388,7 +410,11 @@ export function useRooms(userId: string | null) {
     [roomsBySpaceMap]
   );
 
-  const getRoom = (roomId: string) => rooms.find((r) => r.id === roomId) ?? null;
+  const getRoom = useCallback((roomId: string, includeHistory = false) => {
+    const room = roomsById.get(roomId);
+    if (!includeHistory && room?.replacementRoomId) return roomsById.get(room.replacementRoomId) ?? room;
+    return room ?? null;
+  }, [roomsById]);
 
   return {
     rooms,

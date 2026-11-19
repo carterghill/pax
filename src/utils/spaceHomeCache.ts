@@ -19,6 +19,8 @@ export interface SpaceChildInfo {
   avatarUrl: string | null;
   membership: string;
   joinRule: string | null;
+  upgradeJoinFrom?: string;
+  viaServers?: string[];
   roomType: string | null;
   isRss?: boolean;
   numJoinedMembers: number;

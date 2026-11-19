@@ -34,6 +34,22 @@ export function useExternalLinkInterceptor(): void {
       e.preventDefault();
       e.stopPropagation();
 
+      // A message permalink keeps the original room ID across upgrades.
+      try {
+        const url = new URL(href);
+        if (url.origin === "https://matrix.to" && url.hash.startsWith("#/")) {
+          const [roomId, eventId] = url.hash.slice(2).split("?")[0].split("/").map(decodeURIComponent);
+          if (roomId?.startsWith("!") && eventId?.startsWith("$")) {
+            const accepted = !window.dispatchEvent(new CustomEvent("pax-room-event-link", {
+              detail: { roomId, eventId },
+              cancelable: true,
+            }));
+            if (accepted) return;
+          }
+        }
+      } catch {
+        // Malformed Matrix links follow the existing external-opening path.
+      }
       openUrl(href).catch((err) => {
         console.error("[Pax] Failed to open external URL:", href, err);
       });

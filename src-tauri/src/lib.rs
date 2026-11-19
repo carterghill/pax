@@ -64,6 +64,7 @@ pub struct AppState {
     /// Background `sync_with_callback` task — must be aborted before deleting the SQLite store
     /// or replacing `client`, otherwise the DB stays locked (especially on Windows).
     pub sync_join: Mutex<Option<JoinHandle<()>>>,
+    pub room_upgrade_operation: Mutex<()>,
     pub display_server: DisplayServer,
     pub giphy_api_key: Option<String>,
     pub auth_config: AuthConfig,
@@ -314,6 +315,7 @@ pub fn run() {
         file_cache,
         sync_running: Arc::new(Mutex::new(false)),
         sync_join: Mutex::new(None),
+        room_upgrade_operation: Mutex::new(()),
         display_server,
         giphy_api_key,
         auth_config,
@@ -447,6 +449,8 @@ pub fn run() {
             commands::room_membership::join_room,
             commands::room_membership::leave_room,
             commands::room_membership::knock_room,
+            commands::room_upgrades::get_room_upgrade_options,
+            commands::room_upgrades::upgrade_room,
             commands::room_settings::get_space_info,
             commands::room_settings::get_space_settings,
             commands::room_settings::apply_space_settings,
