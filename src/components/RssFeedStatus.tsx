@@ -1,31 +1,37 @@
 import { useEffect, useRef, useState, type Ref } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
-import { CheckCircle2, RefreshCw, Rss } from "lucide-react";
+import { Check, CheckCircle2, Loader2, RefreshCw, Rss, X } from "lucide-react";
 import { useTheme } from "../theme/ThemeContext";
 
-export interface FeedSettings {
-  url: string;
+export interface RssBotSettings {
   botUserId: string;
   revision: string | null;
   invitationCancelled: boolean;
   canEdit: boolean;
 }
 
-interface FeedStatus extends FeedSettings {
+interface FeedStatus extends RssBotSettings {
   membership: string;
   roomSynced: boolean;
   canManage: boolean;
   canInvite: boolean;
   canCancelInvitation: boolean;
   autoSetup: boolean;
+  initialSubscriptionPending: boolean;
   subscriptionEventId: string | null;
   subscriptionConfirmed: boolean;
-  subscriptionReply: string | null;
+  subscriptionReplied: boolean;
   confirmationError: string | null;
 }
 
 type Action = "check" | "setup" | "invite" | "cancel";
+
+const connectionIcons = {
+  connected: { Icon: Check, label: "Connected" },
+  connecting: { Icon: Loader2, label: "Connecting" },
+  disconnected: { Icon: X, label: "Disconnected" },
+};
 
 export function useRssFeedStatus(roomId: string | null) {
   const [trackedRoomId, setTrackedRoomId] = useState<string | null>(null);
@@ -83,7 +89,7 @@ export function useRssFeedStatus(roomId: string | null) {
           return;
         }
         if (latest.invitationCancelled) return;
-        if (latest.subscriptionEventId) {
+        if (!latest.initialSubscriptionPending) {
           setupFailed = false;
           setError(null);
         }
@@ -108,7 +114,7 @@ export function useRssFeedStatus(roomId: string | null) {
         }
         if (action === "setup") setupFailed = false;
         if (latest.membership === "join" && latest.roomSynced && latest.canManage
-          && !latest.subscriptionEventId && !setupFailed && (latest.autoSetup || action === "setup")) {
+          && latest.initialSubscriptionPending && !setupFailed && (latest.autoSetup || action === "setup")) {
           operation = "setup";
           setSending(true);
           await invoke("setup_rss_feed", { roomId, revision: latest.revision });
@@ -137,7 +143,7 @@ export function useRssFeedStatus(roomId: string | null) {
             refreshQueued = false;
             timer = setTimeout(() => { void run(); }, 0);
           } else if (!latest?.invitationCancelled) {
-            timer = setTimeout(() => { void run(); }, latest?.subscriptionEventId ? 30_000 : 5_000);
+            timer = setTimeout(() => { void run(); }, latest && !latest.initialSubscriptionPending ? 30_000 : 5_000);
           }
         }
       }
@@ -159,42 +165,40 @@ export function useRssFeedStatus(roomId: string | null) {
 
   if (!roomId || trackedRoomId !== roomId) return null;
 
-  const confirmed = status?.subscriptionConfirmed;
-  const providerReply = status?.subscriptionReply;
   const paused = !!status?.invitationCancelled;
   const joined = !paused && status?.membership === "join";
+  const setupComplete = status && !status.initialSubscriptionPending
+    && (!status.subscriptionEventId || status.subscriptionConfirmed);
+  const connected = joined && (setupComplete || status.subscriptionReplied);
+  const connecting = !paused && (joined || status?.membership === "invite" || status?.membership === "knock"
+    || (!status && !checkError));
+  const connection: keyof typeof connectionIcons = connected ? "connected" : connecting ? "connecting" : "disconnected";
   let title = "Checking feed provider…";
-  let label = "Checking…";
   let detail = "";
   if (paused) {
     title = "Feed setup paused";
-    label = "Paused";
-    detail = "The provider invitation was cancelled. You can resume setup in Room Settings → RSS Feed.";
+    detail = "You can resume setup in Room Settings → RSS Bot.";
   } else if (status) {
     switch (status.membership) {
       case "invite":
         title = "Waiting for provider to join";
-        label = "Invited";
         detail = "Invitation sent. Pax will continue setup when the provider joins.";
         if (waitingLong) detail += " A long delay can indicate a provider or federation problem. You can retry the invitation below.";
         break;
       case "join":
-        if (confirmed) {
-          title = "Feed subscribed";
-          label = "Subscribed";
-          detail = "The provider confirmed the subscription. New feed entries will appear here.";
+        if (setupComplete) {
+          title = "RSS bot connected";
+          detail = "Manage subscriptions from RSS feeds in the room menu.";
         } else if (status.subscriptionEventId) {
-          title = providerReply ? "Provider replied to setup" : "Subscription sent · awaiting confirmation";
-          label = providerReply ? "Replied" : "Awaiting reply";
-          detail = providerReply
-            || "Pax sent the feed URL and is waiting for the provider to confirm.";
+          title = status.subscriptionReplied ? "First subscription could not be confirmed" : "Waiting for the RSS bot to confirm";
+          detail = status.subscriptionReplied
+            ? "Check the bot’s current subscriptions from RSS feeds in the room menu."
+            : "Pax sent the first subscription request.";
         } else if (!status.roomSynced) {
           title = "Provider joined · syncing room";
-          label = "Syncing…";
           detail = "Pax will send the subscription once this room finishes syncing.";
         } else {
           title = sending ? "Setting up subscription…" : "Provider joined";
-          label = sending ? "Setting up…" : "Joined";
           detail = status.canManage
             ? "The feed subscription is ready to send."
             : "A room moderator with permission to manage feed settings needs to finish setup.";
@@ -202,42 +206,36 @@ export function useRssFeedStatus(roomId: string | null) {
         break;
       case "leave":
         title = "Provider is not in the room";
-        label = "Not joined";
         detail = "The provider left or declined its invitation. You can invite it again.";
         break;
       case "ban":
         title = "Provider is banned";
-        label = "Banned";
         detail = "A room moderator must unban the provider before it can join.";
         break;
       case "none":
         title = "Provider has not been invited";
-        label = "Not invited";
         detail = "Invite the provider to finish setting up this feed.";
         break;
       case "knock":
         title = "Provider is requesting to join";
-        label = "Requested to join";
         detail = "Invite the provider to let it into this room.";
         break;
       default:
         title = "Provider membership is unknown";
-        label = "Unknown";
         detail = "The homeserver returned an unrecognized membership status. Check again in a moment.";
     }
   }
   const panelError = checkError || error || status?.confirmationError;
   if (checkError) title = "Could not refresh feed status";
-  if (panelError) label = "Check status";
 
   // Keep the setup controls visible while a provider still needs to join or receive the command.
-  const defaultExpanded = !paused && (status ? !joined || !status.subscriptionEventId : !!checkError);
+  const defaultExpanded = !paused && (status ? !joined || status.initialSubscriptionPending : !!checkError);
   const hasOverride = panelOverride?.roomId === roomId
     && (panelOverride.revision === undefined || panelOverride.revision === status?.revision);
   const expanded = hasOverride ? panelOverride.expanded : defaultExpanded;
 
   return {
-    status, checking, title, label, detail, panelError, expanded, joined, confirmed, paused,
+    status, checking, title, connection, detail, panelError, expanded, joined, paused,
     setExpanded: (value: boolean) => setPanelOverride({ roomId, revision: status?.revision, expanded: value }),
     run: (action: Action) => runRef.current(action, status?.revision),
   };
@@ -245,60 +243,66 @@ export function useRssFeedStatus(roomId: string | null) {
 
 type RssFeedView = NonNullable<ReturnType<typeof useRssFeedStatus>>;
 
-export function RssFeedStatusToggle({ feed, panelId, buttonRef }: {
+export function RssFeedStatusToggle({ feed, botUserId, panelId, buttonRef }: {
   feed: RssFeedView;
+  botUserId?: string;
   panelId: string;
   buttonRef: Ref<HTMLButtonElement>;
 }) {
-  const { palette, typography, spacing } = useTheme();
-  const { status, expanded, label, joined, confirmed, panelError } = feed;
-  const ellipsis = { overflow: "hidden", whiteSpace: "nowrap", textOverflow: "ellipsis" } as const;
+  const { palette, spacing, typography } = useTheme();
+  const { connection, expanded } = feed;
+  const { Icon, label } = connectionIcons[connection];
+  const provider = botUserId || "RSS bot";
+  const description = `${provider} · ${label}`;
   return (
     <button
       ref={buttonRef}
       type="button"
       aria-expanded={expanded}
       aria-controls={panelId}
-      title={[status?.url, status?.botUserId, feed.title].filter(Boolean).join("\n")}
+      aria-label={description}
+      title={description}
       onClick={() => feed.setExpanded(!expanded)}
       style={{
-        background: expanded ? palette.bgActive : "transparent", color: palette.textPrimary,
-        border: "none", borderRadius: 4, cursor: "pointer", minWidth: 0,
-        padding: `3px ${spacing.unit}px`, display: "flex", alignItems: "center", gap: spacing.unit * 2,
-        fontFamily: typography.fontFamily, fontSize: typography.fontSizeSmall, lineHeight: 1.3, textAlign: "left",
+        background: expanded ? palette.bgActive : "transparent",
+        color: palette.textPrimary, border: "none", borderRadius: 4, cursor: "pointer",
+        minWidth: 0, minHeight: 26, padding: `3px ${spacing.unit}px`,
+        display: "flex", alignItems: "center", gap: spacing.unit * 2,
+        fontFamily: typography.fontFamily, fontSize: typography.fontSizeSmall,
       }}
     >
-      <span style={{ display: "grid", minWidth: 0 }}>
-        <span style={ellipsis}>{status?.url.replace(/^https?:\/\//, "") || "RSS feed"}</span>
-        {status && <span style={{ ...ellipsis, color: palette.textSecondary }}>{status.botUserId}</span>}
-      </span>
-      <span style={{ ...ellipsis, flexShrink: 0, maxWidth: "60%", color: confirmed && joined && !panelError ? palette.accent : palette.textSecondary }}>
-        {label}
-      </span>
+      <Rss size={15} aria-hidden="true" color={palette.textSecondary} style={{ flexShrink: 0 }} />
+      <span style={{ overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{provider}</span>
+      <Icon
+        size={16}
+        aria-hidden="true"
+        color={connection === "connected" ? palette.accent : palette.textSecondary}
+        className={connection === "connecting" ? "pax-rss-connecting" : undefined}
+        style={{ flexShrink: 0 }}
+      />
     </button>
   );
 }
 
 export function RssFeedStatusPanel({ feed, id, onHide }: { feed: RssFeedView; id: string; onHide: () => void }) {
   const { palette, typography, spacing } = useTheme();
-  const { status, checking, title, detail, panelError, expanded, joined, confirmed, paused, run } = feed;
+  const { status, checking, title, detail, panelError, expanded, joined, paused, run } = feed;
   const buttonStyle = {
     padding: "5px 9px", border: `1px solid ${palette.border}`, borderRadius: 4,
     color: palette.textPrimary, background: palette.bgPrimary, cursor: checking ? "default" : "pointer",
     fontSize: typography.fontSizeSmall, fontFamily: typography.fontFamily, opacity: checking ? 0.6 : 1,
   };
   return (
-    <section id={id} hidden={!expanded} aria-label="RSS feed status" style={{
+    <section id={id} hidden={!expanded} aria-label="RSS bot status" style={{
       padding: `${spacing.unit * 3}px ${spacing.unit * 4}px`, background: palette.bgSecondary,
       borderBottom: `1px solid ${palette.border}`, flexShrink: 0, maxHeight: "45%", overflowY: "auto",
       color: palette.textPrimary, fontSize: typography.fontSizeSmall,
     }}>
       <div style={{ display: "flex", alignItems: "center", gap: spacing.unit * 2 }}>
-        {confirmed && joined ? <CheckCircle2 size={17} color={palette.accent} /> : <Rss size={17} color={palette.textSecondary} />}
+        {joined && !panelError ? <CheckCircle2 size={17} color={palette.accent} /> : <Rss size={17} color={palette.textSecondary} />}
         <strong role="status" style={{ color: palette.textHeading }}>{title}</strong>
       </div>
       {status && <div style={{ marginTop: 6, color: palette.textSecondary, overflowWrap: "anywhere" }}>
-        <div>{status.url}</div>
         <div style={{ marginTop: 3 }}>
           {status.botUserId} · {paused ? "Paused" : joined ? "Joined" : status.membership === "invite" ? "Invited" : "Not joined"}
         </div>
@@ -315,7 +319,7 @@ export function RssFeedStatusPanel({ feed, id, onHide }: { feed: RssFeedView; id
         <button type="button" onClick={onHide} style={{ ...buttonStyle, cursor: "pointer", opacity: 1 }}>
           Hide
         </button>
-        {status?.canManage && joined && status.roomSynced && !status.subscriptionEventId && (
+        {status?.canManage && joined && status.roomSynced && status.initialSubscriptionPending && (
           <button type="button" disabled={checking} onClick={() => run("setup")} style={buttonStyle}>
             {panelError ? "Retry setup" : "Finish setup"}
           </button>

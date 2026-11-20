@@ -67,10 +67,9 @@ async fn build_room_info(
             value.ok()
         });
     let rss_content = rss_state.as_ref().and_then(|event| event.get("content"));
-    let is_rss =
-        rss_content.is_some_and(|content| content["version"] == 1 && content["url"].is_string());
     let rss_provider =
-        rss_content.and_then(|content| super::rss::RssFeedConfig::from_state_content(content).ok());
+        rss_content.and_then(|content| super::rss::RssRoomProvider::from_state_content(content).ok());
+    let is_rss = rss_provider.is_some();
     let topic = room.topic();
 
     let explicit_name = room.name();

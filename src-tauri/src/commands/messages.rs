@@ -2115,10 +2115,17 @@ pub async fn start_sync(
     {
         let app_h = app.clone();
         let gate_h = reconcile_gate.clone();
+        let rss_state = state_arc.clone();
         client.add_event_handler(move |ev: OriginalSyncRoomMemberEvent, room: Room| {
             let app = app_h.clone();
             let gate = gate_h.clone();
+            let rss_state = rss_state.clone();
             async move {
+                if ev.content.membership == MembershipState::Join
+                    && ev.unsigned.prev_content.as_ref().is_none_or(|prev| prev.membership != MembershipState::Join)
+                {
+                    super::rss::on_provider_joined(rss_state, room.clone(), &ev.state_key).await;
+                }
                 if !gate.load(Ordering::Relaxed) {
                     return;
                 }

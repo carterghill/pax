@@ -28,6 +28,7 @@ import MessageRow from "../features/chat/messages/MessageRow";
 import TimelineNoticeRow from "../features/chat/messages/TimelineNoticeRow";
 import { rssArticleCandidate, type RssArticleCandidate } from "../features/chat/messages/rssArticle";
 import { rssThreadReplyCount } from "../features/chat/messages/rssThreads";
+import type { RoomFeedSubscription } from "../features/rss/api";
 import {
   shouldShowHeader,
   getReplyThreadPreview,
@@ -52,9 +53,9 @@ export type MessageListHandle = {
 interface MessageListProps {
   messages: Message[];
   rssProvider?: RssProvider;
+  rssSubscriptions?: readonly RoomFeedSubscription[];
   rssReplies?: ReadonlyMap<string, Message[]>;
   activeRssThreadId?: string;
-  onRssArticleConfirmed?: (eventId: string) => void;
   onOpenRssThread?: (root: Message, article: RssArticleCandidate) => void;
   replyDrawer?: boolean;
   rssReplyCounts?: ReadonlyMap<string, number>;
@@ -117,9 +118,9 @@ const MessageList = forwardRef<MessageListHandle, MessageListProps>(function Mes
   {
     messages: timeline,
     rssProvider,
+    rssSubscriptions,
     rssReplies,
     activeRssThreadId,
-    onRssArticleConfirmed,
     onOpenRssThread,
     replyDrawer = false,
     rssReplyCounts,
@@ -164,13 +165,10 @@ const MessageList = forwardRef<MessageListHandle, MessageListProps>(function Mes
     () => new Set(pinnedEventIds),
     [pinnedEventIds],
   );
-  const feedUrl = rssProvider?.url;
-  const botUserId = rssProvider?.botUserId;
   const rssArticles = useMemo(() => {
-    if (!feedUrl || !botUserId) return [];
-    const provider = { url: feedUrl, botUserId };
-    return messages.map((message) => rssArticleCandidate(message, provider));
-  }, [botUserId, feedUrl, messages]);
+    if (!rssProvider) return [];
+    return messages.map((message) => rssArticleCandidate(message, rssProvider, rssSubscriptions));
+  }, [rssProvider, rssSubscriptions, messages]);
 
   const { resolveMemberLabel } = useResolveMemberLabel(roomId);
 
@@ -970,7 +968,6 @@ const MessageList = forwardRef<MessageListHandle, MessageListProps>(function Mes
               rssArticle={article}
               rssReplyCount={article ? rssReplyCounts?.get(msg.eventId) ?? rssThreadReplyCount(msg, rssReplies?.get(msg.eventId) ?? []) : 0}
               rssThreadOpen={msg.eventId === activeRssThreadId}
-              onRssArticleConfirmed={onRssArticleConfirmed}
               onOpenRssThread={onOpenRssThread}
               showHeader={showHeader}
               showReplyButton={showReplyButton}

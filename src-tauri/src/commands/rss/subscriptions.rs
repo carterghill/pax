@@ -72,7 +72,7 @@ async fn rss_room(state: &AppState, room_id: &str) -> Result<RssRoom, String> {
         .filter(|room| room.state() == RoomState::Joined)
         .ok_or("Join the room before managing its feeds.")?;
     let (_, settings, member) = read_feed_settings(&state.http_client, &ac, &room_id).await?;
-    let bot_user_id = OwnedUserId::try_from(settings.feed.bot_user_id)
+    let bot_user_id = OwnedUserId::try_from(settings.provider.bot_user_id)
         .map_err(|_| "Invalid feed bot address.")?;
     if read_provider_membership(&state.http_client, &ac, &room_id, bot_user_id.as_str()).await?
         != "join"
@@ -199,10 +199,15 @@ fn formatted_subscriptions(doc: &NodeRef) -> Option<Vec<RssSubscription>> {
         .ok()?
         .map(|row| {
             let text = row.text_contents();
-            let (id, _) = text.trim().split_once(" - ")?;
+            let (id, entry) = text.trim().split_once(" - ")?;
             let link = row.as_node().select_first("a[href]").ok()?;
             let attrs = link.attributes.borrow();
-            subscription(id, &link.text_contents(), attrs.get("href")?)
+            let label = link.text_contents();
+            let title = entry
+                .split_once(label.as_str())
+                .and_then(|(prefix, _)| prefix.trim_end().strip_suffix('('))
+                .unwrap_or(&label);
+            subscription(id, title, attrs.get("href")?)
         })
         .collect()
 }
@@ -506,7 +511,8 @@ mod tests {
               <p><strong>Subscriptions in this room:</strong></p><ul>
               <li>42 - <a href="https://example.org/feed?q=(world)&amp;lang=en">World &amp; News</a>
               (subscribed by <a href="https://matrix.to/#/@test:example.org">@test</a>)</li>
-              <li>43 - <a href="https://example.net/rss">Local</a></li></ul>"#.into()),
+              <li>43 - Local (<a href="https://example.net/rss">https://example.net/rss</a>)
+              (subscribed by <a href="https://matrix.to/#/@test:example.org">@test</a>)</li></ul>"#.into()),
             ..Default::default()
         };
         assert_eq!(

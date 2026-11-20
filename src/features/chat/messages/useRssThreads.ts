@@ -1,29 +1,22 @@
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { listen } from "@tauri-apps/api/event";
 import { getRoomMessage } from "../api";
 import type { Message, RssProvider } from "../../../types/matrix";
+import type { RoomFeedSubscription } from "../../rss/api";
 import { rssArticleCandidate } from "./rssArticle";
 import { partitionRssTimeline, type RssThread } from "./rssThreads";
 
 const empty = new Map<string, Message | null>();
-const emptyConfirmed = new Set<string>();
 
-export function useRssThreads(roomId: string | null, provider: RssProvider | undefined, messages: Message[]) {
-  const key = roomId && provider ? JSON.stringify([roomId, provider.botUserId, provider.url]) : null;
+export function useRssThreads(
+  roomId: string | null,
+  provider: RssProvider | undefined,
+  messages: Message[],
+  subscriptions?: readonly RoomFeedSubscription[],
+) {
+  const key = roomId && provider ? JSON.stringify([roomId, provider.botUserId]) : null;
   const [loaded, setLoaded] = useState<{ key: string; messages: Map<string, Message | null> } | null>(null);
-  const [confirmed, setConfirmed] = useState<{ key: string; ids: Set<string> } | null>(null);
   const extraMessages = loaded?.key === key ? loaded.messages : empty;
-  const confirmedIds = confirmed?.key === key ? confirmed.ids : emptyConfirmed;
-
-  const confirmArticle = useCallback((eventId: string) => {
-    if (!key) return;
-    setConfirmed((previous) => {
-      if (previous?.key === key && previous.ids.has(eventId)) return previous;
-      const ids = new Set(previous?.key === key ? previous.ids : []);
-      ids.add(eventId);
-      return { key, ids };
-    });
-  }, [key]);
 
   const missing = useMemo(() => {
     if (!key) return [];
@@ -73,11 +66,11 @@ export function useRssThreads(roomId: string | null, provider: RssProvider | und
   return useMemo(() => {
     const articles = new Map<string, RssThread>();
     if (!key || !provider) {
-      return { articles, confirmArticle, ...partitionRssTimeline(messages, articles) };
+      return { articles, ...partitionRssTimeline(messages, articles) };
     }
     const add = (root: Message) => {
-      const article = rssArticleCandidate(root, provider);
-      if (article && (article.headline || confirmedIds.has(root.eventId))) {
+      const article = rssArticleCandidate(root, provider, subscriptions);
+      if (article) {
         articles.set(root.eventId, { root, article });
       } else {
         articles.delete(root.eventId);
@@ -87,6 +80,6 @@ export function useRssThreads(roomId: string | null, provider: RssProvider | und
       if (message) add(message);
     }
     for (const message of messages) add(message);
-    return { articles, confirmArticle, ...partitionRssTimeline(messages, articles, extraMessages) };
-  }, [confirmArticle, confirmedIds, extraMessages, key, messages, provider]);
+    return { articles, ...partitionRssTimeline(messages, articles, extraMessages) };
+  }, [extraMessages, key, messages, provider, subscriptions]);
 }

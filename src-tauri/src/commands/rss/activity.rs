@@ -6,7 +6,7 @@ use std::{
 
 use matrix_sdk::{
     config::RequestConfig,
-    deserialized_responses::{RawAnySyncOrStrippedState, TimelineEvent},
+    deserialized_responses::TimelineEvent,
     room::MessagesOptions,
     ruma::{
         events::{
@@ -21,20 +21,12 @@ use matrix_sdk::{
 use serde_json::Value;
 use tokio::sync::{Mutex, OnceCell, Semaphore};
 
-use super::{parse_feed_url, RssFeedConfig, RSS_FEED_EVENT};
+use super::{cached_feed_event, parse_feed_url, RssRoomProvider};
 use crate::commands::{message_display::reply_to_from_message_relation, unread::RoomUnreadState};
 
-pub(crate) async fn room_feed_config(room: &Room) -> Option<RssFeedConfig> {
-    let event = room
-        .get_state_event(RSS_FEED_EVENT.into(), "")
-        .await
-        .ok()??;
-    let value = match event {
-        RawAnySyncOrStrippedState::Sync(raw) => raw.deserialize_as::<Value>(),
-        RawAnySyncOrStrippedState::Stripped(raw) => raw.deserialize_as::<Value>(),
-    }
-    .ok()?;
-    RssFeedConfig::from_state_content(value.get("content")?).ok()
+async fn room_provider(room: &Room) -> Option<RssRoomProvider> {
+    let value = cached_feed_event(room).await?;
+    RssRoomProvider::from_state_content(value.get("content")?).ok()
 }
 
 fn management_command(body: &str) -> bool {
@@ -97,7 +89,7 @@ pub(crate) struct Filter {
 impl Filter {
     pub(crate) async fn for_room(room: &Room) -> Option<Self> {
         Some(Self {
-            bot_id: room_feed_config(room).await?.bot_user_id,
+            bot_id: room_provider(room).await?.bot_user_id,
             commands: HashMap::new(),
         })
     }
@@ -405,6 +397,7 @@ mod tests {
     use crate::commands::{
         auth::SavedSession,
         pax_auth::tests::{client, Server, TestDir, USER},
+        rss::RSS_FEED_EVENT,
     };
 
     #[test]
@@ -475,7 +468,7 @@ mod tests {
                     "state":{"events":[
                         {"type":"m.room.create","state_key":"","sender":USER,"event_id":"$create","origin_server_ts":1,"content":{"creator":USER,"room_version":"10"}},
                         {"type":"m.room.member","state_key":USER,"sender":USER,"event_id":"$self","origin_server_ts":2,"content":{"membership":"join"}},
-                        {"type":RSS_FEED_EVENT,"state_key":"","sender":USER,"event_id":"$rss","origin_server_ts":3,"content":{"version":1,"provider":"rss-command","url":"https://example.org/rss","botUserId":bot}}
+                        {"type":RSS_FEED_EVENT,"state_key":"","sender":USER,"event_id":"$rss","origin_server_ts":3,"content":{"version":1,"provider":"rss-command","botUserId":bot}}
                     ]},
                     "timeline":{"events":[read.clone(), command.clone(), reply.clone()],"limited":false},
                     "ephemeral":{"events":[{"type":"m.receipt","content":{"$already-read":{"m.read.private":{USER:{"ts":100}}}}}]},

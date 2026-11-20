@@ -34,7 +34,7 @@ pub struct RoomInfo {
     pub room_type: Option<String>,
     pub is_rss: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub rss_provider: Option<crate::commands::rss::RssFeedConfig>,
+    pub rss_provider: Option<crate::commands::rss::RssRoomProvider>,
     /// `m.room.topic` when known (spaces and rooms).
     pub topic: Option<String>,
     /// "joined" or "invited"

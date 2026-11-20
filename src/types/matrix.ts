@@ -12,7 +12,6 @@ export interface SpaceChildOrder {
 }
 
 export interface RssProvider {
-  url: string;
   botUserId: string;
 }
 

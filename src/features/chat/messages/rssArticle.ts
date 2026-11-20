@@ -1,11 +1,11 @@
 import type { Message, RssProvider } from "../../../types/matrix";
+import type { RoomFeedSubscription } from "../../rss/api";
 
 export interface RssArticleCandidate {
-  feedUrl: string;
   previewFeedUrl?: string;
   url: string;
   hostname: string;
-  headline?: string;
+  headline: string;
   siteName?: string;
   via?: "Google News";
 }
@@ -46,14 +46,11 @@ function announcementText(text: string) {
     .trim();
 }
 
-function googleNewsPreviewFeed(feedTitle: string, configuredFeed: string, article: URL) {
+function googleNewsPreviewFeed(feedTitle: string, article: URL) {
   const query = feedTitle.match(googleNewsSearchTitle)?.[1];
   if (!query || query.length > 512) return;
 
   const feed = new URL("https://news.google.com/rss/search");
-  if (configuredFeed.startsWith(`${feed.href}?`) &&
-      new URL(configuredFeed).searchParams.get("q") === query) return;
-
   feed.searchParams.set("q", query);
   if (article.hostname === feed.hostname) {
     for (const key of ["hl", "gl", "ceid"]) {
@@ -67,9 +64,10 @@ function googleNewsPreviewFeed(feedTitle: string, configuredFeed: string, articl
 export function rssArticleCandidate(
   message: Message,
   provider?: RssProvider,
+  subscriptions?: readonly RoomFeedSubscription[],
 ): RssArticleCandidate | null {
   if (
-    !provider?.url ||
+    !provider ||
     message.sender !== provider.botUserId ||
     message.replyTo ||
     message.threadRootId ||
@@ -84,29 +82,29 @@ export function rssArticleCandidate(
 
   const body = message.body.trim();
   const update = announcement(body);
-  if (!update && /^(?:error\b|failed\b|could not\b|unable to\b|subscribed\b|unsubscribed\b|usage\b|!rss\b)/i.test(body)) {
-    return null;
-  }
+  if (!update) return null;
 
-  const links = (update?.[2] ?? body).match(webLink);
+  const headline = announcementText(update[2]);
+  const feedTitle = announcementText(update[1]);
+  if (!headline) return null;
+  const links = update[2].match(webLink);
   for (const link of links?.reverse() ?? []) {
     try {
       const url = new URL(link.replace(/[.,;:]+$/, ""));
       if (url.username || url.password || (url.pathname === "/" && !url.search)) continue;
-      const headline = update ? announcementText(update[2]) : undefined;
-      const feedTitle = update ? announcementText(update[1]) : undefined;
-      // A bot can post feeds other than the one saved in Pax's room settings.
       const fromGoogleNews = (url.hostname === "news.google.com" && googleNewsArticlePath.test(url.pathname))
-        || googleNewsFeedTitle.test(feedTitle ?? "");
+        || googleNewsFeedTitle.test(feedTitle);
       // Google News appends the publisher to each item title, even if the item leaves the feed.
-      const publisher = fromGoogleNews ? headline?.match(/^(.+) - (.+)$/) : null;
-      const previewFeedUrl = feedTitle && googleNewsPreviewFeed(feedTitle, provider.url, url);
+      const publisher = fromGoogleNews ? headline.match(/^(.+) - (.+)$/) : null;
+      const matchingFeeds = subscriptions?.filter(({ title }) => title === feedTitle);
+      const previewFeedUrl = matchingFeeds?.length === 1
+        ? matchingFeeds[0].url
+        : googleNewsPreviewFeed(feedTitle, url);
       return {
-        feedUrl: provider.url,
         ...(previewFeedUrl && { previewFeedUrl }),
         url: url.href,
         hostname: url.hostname.replace(/^www\./i, ""),
-        headline: publisher?.[1] || headline || undefined,
+        headline: publisher?.[1] ?? headline,
         siteName: publisher?.[2] ?? feedTitle,
         ...(publisher && { via: "Google News" }),
       };

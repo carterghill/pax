@@ -1,18 +1,16 @@
 import { useEffect, useState, type CSSProperties } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { useTheme } from "../theme/ThemeContext";
-import type { FeedSettings } from "./RssFeedStatus";
-import RssFeedSearch from "./RssFeedSearch";
+import type { RssBotSettings } from "./RssFeedStatus";
 
 interface SaveResult {
-  settings: FeedSettings;
+  settings: RssBotSettings;
   setupError: string | null;
 }
 
-export default function RssFeedSettingsPanel({ roomId }: { roomId: string }) {
+export default function RssBotSettingsPanel({ roomId }: { roomId: string }) {
   const { palette, typography, spacing } = useTheme();
-  const [settings, setSettings] = useState<FeedSettings | null>(null);
-  const [url, setUrl] = useState("");
+  const [settings, setSettings] = useState<RssBotSettings | null>(null);
   const [botUserId, setBotUserId] = useState("");
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
@@ -25,10 +23,9 @@ export default function RssFeedSettingsPanel({ roomId }: { roomId: string }) {
     setLoading(true);
     setError(null);
     setSaved(false);
-    invoke<FeedSettings>("get_rss_feed_settings", { roomId }).then((feed) => {
+    invoke<RssBotSettings>("get_rss_bot_settings", { roomId }).then((feed) => {
       if (cancelled) return;
       setSettings(feed);
-      setUrl(feed.url);
       setBotUserId(feed.botUserId);
     }).catch((e) => {
       if (!cancelled) setError(String(e));
@@ -44,13 +41,12 @@ export default function RssFeedSettingsPanel({ roomId }: { roomId: string }) {
     setError(null);
     setSaved(false);
     try {
-      const result = await invoke<SaveResult>("save_rss_feed_settings", {
+      const result = await invoke<SaveResult>("save_rss_bot_settings", {
         roomId,
-        feed: { url: url.trim(), botUserId: botUserId.trim() },
+        botUserId: botUserId.trim(),
         revision: settings.revision,
       });
       setSettings(result.settings);
-      setUrl(result.settings.url);
       setBotUserId(result.settings.botUserId);
       setSaved(true);
       setError(result.setupError);
@@ -62,8 +58,8 @@ export default function RssFeedSettingsPanel({ roomId }: { roomId: string }) {
   }
 
   const canEdit = !!settings?.canEdit && !loading && !saving;
-  const changed = settings && (url.trim() !== settings.url || botUserId.trim() !== settings.botUserId);
-  const canSave = canEdit && !!url.trim() && !!botUserId.trim() && (changed || settings?.invitationCancelled);
+  const changed = botUserId.trim() !== settings?.botUserId;
+  const canSave = canEdit && !!botUserId.trim() && (changed || settings?.invitationCancelled);
   const inputStyle: CSSProperties = {
     boxSizing: "border-box",
     width: "100%",
@@ -81,39 +77,28 @@ export default function RssFeedSettingsPanel({ roomId }: { roomId: string }) {
       display: "flex", flexDirection: "column", gap: spacing.unit * 3,
       color: palette.textPrimary, fontSize: typography.fontSizeSmall,
     }}>
-      {loading && <div role="status">Loading feed settings…</div>}
+      {loading && <div role="status">Loading RSS bot settings…</div>}
       {settings && !loading && (
         <>
-          <div>
-            <label style={{ display: "grid", gap: 6 }}>
-              Feed URL
-              <input type="url" value={url} onChange={(e) => { setUrl(e.target.value); setSaved(false); }}
-                required readOnly={!canEdit} style={inputStyle} />
-            </label>
-            {settings.canEdit && <RssFeedSearch key={roomId} disabled={!canEdit} onAdd={(feedUrl) => {
-              setUrl(feedUrl);
-              setSaved(false);
-            }} />}
-          </div>
           <label style={{ display: "grid", gap: 6 }}>
-            Provider bot
+            RSS bot
             <input type="text" value={botUserId} onChange={(e) => { setBotUserId(e.target.value); setSaved(false); }}
               required readOnly={!canEdit} spellCheck={false} autoCapitalize="off" style={inputStyle} />
           </label>
           <div style={{ color: palette.textSecondary }}>
             {settings.invitationCancelled
               ? "Invitation cancelled. Save these settings to resume feed setup."
-              : "Pax uses a provider already in this room or invites it if needed."}
+              : "Manage subscriptions from RSS feeds in the room menu."}
           </div>
           {changed && !settings.invitationCancelled && <div style={{ color: palette.textSecondary }}>
             To stop an earlier subscription, remove it with the bot that manages it.
           </div>}
-          {!settings.canEdit && <div style={{ color: palette.textSecondary }}>You need permission to edit this room’s feed settings.</div>}
+          {!settings.canEdit && <div style={{ color: palette.textSecondary }}>You need room permission to change the RSS bot.</div>}
           {settings.canEdit && <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
             <button type="submit" disabled={!canSave} style={{ ...buttonStyle, opacity: canSave ? 1 : 0.5 }}>
-              {saving ? "Saving…" : settings.invitationCancelled ? "Save and resume" : "Save feed settings"}
+              {saving ? "Saving…" : settings.invitationCancelled ? "Save and resume" : "Save RSS bot"}
             </button>
-            {saved && <span role="status">Feed settings saved</span>}
+            {saved && <span role="status">RSS bot settings saved</span>}
           </div>}
         </>
       )}

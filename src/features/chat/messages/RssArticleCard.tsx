@@ -6,17 +6,16 @@ import { loadRssArticlePreview, type RssArticlePreview } from "./rssPreview";
 
 export function useRssArticlePreview(candidate: RssArticleCandidate | null) {
   const rowRef = useRef<HTMLDivElement>(null);
-  const feedUrl = candidate?.previewFeedUrl ?? candidate?.feedUrl;
+  const feedUrl = candidate?.previewFeedUrl ?? null;
   const articleUrl = candidate?.url;
-  const allowPageFallback = Boolean(candidate?.headline);
-  const key = articleUrl ? JSON.stringify([feedUrl, articleUrl, allowPageFallback]) : null;
+  const key = articleUrl ? JSON.stringify([feedUrl, articleUrl]) : null;
   const [result, setResult] = useState<{ key: string; preview: RssArticlePreview } | null>(null);
 
   useEffect(() => {
-    if (!key || !feedUrl || !articleUrl || !rowRef.current) return;
+    if (!key || !articleUrl || !rowRef.current) return;
 
     const load = () =>
-      loadRssArticlePreview(key, feedUrl, articleUrl, allowPageFallback, (preview) => {
+      loadRssArticlePreview(key, feedUrl, articleUrl, (preview) => {
         setResult({ key, preview });
       });
 
@@ -35,7 +34,7 @@ export function useRssArticlePreview(candidate: RssArticleCandidate | null) {
       observer.disconnect();
       cancelLoad?.();
     };
-  }, [allowPageFallback, articleUrl, feedUrl, key]);
+  }, [articleUrl, feedUrl, key]);
 
   return { rowRef, preview: result?.key === key ? result.preview : null };
 }

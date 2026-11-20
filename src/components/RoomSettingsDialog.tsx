@@ -8,7 +8,7 @@ import ModerationScopeDialog from "./ModerationScopeDialog";
 import SettingsMemberCategory from "./SettingsMemberCategory";
 import PowerLevelsSettingsPanel from "./PowerLevelsSettingsPanel";
 import NotificationSettingsPanel from "./NotificationSettingsPanel";
-import RssFeedSettingsPanel from "./RssFeedSettingsPanel";
+import RssBotSettingsPanel from "./RssBotSettingsPanel";
 import RoomUpgradeSettings from "./RoomUpgradeSettings";
 import type { RoomManagementMembersResponse } from "../types/matrix";
 
@@ -470,7 +470,7 @@ export default function RoomSettingsDialog({
               </div>
               {[
                 { id: "general" as SettingsTab, label: "General", icon: SettingsIcon },
-                ...(isRss ? [{ id: "rss" as SettingsTab, label: "RSS Feed", icon: Rss }] : []),
+                ...(isRss ? [{ id: "rss" as SettingsTab, label: "RSS Bot", icon: Rss }] : []),
                 { id: "notifications" as SettingsTab, label: "Notifications", icon: Bell },
                 { id: "members" as SettingsTab, label: "Members", icon: Users },
                 { id: "permissions" as SettingsTab, label: "Permissions", icon: Shield },
@@ -998,7 +998,7 @@ export default function RoomSettingsDialog({
                   <NotificationSettingsPanel scope="room" scopeId={roomId} />
                 )}
                 {activeTab === "rss" && isRss && (
-                  <RssFeedSettingsPanel key={roomId} roomId={roomId} />
+                  <RssBotSettingsPanel key={roomId} roomId={roomId} />
                 )}
               </div>
 

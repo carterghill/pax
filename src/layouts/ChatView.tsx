@@ -1,4 +1,4 @@
-import { useState, useEffect, useRef, useCallback, useMemo, useId, type CSSProperties, type ReactNode } from "react";
+import { useState, useEffect, useRef, useCallback, useMemo, useId, useSyncExternalStore, type CSSProperties, type ReactNode } from "react";
 import { useRoomRedactionPolicy } from "../hooks/useRoomRedactionPolicy";
 import { useRoomCanSendMessages } from "../hooks/useRoomCanSendMessages";
 import { useRoomCanPinMessages } from "../hooks/useRoomCanPinMessages";
@@ -33,6 +33,7 @@ import RssThreadDrawer from "../features/chat/messages/RssThreadDrawer";
 import type { RssArticleCandidate } from "../features/chat/messages/rssArticle";
 import { rssThreadReplyCount, type RssThread } from "../features/chat/messages/rssThreads";
 import { useRssThreads } from "../features/chat/messages/useRssThreads";
+import { recentRssList, subscribeToRssLists } from "../features/rss/api";
 
 const MIN_USER_MENU_WIDTH = 180;
 const MAX_USER_MENU_WIDTH = 400;
@@ -233,13 +234,14 @@ export default function ChatView({
   const rssFeed = useRssFeedStatus(rssRoomId);
   // The synced room state is available before the provider's live status check.
   const rssSettings = rssFeed?.status ?? activeRoom?.rssProvider;
-  const rssUrl = rssRoomId ? rssSettings?.url : undefined;
   const rssBot = rssRoomId ? rssSettings?.botUserId : undefined;
   const rssProvider = useMemo(
-    () => rssUrl && rssBot ? { url: rssUrl, botUserId: rssBot } : undefined,
-    [rssUrl, rssBot],
+    () => rssBot ? { botUserId: rssBot } : undefined,
+    [rssBot],
   );
-  const rssThreads = useRssThreads(rssRoomId, rssProvider, messages);
+  const getRssSubscriptions = useCallback(() => recentRssList(rssRoomId, rssBot), [rssRoomId, rssBot]);
+  const rssSubscriptions = useSyncExternalStore(subscribeToRssLists, getRssSubscriptions);
+  const rssThreads = useRssThreads(rssRoomId, rssProvider, messages, rssSubscriptions);
   const rssPanelId = useId();
   const rssButtonRef = useRef<HTMLButtonElement>(null);
   const selfProfile = useMatrixUserProfile(isDraft ? null : userId);
@@ -287,7 +289,6 @@ export default function ChatView({
   } | null>(null);
   const activeThread = selectedThread && selectedThread.roomId === rssRoomId
     && selectedThread.thread.root.sender === rssProvider?.botUserId
-    && selectedThread.thread.article.feedUrl === rssProvider.url
     ? {
       ...selectedThread.thread,
       root: rssThreads.articles.get(selectedThread.thread.root.eventId)?.root ?? selectedThread.thread.root,
@@ -640,7 +641,7 @@ export default function ChatView({
           <span aria-hidden="true" style={{
             width: 4, height: 4, flexShrink: 0, borderRadius: "50%", background: palette.textSecondary,
           }} />
-          <RssFeedStatusToggle feed={rssFeed} panelId={rssPanelId} buttonRef={rssButtonRef} />
+          <RssFeedStatusToggle feed={rssFeed} botUserId={rssBot} panelId={rssPanelId} buttonRef={rssButtonRef} />
         </>
       )}
     </div>
@@ -785,10 +786,10 @@ export default function ChatView({
             ref={messageListRef}
             messages={[...history.messages, ...rssThreads.visibleMessages]}
             rssProvider={rssProvider}
+            rssSubscriptions={rssSubscriptions}
             rssReplies={rssThreads.replies}
             rssReplyCounts={replyCounts}
             activeRssThreadId={activeThread?.root.eventId}
-            onRssArticleConfirmed={rssThreads.confirmArticle}
             onOpenRssThread={rssRoomId ? openThread : undefined}
             loadingOlder={loadingOlder || history.loading}
             initialLoading={initialLoading}

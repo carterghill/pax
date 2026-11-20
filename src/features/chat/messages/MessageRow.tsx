@@ -1,4 +1,4 @@
-import { memo, useEffect } from "react";
+import { memo } from "react";
 import {
   MoreVertical,
   MessageSquare,
@@ -44,7 +44,6 @@ export interface MessageRowProps {
   rssArticle: RssArticleCandidate | null;
   rssReplyCount: number;
   rssThreadOpen: boolean;
-  onRssArticleConfirmed?: (eventId: string) => void;
   onOpenRssThread?: (root: Message, article: RssArticleCandidate) => void;
   showHeader: boolean;
   /** Reply control in the hover bar (not the ⋮ menu). */
@@ -90,7 +89,6 @@ const MessageRow = memo(function MessageRow({
   rssArticle,
   rssReplyCount,
   rssThreadOpen,
-  onRssArticleConfirmed,
   onOpenRssThread,
   showHeader,
   showReplyButton,
@@ -120,14 +118,10 @@ const MessageRow = memo(function MessageRow({
   resolveMemberLabel,
 }: MessageRowProps) {
   const { rowRef, preview } = useRssArticlePreview(rssArticle);
-  const article = rssArticle && (rssArticle.headline || preview) ? rssArticle : null;
+  const article = rssArticle;
   const openArticleThread = article && onOpenRssThread
     ? () => onOpenRssThread(msg, { ...article, headline: preview?.article.title || article.headline })
     : undefined;
-  const confirmedCustomArticle = Boolean(rssArticle && !rssArticle.headline && preview);
-  useEffect(() => {
-    if (confirmedCustomArticle) onRssArticleConfirmed?.(msg.eventId);
-  }, [confirmedCustomArticle, msg.eventId, onRssArticleConfirmed]);
   const menuBtn = spacingUnit * 7;
   const rowActive = isMenuOpen || isReactionPickerOpen;
   const groupShadow =

@@ -84,6 +84,12 @@ html, body {
   to { transform: rotate(360deg); }
 }
 
+@media (prefers-reduced-motion: no-preference) {
+  .pax-rss-connecting {
+    animation: spin 1s linear infinite;
+  }
+}
+
 @keyframes messageListSpinner {
   to { transform: rotate(360deg); }
 }

@@ -266,7 +266,7 @@ export default function CreateRoomDialog({
         const trimmedName = name.trim();
         const trimmedTopic = topic.trim() || null;
         const aliasLocal = roomAlias.trim().toLowerCase().replace(/[^a-z0-9_-]/g, "");
-        const rssProvider = roomKind === "rss" ? { url: new URL(feedUrl.trim()).href, botUserId: feedBot.trim() } : undefined;
+        const rssFeed = roomKind === "rss" ? { url: new URL(feedUrl.trim()).href, botUserId: feedBot.trim() } : null;
         const roomId = await invoke<string>(spaceId ? "create_room_in_space" : "create_standalone_room", {
           ...(spaceId ? { spaceId, spaceRoomAccess: roomAccess } : { roomAccess }),
           name: trimmedName,
@@ -275,7 +275,7 @@ export default function CreateRoomDialog({
           roomAlias: aliasLocal || null,
           historyVisibility,
           federate,
-          rssFeed: rssProvider ?? null,
+          rssFeed,
         });
         created = {
           room: {
@@ -287,7 +287,7 @@ export default function CreateRoomDialog({
             parentSpaceIds: spaceId ? [spaceId] : [],
             roomType,
             isRss: roomKind === "rss",
-            rssProvider,
+            rssProvider: rssFeed ? { botUserId: rssFeed.botUserId } : undefined,
             membership: "joined",
           },
           topic: trimmedTopic,
@@ -884,7 +884,7 @@ export default function CreateRoomDialog({
                 <div style={{ marginBottom: 16, padding: 12, border: `1px solid ${palette.border}`, borderRadius: 8 }}>
                   <div style={{ marginBottom: 12 }}>
                     <label htmlFor="rss-feed-url" style={labelStyle}>
-                      Feed URL <span style={{ color: "#ed4245" }}>*</span>
+                      First feed URL <span style={{ color: "#ed4245" }}>*</span>
                     </label>
                     <input
                       id="rss-feed-url"
@@ -915,7 +915,7 @@ export default function CreateRoomDialog({
                     style={inputStyle}
                   />
                   <div id="rss-feed-bot-help" style={{ marginTop: 6, color: palette.textSecondary, fontSize: typography.fontSizeSmall }}>
-                    The bot joins this room and posts feed updates. You can choose any bot that supports !rss subscribe.
+                    The bot subscribes to the first feed after it joins. Manage subscriptions from RSS feeds in the room menu.
                   </div>
                 </div>
               )}

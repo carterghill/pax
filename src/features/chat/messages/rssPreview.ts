@@ -50,9 +50,8 @@ export function getRssPreviewImage(url: string) {
 
 export function loadRssArticlePreview(
   key: string,
-  feedUrl: string,
+  feedUrl: string | null,
   articleUrl: string,
-  allowPageFallback: boolean,
   onPreview: (preview: RssArticlePreview) => void,
 ): () => void {
   let disposed = false;
@@ -60,7 +59,6 @@ export function loadRssArticlePreview(
   void cacheArticle(key, () => invoke<ArticleMetadata | null>("get_rss_article_preview", {
     feedUrl,
     articleUrl,
-    allowPageFallback,
   })).then((article) => {
     if (disposed || !article) return;
     let images: RssArticlePreview["images"] = {};

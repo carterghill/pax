@@ -39,7 +39,7 @@ test("article details publish immediately and images fill in as they arrive", as
   const respond = mockPreviews(t);
   const url = "https://example.org/first";
   const previews = [];
-  loadRssArticlePreview(url, feedUrl, url, true, (value) => previews.push(value));
+  loadRssArticlePreview(url, feedUrl, url, (value) => previews.push(value));
 
   const illustrated = { ...article, image: thumbnail, authorImage: bylinePhoto };
   await respond(url, illustrated);
@@ -59,7 +59,7 @@ test("leaving a row drops late image results", async (t) => {
   const url = "https://example.org/third";
   const image = "https://example.org/third.png";
   const publish = t.mock.fn();
-  const cancel = loadRssArticlePreview(url, feedUrl, url, true, publish);
+  const cancel = loadRssArticlePreview(url, null, url, publish);
 
   await respond(url, { ...article, image });
   cancel();

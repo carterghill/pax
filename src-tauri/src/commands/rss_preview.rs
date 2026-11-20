@@ -236,24 +236,18 @@ async fn fetch_feed(url: Url) -> FeedCell {
 
 #[tauri::command]
 pub async fn get_rss_article_preview(
-    feed_url: String,
+    feed_url: Option<String>,
     article_url: String,
-    allow_page_fallback: bool,
 ) -> Option<ArticlePreview> {
     let article = preview_url(&article_url)?;
     let google_news_link = is_google_news(&article);
-    let feed = if let Some(url) = preview_url(&feed_url) {
+    let feed = if let Some(url) = feed_url.as_deref().and_then(preview_url) {
         Some(fetch_feed(url).await)
     } else {
         None
     };
     let feed = feed.as_ref().and_then(|cell| cell.get()?.as_ref());
     let mut preview = feed.and_then(|feed| feed.preview_for(&article));
-    // Uncategorized provider messages are displayed as articles only when their
-    // link matches the configured feed, so a bot reply cannot trigger a page fetch.
-    if preview.is_none() && !allow_page_fallback {
-        return None;
-    }
     let page = fetch(article, Resource::Page).await.filter(|(base, _, _)| {
         // The redirect can stop on a Google interstitial or a publisher homepage.
         !google_news_link

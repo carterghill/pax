@@ -89,7 +89,7 @@ export default function RssFeedsDialog({ roomId, roomName, onClose }: {
   const [listError, setListError] = useState<string | null>(null);
   const [listLoading, setListLoading] = useState(true);
   const [reload, setReload] = useState(0);
-  const listRequest = useRef<{ reload: number; promise: Promise<RoomFeedSubscriptions> } | null>(null);
+  const listRequest = useRef<{ roomId: string; reload: number; promise: Promise<RoomFeedSubscriptions> } | null>(null);
   const [pending, setPending] = useState<SubscriptionChange | null>(null);
   const [updateError, setUpdateError] = useState<string | null>(null);
   const [updateStatus, setUpdateStatus] = useState("");
@@ -105,13 +105,16 @@ export default function RssFeedsDialog({ roomId, roomName, onClose }: {
     let active = true;
     setListLoading(true);
     setListError(null);
-    if (listRequest.current?.reload !== reload) {
-      listRequest.current = { reload, promise: listRssSubscriptions(roomId) };
+    if (listRequest.current?.roomId !== roomId || listRequest.current.reload !== reload) {
+      listRequest.current = { roomId, reload, promise: listRssSubscriptions(roomId) };
     }
     void listRequest.current.promise.then((next) => {
       if (active) setFeeds(next);
     }).catch((error) => {
-      if (active) setListError(String(error));
+      if (active) {
+        setFeeds(null);
+        setListError(String(error));
+      }
     }).finally(() => {
       if (active) setListLoading(false);
     });
@@ -149,18 +152,15 @@ export default function RssFeedsDialog({ roomId, roomName, onClose }: {
     setUpdateStatus("");
     try {
       const added = await updateRssSubscription(roomId, feeds.botUserId, change);
-      setFeeds((current) => {
-        if (!current) return current;
-        const subscriptions = change.kind === "unsubscribe"
-          ? current.subscriptions.filter((feed) => feed.id !== change.id)
-          : added
-            ? [...current.subscriptions.filter((feed) => feed.id !== added.id), added]
-            : current.subscriptions;
-        return { ...current, subscriptions };
-      });
       setUpdateStatus(added ? `Added ${added.title}.` : "Feed removed.");
     } catch (error) {
       setUpdateError(String(error));
+    }
+    try {
+      setFeeds(await listRssSubscriptions(roomId));
+    } catch (error) {
+      setFeeds(null);
+      setListError(String(error));
     } finally {
       setPending(null);
     }
