@@ -48,9 +48,13 @@ export function clampFixedPopoverToViewport(
 /*  Message grouping & reply previews                                  */
 /* ------------------------------------------------------------------ */
 
+export function isTimelineNotice(message: Message | undefined): boolean {
+  return Boolean(message?.membershipNotice || message?.directCallNotice);
+}
+
 export function shouldShowHeader(msg: Message, prevMsg: Message | null): boolean {
   if (!prevMsg) return true;
-  if (msg.decryptionFailed || prevMsg.decryptionFailed || prevMsg.membershipNotice) return true;
+  if (msg.decryptionFailed || prevMsg.decryptionFailed || isTimelineNotice(prevMsg)) return true;
   if (prevMsg.sender !== msg.sender) return true;
   if (msg.timestamp - prevMsg.timestamp > 5 * 60 * 1000) return true;
   return false;
@@ -58,6 +62,7 @@ export function shouldShowHeader(msg: Message, prevMsg: Message | null): boolean
 
 export function replySnippetForMessage(m: Message): string {
   if (m.membershipNotice) return "Room membership changed";
+  if (m.directCallNotice) return "Voice call";
   if (m.decryptionFailed) return "Message unavailable on this device";
   if (m.imageMediaRequest || m.localImagePreviewObjectUrl) return "Image";
   if (m.videoMediaRequest) return "Video";
@@ -142,7 +147,7 @@ const NON_EDITABLE_BRACKET_PREFIXES = [
 ] as const;
 
 export function messageAllowsEdit(msg: Message, userId: string): boolean {
-  if (msg.decryptionFailed || msg.membershipNotice) return false;
+  if (msg.decryptionFailed || isTimelineNotice(msg)) return false;
   if (msg.eventId.startsWith("local:")) return false;
   if (msg.sender !== userId) return false;
   if (msg.imageMediaRequest != null) return false;
@@ -162,7 +167,7 @@ export function messageAllowsDelete(
   userId: string,
   policy: RoomRedactionPolicy,
 ): boolean {
-  if (msg.membershipNotice) return false;
+  if (isTimelineNotice(msg)) return false;
   if (msg.sender === userId) return policy.canRedactOwn;
   return policy.canRedactOther;
 }

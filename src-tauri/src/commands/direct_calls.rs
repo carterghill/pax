@@ -2,7 +2,11 @@ use std::{collections::VecDeque, sync::Arc, time::Duration};
 
 use matrix_sdk::{
     deserialized_responses::{TimelineEvent, TimelineEventKind},
-    ruma::{events::room::member::MembershipState, OwnedUserId},
+    ruma::{
+        events::{room::member::MembershipState, AnySyncTimelineEvent},
+        serde::Raw,
+        OwnedEventId, OwnedUserId,
+    },
     sync::SyncResponse,
     Client, Room, RoomMemberships, RoomState,
 };
@@ -10,20 +14,15 @@ use serde::{Deserialize, Serialize};
 use tauri::{Emitter, State};
 use tokio::sync::Mutex;
 
-use crate::{voice_presence::now_ms, AppState};
+use crate::{
+    types::{DirectCallNotice, DirectCallSignalKind as SignalKind, MessageInfo},
+    voice_presence::now_ms,
+    AppState,
+};
 
-const CALL_EVENT: &str = "com.carter.pax.direct_call";
+pub(super) const CALL_EVENT: &str = "com.carter.pax.direct_call";
 const RING_MS: u64 = 30_000;
 const MAX_PENDING_SIGNALS: usize = 128;
-
-#[derive(Clone, Copy, Deserialize, Serialize, PartialEq)]
-#[serde(rename_all = "camelCase")]
-pub(crate) enum SignalKind {
-    Ring,
-    Answer,
-    Connect,
-    End,
-}
 
 #[derive(Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -61,9 +60,18 @@ pub(crate) struct DirectCallSignal {
 
 #[derive(Deserialize)]
 struct CallEvent {
+    event_id: OwnedEventId,
     sender: OwnedUserId,
     origin_server_ts: u64,
     content: SignalContent,
+    state_key: Option<String>,
+    #[serde(default)]
+    unsigned: CallUnsigned,
+}
+
+#[derive(Default, Deserialize)]
+struct CallUnsigned {
+    redacted_because: Option<serde::de::IgnoredAny>,
 }
 
 pub(crate) type PendingDirectCalls = Mutex<VecDeque<DirectCallSignal>>;
@@ -135,16 +143,42 @@ pub(crate) async fn take_direct_call_signals(
         .collect())
 }
 
-fn fresh_call_event(event: &TimelineEvent, now: u64) -> Option<(CallEvent, u64, bool)> {
-    let raw = event.kind.raw();
-    if raw.get_field::<String>("type").ok().flatten().as_deref() != Some(CALL_EVENT) {
+fn parse_call_event(raw: &Raw<AnySyncTimelineEvent>) -> Option<CallEvent> {
+    if raw.get_field::<&str>("type").ok().flatten() != Some(CALL_EVENT) {
         return None;
     }
     let call: CallEvent = serde_json::from_str(raw.json().get()).ok()?;
+    (call.content.is_valid() && call.state_key.is_none() && call.unsigned.redacted_because.is_none())
+        .then_some(call)
+}
+
+pub(super) fn call_notice(
+    raw: &Raw<AnySyncTimelineEvent>,
+    encrypted_room: bool,
+    decrypted: bool,
+) -> Option<MessageInfo> {
+    if encrypted_room && !decrypted {
+        return None;
+    }
+    let call = parse_call_event(raw)?;
+    Some(MessageInfo {
+        direct_call_notice: Some(DirectCallNotice {
+            call_id: call.content.call_id,
+            kind: call.content.kind,
+        }),
+        event_id: call.event_id.to_string(),
+        sender: call.sender.to_string(),
+        timestamp: call.origin_server_ts,
+        ..Default::default()
+    })
+}
+
+fn fresh_call_event(event: &TimelineEvent, now: u64) -> Option<(CallEvent, u64, bool)> {
+    let call = parse_call_event(event.raw())?;
     // Ignore old offers from the initial sync and limit clock skew.
     let expires_at = call.origin_server_ts.saturating_add(RING_MS);
     let decrypted = matches!(event.kind, TimelineEventKind::Decrypted(_));
-    (call.content.is_valid() && expires_at > now && call.origin_server_ts <= now + RING_MS)
+    (expires_at > now && call.origin_server_ts <= now + RING_MS)
         .then_some((call, expires_at.min(now + RING_MS), decrypted))
 }
 
@@ -209,7 +243,6 @@ pub(super) async fn receive_signals(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use matrix_sdk::ruma::serde::Raw;
     use serde_json::json;
 
     fn event(timestamp: u64, kind: &str, answer_device: Option<&str>) -> TimelineEvent {
@@ -246,5 +279,28 @@ mod tests {
         assert!(fresh_call_event(&event(now, "ring", Some("OTHER")), now).is_none());
         let (connect, _, _) = fresh_call_event(&event(now, "connect", Some("OTHER")), now).unwrap();
         assert_eq!(connect.content.answer_device_id.as_deref(), Some("OTHER"));
+    }
+
+    #[test]
+    fn old_signals_are_visible_in_history_without_ringing_again() {
+        let old = event(42, "ring", None);
+        assert!(fresh_call_event(&old, 500_000).is_none());
+        assert!(call_notice(old.raw(), true, false).is_none());
+
+        let notice = call_notice(old.raw(), true, true).unwrap();
+        assert_eq!(notice.event_id, "$call");
+        assert_eq!(notice.sender, "@peer:example.org");
+        assert_eq!(notice.timestamp, 42);
+        assert!(notice.direct_call_notice.unwrap().kind == SignalKind::Ring);
+    }
+
+    #[test]
+    fn redacted_signals_are_not_call_history() {
+        let original = event(42, "end", None);
+        let mut redacted: serde_json::Value =
+            serde_json::from_str(original.raw().json().get()).unwrap();
+        redacted["unsigned"] = json!({ "redacted_because": {} });
+        let raw = Raw::from_json_string(redacted.to_string()).unwrap();
+        assert!(call_notice(&raw, false, false).is_none());
     }
 }

@@ -39,7 +39,6 @@ pub(super) fn membership_notice(event: &OriginalSyncRoomMemberEvent) -> Option<M
         .map(str::to_owned);
 
     Some(MessageInfo {
-        decryption_failed: false,
         membership_notice: Some(MembershipNotice {
             action,
             target_user_id: event.state_key.to_string(),
@@ -48,29 +47,8 @@ pub(super) fn membership_notice(event: &OriginalSyncRoomMemberEvent) -> Option<M
         }),
         event_id: event.event_id.to_string(),
         sender: event.sender.to_string(),
-        sender_name: None,
-        body: String::new(),
         timestamp: event.origin_server_ts.0.into(),
-        avatar_url: None,
-        edited: false,
-        reply_to: None,
-        thread_root_id: None,
-        thread_summary: None,
-        image_media_request: None,
-        image_width: None,
-        image_height: None,
-        image_blurhash: None,
-        video_media_request: None,
-        video_width: None,
-        video_height: None,
-        file_media_request: None,
-        file_mime: None,
-        file_display_name: None,
-        unsupported_matrix_msgtype: None,
-        reactions: None,
-        formatted_body: None,
-        mentioned_user_ids: None,
-        mentions_room: false,
+        ..Default::default()
     })
 }
 

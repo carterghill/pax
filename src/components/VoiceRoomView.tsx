@@ -16,27 +16,68 @@ import { useUserVolume } from "../hooks/useUserVolume";
 import VolumeContextMenu from "./VolumeContextMenu";
 import VoiceAudioSettingsSection from "./VoiceAudioSettingsSection";
 import ScreenShareGrid from "./ScreenShareGrid";
-import { useOverlayObstruction, registerObstruction, unregisterObstruction } from "../hooks/useOverlayObstruction";
+import { useOverlayObstruction } from "../hooks/useOverlayObstruction";
 
-interface VoiceRoomViewProps {
-  room: Room;
+interface VoiceCallPanelProps {
+  roomId: string;
   voiceCall: VoiceCall;
-  voiceParticipants: MatrixVoiceParticipant[];
+  voiceParticipants?: MatrixVoiceParticipant[];
   /** LiveKit Room Service snapshot (mute/deafen/speaking) when not connected */
-  livekitInRoom: LivekitVoiceParticipantInfo[];
+  livekitInRoom?: LivekitVoiceParticipantInfo[];
   userId: string;
+  directCall?: { peer: MatrixVoiceParticipant; onEnd: () => void };
 }
+
+const EMPTY_VOICE_PARTICIPANTS: MatrixVoiceParticipant[] = [];
+const EMPTY_LIVEKIT_PARTICIPANTS: LivekitVoiceParticipantInfo[] = [];
 
 export default function VoiceRoomView({
   room,
-  voiceCall,
-  voiceParticipants,
-  livekitInRoom,
+  ...panelProps
+}: Omit<VoiceCallPanelProps, "roomId" | "directCall"> & { room: Room }) {
+  const { palette, spacing, typography } = useTheme();
+  const { connectedRoomId, isConnecting } = panelProps.voiceCall;
+
+  return (
+    <div style={{ flex: 1, display: "flex", flexDirection: "column", minHeight: 0 }}>
+      <div style={{
+        padding: `0 ${spacing.unit * 4}px`,
+        borderBottom: `1px solid ${palette.border}`,
+        height: spacing.headerHeight,
+        flexShrink: 0,
+        display: "flex",
+        alignItems: "center",
+        gap: spacing.unit * 3,
+      }}>
+        <Volume2 size={20} color={palette.textSecondary} style={{ flexShrink: 0 }} />
+        <RoomHeaderTitle name={room.name} caption={room.topic} />
+        {connectedRoomId === room.id && !isConnecting && (
+          <span style={{
+            fontSize: typography.fontSizeSmall,
+            color: "#23a55a",
+            display: "flex",
+            alignItems: "center",
+            flexShrink: 0,
+            gap: spacing.unit,
+          }}>
+            <span style={{ width: 8, height: 8, borderRadius: "50%", backgroundColor: "#23a55a" }} />
+            Connected
+          </span>
+        )}
+      </div>
+      <VoiceCallPanel key={room.id} roomId={room.id} {...panelProps} />
+    </div>
+  );
+}
+
+export function VoiceCallPanel({
+  roomId,
+  voiceCall: callState,
+  voiceParticipants = EMPTY_VOICE_PARTICIPANTS,
+  livekitInRoom = EMPTY_LIVEKIT_PARTICIPANTS,
   userId,
-}: VoiceRoomViewProps) {
-  // Destructure actions from voiceCall; use voiceCall directly as callState
-  // since VoiceCall extends VoiceCallState.
-  const callState = voiceCall;
+  directCall,
+}: VoiceCallPanelProps) {
   const {
     connect: onConnect,
     disconnect: onDisconnect,
@@ -52,9 +93,16 @@ export default function VoiceRoomView({
     setNoiseSuppressionConfig: onSetNoiseSuppressionConfig,
     setParticipantVolume: onSetParticipantVolume,
     listAudioDevices: onListAudioDevices,
-  } = voiceCall;
+  } = callState;
   const { palette, spacing, typography } = useTheme();
   const { getVolume, setVolume } = useUserVolume();
+  const isConnected = callState.connectedRoomId === roomId && !callState.isConnecting;
+  const isConnecting = callState.isConnecting && callState.connectedRoomId === roomId;
+  const isDirectCall = directCall != null;
+  const hasScreenShare = isConnected && (callState.screenSharingOwners.length > 0 || callState.isLocalScreenSharing);
+  const participantsBesideShare = hasScreenShare && !directCall;
+  const avatarSize = directCall ? (hasScreenShare ? 40 : 64) : 80;
+  const peer = directCall?.peer;
   const [screenShareMenuOpen, setScreenShareMenuOpen] = useState(false);
   const [generalSettingsOpen, setGeneralSettingsOpen] = useState(false);
   const [generalSettingsTab, setGeneralSettingsTab] = useState<"stream" | "audio">("stream");
@@ -64,46 +112,33 @@ export default function VoiceRoomView({
   const screenShareMenuPopupRef = useRef<HTMLDivElement>(null);
   const generalSettingsRef = useRef<HTMLDivElement>(null);
   const generalSettingsPopupRef = useRef<HTMLDivElement>(null);
-  const activeShareRef = useRef<{
-    mode: "screen" | "window";
-    windowTitle?: string;
-    windowHandle?: string;
-  } | null>(null);
   const isLinux = navigator.userAgent.includes("Linux");
-
-  // Popups are `position: absolute` — parent `getBoundingClientRect()` excludes them; ref the panels.
-  // Screen share popup obstruction is managed via callback ref below
-  // because the portal doesn't mount until screenShareMenuPos is set
-  // (async in useEffect), so useOverlayObstruction's useLayoutEffect
-  // fires before the ref is populated and never re-runs.
-  const screenShareObsIdRef = useRef<number | null>(null);
-  const screenSharePopupCallbackRef = useCallback((el: HTMLDivElement | null) => {
-    // Also keep the regular ref updated for click-outside detection
-    screenShareMenuPopupRef.current = el;
-    if (el) {
-      screenShareObsIdRef.current = registerObstruction(el);
-    } else if (screenShareObsIdRef.current !== null) {
-      unregisterObstruction(screenShareObsIdRef.current);
-      screenShareObsIdRef.current = null;
-    }
-  }, []);
-  useOverlayObstruction(generalSettingsPopupRef, generalSettingsOpen);
   const [windowList, setWindowList] = useState<ScreenShareWindowOption[]>([]);
   const [windowListLoading, setWindowListLoading] = useState(false);
-  const [screenShareMenuPos, setScreenShareMenuPos] = useState<{ top: number; left: number; width: number } | null>(null);
+  const [menuPosition, setMenuPosition] = useState<{
+    top?: number;
+    bottom?: number;
+    left: number;
+    width: number;
+    maxHeight: number;
+  } | null>(null);
+  const showScreenShareMenu = isConnected && screenShareMenuOpen && !callState.isLocalScreenSharing;
+  const showGeneralSettings = isConnected && generalSettingsOpen;
+  useOverlayObstruction(screenShareMenuPopupRef, showScreenShareMenu && menuPosition !== null);
+  useOverlayObstruction(generalSettingsPopupRef, showGeneralSettings && menuPosition !== null);
 
   useEffect(() => {
     onGetLowBandwidthMode().then(setLowBandwidthMode).catch(() => {});
   }, [onGetLowBandwidthMode]);
 
   const reconnectAfterDeviceChange = useCallback(async () => {
-    if (callState.connectedRoomId === room.id && !callState.isConnecting) {
-      await onConnect(room.id, { forceReconnect: true });
+    if (isConnected) {
+      await onConnect(roomId, { forceReconnect: true, replaceOtherSessions: isDirectCall ? false : undefined });
     }
-  }, [callState.connectedRoomId, callState.isConnecting, onConnect, room.id]);
+  }, [isConnected, onConnect, roomId, isDirectCall]);
 
   useEffect(() => {
-    if (!screenShareMenuOpen || isLinux) return;
+    if (!showScreenShareMenu || isLinux) return;
     let cancelled = false;
     setWindowList([]);
     setWindowListLoading(true);
@@ -127,48 +162,48 @@ export default function VoiceRoomView({
     return () => {
       cancelled = true;
     };
-  }, [screenShareMenuOpen, isLinux, onEnumerateScreenShareWindows]);
+  }, [showScreenShareMenu, isLinux, onEnumerateScreenShareWindows]);
 
   useEffect(() => {
-    if (!screenShareMenuOpen) {
-      setScreenShareMenuPos(null);
+    if (!showScreenShareMenu && !showGeneralSettings) {
+      setMenuPosition(null);
       return;
     }
 
-    function updateScreenShareMenuPos() {
-      const anchor = screenShareMenuRef.current;
+    function updateMenuPosition() {
+      const anchor = showScreenShareMenu ? screenShareMenuRef.current : generalSettingsRef.current;
       if (!anchor) return;
       const rect = anchor.getBoundingClientRect();
-      const viewportWidth = window.innerWidth;
+      const margin = 12;
       const gap = spacing.unit * 2;
-      const width = isLinux
-        ? Math.min(320, Math.max(220, viewportWidth - 24))
-        : Math.min(760, Math.max(320, viewportWidth - 24));
-      const minLeft = 12;
-      const maxLeft = Math.max(minLeft, viewportWidth - width - 12);
+      const width = Math.min(showScreenShareMenu && !isLinux ? 760 : 320, window.innerWidth - margin * 2);
       const centeredLeft = rect.left + rect.width / 2 - width / 2;
-      const left = Math.min(Math.max(centeredLeft, minLeft), maxLeft);
+      const left = Math.min(Math.max(centeredLeft, margin), window.innerWidth - width - margin);
+      const above = rect.top - gap - margin;
+      const below = window.innerHeight - rect.bottom - gap - margin;
+      const openBelow = below > above;
 
-      setScreenShareMenuPos({
-        top: rect.top - gap,
+      setMenuPosition({
+        top: openBelow ? rect.bottom + gap : undefined,
+        bottom: openBelow ? undefined : window.innerHeight - rect.top + gap,
         left,
         width,
+        maxHeight: Math.min(window.innerHeight * 0.7, Math.max(above, below)),
       });
     }
 
-    updateScreenShareMenuPos();
-    window.addEventListener("resize", updateScreenShareMenuPos);
-    window.addEventListener("scroll", updateScreenShareMenuPos, true);
+    updateMenuPosition();
+    window.addEventListener("resize", updateMenuPosition);
+    window.addEventListener("scroll", updateMenuPosition, true);
     return () => {
-      window.removeEventListener("resize", updateScreenShareMenuPos);
-      window.removeEventListener("scroll", updateScreenShareMenuPos, true);
+      window.removeEventListener("resize", updateMenuPosition);
+      window.removeEventListener("scroll", updateMenuPosition, true);
     };
-  }, [screenShareMenuOpen, isLinux, spacing.unit]);
+  }, [showScreenShareMenu, showGeneralSettings, hasScreenShare, isLinux, spacing.unit]);
 
   const startShare = useCallback(
     async (mode: "screen" | "window", windowTitle?: string, windowHandle?: string) => {
       setIsStartingScreenShare(true);
-      activeShareRef.current = { mode, windowTitle, windowHandle };
       try {
         await onStartScreenShare(mode, windowTitle, windowHandle);
       } catch (e) {
@@ -181,7 +216,6 @@ export default function VoiceRoomView({
 
   const stopShare = useCallback(async () => {
     setIsStartingScreenShare(false);
-    activeShareRef.current = null;
     try {
       await onStopScreenShare();
     } catch (e) {
@@ -195,17 +229,11 @@ export default function VoiceRoomView({
       setLowBandwidthMode(next);
       try {
         await onSetLowBandwidthMode(next);
-        // Restart active screen share so bitrate/fps settings take effect
-        const active = activeShareRef.current;
-        if (callState.isLocalScreenSharing && active) {
-          await onStopScreenShare();
-          await onStartScreenShare(active.mode, active.windowTitle, active.windowHandle);
-        }
       } catch (e) {
         console.error("Failed to toggle low bandwidth mode:", e);
       }
     },
-    [lowBandwidthMode, onSetLowBandwidthMode, callState.isLocalScreenSharing, onStopScreenShare, onStartScreenShare]
+    [lowBandwidthMode, onSetLowBandwidthMode]
   );
 
   useEffect(() => {
@@ -222,7 +250,8 @@ export default function VoiceRoomView({
       if (
         generalSettingsOpen &&
         generalSettingsRef.current &&
-        !generalSettingsRef.current.contains(target)
+        !generalSettingsRef.current.contains(target) &&
+        !generalSettingsPopupRef.current?.contains(target)
       ) {
         setGeneralSettingsOpen(false);
       }
@@ -261,10 +290,6 @@ export default function VoiceRoomView({
     [getVolume],
   );
 
-  const isConnected = callState.connectedRoomId === room.id && !callState.isConnecting;
-  const isConnecting = callState.isConnecting && callState.connectedRoomId === room.id;
-  const hasScreenShare = callState.screenSharingOwners.length > 0 || callState.isLocalScreenSharing;
-
   // Build set of LiveKit participant identities (normalized) for matching
   // Build avatar lookup from Matrix roster (keyed by normalized userId)
   const avatarByUserId = useMemo(() => {
@@ -288,6 +313,7 @@ export default function VoiceRoomView({
   const allParticipants = useMemo(() => {
     const result: Array<{
       identity: string;
+      userId: string;
       displayName: string;
       avatarUrl?: string | null;
       isLocal: boolean;
@@ -299,12 +325,18 @@ export default function VoiceRoomView({
 
     // Add connected LiveKit participants
     for (const p of callState.participants) {
-      const mxid = extractMatrixUserId(p.identity);
-      const displayName = localpartFromUserId(p.identity);
+      const isPeer = peer && (
+        p.identity === peer.userId ||
+        p.identity.startsWith(`${peer.userId}:`) ||
+        p.identity.startsWith(`${peer.userId}|`)
+      );
+      const profile = isPeer ? peer : null;
+      const mxid = profile?.userId ?? extractMatrixUserId(p.identity);
       result.push({
         identity: p.identity,
-        displayName,
-        avatarUrl: avatarByUserId.get(normalizeUserId(mxid)) ?? null,
+        userId: isDirectCall && p.isLocal ? userId : mxid,
+        displayName: localpartFromUserId(profile?.displayName ?? p.identity),
+        avatarUrl: profile?.avatarUrl ?? avatarByUserId.get(normalizeUserId(mxid)) ?? null,
         isLocal: p.isLocal,
         isConnecting: false,
         isSpeaking: p.isSpeaking,
@@ -314,8 +346,7 @@ export default function VoiceRoomView({
     }
 
     // When we're connected (not just connecting), add room participants not yet in LiveKit
-    const isConnectedToThisRoom = callState.connectedRoomId === room.id && !callState.isConnecting;
-    if (isConnectedToThisRoom && voiceParticipants) {
+    if (isConnected) {
       for (const p of voiceParticipants) {
         const normalized = normalizeUserId(p.userId);
         const localpart = localpartFromUserId(p.userId);
@@ -327,6 +358,7 @@ export default function VoiceRoomView({
         const isLocal = p.userId === userId;
         result.push({
           identity: p.userId,
+          userId: p.userId,
           displayName: localDisplayName,
           avatarUrl: p.avatarUrl,
           isLocal,
@@ -339,9 +371,9 @@ export default function VoiceRoomView({
       compareByDisplayThenKey(a.displayName, a.identity, b.displayName, b.identity)
     );
     return result;
-  }, [callState.participants, callState.connectedRoomId, callState.isConnecting, room.id, voiceParticipants, userId, liveKitIdentitySet, avatarByUserId]);
+  }, [callState.participants, isConnected, voiceParticipants, userId, liveKitIdentitySet, avatarByUserId, peer, isDirectCall]);
 
-  const showLobby = !isConnected && !isConnecting && !callState.error;
+  const showLobby = !isDirectCall && !isConnected && !isConnecting && !callState.error;
 
   const lobbyParticipants = useMemo(() => {
     if (!showLobby) return [];
@@ -399,57 +431,27 @@ export default function VoiceRoomView({
     return result;
   }, [showLobby, voiceParticipants, livekitInRoom, userId, avatarByUserId]);
 
-  // Display names for screen share header
-  const remoteSharers = callState.screenSharingOwners.filter(id => {
-    // Filter out local identity (we show "You are sharing" separately)
-    return localpartFromUserId(id) !== localpartFromUserId(userId);
-  });
   return (
-    <div style={{
-      flex: 1,
+    <section aria-label={directCall ? "Voice call" : undefined} style={{
+      flex: directCall ? "0 1 auto" : 1,
       display: "flex",
       flexDirection: "column",
-      height: "100vh",
+      minWidth: 0,
+      minHeight: 0,
+      height: directCall ? (hasScreenShare ? "min(55vh, 460px)" : 180) : undefined,
+      maxHeight: directCall ? "55%" : undefined,
     }}>
-      {/* Header */}
-      <div style={{
-        padding: `0 ${spacing.unit * 4}px`,
-        borderBottom: `1px solid ${palette.border}`,
-        height: spacing.headerHeight,
-        display: "flex",
-        alignItems: "center",
-        gap: spacing.unit * 3,
-      }}>
-        <Volume2 size={20} color={palette.textSecondary} style={{ flexShrink: 0 }} />
-        <RoomHeaderTitle name={room.name} caption={room.topic} />
-        {isConnected && (
-          <span style={{
-            fontSize: typography.fontSizeSmall,
-            color: "#23a55a",
-            display: "flex",
-            alignItems: "center",
-            flexShrink: 0,
-            gap: spacing.unit,
-          }}>
-            <span style={{
-              width: 8, height: 8, borderRadius: "50%",
-              backgroundColor: "#23a55a",
-            }} />
-            Connected
-          </span>
-        )}
-      </div>
-
       {/* Main content: screen share (primary) or participant grid */}
       <div style={{
         flex: 1,
+        minHeight: 0,
         display: "flex",
-        flexDirection: hasScreenShare ? "row" : "column",
+        flexDirection: participantsBesideShare ? "row" : "column",
         overflow: "hidden",
       }}>
         {hasScreenShare && (
           <ScreenShareGrid
-            remoteSharers={remoteSharers}
+            remoteSharers={callState.screenSharingOwners}
             isLocalScreenSharing={callState.isLocalScreenSharing}
             getVolume={getStreamVolume}
             onVolumeChange={handleStreamVolumeChange}
@@ -468,12 +470,12 @@ export default function VoiceRoomView({
           flex: hasScreenShare ? "0 0 auto" : 1,
           display: "flex",
           flexWrap: "wrap",
-          alignContent: hasScreenShare ? "flex-start" : "center",
+          alignContent: participantsBesideShare ? "flex-start" : "safe center",
           justifyContent: "center",
           gap: spacing.unit * 4,
-          padding: spacing.unit * 6,
+          padding: spacing.unit * (directCall ? 2 : 6),
           overflowY: "auto",
-          width: hasScreenShare ? 180 : undefined,
+          width: participantsBesideShare ? 180 : undefined,
         }}>
         <style>{`@keyframes spin { from { transform: rotate(0deg); } to { transform: rotate(360deg); } }`}</style>
         {isConnecting && (
@@ -572,7 +574,7 @@ export default function VoiceRoomView({
 
         {/* Show errors (e.g. screen share failure) even when connected */}
         {callState.error && isConnected && (
-          <div style={{
+          <div role="alert" style={{
             padding: spacing.unit * 2,
             margin: spacing.unit * 2,
             backgroundColor: "rgba(242, 63, 67, 0.15)",
@@ -609,8 +611,8 @@ export default function VoiceRoomView({
             {/* Avatar circle - circular progress when connecting */}
             {p.isConnecting ? (
               <div style={{
-                width: 80,
-                height: 80,
+                width: avatarSize,
+                height: avatarSize,
                 borderRadius: "50%",
                 backgroundColor: palette.bgActive,
                 display: "flex",
@@ -625,10 +627,10 @@ export default function VoiceRoomView({
               </div>
             ) : (
               <UserAvatar
-                userId={extractMatrixUserId(p.identity)}
+                userId={p.userId}
                 displayName={p.displayName}
                 avatarUrlHint={p.avatarUrl}
-                size={80}
+                size={avatarSize}
                 fontSize={28}
                 style={{
                   boxShadow: p.isSpeaking ? "0 0 0 3px #23a55a" : "none",
@@ -702,7 +704,7 @@ export default function VoiceRoomView({
         }}>
           <button
             type="button"
-            onClick={() => voiceCall.connect(room.id)}
+            onClick={() => onConnect(roomId)}
             style={{
               padding: `${spacing.unit * 2}px ${spacing.unit * 5}px`,
               borderRadius: spacing.unit * 2,
@@ -722,14 +724,17 @@ export default function VoiceRoomView({
       {/* Controls bar */}
       {isConnected && (
         <div style={{
-          padding: `${spacing.unit * 4}px`,
+          padding: spacing.unit * (directCall ? 2 : 4),
           borderTop: `1px solid ${palette.border}`,
           display: "flex",
+          flexShrink: 0,
+          flexWrap: directCall ? "wrap" : undefined,
           justifyContent: "center",
-          gap: spacing.unit * 3,
+          gap: spacing.unit * (directCall ? 2 : 3),
         }}>
           {/* Mute/Unmute */}
           <button
+            type="button"
             onClick={onToggleMic}
             title={callState.isMicEnabled ? "Mute" : "Unmute"}
             style={{
@@ -753,6 +758,7 @@ export default function VoiceRoomView({
 
           {/* Deafen/Undeafen (local playback mute) */}
           <button
+            type="button"
             onClick={onToggleDeafen}
             title={callState.isDeafened ? "Undeafen" : "Deafen"}
             style={{
@@ -784,14 +790,17 @@ export default function VoiceRoomView({
           {/* Screen Share */}
           <div ref={screenShareMenuRef} style={{ position: "relative", display: "flex", alignItems: "center", gap: 2 }}>
             <button
+              type="button"
               onClick={() => {
                 if (callState.isLocalScreenSharing) {
                   void stopShare();
                 } else {
                   setScreenShareMenuOpen((v) => !v);
+                  setGeneralSettingsOpen(false);
                 }
               }}
               title={callState.isLocalScreenSharing ? "Stop sharing screen" : "Share screen"}
+              aria-expanded={callState.isLocalScreenSharing ? undefined : showScreenShareMenu}
               style={{
                 width: 48,
                 height: 48,
@@ -808,17 +817,13 @@ export default function VoiceRoomView({
             >
               {callState.isLocalScreenSharing ? <MonitorUp size={20} /> : <Monitor size={20} />}
             </button>
-            {screenShareMenuOpen &&
-              !callState.isLocalScreenSharing &&
-              screenShareMenuPos &&
+            {showScreenShareMenu && menuPosition &&
               createPortal(
               <div
-                ref={screenSharePopupCallbackRef}
+                ref={screenShareMenuPopupRef}
                 style={{
                 position: "fixed",
-                top: screenShareMenuPos.top,
-                left: screenShareMenuPos.left,
-                transform: "translateY(-100%)",
+                ...menuPosition,
                 backgroundColor: palette.bgSecondary,
                 border: `1px solid ${palette.border}`,
                 borderRadius: spacing.unit * 2,
@@ -826,9 +831,6 @@ export default function VoiceRoomView({
                 display: "flex",
                 flexDirection: "column",
                 gap: spacing.unit * 2,
-                width: screenShareMenuPos.width,
-                maxWidth: screenShareMenuPos.width,
-                maxHeight: "70vh",
                 overflowY: "auto",
                 zIndex: 2000,
                 boxShadow: "0 12px 36px rgba(0,0,0,0.45)",
@@ -1071,6 +1073,7 @@ export default function VoiceRoomView({
           {/* General settings */}
           <div ref={generalSettingsRef} style={{ position: "relative", display: "flex", alignItems: "center" }}>
             <button
+              type="button"
               onClick={() => {
                 setGeneralSettingsOpen((v) => {
                   const next = !v;
@@ -1082,6 +1085,7 @@ export default function VoiceRoomView({
                 setScreenShareMenuOpen(false);
               }}
               title="Voice settings"
+              aria-expanded={showGeneralSettings}
               style={{
                 width: 48,
                 height: 48,
@@ -1098,20 +1102,18 @@ export default function VoiceRoomView({
             >
               <Settings size={20} />
             </button>
-            {generalSettingsOpen && (
+            {showGeneralSettings && menuPosition && createPortal(
               <div
                 ref={generalSettingsPopupRef}
                 style={{
-                position: "absolute",
-                bottom: `calc(100% + ${spacing.unit * 4}px)`,
-                left: "50%",
-                transform: "translateX(-50%)",
+                position: "fixed",
+                ...menuPosition,
                 backgroundColor: palette.bgSecondary,
                 border: `1px solid ${palette.border}`,
                 borderRadius: spacing.unit * 2,
                 padding: spacing.unit * 4,
-                minWidth: 260,
-                zIndex: 10,
+                overflowY: "auto",
+                zIndex: 2000,
               }}
               >
                 <div
@@ -1197,14 +1199,16 @@ export default function VoiceRoomView({
                     onAfterDevicePreferenceChange={reconnectAfterDeviceChange}
                   />
                 )}
-              </div>
+              </div>,
+              document.body
             )}
           </div>
 
           {/* Disconnect */}
           <button
-            onClick={() => void onDisconnect()}
-            title="Disconnect"
+            type="button"
+            onClick={() => void (directCall ? directCall.onEnd() : onDisconnect())}
+            title={directCall ? "Hang up" : "Disconnect"}
             style={{
               width: 48,
               height: 48,
@@ -1237,6 +1241,6 @@ export default function VoiceRoomView({
           onClose={() => setContextMenu(null)}
         />
       )}
-    </div>
+    </section>
   );
 }

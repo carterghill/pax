@@ -13,7 +13,7 @@ import { createPortal } from "react-dom";
 import { invoke } from "@tauri-apps/api/core";
 import { Picker } from "emoji-mart";
 import data from "@emoji-mart/data";
-import { ArrowDown } from "lucide-react";
+import { ArrowDown, Phone } from "lucide-react";
 import { Message, MessageReaction, RoomRedactionPolicy } from "../types/matrix";
 import { useResolveMemberLabel } from "../hooks/useResolveMemberLabel";
 import { useTheme } from "../theme/ThemeContext";
@@ -22,13 +22,16 @@ import MediaViewerModal, {
 } from "./MediaViewerModal";
 import { fileNameFromImageUrl } from "../utils/directImageUrl";
 import { useReadReceiptSender } from "../hooks/useReadReceiptSender";
+import { projectCallHistory } from "../features/chat/messages/callHistory";
 import MembershipNoticeRow from "../features/chat/messages/MembershipNoticeRow";
 import MessageRow from "../features/chat/messages/MessageRow";
+import TimelineNoticeRow from "../features/chat/messages/TimelineNoticeRow";
 import { rssArticleCandidate, type RssArticleCandidate, type RssProvider } from "../features/chat/messages/rssArticle";
 import { rssThreadReplyCount } from "../features/chat/messages/rssThreads";
 import {
   shouldShowHeader,
   getReplyThreadPreview,
+  isTimelineNotice,
   reactionHoverLines,
   messageAllowsEdit,
   messageAllowsDelete,
@@ -61,6 +64,7 @@ interface MessageListProps {
   hasUpgradeHistory?: boolean;
   historyError?: string | null;
   isAtLatest: boolean;
+  latestEventId?: string | null;
   automaticReadBlocked?: boolean;
   privateReadOnly?: boolean;
   acknowledgedThrough?: string | null;
@@ -111,7 +115,7 @@ const REACTION_POPOVER_IGNORE = ["[data-message-reaction-popover]"];
 
 const MessageList = forwardRef<MessageListHandle, MessageListProps>(function MessageList(
   {
-    messages,
+    messages: timeline,
     rssProvider,
     rssReplies,
     activeRssThreadId,
@@ -125,6 +129,7 @@ const MessageList = forwardRef<MessageListHandle, MessageListProps>(function Mes
     hasUpgradeHistory,
     historyError,
     isAtLatest,
+    latestEventId,
     automaticReadBlocked = false,
     privateReadOnly = false,
     acknowledgedThrough = null,
@@ -151,6 +156,10 @@ const MessageList = forwardRef<MessageListHandle, MessageListProps>(function Mes
   ref,
 ) {
   const { palette, typography, spacing, resolvedColorScheme } = useTheme();
+  const { messages, anchors, missedCalls, readThroughEventId } = useMemo(
+    () => projectCallHistory(timeline, latestEventId),
+    [timeline, latestEventId],
+  );
   const pinnedSet = useMemo(
     () => new Set(pinnedEventIds),
     [pinnedEventIds],
@@ -177,7 +186,7 @@ const MessageList = forwardRef<MessageListHandle, MessageListProps>(function Mes
       const root = scrollContainerRef.current;
       if (!root) return;
       const el = root.querySelector(
-        `[data-message-event-id="${CSS.escape(eventId)}"]`,
+        `[data-message-event-id="${CSS.escape(anchors.get(eventId) ?? eventId)}"]`,
       ) as HTMLElement | null;
       if (!el) return;
       cancelScrollAnimation();
@@ -379,7 +388,7 @@ const MessageList = forwardRef<MessageListHandle, MessageListProps>(function Mes
 
   const lastId = messages[messages.length - 1]?.eventId ?? null;
   let lastChatIndex = messages.length - 1;
-  while (messages[lastChatIndex]?.membershipNotice) lastChatIndex -= 1;
+  while (isTimelineNotice(messages[lastChatIndex])) lastChatIndex -= 1;
   const lastChatId = messages[lastChatIndex]?.eventId ?? null;
   const scrollContextRef = useRef<{
     roomId: string;
@@ -499,16 +508,12 @@ const MessageList = forwardRef<MessageListHandle, MessageListProps>(function Mes
   /*  Read receipts                                                    */
   /* ================================================================ */
 
-  // Acknowledge the latest rendered event once the user appears to have seen
-  // it — i.e. we're on the tail page of history AND they're pinned near the
-  // bottom.  The hook also gates internally on window focus/visibility so that
-  // a backgrounded tab doesn't silently mark rooms as read.  Whether the
-  // receipt is public (`m.read`) or private (`m.read.private`) is decided
-  // inside the hook from the user's setting (see `readReceiptPrefs`).
+  // Acknowledge the timeline through the events covered by the visible entries
+  // when the user is at the latest page, near the bottom, and the window is focused.
   useReadReceiptSender(
     roomId,
     {
-      latestVisibleEventId: messages[messages.length - 1]?.historyRoomId ? null : lastId,
+      readThroughEventId,
       atBottom: isAtLatest && atBottom,
       blocked: automaticReadBlocked,
       privateOnly: privateReadOnly,
@@ -879,7 +884,7 @@ const MessageList = forwardRef<MessageListHandle, MessageListProps>(function Mes
         {hasOlder
           ? loadingOlder
             ? "Loading older messages..."
-            : replyDrawer || rssProvider || hasUpgradeHistory || messages.some((msg) => msg.membershipNotice) ? (
+            : replyDrawer || rssProvider || hasUpgradeHistory || messages.some(isTimelineNotice) ? (
               <button type="button" onClick={onLoadOlder} style={{
                 color: palette.textSecondary,
                 background: "none",
@@ -925,6 +930,22 @@ const MessageList = forwardRef<MessageListHandle, MessageListProps>(function Mes
                 actorLabel={msg.senderName?.trim() || resolveMemberLabel(msg.sender)}
                 targetLabel={notice.targetName?.trim() || resolveMemberLabel(notice.targetUserId)}
               />
+            </Fragment>
+          );
+        }
+        if (msg.directCallNotice) {
+          const caller = <bdi>{msg.senderName?.trim() || resolveMemberLabel(msg.sender)}</bdi>;
+          const text = missedCalls.has(msg.eventId)
+            ? <>Missed voice call from {caller}</>
+            : msg.directCallNotice.kind === "ring"
+              ? <>{caller} started a voice call</>
+              : "Voice call";
+          return (
+            <Fragment key={msg.eventId}>
+              {crossedUpgrade && upgradeDivider}
+              <TimelineNoticeRow eventId={msg.eventId} timestamp={msg.timestamp} icon={<Phone size={14} aria-hidden="true" />}>
+                {text}
+              </TimelineNoticeRow>
             </Fragment>
           );
         }

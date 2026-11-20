@@ -105,6 +105,10 @@ export function useVoiceCall() {
   const connectedRoomIdRef = useRef<string | null>(null);
   connectedRoomIdRef.current = state.connectedRoomId;
   const isConnectingRef = useRef(false);
+  const activeScreenShare = useRef<{
+    roomId: string;
+    source: Parameters<VoiceCallActions["startScreenShare"]>;
+  } | null>(null);
   /** Tracks which room is being auto-rejoined (null = none). Set to null
    *  by disconnect() to cancel an in-progress rejoin attempt. */
   const rejoinRoomRef = useRef<string | null>(null);
@@ -290,6 +294,7 @@ export function useVoiceCall() {
     const forceReconnect = options?.forceReconnect ?? false;
     if (isConnectingRef.current) return false;
     if (!forceReconnect && connectedRoomIdRef.current === roomId) return true;
+    activeScreenShare.current = null;
     // Cancel any in-progress auto-rejoin (e.g. user connects to a different room)
     rejoinRoomRef.current = null;
     isConnectingRef.current = true;
@@ -331,6 +336,7 @@ export function useVoiceCall() {
     const roomId = connectedRoomIdRef.current;
     if (!roomId || (expectedRoomId && roomId !== expectedRoomId)) return;
     connectedRoomIdRef.current = null;
+    activeScreenShare.current = null;
     // Cancel any in-progress auto-rejoin
     rejoinRoomRef.current = null;
     playSound("ui/pop_close");
@@ -407,6 +413,7 @@ export function useVoiceCall() {
       windowTitle?: string,
       windowHandle?: string,
     ): Promise<void> => {
+      const roomId = connectedRoomIdRef.current;
       setState((prev) => ({ ...prev, error: null }));
       try {
         await invoke("voice_start_screen_share", {
@@ -414,6 +421,9 @@ export function useVoiceCall() {
           windowTitle: windowTitle ?? null,
           windowHandle: windowHandle ?? null,
         });
+        if (roomId && connectedRoomIdRef.current === roomId) {
+          activeScreenShare.current = { roomId, source: [mode, windowTitle, windowHandle] };
+        }
       } catch (e) {
         console.error("Failed to start screen share:", e);
         setState((prev) => ({ ...prev, error: String(e) }));
@@ -429,8 +439,10 @@ export function useVoiceCall() {
   );
 
   const stopScreenShare = useCallback(async (): Promise<void> => {
+    const previousShare = activeScreenShare.current;
     try {
       await invoke("voice_stop_screen_share");
+      if (activeScreenShare.current === previousShare) activeScreenShare.current = null;
     } catch (e) {
       console.error("Failed to stop screen share:", e);
       throw e;
@@ -443,8 +455,16 @@ export function useVoiceCall() {
   );
 
   const setLowBandwidthMode = useCallback(
-    (enabled: boolean) => invoke<void>("set_low_bandwidth_mode", { enabled }),
-    [],
+    async (enabled: boolean) => {
+      const share = state.isLocalScreenSharing ? activeScreenShare.current : null;
+      await invoke<void>("set_low_bandwidth_mode", { enabled });
+      // The capture options belong to the call and survive room navigation.
+      if (share && activeScreenShare.current === share && connectedRoomIdRef.current === share.roomId) {
+        await stopScreenShare();
+        if (connectedRoomIdRef.current === share.roomId) await startScreenShare(...share.source);
+      }
+    },
+    [state.isLocalScreenSharing, startScreenShare, stopScreenShare],
   );
 
   const getNoiseSuppressionConfig = useCallback(

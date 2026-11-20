@@ -1,4 +1,4 @@
-import { useState, useEffect, useRef, useCallback, useMemo, useId, type CSSProperties } from "react";
+import { useState, useEffect, useRef, useCallback, useMemo, useId, type CSSProperties, type ReactNode } from "react";
 import { useRoomRedactionPolicy } from "../hooks/useRoomRedactionPolicy";
 import { useRoomCanSendMessages } from "../hooks/useRoomCanSendMessages";
 import { useRoomCanPinMessages } from "../hooks/useRoomCanPinMessages";
@@ -56,6 +56,7 @@ interface ChatViewProps {
   onStartDirectMessage: (peerUserId: string, displayNameHint: string) => void;
   onStartCall?: () => void;
   callUnavailable?: string;
+  callContent?: ReactNode;
   /** Opened from a system notification: scroll this timeline event after the room is active. */
   notificationJump?: { roomId: string; eventId: string } | null;
   onNotificationJumpConsumed?: () => void;
@@ -172,6 +173,7 @@ export default function ChatView({
   onStartDirectMessage,
   onStartCall,
   callUnavailable,
+  callContent,
   notificationJump = null,
   onNotificationJumpConsumed,
   moderationSpaceTreeRoomIds = null,
@@ -672,7 +674,7 @@ export default function ChatView({
               onSelectEventId={handleSelectPinnedMessage}
             />
             <RoomDownloadsButton roomId={activeRoom.id} />
-            {callButton(onStartCall, callUnavailable ?? "Start voice call")}
+            {!callContent && callButton(onStartCall, callUnavailable ?? "Start voice call")}
           </div>
         </div>
       ) : (
@@ -732,6 +734,8 @@ export default function ChatView({
         </div>
       )}
 
+      {callContent}
+
       {/* Content area: messages + optional user menu */}
       <div style={{
         flex: 1,
@@ -785,6 +789,7 @@ export default function ChatView({
             historyError={history.error}
             hasUpgradeHistory={!!activeRoom.historyRoomIds?.length}
             isAtLatest={isAtLatest}
+            latestEventId={latestEventId}
             automaticReadBlocked={unavailable.blocked}
             privateReadOnly={unavailable.privateOnly}
             acknowledgedThrough={unavailable.acknowledgedThrough}

@@ -1,4 +1,4 @@
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 
 /// Per-parent `m.space.child` ordering metadata for a room or sub-space.
@@ -105,13 +105,31 @@ pub struct MembershipNotice {
     pub reason: Option<String>,
 }
 
+#[derive(Clone, Copy, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub(crate) enum DirectCallSignalKind {
+    Ring,
+    Answer,
+    Connect,
+    End,
+}
+
 #[derive(Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DirectCallNotice {
+    pub(crate) call_id: String,
+    pub(crate) kind: DirectCallSignalKind,
+}
+
+#[derive(Clone, Default, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct MessageInfo {
     /// Ciphertext retained as a timeline placeholder; no plaintext was recovered.
     pub decryption_failed: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub membership_notice: Option<MembershipNotice>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub direct_call_notice: Option<DirectCallNotice>,
     pub event_id: String,
     pub sender: String,
     pub sender_name: Option<String>,
@@ -285,7 +303,7 @@ pub struct RoomMessagePayload {
 
 #[derive(Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
-pub struct RoomMembershipNoticePayload {
+pub struct RoomTimelineNoticePayload {
     pub room_id: String,
     pub message: MessageInfo,
 }

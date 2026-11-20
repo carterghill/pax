@@ -2,6 +2,7 @@ import { useEffect, useLayoutEffect, useState, useCallback, useRef } from "react
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { useUserAvatarStoreOptional } from "../context/UserAvatarStore";
+import { isTimelineNotice } from "../features/chat/messages/messageListUtils";
 import { Message, MessageBatch } from "../types/matrix";
 
 /* ------------------------------------------------------------------ */
@@ -235,7 +236,7 @@ export function applyReactionDelta(
   const fromMe =
     me != null && payload.sender.trim().toLowerCase() === me;
   return arr.map((m) => {
-    if (m.eventId !== payload.targetEventId || m.membershipNotice) return m;
+    if (m.eventId !== payload.targetEventId || isTimelineNotice(m)) return m;
     const list = m.reactions ? [...m.reactions] : [];
     const i = list.findIndex((r) => reactionKeysEqual(r.key, payload.key));
 
@@ -299,7 +300,7 @@ export function applyMessageEdit(arr: Message[], payload: MessageEditPayload): M
   if (idx === -1) return arr;
 
   const current = arr[idx];
-  if (current.membershipNotice || current.sender !== payload.sender) return arr;
+  if (isTimelineNotice(current) || current.sender !== payload.sender) return arr;
   const {
     body,
     imageMediaRequest,
@@ -404,7 +405,7 @@ export function useMessages(roomId: string | null, currentUserId: string | null 
     (msgs: Message[]) => {
       if (!userAvatarStore || msgs.length === 0) return;
       userAvatarStore.primeMany(
-        msgs.filter((m) => !m.membershipNotice)
+        msgs.filter((m) => !isTimelineNotice(m))
           .map((m) => ({ userId: m.sender, avatarUrl: m.avatarUrl })),
       );
     },
@@ -474,7 +475,7 @@ export function useMessages(roomId: string | null, currentUserId: string | null 
       for (const [id, message] of fetch.updates) {
         if (message === null) {
           byId.delete(id);
-        } else if (!byId.has(id)) {
+        } else if (!byId.has(id) || (byId.get(id)?.decryptionFailed && !message.decryptionFailed)) {
           byId.set(id, message);
         }
       }
@@ -587,7 +588,10 @@ export function useMessages(roomId: string | null, currentUserId: string | null 
 
     const onTimelineEntry = ({ roomId: rid, message }: RoomMessagePayload) => {
       if (rid !== roomId || activeRoomIdRef.current !== roomId) return;
-      const alreadyVisible = messagesRef.current.some((m) => m.eventId === message.eventId);
+      const existing = messagesRef.current.find((m) => m.eventId === message.eventId);
+      if (existing?.directCallNotice && message.decryptionFailed) return;
+      const alreadyVisible = existing !== undefined;
+      const isNotice = isTimelineNotice(message);
       const fetch = latestFetchRef.current;
       if (fetch?.roomId === roomId) {
         fetch.updates.set(message.eventId, message);
@@ -598,12 +602,12 @@ export function useMessages(roomId: string | null, currentUserId: string | null 
       }
 
       if (!isAtLatestRef.current) {
-        if (!alreadyVisible && !message.membershipNotice) setPendingRecentCount((c) => c + 1);
+        if (!alreadyVisible && !isNotice) setPendingRecentCount((c) => c + 1);
         return;
       }
 
       let prev = messagesRef.current;
-      if (!message.membershipNotice) prev = removeMatchingLocalEchoes(prev, message, currentUserId);
+      if (!isNotice) prev = removeMatchingLocalEchoes(prev, message, currentUserId);
 
       const idx = prev.findIndex((m) => m.eventId === message.eventId);
 
@@ -614,7 +618,7 @@ export function useMessages(roomId: string | null, currentUserId: string | null 
         revokeLocalPreviewIfNeeded(old);
         next[idx] = {
           ...message,
-          senderName: message.membershipNotice ? message.senderName ?? old.senderName : message.senderName,
+          senderName: isNotice ? message.senderName ?? old.senderName : message.senderName,
           reactions: message.reactions ?? old.reactions,
         };
       } else {
@@ -634,7 +638,7 @@ export function useMessages(roomId: string | null, currentUserId: string | null 
       setMessages(next);
     };
     const unMsg = listen<RoomMessagePayload>("room-message", ({ payload }) => onTimelineEntry(payload));
-    const unMembership = listen<RoomMessagePayload>("room-membership-notice", ({ payload }) => onTimelineEntry(payload));
+    const unNotice = listen<RoomMessagePayload>("room-timeline-notice", ({ payload }) => onTimelineEntry(payload));
 
     const unEdit = listen<MessageEditPayload>("room-message-edit", (event) => {
       if (event.payload.roomId !== roomId) return;
@@ -677,7 +681,7 @@ export function useMessages(roomId: string | null, currentUserId: string | null 
 
     return () => {
       unMsg.then((fn) => fn());
-      unMembership.then((fn) => fn());
+      unNotice.then((fn) => fn());
       unEdit.then((fn) => fn());
       unRedact.then((fn) => fn());
       unReact.then((fn) => fn());

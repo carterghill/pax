@@ -76,12 +76,18 @@ export interface MembershipNotice {
   reason: string | null;
 }
 
+export interface DirectCallNotice {
+  callId: string;
+  kind: "ring" | "answer" | "connect" | "end";
+}
+
 export interface Message {
   /** Set for a message displayed from a predecessor room. */
   historyRoomId?: string;
   /** An encrypted event whose contents are unavailable on this device. */
   decryptionFailed?: boolean;
   membershipNotice?: MembershipNotice;
+  directCallNotice?: DirectCallNotice;
   eventId: string;
   sender: string;
   senderName: string | null;

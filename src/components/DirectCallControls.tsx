@@ -11,13 +11,14 @@ interface DirectCallControlsProps {
   avatarUrl?: string | null;
   isMicEnabled: boolean;
   peerJoined: boolean;
+  showActions?: boolean;
   onAnswer: () => void;
   onEnd: () => void;
   onToggleMic: () => void;
 }
 
 export default function DirectCallControls({
-  call, name, avatarUrl, isMicEnabled, peerJoined, onAnswer, onEnd, onToggleMic,
+  call, name, avatarUrl, isMicEnabled, peerJoined, showActions = true, onAnswer, onEnd, onToggleMic,
 }: DirectCallControlsProps) {
   const { palette, spacing, typography } = useTheme();
   const incoming = call.phase === "incoming";
@@ -82,14 +83,16 @@ export default function DirectCallControls({
       <span role="status" style={{ flex: 1, minWidth: 0, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
         {status}
       </span>
-      {active && (
+      {showActions && active && (
         <button type="button" aria-label={muteLabel} title={muteLabel} onClick={onToggleMic} style={buttonStyle}>
           {isMicEnabled ? <Mic size={17} aria-hidden="true" /> : <MicOff size={17} aria-hidden="true" />}
         </button>
       )}
-      <button type="button" aria-label={endLabel} title={endLabel} onClick={onEnd} style={endStyle}>
-        <PhoneOff size={17} aria-hidden="true" /> {endLabel}
-      </button>
+      {showActions && (
+        <button type="button" aria-label={endLabel} title={endLabel} onClick={onEnd} style={endStyle}>
+          <PhoneOff size={17} aria-hidden="true" /> {endLabel}
+        </button>
+      )}
     </div>
   );
 }

@@ -2,7 +2,7 @@ import SpaceSidebar from "../components/SpaceSidebar";
 import RoomSidebar from "../components/RoomSidebar";
 import DiscoverView from "../components/DiscoverView";
 import ChatView from "../layouts/ChatView";
-import VoiceRoomView from "../components/VoiceRoomView";
+import VoiceRoomView, { VoiceCallPanel } from "../components/VoiceRoomView";
 import DirectCallControls, { DirectCallError } from "../components/DirectCallControls";
 import InvitationView from "../layouts/InvitationView";
 import SpaceHomeView from "../layouts/SpaceHomeView";
@@ -1316,6 +1316,24 @@ export default function MainLayout({
   );
 
   const directCallRoom = directCall && getRoom(directCall.roomId);
+  const directCallName = directCallRoom ? effectiveDmTitle(directCallRoom) : directCall?.peerUserId ?? "";
+  const chatCall = directCall && directCall.phase !== "incoming" && !discoverOpen && !showingDraftDm
+    && activeRoom?.id === directCall.roomId && activeRoom.membership === "joined"
+    && !activeRoom.upgradePending && activeRoom.roomType !== VOICE_ROOM_TYPE ? directCall : null;
+  const showCallPanel = chatCall?.phase === "active" && connectedVoiceRoomId === chatCall.roomId;
+  const directCallStatus = directCall && (
+    <DirectCallControls
+      call={directCall}
+      name={directCallName}
+      avatarUrl={directCallRoom?.avatarUrl}
+      isMicEnabled={voiceCall.isMicEnabled}
+      peerJoined={directCallPeerJoined && !voiceCall.isConnecting}
+      showActions={!showCallPanel || voiceCall.isConnecting}
+      onAnswer={answerDirectCall}
+      onEnd={endDirectCall}
+      onToggleMic={voiceCall.toggleMic}
+    />
+  );
   const activeDmPeer = activeRoom?.dmPeerUserId;
   const callUnavailable = directCall || connectedVoiceRoomId || voiceCall.isConnecting
     ? "End the current call before starting another"
@@ -1371,18 +1389,7 @@ export default function MainLayout({
           flexDirection: "column",
           paddingBottom: isMobile ? "env(safe-area-inset-bottom, 0px)" : 0,
         }}>
-          {directCall && (
-            <DirectCallControls
-              call={directCall}
-              name={directCallRoom ? effectiveDmTitle(directCallRoom) : directCall.peerUserId}
-              avatarUrl={directCallRoom?.avatarUrl}
-              isMicEnabled={voiceCall.isMicEnabled}
-              peerJoined={directCallPeerJoined && !voiceCall.isConnecting}
-              onAnswer={answerDirectCall}
-              onEnd={endDirectCall}
-              onToggleMic={voiceCall.toggleMic}
-            />
-          )}
+          {!chatCall && directCallStatus}
           {directCallError && <DirectCallError message={directCallError} onDismiss={clearDirectCallError} />}
           <div style={{
             flex: 1,
@@ -1439,6 +1446,27 @@ export default function MainLayout({
                 onStartCall={activeDmPeer && !callUnavailable
                   ? () => startDirectCall(activeRoom.id, activeDmPeer) : undefined}
                 callUnavailable={callUnavailable}
+                callContent={chatCall && (
+                  <>
+                    {showCallPanel && (
+                      <VoiceCallPanel
+                        key={chatCall.callId}
+                        roomId={chatCall.roomId}
+                        voiceCall={voiceCall}
+                        userId={userId}
+                        directCall={{
+                          peer: {
+                            userId: chatCall.peerUserId,
+                            displayName: directCallName,
+                            avatarUrl: directCallRoom?.avatarUrl ?? null,
+                          },
+                          onEnd: endDirectCall,
+                        }}
+                      />
+                    )}
+                    {directCallStatus}
+                  </>
+                )}
                 moderationSpaceTreeRoomIds={moderationSpaceTreeRoomIds}
                 moderationSpaceName={moderationSpaceName}
                 onOpenNavigation={openMobileNavDrawer}

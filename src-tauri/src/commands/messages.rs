@@ -2,7 +2,7 @@ use std::collections::{HashMap, HashSet};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 
-use matrix_sdk::deserialized_responses::TimelineEvent;
+use matrix_sdk::deserialized_responses::{EncryptionInfo, TimelineEvent};
 use matrix_sdk::room::edit::EditedContent;
 use matrix_sdk::room::reply::{EnforceThread, Reply};
 use matrix_sdk::room::IncludeRelations;
@@ -45,9 +45,9 @@ use tauri::{Emitter, State};
 use crate::types::{
     MessageBatch, MessageEditPayload, MessageInfo, MessageReactionDeltaPayload,
     MessageReactionSummary, MessageRedactedPayload, MessageReplyTo, MessageThreadSummary,
-    PinnedMessagePreview, PresencePayload, RoomMembersChangedPayload, RoomMembershipNoticePayload,
-    RoomMessagePayload, RoomPinPermission, RoomRedactionPolicy, RoomSendPermission, TypingPayload,
-    VoiceParticipantsInvalidatedPayload,
+    PinnedMessagePreview, PresencePayload, RoomMembersChangedPayload, RoomMessagePayload,
+    RoomPinPermission, RoomRedactionPolicy, RoomSendPermission, RoomTimelineNoticePayload,
+    TypingPayload, VoiceParticipantsInvalidatedPayload,
 };
 use crate::AppState;
 
@@ -56,7 +56,10 @@ use super::message_display::{
     reply_to_from_message_relation, thread_root_from_message_relation, thread_summary_from_bundle,
     MessageDisplayExtract, MessageThreadTarget,
 };
-use super::{fmt_error_chain, get_client, resolve_room};
+use super::{
+    direct_calls::{call_notice, CALL_EVENT},
+    fmt_error_chain, get_client, resolve_room,
+};
 
 /// Keep the envelope's public metadata when the SDK cannot decrypt an event.
 /// Never expose ciphertext as message text or confuse redactions with missing keys.
@@ -79,6 +82,7 @@ pub(super) fn unavailable_message(raw: &serde_json::value::RawValue) -> Option<M
     Some(MessageInfo {
         decryption_failed: true,
         membership_notice: None,
+        direct_call_notice: None,
         event_id,
         sender,
         sender_name: None,
@@ -371,6 +375,7 @@ pub async fn get_messages(
     let room = resolve_room(&client, &room_id)?;
 
     let avatars = state.avatars.clone();
+    let encrypted_room = room.encryption_state().is_encrypted();
 
     // First pass: extract message data and collect unique senders
     struct RawMsg {
@@ -386,6 +391,8 @@ pub async fn get_messages(
     }
     let mut raw_msgs = Vec::new();
     let mut other_entries = Vec::new();
+    let mut visible_calls = HashSet::new();
+    let mut call_signal_count = 0;
     let mut unique_senders = Vec::new();
     let mut seen_senders = std::collections::HashSet::new();
     // target event id -> replacement fields + origin_server_ts; keep latest edit per target
@@ -476,6 +483,18 @@ pub async fn get_messages(
                 other_entries.push((position, message));
                 continue;
             }
+            if let Some(notice) = call_notice(
+                event.raw(),
+                encrypted_room,
+                event.kind.encryption_info().is_some(),
+            ) {
+                if let Some(call) = &notice.direct_call_notice {
+                    visible_calls.insert(call.call_id.clone());
+                }
+                call_signal_count += 1;
+                other_entries.push((position, notice));
+                continue;
+            }
             let raw = match event.raw().deserialize() {
                 Ok(e) => e,
                 Err(_) => continue,
@@ -535,7 +554,8 @@ pub async fn get_messages(
         // Keep paging until we have enough visible messages to overflow the
         // viewport (so the user can actually scroll and re-trigger pagination),
         // we truly run out of history, or we hit the per-call page cap.
-        if raw_msgs.len() + other_entries.len() >= target_visible || prev_batch.is_none() {
+        let visible = raw_msgs.len() + other_entries.len() - call_signal_count + visible_calls.len();
+        if visible >= target_visible || prev_batch.is_none() {
             break;
         }
         if pages_scanned >= MAX_PAGES_PER_CALL {
@@ -584,6 +604,7 @@ pub async fn get_messages(
             let message = MessageInfo {
                 decryption_failed: false,
                 membership_notice: None,
+                direct_call_notice: None,
                 event_id: m.event_id,
                 sender: m.sender,
                 sender_name,
@@ -935,6 +956,7 @@ async fn build_message_infos_from_timeline_events(
 
     let client = room.client();
     let me = client.user_id();
+    let encrypted_room = room.encryption_state().is_encrypted();
     let reaction_map = aggregate_reactions_from_timeline(&timeline_events, me);
 
     for (position, event) in timeline_events.into_iter().enumerate() {
@@ -946,7 +968,15 @@ async fn build_message_infos_from_timeline_events(
             other_entries.push((position, message));
             continue;
         }
-        let raw = match event.kind.raw().deserialize() {
+        if let Some(notice) = call_notice(
+            event.raw(),
+            encrypted_room,
+            event.kind.encryption_info().is_some(),
+        ) {
+            other_entries.push((position, notice));
+            continue;
+        }
+        let raw = match event.raw().deserialize() {
             Ok(e) => e,
             Err(_) => continue,
         };
@@ -1028,6 +1058,7 @@ async fn build_message_infos_from_timeline_events(
             let message = MessageInfo {
                 decryption_failed: false,
                 membership_notice: None,
+                direct_call_notice: None,
                 event_id: m.event_id,
                 sender: m.sender,
                 sender_name,
@@ -1718,6 +1749,7 @@ pub async fn start_sync(
                 message: MessageInfo {
                     decryption_failed: false,
                     membership_notice: None,
+                    direct_call_notice: None,
                     event_id: ev.event_id.to_string(),
                     sender,
                     sender_name,
@@ -1753,29 +1785,48 @@ pub async fn start_sync(
     // Only events in the room's timeline belong in the chat history.
     {
         let app = app.clone();
-        client.add_event_handler(move |event: Raw<AnySyncTimelineEvent>, room: Room| {
-            let app = app.clone();
-            async move {
-                if room.is_space()
-                    || event.get_field::<&str>("type").ok().flatten() != Some("m.room.member")
-                {
-                    return;
+        let pending = state.pending_unavailable_reads.clone();
+        client.add_event_handler(
+            move |event: Raw<AnySyncTimelineEvent>,
+                  room: Room,
+                  encryption_info: Option<EncryptionInfo>| {
+                let app = app.clone();
+                let pending = pending.clone();
+                async move {
+                    if room.is_space() {
+                        return;
+                    }
+                    let message = match event.get_field::<&str>("type").ok().flatten() {
+                        Some("m.room.member") => event
+                            .deserialize()
+                            .ok()
+                            .as_ref()
+                            .and_then(timeline_membership_notice),
+                        Some(CALL_EVENT) => call_notice(
+                            &event,
+                            room.encryption_state().is_encrypted(),
+                            encryption_info.is_some(),
+                        ),
+                        _ => None,
+                    };
+                    let Some(message) = message else {
+                        return;
+                    };
+                    if message.direct_call_notice.is_some()
+                        && message.sender != room.own_user_id().as_str()
+                    {
+                        super::unavailable_messages::note_incoming(&pending, &room).await;
+                    }
+                    let _ = app.emit(
+                        "room-timeline-notice",
+                        RoomTimelineNoticePayload {
+                            room_id: room.room_id().to_string(),
+                            message,
+                        },
+                    );
                 }
-                let Ok(event) = event.deserialize() else {
-                    return;
-                };
-                let Some(message) = timeline_membership_notice(&event) else {
-                    return;
-                };
-                let _ = app.emit(
-                    "room-membership-notice",
-                    RoomMembershipNoticePayload {
-                        room_id: room.room_id().to_string(),
-                        message,
-                    },
-                );
-            }
-        });
+            },
+        );
     }
 
     // Undecrypted events still have a sender, timestamp and event ID. Surface
