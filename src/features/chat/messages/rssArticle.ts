@@ -1,9 +1,4 @@
-import type { Message } from "../../../types/matrix";
-
-export interface RssProvider {
-  url: string;
-  botUserId: string;
-}
+import type { Message, RssProvider } from "../../../types/matrix";
 
 export interface RssArticleCandidate {
   feedUrl: string;
@@ -11,6 +6,24 @@ export interface RssArticleCandidate {
   hostname: string;
   headline?: string;
   siteName?: string;
+}
+
+const publicationDate = new Intl.DateTimeFormat(undefined, { dateStyle: "medium" });
+const publicationTime = new Intl.DateTimeFormat(undefined, { timeStyle: "short" });
+
+export function formatRssPublication(value: string | null | undefined, now = new Date()) {
+  if (!value) return null;
+  const timestamp = value.trim();
+  const dateOnly = /^\d{4}-\d{2}-\d{2}$/.test(timestamp);
+  const date = new Date(dateOnly ? `${timestamp}T00:00:00` : timestamp);
+  if (!Number.isFinite(date.valueOf())) return null;
+
+  const hasTime = /[T\s]\d{1,2}:\d{2}/i.test(timestamp);
+  const showTime = hasTime && date.toDateString() === now.toDateString();
+  return {
+    dateTime: dateOnly ? timestamp : date.toISOString(),
+    label: showTime ? `Today at ${publicationTime.format(date)}` : publicationDate.format(date),
+  };
 }
 
 const webLink = /https?:\/\/(?:[^\s<>"'`()[\]]|\([^\s()]*\))+/gi;

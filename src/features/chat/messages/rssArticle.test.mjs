@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { rssArticleCandidate } from "./rssArticle.ts";
+import { formatRssPublication, rssArticleCandidate } from "./rssArticle.ts";
 
 const provider = { url: "https://feeds.example.org/tech", botUserId: "@bot:nope.chat" };
 const link = "https://tech.example.org/story/";
@@ -34,4 +34,25 @@ test("a custom provider announcement needs a feed match", () => {
   const candidate = rssArticleCandidate({ ...update, body: `Just published: ${link}` }, provider);
   assert.equal(candidate?.url, link);
   assert.equal(candidate?.headline, undefined);
+});
+
+test("publication times are shown for articles published on the local day", () => {
+  const now = new Date(2026, 10, 19, 23, 55);
+  const today = new Date(2026, 10, 19, 23, 45);
+  const previousDay = new Date(2026, 10, 18, 23, 50);
+  const dateFormat = new Intl.DateTimeFormat(undefined, { dateStyle: "medium" });
+  const timeFormat = new Intl.DateTimeFormat(undefined, { timeStyle: "short" });
+
+  for (const timestamp of [today.toISOString(), today.toUTCString()]) {
+    assert.deepEqual(formatRssPublication(timestamp, now), {
+      dateTime: today.toISOString(),
+      label: `Today at ${timeFormat.format(today)}`,
+    });
+  }
+  assert.equal(formatRssPublication(previousDay.toISOString(), now)?.label, dateFormat.format(previousDay));
+  assert.deepEqual(formatRssPublication("2026-11-19", now), {
+    dateTime: "2026-11-19",
+    label: dateFormat.format(today),
+  });
+  assert.equal(formatRssPublication("Invalid date", now), null);
 });

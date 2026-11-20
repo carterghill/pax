@@ -14,7 +14,7 @@ import { invoke } from "@tauri-apps/api/core";
 import { Picker } from "emoji-mart";
 import data from "@emoji-mart/data";
 import { ArrowDown, Phone } from "lucide-react";
-import { Message, MessageReaction, RoomRedactionPolicy } from "../types/matrix";
+import { Message, MessageReaction, RoomRedactionPolicy, type RssProvider } from "../types/matrix";
 import { useResolveMemberLabel } from "../hooks/useResolveMemberLabel";
 import { useTheme } from "../theme/ThemeContext";
 import MediaViewerModal, {
@@ -26,7 +26,7 @@ import { projectCallHistory } from "../features/chat/messages/callHistory";
 import MembershipNoticeRow from "../features/chat/messages/MembershipNoticeRow";
 import MessageRow from "../features/chat/messages/MessageRow";
 import TimelineNoticeRow from "../features/chat/messages/TimelineNoticeRow";
-import { rssArticleCandidate, type RssArticleCandidate, type RssProvider } from "../features/chat/messages/rssArticle";
+import { rssArticleCandidate, type RssArticleCandidate } from "../features/chat/messages/rssArticle";
 import { rssThreadReplyCount } from "../features/chat/messages/rssThreads";
 import {
   shouldShowHeader,

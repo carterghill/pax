@@ -51,21 +51,26 @@ async fn build_room_info(
     }
 
     let room_type_str = room.room_type().map(|rt| rt.to_string());
-    let is_rss = room
+    let rss_state = room
         .get_state_event(super::rss::RSS_FEED_EVENT.into(), "")
         .await
         .ok()
         .flatten()
-        .is_some_and(|event| {
+        .and_then(|event| {
             use matrix_sdk::deserialized_responses::RawAnySyncOrStrippedState;
             let value = match event {
                 RawAnySyncOrStrippedState::Sync(raw) => raw.deserialize_as::<serde_json::Value>(),
-                RawAnySyncOrStrippedState::Stripped(raw) => raw.deserialize_as::<serde_json::Value>(),
+                RawAnySyncOrStrippedState::Stripped(raw) => {
+                    raw.deserialize_as::<serde_json::Value>()
+                }
             };
-            value.is_ok_and(|value| {
-                value["content"]["version"] == 1 && value["content"]["url"].is_string()
-            })
+            value.ok()
         });
+    let rss_content = rss_state.as_ref().and_then(|event| event.get("content"));
+    let is_rss =
+        rss_content.is_some_and(|content| content["version"] == 1 && content["url"].is_string());
+    let rss_provider =
+        rss_content.and_then(|content| super::rss::RssFeedConfig::from_state_content(content).ok());
     let topic = room.topic();
 
     let explicit_name = room.name();
@@ -100,6 +105,7 @@ async fn build_room_info(
         space_child_orders,
         room_type: room_type_str,
         is_rss,
+        rss_provider,
         topic,
         membership: membership.to_string(),
         replacement_room_id: None,

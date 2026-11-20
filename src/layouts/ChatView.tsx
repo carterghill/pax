@@ -231,7 +231,14 @@ export default function ChatView({
 
   const rssRoomId = !isDraft && activeRoom?.isRss ? activeRoom.id : null;
   const rssFeed = useRssFeedStatus(rssRoomId, messages);
-  const rssProvider = rssFeed?.status ?? undefined;
+  // The synced room state is available before the provider's live status check.
+  const rssSettings = rssFeed?.status ?? activeRoom?.rssProvider;
+  const rssUrl = rssRoomId ? rssSettings?.url : undefined;
+  const rssBot = rssRoomId ? rssSettings?.botUserId : undefined;
+  const rssProvider = useMemo(
+    () => rssUrl && rssBot ? { url: rssUrl, botUserId: rssBot } : undefined,
+    [rssUrl, rssBot],
+  );
   const rssThreads = useRssThreads(rssRoomId, rssProvider, messages);
   const rssPanelId = useId();
   const rssButtonRef = useRef<HTMLButtonElement>(null);

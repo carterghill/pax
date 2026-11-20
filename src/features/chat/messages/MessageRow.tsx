@@ -122,7 +122,7 @@ const MessageRow = memo(function MessageRow({
   const { rowRef, preview } = useRssArticlePreview(rssArticle);
   const article = rssArticle && (rssArticle.headline || preview) ? rssArticle : null;
   const openArticleThread = article && onOpenRssThread
-    ? () => onOpenRssThread(msg, { ...article, headline: preview?.title || article.headline })
+    ? () => onOpenRssThread(msg, { ...article, headline: preview?.article.title || article.headline })
     : undefined;
   const confirmedCustomArticle = Boolean(rssArticle && !rssArticle.headline && preview);
   useEffect(() => {

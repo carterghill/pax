@@ -33,6 +33,8 @@ pub struct RoomInfo {
     pub space_child_orders: HashMap<String, SpaceChildOrder>,
     pub room_type: Option<String>,
     pub is_rss: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub rss_provider: Option<crate::commands::rss::RssFeedConfig>,
     /// `m.room.topic` when known (spaces and rooms).
     pub topic: Option<String>,
     /// "joined" or "invited"

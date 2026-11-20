@@ -11,6 +11,11 @@ export interface SpaceChildOrder {
   originServerTs: number;
 }
 
+export interface RssProvider {
+  url: string;
+  botUserId: string;
+}
+
 export interface Room {
   id: string;
   name: string;
@@ -28,6 +33,7 @@ export interface Room {
   roomType: string | null;
   /** Normal Matrix chat with Pax RSS feed metadata. */
   isRss?: boolean;
+  rssProvider?: RssProvider;
   /** `m.room.topic` when the homeserver includes it (e.g. after sync). */
   topic?: string | null;
   /** "joined" or "invited" */

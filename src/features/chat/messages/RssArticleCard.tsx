@@ -1,44 +1,8 @@
-import { useEffect, useRef, useState } from "react";
-import { invoke } from "@tauri-apps/api/core";
+import { memo, useEffect, useRef, useState, type SyntheticEvent } from "react";
 import { ExternalLink, Rss } from "lucide-react";
 import { useTheme } from "../../../theme/ThemeContext";
-import type { RssArticleCandidate } from "./rssArticle";
-
-interface ArticlePreview {
-  title: string | null;
-  description: string | null;
-  siteName: string | null;
-  image: string | null;
-  authorImage: string | null;
-  siteImage: string | null;
-  publishedAt: string | null;
-  authors: string[];
-}
-
-function previewCache<T>(limit: number) {
-  const entries = new Map<string, { promise: Promise<T | null>; expires: number }>();
-  return (key: string, request: () => Promise<T | null>) => {
-    const existing = entries.get(key);
-    if (existing && existing.expires > Date.now()) return existing.promise;
-    if (existing) entries.delete(key);
-    if (entries.size >= limit) {
-      const oldest = entries.keys().next();
-      if (!oldest.done) entries.delete(oldest.value);
-    }
-    const entry = {
-      promise: request().catch(() => null),
-      expires: Date.now() + 10 * 60_000,
-    };
-    entries.set(key, entry);
-    void entry.promise.then((result) => {
-      if (result === null) entry.expires = Date.now() + 60_000;
-    });
-    return entry.promise;
-  };
-}
-
-const cacheArticle = previewCache<ArticlePreview>(160);
-const cacheImage = previewCache<string>(32);
+import { formatRssPublication, type RssArticleCandidate } from "./rssArticle";
+import { loadRssArticlePreview, type RssArticlePreview } from "./rssPreview";
 
 export function useRssArticlePreview(candidate: RssArticleCandidate | null) {
   const rowRef = useRef<HTMLDivElement>(null);
@@ -46,86 +10,77 @@ export function useRssArticlePreview(candidate: RssArticleCandidate | null) {
   const articleUrl = candidate?.url;
   const allowPageFallback = Boolean(candidate?.headline);
   const key = articleUrl ? JSON.stringify([feedUrl, articleUrl, allowPageFallback]) : null;
-  const [result, setResult] = useState<{ key: string; preview: ArticlePreview | null } | null>(null);
+  const [result, setResult] = useState<{ key: string; preview: RssArticlePreview } | null>(null);
 
   useEffect(() => {
     if (!key || !feedUrl || !articleUrl || !rowRef.current) return;
 
-    let disposed = false;
-    const load = () => {
-      void cacheArticle(key, () => invoke<ArticlePreview | null>("get_rss_article_preview", {
-        feedUrl,
-        articleUrl,
-        allowPageFallback,
-      })).then((preview) => {
-        if (!disposed) setResult({ key, preview });
+    const load = () =>
+      loadRssArticlePreview(key, feedUrl, articleUrl, allowPageFallback, (preview) => {
+        setResult({ key, preview });
       });
-    };
 
-    if (typeof IntersectionObserver === "undefined") {
-      load();
-      return () => { disposed = true; };
-    }
+    if (typeof IntersectionObserver === "undefined") return load();
 
+    let disposed = false;
+    let cancelLoad: (() => void) | undefined;
     const observer = new IntersectionObserver((entries) => {
-      if (entries.some((entry) => entry.isIntersecting)) {
-        observer.disconnect();
-        load();
-      }
+      if (disposed || cancelLoad || !entries.some((entry) => entry.isIntersecting)) return;
+      observer.disconnect();
+      cancelLoad = load();
     }, { rootMargin: "200px" });
     observer.observe(rowRef.current);
     return () => {
       disposed = true;
       observer.disconnect();
+      cancelLoad?.();
     };
   }, [allowPageFallback, articleUrl, feedUrl, key]);
 
   return { rowRef, preview: result?.key === key ? result.preview : null };
 }
 
-function usePreviewImage(url: string | null | undefined) {
-  const [result, setResult] = useState<{ url: string; image: string | null } | null>(null);
-  useEffect(() => {
-    if (!url) return;
-    let disposed = false;
-    void cacheImage(url, () => invoke<string | null>("get_rss_preview_image", { url }))
-      .then((image) => {
-        if (!disposed) setResult({ url, image });
-      });
-    return () => { disposed = true; };
-  }, [url]);
-  return {
-    image: result?.url === url ? result?.image : null,
-    onError: () => {
-      if (url) setResult({ url, image: null });
-    },
-  };
-}
+const headlineLines = 2;
+const summaryLines = 3;
+const thumbnailWidth = 128;
+const thumbnailHeight = 80;
 
-const publicationDate = new Intl.DateTimeFormat(undefined, { dateStyle: "medium" });
-
-export function RssArticleCard({
+export const RssArticleCard = memo(function RssArticleCard({
   candidate,
   preview,
   sender,
   postedAt,
 }: {
   candidate: RssArticleCandidate;
-  preview: ArticlePreview | null;
+  preview: RssArticlePreview | null;
   sender: string;
   postedAt: string;
 }) {
   const { palette, spacing, typography } = useTheme();
-  const authorImage = usePreviewImage(preview?.authorImage);
-  const siteImage = usePreviewImage(preview?.siteImage);
-  const articleImage = usePreviewImage(preview?.image);
-  const badgeImage = authorImage.image ? authorImage : siteImage;
-  const site = preview?.siteName || candidate.siteName || candidate.hostname;
-  const authors = preview?.authors.join(", ");
-  const title = preview?.title || candidate.headline || candidate.hostname;
-  const description = preview?.description;
-  const date = preview?.publishedAt ? new Date(preview.publishedAt) : null;
-  const published = date && Number.isFinite(date.valueOf()) ? date : null;
+  const [brokenImages, setBrokenImages] = useState(() => new Set<string>());
+  const usableImage = (src?: string) => src && !brokenImages.has(src) ? src : undefined;
+  const authorImage = usableImage(preview?.images.authorImage);
+  const badgeImage = authorImage ?? usableImage(preview?.images.siteImage);
+  const articleImage = usableImage(preview?.images.image);
+  const hideBrokenImage = (event: SyntheticEvent<HTMLImageElement>) => {
+    const src = event.currentTarget.getAttribute("src");
+    if (!src) return;
+    setBrokenImages((previous) => previous.has(src) ? previous : new Set(previous).add(src));
+  };
+  const article = preview?.article;
+  const site = article?.siteName || candidate.siteName || candidate.hostname;
+  const authors = article?.authors.join(", ");
+  const title = article?.title || candidate.headline || candidate.hostname;
+  const description = article?.description;
+  const published = formatRssPublication(article?.publishedAt);
+  const byline = [authors, site, published?.label].filter(Boolean).join(" · ");
+  const headlineLineHeight = typography.fontSizeBase * 1.35;
+  const summaryLineHeight = typography.fontSizeSmall * 1.4;
+  const bylineLineHeight = typography.fontSizeSmall * 1.35;
+  const bodyHeight = Math.max(
+    thumbnailHeight,
+    headlineLines * headlineLineHeight + spacing.unit + summaryLines * summaryLineHeight,
+  );
 
   return (
     <article
@@ -143,10 +98,11 @@ export function RssArticleCard({
           display: "flex",
           alignItems: "center",
           gap: spacing.unit * 2,
+          height: Math.max(28, bylineLineHeight * 2),
           marginBottom: spacing.unit * 2,
           color: palette.textSecondary,
           fontSize: typography.fontSizeSmall,
-          lineHeight: 1.35,
+          lineHeight: `${bylineLineHeight}px`,
         }}
       >
         <span
@@ -162,18 +118,28 @@ export function RssArticleCard({
             backgroundColor: palette.bgHover,
           }}
         >
-          {badgeImage.image ? (
+          {badgeImage ? (
             <img
-              src={badgeImage.image}
-              onError={badgeImage.onError}
+              src={badgeImage}
+              onError={hideBrokenImage}
               alt=""
               width={28}
               height={28}
-              style={{ objectFit: authorImage.image ? "cover" : "contain" }}
+              style={{ objectFit: authorImage ? "cover" : "contain" }}
             />
           ) : <Rss size={15} />}
         </span>
-        <span style={{ minWidth: 0, overflowWrap: "anywhere" }} title={`Posted by ${sender} · ${postedAt}`}>
+        <span
+          style={{
+            minWidth: 0,
+            overflow: "hidden",
+            overflowWrap: "anywhere",
+            display: "-webkit-box",
+            WebkitLineClamp: 2,
+            WebkitBoxOrient: "vertical",
+          }}
+          title={`${byline}\nPosted by ${sender} · ${postedAt}`}
+        >
           {authors && (
             <>
               <strong style={{ color: palette.textHeading }}>{authors}</strong>
@@ -184,22 +150,29 @@ export function RssArticleCard({
           {published && (
             <>
               <span aria-hidden> · </span>
-              <time dateTime={published.toISOString()}>{publicationDate.format(published)}</time>
+              <time dateTime={published.dateTime}>{published.label}</time>
             </>
           )}
         </span>
       </header>
-      <div style={{ display: "flex", alignItems: "flex-start", gap: spacing.unit * 3 }}>
+      {/* Keep the card's height independent of when its metadata and images arrive. */}
+      <div style={{ display: "flex", alignItems: "flex-start", gap: spacing.unit * 3, height: bodyHeight }}>
         <div style={{ flex: 1, minWidth: 0 }}>
           <a
             href={candidate.url}
             target="_blank"
             rel="noopener noreferrer"
+            title={title}
             style={{
+              display: "-webkit-box",
+              WebkitLineClamp: headlineLines,
+              WebkitBoxOrient: "vertical",
+              height: headlineLineHeight * headlineLines,
+              overflow: "hidden",
               color: palette.textHeading,
               fontSize: typography.fontSizeBase,
               fontWeight: typography.fontWeightBold,
-              lineHeight: 1.35,
+              lineHeight: `${headlineLineHeight}px`,
               textUnderlineOffset: "0.18em",
               overflowWrap: "anywhere",
             }}
@@ -210,36 +183,39 @@ export function RssArticleCard({
             <p style={{
               margin: `${spacing.unit}px 0 0`,
               display: "-webkit-box",
-              WebkitLineClamp: 3,
+              WebkitLineClamp: summaryLines,
               WebkitBoxOrient: "vertical",
               overflow: "hidden",
               overflowWrap: "anywhere",
               fontSize: typography.fontSizeSmall,
               color: palette.textSecondary,
-              lineHeight: 1.4,
+              lineHeight: `${summaryLineHeight}px`,
             }}>
               {description}
             </p>
           )}
         </div>
-        {articleImage.image && (
-          <img
-            src={articleImage.image}
-            onError={articleImage.onError}
-            alt=""
-            width={128}
-            height={80}
-            style={{
-              objectFit: "cover",
-              width: "min(30%, 128px)",
-              height: "auto",
-              aspectRatio: "8 / 5",
-              flexShrink: 0,
-              borderRadius: spacing.unit,
-            }}
-          />
-        )}
+        <div
+          aria-hidden
+          style={{
+            position: "relative",
+            width: `min(30%, ${thumbnailWidth}px)`,
+            aspectRatio: `${thumbnailWidth} / ${thumbnailHeight}`,
+            flexShrink: 0,
+            overflow: "hidden",
+            borderRadius: spacing.unit,
+          }}
+        >
+          {articleImage && (
+            <img
+              src={articleImage}
+              onError={hideBrokenImage}
+              alt=""
+              style={{ position: "absolute", inset: 0, width: "100%", height: "100%", objectFit: "cover" }}
+            />
+          )}
+        </div>
       </div>
     </article>
   );
-}
+});

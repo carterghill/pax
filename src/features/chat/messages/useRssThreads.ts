@@ -1,8 +1,8 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { listen } from "@tauri-apps/api/event";
 import { getRoomMessage } from "../api";
-import type { Message } from "../../../types/matrix";
-import { rssArticleCandidate, type RssProvider } from "./rssArticle";
+import type { Message, RssProvider } from "../../../types/matrix";
+import { rssArticleCandidate } from "./rssArticle";
 import { partitionRssTimeline, type RssThread } from "./rssThreads";
 
 const empty = new Map<string, Message | null>();

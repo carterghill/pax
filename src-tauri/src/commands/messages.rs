@@ -1919,7 +1919,7 @@ pub async fn start_sync(
                     if feed_changed {
                         let _ = app.emit(super::rss::RSS_FEED_CHANGED, room.room_id().as_str());
                     }
-                    if details_changed {
+                    if details_changed || feed_changed {
                         let _ = app.emit("rooms-changed", ());
                     }
                 }

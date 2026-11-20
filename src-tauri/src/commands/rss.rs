@@ -59,6 +59,15 @@ pub struct RssFeedConfig {
 }
 
 impl RssFeedConfig {
+    pub(super) fn from_state_content(content: &Value) -> Result<Self, String> {
+        if content["version"] != 1 || content["provider"] != "rss-command" {
+            return Err("This room uses an unsupported feed provider.".into());
+        }
+        Self::deserialize(content)
+            .map_err(|_| "This room's feed settings are incomplete.")?
+            .validated()
+    }
+
     fn validated(&self) -> Result<Self, String> {
         let raw_url = self.url.trim();
         if raw_url.is_empty() || raw_url.chars().any(char::is_whitespace) {
@@ -199,12 +208,7 @@ async fn read_feed_settings(
     .await
     .map_err(|e| format!("Could not read the feed settings: {e}"))?
     .ok_or("This room has no RSS feed settings.")?;
-    if settings["version"] != 1 || settings["provider"] != "rss-command" {
-        return Err("This room uses an unsupported feed provider.".into());
-    }
-    let feed = serde_json::from_value::<RssFeedConfig>(settings.clone())
-        .map_err(|_| "This room's feed settings are incomplete.")?
-        .validated()?;
+    let feed = RssFeedConfig::from_state_content(&settings)?;
     let own_id = ac.client.user_id().ok_or("Not logged in")?;
     let member = match ac.client.get_room(room_id) {
         Some(room) => room

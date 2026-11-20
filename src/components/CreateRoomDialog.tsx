@@ -265,6 +265,7 @@ export default function CreateRoomDialog({
         const trimmedName = name.trim();
         const trimmedTopic = topic.trim() || null;
         const aliasLocal = roomAlias.trim().toLowerCase().replace(/[^a-z0-9_-]/g, "");
+        const rssProvider = roomKind === "rss" ? { url: new URL(feedUrl.trim()).href, botUserId: feedBot.trim() } : undefined;
         const roomId = await invoke<string>(spaceId ? "create_room_in_space" : "create_standalone_room", {
           ...(spaceId ? { spaceId, spaceRoomAccess: roomAccess } : { roomAccess }),
           name: trimmedName,
@@ -273,7 +274,7 @@ export default function CreateRoomDialog({
           roomAlias: aliasLocal || null,
           historyVisibility,
           federate,
-          rssFeed: roomKind === "rss" ? { url: feedUrl.trim(), botUserId: feedBot.trim() } : null,
+          rssFeed: rssProvider ?? null,
         });
         created = {
           room: {
@@ -285,6 +286,7 @@ export default function CreateRoomDialog({
             parentSpaceIds: spaceId ? [spaceId] : [],
             roomType,
             isRss: roomKind === "rss",
+            rssProvider,
             membership: "joined",
           },
           topic: trimmedTopic,
