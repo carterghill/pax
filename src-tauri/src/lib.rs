@@ -92,6 +92,7 @@ pub struct AppState {
     /// (tl;dr: matrix-sdk 0.16 only flags the broadcast's READ_RECEIPT reason on
     /// the sliding-sync path; legacy sync_once doesn't, so we poll instead).
     pub unread_cache: commands::unread::UnreadStateCache,
+    pub(crate) rss_unread_cache: Arc<commands::unread::RssUnreadCache>,
     pub pending_unavailable_reads: commands::unavailable_messages::PendingUnavailableReads,
     /// Per-room raw message count since the user's last read receipt, observed
     /// by counting non-self `m.room.message` events in the sync loop's event
@@ -328,6 +329,7 @@ pub fn run() {
         voice_livekit_jwt_service_url: StdMutex::new(None),
         desired_presence: Arc::new(StdMutex::new("online".to_string())),
         unread_cache: Arc::new(Mutex::new(HashMap::new())),
+        rss_unread_cache: Arc::default(),
         pending_unavailable_reads: Arc::new(Mutex::new(HashMap::new())),
         raw_unread_messages: Arc::new(Mutex::new(HashMap::new())),
     });
@@ -474,6 +476,8 @@ pub fn run() {
             commands::rss::save_rss_feed_settings,
             commands::rss::invite_rss_feed_provider,
             commands::rss::cancel_rss_feed_invitation,
+            commands::rss::subscriptions::list_rss_subscriptions,
+            commands::rss::subscriptions::update_rss_subscription,
             commands::room_creation::link_room_to_space,
             commands::room_creation::set_space_child_order,
             commands::room_discovery::search_public_spaces,
@@ -567,6 +571,7 @@ pub fn run() {
             commands::profile::set_user_avatar,
             commands::profile::remove_user_avatar,
             commands::embed::fetch_url_metadata,
+            commands::rss_search::search_rss_feeds,
             commands::rss_preview::get_rss_article_preview,
             commands::rss_preview::get_rss_preview_image,
             commands::embed::proxy_media,

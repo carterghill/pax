@@ -16,6 +16,7 @@ import {
 import { useTheme } from "../theme/ThemeContext";
 import { paletteDialogShellBorderStyle } from "../theme/paletteBorder";
 import Dialog from "./Dialog";
+import RssFeedSearch from "./RssFeedSearch";
 import { VOICE_ROOM_TYPE } from "../utils/matrix";
 import type { Room } from "../types/matrix";
 import type { RoomsChangedPayload } from "../types/roomsChanged";
@@ -896,6 +897,7 @@ export default function CreateRoomDialog({
                       required
                       style={inputStyle}
                     />
+                    <RssFeedSearch onAdd={setFeedUrl} />
                   </div>
                   <label htmlFor="rss-feed-bot" style={labelStyle}>
                     Feed Bot <span style={{ color: "#ed4245" }}>*</span>

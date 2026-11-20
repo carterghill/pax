@@ -1,3 +1,6 @@
+pub(super) mod activity;
+pub mod subscriptions;
+
 use std::{sync::Arc, time::Duration};
 
 use matrix_sdk::room::RoomMember;
@@ -41,6 +44,7 @@ pub struct RssFeedStatus {
     auto_setup: bool,
     subscription_event_id: Option<String>,
     subscription_confirmed: bool,
+    subscription_reply: Option<String>,
     confirmation_error: Option<String>,
 }
 
@@ -58,6 +62,22 @@ pub struct RssFeedConfig {
     pub bot_user_id: String,
 }
 
+pub(super) fn parse_feed_url(raw_url: &str) -> Result<reqwest::Url, String> {
+    let raw_url = raw_url.trim();
+    if raw_url.is_empty() || raw_url.chars().any(char::is_whitespace) {
+        return Err("Enter a feed URL without spaces or line breaks.".into());
+    }
+    let url = reqwest::Url::parse(raw_url)
+        .map_err(|_| "Enter a valid feed URL starting with https:// or http://.")?;
+    if !matches!(url.scheme(), "https" | "http") || url.host_str().is_none() {
+        return Err("Feed URLs must start with https:// or http://.".into());
+    }
+    if !url.username().is_empty() || url.password().is_some() {
+        return Err("Feed URLs cannot contain a username or password.".into());
+    }
+    Ok(url)
+}
+
 impl RssFeedConfig {
     pub(super) fn from_state_content(content: &Value) -> Result<Self, String> {
         if content["version"] != 1 || content["provider"] != "rss-command" {
@@ -69,18 +89,7 @@ impl RssFeedConfig {
     }
 
     fn validated(&self) -> Result<Self, String> {
-        let raw_url = self.url.trim();
-        if raw_url.is_empty() || raw_url.chars().any(char::is_whitespace) {
-            return Err("Enter a feed URL without spaces or line breaks.".into());
-        }
-        let url = reqwest::Url::parse(raw_url)
-            .map_err(|_| "Enter a valid feed URL starting with https:// or http://.")?;
-        if !matches!(url.scheme(), "https" | "http") || url.host_str().is_none() {
-            return Err("Feed URLs must start with https:// or http://.".into());
-        }
-        if !url.username().is_empty() || url.password().is_some() {
-            return Err("Feed URLs cannot contain a username or password.".into());
-        }
+        let url = parse_feed_url(&self.url)?;
         let bot_user_id = self.bot_user_id.trim();
         UserId::parse(bot_user_id)
             .map_err(|_| "Enter a Matrix bot address in the form @bot:example.org.")?;
@@ -286,6 +295,7 @@ async fn read_feed_status(
         auto_setup,
         subscription_event_id: settings["subscriptionEventId"].as_str().map(str::to_owned),
         subscription_confirmed: false,
+        subscription_reply: None,
         confirmation_error: None,
     };
     Ok((settings, status))
@@ -353,6 +363,52 @@ pub async fn get_rss_feed_status(
         match confirmation {
             Ok(confirmed) => status.subscription_confirmed = confirmed,
             Err(error) => status.confirmation_error = Some(error),
+        }
+        // Maubot acknowledges with a rich reply rather than a reaction.
+        // Rich replies aren't indexed by the annotation endpoint above.
+        if !status.subscription_confirmed {
+            if let (Some(room), Ok(event)) = (
+                ac.client.get_room(&room_id),
+                matrix_sdk::ruma::EventId::parse(event_id),
+            ) {
+                let replies = tokio::time::timeout(
+                    Duration::from_secs(4),
+                    room.event_with_context(
+                        &event,
+                        false,
+                        matrix_sdk::ruma::UInt::from(20u32),
+                        None,
+                    ),
+                )
+                .await;
+                if let Ok(Ok(context)) = replies {
+                    for reply in context
+                        .events_after
+                        .iter()
+                        .filter_map(activity::original_message)
+                    {
+                        let target = super::message_display::reply_to_from_message_relation(
+                            &reply.content.relates_to,
+                        );
+                        if reply.sender.as_str() != status.settings.feed.bot_user_id
+                            || target.as_ref().map(|target| target.event_id.as_str())
+                                != Some(event_id.as_str())
+                        {
+                            continue;
+                        }
+                        let display =
+                            super::message_display::extract_message_display(&reply.content);
+                        status.subscription_confirmed = subscriptions::subscribed_from_reply(
+                            &display,
+                            status.settings.feed.url.clone(),
+                        )
+                        .is_ok();
+                        status.subscription_reply = Some(display.body.chars().take(500).collect());
+                        status.confirmation_error = None;
+                        break;
+                    }
+                }
+            }
         }
     }
     Ok(status)

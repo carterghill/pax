@@ -2,10 +2,12 @@ import type { Message, RssProvider } from "../../../types/matrix";
 
 export interface RssArticleCandidate {
   feedUrl: string;
+  previewFeedUrl?: string;
   url: string;
   hostname: string;
   headline?: string;
   siteName?: string;
+  via?: "Google News";
 }
 
 const publicationDate = new Intl.DateTimeFormat(undefined, { dateStyle: "medium" });
@@ -27,6 +29,9 @@ export function formatRssPublication(value: string | null | undefined, now = new
 }
 
 const webLink = /https?:\/\/(?:[^\s<>"'`()[\]]|\([^\s()]*\))+/gi;
+const googleNewsArticlePath = /^\/(?:rss\/)?(?:articles|read)\//;
+const googleNewsFeedTitle = /(?:^| - )Google News$/i;
+const googleNewsSearchTitle = /^"(.+)" - Google News$/i;
 
 function announcement(body: string) {
   // The Maubot and t2bot announcements include a publication before the headline.
@@ -39,6 +44,24 @@ function announcementText(text: string) {
     .replace(webLink, "")
     .replace(/\(\s*\)/g, "")
     .trim();
+}
+
+function googleNewsPreviewFeed(feedTitle: string, configuredFeed: string, article: URL) {
+  const query = feedTitle.match(googleNewsSearchTitle)?.[1];
+  if (!query || query.length > 512) return;
+
+  const feed = new URL("https://news.google.com/rss/search");
+  if (configuredFeed.startsWith(`${feed.href}?`) &&
+      new URL(configuredFeed).searchParams.get("q") === query) return;
+
+  feed.searchParams.set("q", query);
+  if (article.hostname === feed.hostname) {
+    for (const key of ["hl", "gl", "ceid"]) {
+      const value = article.searchParams.get(key);
+      if (value) feed.searchParams.set(key, value);
+    }
+  }
+  return feed.href;
 }
 
 export function rssArticleCandidate(
@@ -71,12 +94,21 @@ export function rssArticleCandidate(
       const url = new URL(link.replace(/[.,;:]+$/, ""));
       if (url.username || url.password || (url.pathname === "/" && !url.search)) continue;
       const headline = update ? announcementText(update[2]) : undefined;
+      const feedTitle = update ? announcementText(update[1]) : undefined;
+      // A bot can post feeds other than the one saved in Pax's room settings.
+      const fromGoogleNews = (url.hostname === "news.google.com" && googleNewsArticlePath.test(url.pathname))
+        || googleNewsFeedTitle.test(feedTitle ?? "");
+      // Google News appends the publisher to each item title, even if the item leaves the feed.
+      const publisher = fromGoogleNews ? headline?.match(/^(.+) - (.+)$/) : null;
+      const previewFeedUrl = feedTitle && googleNewsPreviewFeed(feedTitle, provider.url, url);
       return {
         feedUrl: provider.url,
+        ...(previewFeedUrl && { previewFeedUrl }),
         url: url.href,
         hostname: url.hostname.replace(/^www\./i, ""),
-        headline: headline || undefined,
-        siteName: update ? announcementText(update[1]) : undefined,
+        headline: publisher?.[1] || headline || undefined,
+        siteName: publisher?.[2] ?? feedTitle,
+        ...(publisher && { via: "Google News" }),
       };
     } catch {
       // Try the next link when a provider sends a malformed URL.

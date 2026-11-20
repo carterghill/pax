@@ -30,6 +30,41 @@ test("other senders, replies, and setup errors keep their regular message layout
   assert.equal(rssArticleCandidate(update), null);
 });
 
+test("a Google News bot announcement supplies publisher credit before the preview loads", () => {
+  const google = { ...provider, url: "https://news.google.com/rss/search?q=when%3A24h+site%3Areuters.com%2Fworld" };
+  const headline = "With foreign aid slashed, Africa must 'own its own future', billionaire Ibrahim says";
+  const googleLink = "https://news.google.com/rss/articles/abc?oc=5";
+  const announcement = {
+    ...update,
+    body: `New post in "when:24h site:reuters.com/world" - Google News: ${headline} - Reuters (\n${googleLink}\n)`,
+  };
+  assert.deepEqual(rssArticleCandidate(announcement, google), {
+    feedUrl: google.url,
+    url: googleLink,
+    hostname: "news.google.com",
+    headline,
+    siteName: "Reuters",
+    via: "Google News",
+  });
+  const roomFeed = { ...provider, url: "https://rss.csmonitor.com/feeds/world" };
+  assert.deepEqual(rssArticleCandidate(announcement, roomFeed), {
+    feedUrl: roomFeed.url,
+    previewFeedUrl: google.url,
+    url: googleLink,
+    hostname: "news.google.com",
+    headline,
+    siteName: "Reuters",
+    via: "Google News",
+  });
+  const publisherLink = "https://www.reuters.com/world/africa/story/";
+  const direct = { ...announcement, body: announcement.body.replace(googleLink, publisherLink) };
+  const directCandidate = rssArticleCandidate(direct, roomFeed);
+  assert.equal(directCandidate?.siteName, "Reuters");
+  assert.equal(directCandidate?.previewFeedUrl, google.url);
+  const ordinary = { ...update, body: `New post in Tech News: A headline - Analysis (${link})` };
+  assert.equal(rssArticleCandidate(ordinary, google)?.headline, "A headline - Analysis");
+});
+
 test("a custom provider announcement needs a feed match", () => {
   const candidate = rssArticleCandidate({ ...update, body: `Just published: ${link}` }, provider);
   assert.equal(candidate?.url, link);

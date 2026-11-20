@@ -26,6 +26,7 @@ import ActiveCallBar from "./ActiveCallBar";
 import VolumeContextMenu from "./VolumeContextMenu";
 import RoomContextMenu from "./RoomContextMenu";
 import RoomSettingsDialog from "./RoomSettingsDialog";
+import RssFeedsDialog from "./RssFeedsDialog";
 import { collectRoomIdsInSpaceTree } from "../utils/spaceModeration";
 import InviteDialog from "./InviteDialog";
 import LeaveConfirmDialog from "./LeaveConfirmDialog";
@@ -739,6 +740,7 @@ export default function RoomSidebar({
     roomName: string;
   } | null>(null);
   const [settingsRoomId, setSettingsRoomId] = useState<string | null>(null);
+  const [rssFeedsRoom, setRssFeedsRoom] = useState<{ id: string; name: string } | null>(null);
   const [inviteRoom, setInviteRoom] = useState<{ id: string; name: string } | null>(null);
   const [inviteSpaceFromHeader, setInviteSpaceFromHeader] = useState<{ id: string; name: string } | null>(
     null
@@ -1872,6 +1874,9 @@ export default function RoomSidebar({
             setInviteRoom({ id: t.roomId, name: t.roomName });
           }}
           onOpenSettings={() => setSettingsRoomId(roomContextMenu.roomId)}
+          onOpenRssFeeds={getRoom(roomContextMenu.roomId, true)?.isRss ? () => {
+            setRssFeedsRoom({ id: roomContextMenu.roomId, name: roomContextMenu.roomName });
+          } : undefined}
           onViewParentSpaces={() => {
             const t = roomContextMenu;
             setParentSpacesRoom({ id: t.roomId, name: t.roomName });
@@ -1883,6 +1888,11 @@ export default function RoomSidebar({
           }}
           onClose={() => setRoomContextMenu((current) => current?.roomId === roomContextMenu.roomId ? null : current)}
         />
+      )}
+
+      {rssFeedsRoom && (
+        <RssFeedsDialog key={rssFeedsRoom.id} roomId={rssFeedsRoom.id} roomName={rssFeedsRoom.name}
+          onClose={() => setRssFeedsRoom(null)} />
       )}
 
       {/* Room settings modal */}

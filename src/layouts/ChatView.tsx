@@ -230,7 +230,7 @@ export default function ChatView({
   };
 
   const rssRoomId = !isDraft && activeRoom?.isRss ? activeRoom.id : null;
-  const rssFeed = useRssFeedStatus(rssRoomId, messages);
+  const rssFeed = useRssFeedStatus(rssRoomId);
   // The synced room state is available before the provider's live status check.
   const rssSettings = rssFeed?.status ?? activeRoom?.rssProvider;
   const rssUrl = rssRoomId ? rssSettings?.url : undefined;

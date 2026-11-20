@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from "react";
-import { CheckCheck, Settings, UserPlus, LogOut, Layers } from "lucide-react";
+import { CheckCheck, Settings, UserPlus, LogOut, Layers, Rss } from "lucide-react";
 import { useTheme } from "../theme/ThemeContext";
 import { useOverlayObstruction } from "../hooks/useOverlayObstruction";
 
@@ -9,6 +9,7 @@ interface RoomContextMenuProps {
   roomName: string;
   onInvite: () => void;
   onOpenSettings: () => void;
+  onOpenRssFeeds?: () => void;
   onViewParentSpaces: () => void;
   onLeave: () => void;
   onClose: () => void;
@@ -21,6 +22,7 @@ export default function RoomContextMenu({
   roomName,
   onInvite,
   onOpenSettings,
+  onOpenRssFeeds,
   onViewParentSpaces,
   onLeave,
   onClose,
@@ -152,6 +154,21 @@ export default function RoomContextMenu({
         <Settings size={14} color={palette.textSecondary} />
         Room Settings
       </button>
+
+      {onOpenRssFeeds && (
+        <button type="button" onClick={() => { onOpenRssFeeds(); onClose(); }} style={{
+          display: "flex", alignItems: "center", gap: spacing.unit * 2, width: "100%",
+          padding: `${spacing.unit * 1.5}px ${spacing.unit * 2}px`, border: "none", borderRadius: 4,
+          backgroundColor: "transparent", color: palette.textPrimary, fontSize: typography.fontSizeSmall,
+          cursor: "pointer", textAlign: "left",
+        }}
+          onMouseEnter={(e) => { e.currentTarget.style.backgroundColor = palette.bgActive; }}
+          onMouseLeave={(e) => { e.currentTarget.style.backgroundColor = "transparent"; }}
+        >
+          <Rss size={14} color={palette.textSecondary} aria-hidden="true" />
+          RSS feeds
+        </button>
+      )}
 
       <button
         onClick={() => {

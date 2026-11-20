@@ -376,6 +376,7 @@ pub async fn get_messages(
 
     let avatars = state.avatars.clone();
     let encrypted_room = room.encryption_state().is_encrypted();
+    let mut rss = super::rss::activity::Filter::for_room(&room).await;
 
     // First pass: extract message data and collect unique senders
     struct RawMsg {
@@ -443,6 +444,9 @@ pub async fn get_messages(
             ..
         } = response;
 
+        if let Some(filter) = &mut rss {
+            filter.remember_commands(&chunk);
+        }
         events_for_reactions.extend(chunk.iter().cloned());
 
         pages_scanned += 1;
@@ -513,6 +517,11 @@ pub async fn get_messages(
                     _ => continue,
                 };
 
+                if let Some(filter) = &mut rss {
+                    if filter.hides_message(&room, &original).await {
+                        continue;
+                    }
+                }
                 if let Some(Relation::Replacement(repl)) = &original.content.relates_to {
                     let target = (repl.event_id.to_string(), original.sender.to_string());
                     let ext = extract_message_display(&RoomMessageEventContent::from(
@@ -958,6 +967,10 @@ async fn build_message_infos_from_timeline_events(
     let me = client.user_id();
     let encrypted_room = room.encryption_state().is_encrypted();
     let reaction_map = aggregate_reactions_from_timeline(&timeline_events, me);
+    let mut rss = super::rss::activity::Filter::for_room(room).await;
+    if let Some(filter) = &mut rss {
+        filter.remember_commands(&timeline_events);
+    }
 
     for (position, event) in timeline_events.into_iter().enumerate() {
         if let Some(message) = unavailable_message(event.raw().json()) {
@@ -988,6 +1001,11 @@ async fn build_message_infos_from_timeline_events(
         if let AnySyncTimelineEvent::MessageLike(AnySyncMessageLikeEvent::RoomMessage(msg)) = raw {
             match msg {
                 SyncMessageLikeEvent::Original(original) => {
+                    if let Some(filter) = &mut rss {
+                        if filter.hides_message(room, &original).await {
+                            continue;
+                        }
+                    }
                     if let Some(Relation::Replacement(repl)) = &original.content.relates_to {
                         let target = (repl.event_id.to_string(), original.sender.to_string());
                         let ext = extract_message_display(&RoomMessageEventContent::from(
@@ -1132,6 +1150,7 @@ pub async fn get_pinned_message_previews(
     let client = get_client(&state).await?;
     let room = resolve_room(&client, &room_id)?;
     let ids = current_pinned_event_ids(&room).await?;
+    let mut rss = super::rss::activity::Filter::for_room(&room).await;
 
     let mut out = Vec::new();
     for id in ids {
@@ -1170,6 +1189,11 @@ pub async fn get_pinned_message_previews(
                         (String::new(), "Deleted message".to_string())
                     }
                     SyncMessageLikeEvent::Original(o) => {
+                        if let Some(filter) = &mut rss {
+                            if filter.hides_message(&room, &o).await {
+                                continue;
+                            }
+                        }
                         let sender = o.sender.to_string();
                         let ext = extract_message_display(&o.content);
                         let mut preview_base = ext.body.clone();
@@ -1626,6 +1650,12 @@ pub async fn start_sync(
         let pending_reads = pending_reads_for_msg.clone();
         let self_uid = self_user_id_for_msg.clone();
         async move {
+            if super::rss::activity::hides_live_message(&room, &ev).await {
+                if reply_to_from_message_relation(&ev.content.relates_to).is_some() {
+                    let _ = app.emit(super::rss::RSS_FEED_CHANGED, room.room_id().as_str());
+                }
+                return;
+            }
             // Bump the raw-message counter for any non-self, non-edit message.
             // `Relation::Replacement` is an edit (m.replace) — it shouldn't
             // bump a fresh-message counter.  All other relations (replies,
@@ -1884,6 +1914,16 @@ pub async fn start_sync(
         move |ev: OriginalSyncMessageLikeEvent<ReactionEventContent>, room: Room| {
             let app = app_handle.clone();
             async move {
+                if ev.content.relates_to.key == "✅"
+                    && super::rss::activity::hides_live_confirmation(
+                        &room,
+                        &ev.sender,
+                        &ev.content.relates_to.event_id,
+                    ).await
+                {
+                    let _ = app.emit(super::rss::RSS_FEED_CHANGED, room.room_id().as_str());
+                    return;
+                }
                 let room_id = room.room_id().to_string();
                 let payload = MessageReactionDeltaPayload {
                     room_id,
@@ -2254,6 +2294,7 @@ pub async fn start_sync(
     let status_msg_map = state.status_msg_map.clone();
     let desired_presence = state.desired_presence.clone();
     let unread_cache = state.unread_cache.clone();
+    let rss_unread_cache = state.rss_unread_cache.clone();
     let raw_unread = state.raw_unread_messages.clone();
     let pending_unavailable_reads = state.pending_unavailable_reads.clone();
     let reconcile_state_arc = state_arc.clone();
@@ -2300,6 +2341,13 @@ pub async fn start_sync(
                     continue;
                 }
             };
+
+            rss_unread_cache.invalidate(response.rooms.joined.iter()
+                .filter(|(_, update)| !update.timeline.events.is_empty() || update.ephemeral.iter().any(|event| {
+                    event.get_field::<String>("type").ok().flatten().as_deref() == Some("m.receipt")
+                }))
+                .map(|(room_id, _)| room_id)
+                .chain(response.rooms.left.keys())).await;
 
             super::direct_calls::receive_signals(&reconcile_state_arc, &client, &app, &response)
                 .await;
@@ -2403,6 +2451,7 @@ pub async fn start_sync(
                 &client,
                 &unread_cache,
                 &raw_unread,
+                &rss_unread_cache,
                 &pending_unavailable_reads,
                 &app,
             )

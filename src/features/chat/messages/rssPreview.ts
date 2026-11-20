@@ -4,6 +4,7 @@ interface ArticleMetadata {
   title: string | null;
   description: string | null;
   siteName: string | null;
+  via: string | null;
   image: string | null;
   authorImage: string | null;
   siteImage: string | null;
@@ -43,6 +44,10 @@ function previewCache<T>(limit: number) {
 const cacheArticle = previewCache<ArticleMetadata>(160);
 const cacheImage = previewCache<string>(32);
 
+export function getRssPreviewImage(url: string) {
+  return cacheImage(url, () => invoke<string | null>("get_rss_preview_image", { url }));
+}
+
 export function loadRssArticlePreview(
   key: string,
   feedUrl: string,
@@ -64,7 +69,7 @@ export function loadRssArticlePreview(
     for (const field of imageFields) {
       const url = article[field];
       if (!url) continue;
-      void cacheImage(url, () => invoke<string | null>("get_rss_preview_image", { url })).then((image) => {
+      void getRssPreviewImage(url).then((image) => {
         if (disposed || !image) return;
         images = { ...images, [field]: image };
         onPreview({ article, images });

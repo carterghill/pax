@@ -12,14 +12,22 @@ pub struct ArticlePreview {
     pub title: Option<String>,
     pub description: Option<String>,
     pub site_name: Option<String>,
+    pub via: Option<&'static str>,
     pub image: Option<String>,
     pub author_image: Option<String>,
     pub site_image: Option<String>,
+    #[serde(skip)]
+    publisher_icon: Option<String>,
     pub published_at: Option<String>,
     pub authors: Vec<String>,
 }
 
 impl ArticlePreview {
+    pub(super) fn with_publisher_icon(mut self) -> Self {
+        self.site_image = self.site_image.or(self.publisher_icon.take());
+        self
+    }
+
     pub(super) fn fill_from(&mut self, page: Self) {
         if self.authors.is_empty() {
             self.authors = page.authors;
@@ -50,8 +58,10 @@ pub(super) struct FeedDocument {
 impl FeedDocument {
     pub(super) fn preview_for(&self, url: &Url) -> Option<ArticlePreview> {
         let mut entry = self.entries.get(&article_key(url))?.clone();
-        entry.site_name.clone_from(&self.site_name);
-        entry.site_image.clone_from(&self.site_image);
+        if entry.site_name.is_none() {
+            entry.site_name.clone_from(&self.site_name);
+            entry.site_image.clone_from(&self.site_image);
+        }
         Some(entry)
     }
 
@@ -65,10 +75,14 @@ impl FeedDocument {
 fn article_key(url: &Url) -> String {
     let mut url = url.clone();
     url.set_fragment(None);
-    if url.query_pairs().any(|(key, _)| key.starts_with("utm_")) {
+    let google_news_article =
+        super::is_google_news(&url) && url.path().starts_with("/rss/articles/");
+    let tracking_parameter =
+        |key: &str| key.starts_with("utm_") || (google_news_article && key == "oc");
+    if url.query_pairs().any(|(key, _)| tracking_parameter(&key)) {
         let pairs = url
             .query_pairs()
-            .filter(|(key, _)| !key.starts_with("utm_"))
+            .filter(|(key, _)| !tracking_parameter(key))
             .map(|(key, value)| (key.into_owned(), value.into_owned()))
             .collect::<Vec<_>>();
         url.set_query(None);
@@ -210,6 +224,16 @@ struct XmlImages {
 
 #[derive(Default, Deserialize)]
 #[serde(default)]
+struct XmlSource {
+    #[serde(rename = "@url")]
+    url: String,
+    #[serde(rename = "$text")]
+    text: String,
+    title: String,
+}
+
+#[derive(Default, Deserialize)]
+#[serde(default)]
 struct XmlEntry {
     title: String,
     description: String,
@@ -218,6 +242,7 @@ struct XmlEntry {
     link: Vec<XmlLink>,
     creator: Vec<String>,
     author: Vec<XmlAuthor>,
+    source: Vec<XmlSource>,
     #[serde(rename = "pubDate")]
     pub_date: String,
     published: String,
@@ -252,6 +277,7 @@ fn parse_xml_feed(raw: &str, base: &Url) -> Option<FeedDocument> {
     let mut root = XmlFeed::deserialize(&mut deserializer).ok()?;
     let channel = root.channel.take();
     let source = channel.as_deref().unwrap_or(&root);
+    let via_google_news = super::is_google_news(base).then_some("Google News");
     let mut feed = FeedDocument {
         site_name: feed_text(&source.title, 120),
         site_image: source
@@ -278,6 +304,27 @@ fn parse_xml_feed(raw: &str, base: &Url) -> Option<FeedDocument> {
         }) else {
             continue;
         };
+        let (site_name, publisher_url) = entry
+            .source
+            .iter()
+            .find_map(|source| {
+                let publisher_url = web_url(base, &source.url);
+                let name = feed_text(&source.title, 120).or_else(|| {
+                    publisher_url.as_ref()?;
+                    feed_text(&source.text, 120)
+                })?;
+                Some((Some(name), publisher_url))
+            })
+            .unwrap_or_default();
+        let via = site_name.as_ref().and(via_google_news);
+        let publisher_icon = via
+            .and(publisher_url.as_ref())
+            .and_then(|url| image_url(url, Some("/favicon.ico")));
+        let title = site_name
+            .as_deref()
+            .filter(|_| via.is_some())
+            .and_then(|publisher| entry.title.strip_suffix(&format!(" - {publisher}")))
+            .unwrap_or(&entry.title);
         let mut authors = entry
             .creator
             .iter()
@@ -313,11 +360,14 @@ fn parse_xml_feed(raw: &str, base: &Url) -> Option<FeedDocument> {
         feed.add(
             &url,
             ArticlePreview {
-                title: feed_text(&entry.title, 240),
+                title: feed_text(title, 240),
                 description: [&entry.description, &entry.summary, &entry.encoded]
                     .into_iter()
                     .find_map(|raw| feed_text(raw, 360)),
+                site_name,
+                via,
                 image,
+                publisher_icon,
                 published_at: [&entry.pub_date, &entry.published, &entry.date]
                     .into_iter()
                     .find_map(|raw| plain(raw, 80)),
@@ -533,6 +583,7 @@ pub(super) fn parse_article(html: &str, base: &Url, feed_author: Option<&str>) -
         site_name: meta_value("og:site_name")
             .or_else(|| publisher.and_then(|data| string_at(data, "name")))
             .and_then(|raw| plain(raw, 120)),
+        via: None,
         image: image_url(base, meta_value("og:image"))
             .or_else(|| {
                 image_url(
@@ -550,6 +601,7 @@ pub(super) fn parse_article(html: &str, base: &Url, feed_author: Option<&str>) -
                 .and_then(schema_image),
         )
         .or_else(site_icon),
+        publisher_icon: None,
         published_at: meta_value("article:published_time")
             .or_else(|| field("datePublished"))
             .and_then(|raw| plain(raw, 80)),
@@ -590,6 +642,48 @@ mod tests {
             Some("https://example.com/thumb.jpg")
         );
         assert_eq!(preview.description.as_deref(), Some("Short summary."));
+    }
+
+    #[test]
+    fn google_news_credits_the_item_publisher_when_provided() {
+        let base = Url::parse("https://news.google.com/rss/search?q=reuters").unwrap();
+        let feed = parse_feed(
+            r#"<rss xmlns:media="http://search.yahoo.com/mrss/"><channel><title>Reuters - Google News</title>
+            <image><url>https://news.google.com/logo.png</url></image>
+            <item><title>A headline - Reuters</title><link>https://news.google.com/rss/articles/abc?oc=5</link>
+            <media:thumbnail url="https://www.reuters.com/images/story.jpg"/>
+            <source url="https://www.reuters.com">Reuters</source></item>
+            <item><title>Another headline</title><link>https://news.google.com/rss/articles/def</link></item>
+            </channel></rss>"#,
+            &base,
+        )
+        .unwrap();
+
+        let link = base.join("/rss/articles/abc").unwrap();
+        let preview = feed.preview_for(&link).unwrap();
+        assert_eq!(preview.title.as_deref(), Some("A headline"));
+        assert_eq!(preview.site_name.as_deref(), Some("Reuters"));
+        assert_eq!(preview.via, Some("Google News"));
+        assert_eq!(
+            preview.image.as_deref(),
+            Some("https://www.reuters.com/images/story.jpg")
+        );
+        assert_eq!(
+            preview.with_publisher_icon().site_image.as_deref(),
+            Some("https://www.reuters.com/favicon.ico")
+        );
+        assert!(feed
+            .preview_for(&Url::parse("https://www.reuters.com").unwrap())
+            .is_none());
+
+        let unattributed = feed
+            .preview_for(&base.join("/rss/articles/def").unwrap())
+            .unwrap();
+        assert_eq!(
+            unattributed.site_name.as_deref(),
+            Some("Reuters - Google News")
+        );
+        assert!(unattributed.via.is_none());
     }
 
     #[test]

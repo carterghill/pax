@@ -3,7 +3,6 @@ import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { CheckCircle2, RefreshCw, Rss } from "lucide-react";
 import { useTheme } from "../theme/ThemeContext";
-import type { Message } from "../types/matrix";
 
 export interface FeedSettings {
   url: string;
@@ -22,12 +21,13 @@ interface FeedStatus extends FeedSettings {
   autoSetup: boolean;
   subscriptionEventId: string | null;
   subscriptionConfirmed: boolean;
+  subscriptionReply: string | null;
   confirmationError: string | null;
 }
 
 type Action = "check" | "setup" | "invite" | "cancel";
 
-export function useRssFeedStatus(roomId: string | null, messages: Message[]) {
+export function useRssFeedStatus(roomId: string | null) {
   const [trackedRoomId, setTrackedRoomId] = useState<string | null>(null);
   const [status, setStatus] = useState<FeedStatus | null>(null);
   const [checking, setChecking] = useState(false);
@@ -159,15 +159,8 @@ export function useRssFeedStatus(roomId: string | null, messages: Message[]) {
 
   if (!roomId || trackedRoomId !== roomId) return null;
 
-  // A loaded timeline can reflect the acknowledgement before the next status poll.
-  const command = status?.subscriptionEventId
-    ? messages.find((m) => m.eventId === status.subscriptionEventId) : undefined;
-  const confirmed = status?.subscriptionConfirmed || command?.reactions?.some(
-    (r) => r.key === "✅" && r.reactedBy?.includes(status!.botUserId),
-  );
-  const providerReply = status?.subscriptionEventId && messages.find(
-    (m) => m.sender === status.botUserId && m.replyTo?.eventId === status.subscriptionEventId,
-  );
+  const confirmed = status?.subscriptionConfirmed;
+  const providerReply = status?.subscriptionReply;
   const paused = !!status?.invitationCancelled;
   const joined = !paused && status?.membership === "join";
   let title = "Checking feed provider…";
@@ -194,8 +187,7 @@ export function useRssFeedStatus(roomId: string | null, messages: Message[]) {
           title = providerReply ? "Provider replied to setup" : "Subscription sent · awaiting confirmation";
           label = providerReply ? "Replied" : "Awaiting reply";
           detail = providerReply
-            ? "Check the provider’s message below for the result or any feed errors."
-            : "The provider has joined and Pax sent the feed URL. Its response will appear here.";
+            || "Pax sent the feed URL and is waiting for the provider to confirm.";
         } else if (!status.roomSynced) {
           title = "Provider joined · syncing room";
           label = "Syncing…";

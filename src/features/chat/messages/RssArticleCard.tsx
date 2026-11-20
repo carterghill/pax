@@ -6,7 +6,7 @@ import { loadRssArticlePreview, type RssArticlePreview } from "./rssPreview";
 
 export function useRssArticlePreview(candidate: RssArticleCandidate | null) {
   const rowRef = useRef<HTMLDivElement>(null);
-  const feedUrl = candidate?.feedUrl;
+  const feedUrl = candidate?.previewFeedUrl ?? candidate?.feedUrl;
   const articleUrl = candidate?.url;
   const allowPageFallback = Boolean(candidate?.headline);
   const key = articleUrl ? JSON.stringify([feedUrl, articleUrl, allowPageFallback]) : null;
@@ -58,22 +58,25 @@ export const RssArticleCard = memo(function RssArticleCard({
 }) {
   const { palette, spacing, typography } = useTheme();
   const [brokenImages, setBrokenImages] = useState(() => new Set<string>());
+  const article = preview?.article;
+  const via = article?.via || candidate.via;
+  const preferAnnouncement = candidate.via && !article?.via;
+  const site = (!preferAnnouncement && article?.siteName) || candidate.siteName || candidate.hostname;
   const usableImage = (src?: string) => src && !brokenImages.has(src) ? src : undefined;
   const authorImage = usableImage(preview?.images.authorImage);
-  const badgeImage = authorImage ?? usableImage(preview?.images.siteImage);
+  const siteImage = !via || article?.siteName === site ? usableImage(preview?.images.siteImage) : undefined;
+  const badgeImage = authorImage ?? siteImage;
   const articleImage = usableImage(preview?.images.image);
   const hideBrokenImage = (event: SyntheticEvent<HTMLImageElement>) => {
     const src = event.currentTarget.getAttribute("src");
     if (!src) return;
     setBrokenImages((previous) => previous.has(src) ? previous : new Set(previous).add(src));
   };
-  const article = preview?.article;
-  const site = article?.siteName || candidate.siteName || candidate.hostname;
   const authors = article?.authors.join(", ");
-  const title = article?.title || candidate.headline || candidate.hostname;
+  const title = (!preferAnnouncement && article?.title) || candidate.headline || candidate.hostname;
   const description = article?.description;
   const published = formatRssPublication(article?.publishedAt);
-  const byline = [authors, site, published?.label].filter(Boolean).join(" · ");
+  const byline = [authors, site, published?.label, via && `via ${via}`].filter(Boolean).join(" · ");
   const headlineLineHeight = typography.fontSizeBase * 1.35;
   const summaryLineHeight = typography.fontSizeSmall * 1.4;
   const bylineLineHeight = typography.fontSizeSmall * 1.35;
@@ -146,13 +149,16 @@ export const RssArticleCard = memo(function RssArticleCard({
               <span aria-hidden> · </span>
             </>
           )}
-          {site}
+          {via ? (
+            <span style={{ color: palette.textHeading, fontWeight: typography.fontWeightMedium }}>{site}</span>
+          ) : site}
           {published && (
             <>
               <span aria-hidden> · </span>
               <time dateTime={published.dateTime}>{published.label}</time>
             </>
           )}
+          {via && <span style={{ fontSize: "0.85em", whiteSpace: "nowrap" }}> · via {via}</span>}
         </span>
       </header>
       {/* Keep the card's height independent of when its metadata and images arrive. */}

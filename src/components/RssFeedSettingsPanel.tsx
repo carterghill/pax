@@ -2,6 +2,7 @@ import { useEffect, useState, type CSSProperties } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { useTheme } from "../theme/ThemeContext";
 import type { FeedSettings } from "./RssFeedStatus";
+import RssFeedSearch from "./RssFeedSearch";
 
 interface SaveResult {
   settings: FeedSettings;
@@ -83,11 +84,17 @@ export default function RssFeedSettingsPanel({ roomId }: { roomId: string }) {
       {loading && <div role="status">Loading feed settings…</div>}
       {settings && !loading && (
         <>
-          <label style={{ display: "grid", gap: 6 }}>
-            Feed URL
-            <input type="url" value={url} onChange={(e) => { setUrl(e.target.value); setSaved(false); }}
-              required readOnly={!canEdit} style={inputStyle} />
-          </label>
+          <div>
+            <label style={{ display: "grid", gap: 6 }}>
+              Feed URL
+              <input type="url" value={url} onChange={(e) => { setUrl(e.target.value); setSaved(false); }}
+                required readOnly={!canEdit} style={inputStyle} />
+            </label>
+            {settings.canEdit && <RssFeedSearch key={roomId} disabled={!canEdit} onAdd={(feedUrl) => {
+              setUrl(feedUrl);
+              setSaved(false);
+            }} />}
+          </div>
           <label style={{ display: "grid", gap: 6 }}>
             Provider bot
             <input type="text" value={botUserId} onChange={(e) => { setBotUserId(e.target.value); setSaved(false); }}

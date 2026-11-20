@@ -33,6 +33,7 @@ pub mod room_settings;
 pub mod room_upgrades;
 pub mod rss;
 pub mod rss_preview;
+pub mod rss_search;
 pub mod space_order;
 pub mod tray_indicator;
 pub mod unread;

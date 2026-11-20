@@ -75,6 +75,10 @@ fn preview_url(raw: &str) -> Option<Url> {
     public_web_url(&url).then_some(url)
 }
 
+fn is_google_news(url: &Url) -> bool {
+    url.domain() == Some("news.google.com")
+}
+
 struct PublicResolver;
 
 impl dns::Resolve for PublicResolver {
@@ -122,7 +126,7 @@ impl Resource {
         match self {
             Self::Feed => "application/rss+xml, application/atom+xml, application/feed+json, application/xml, text/xml, application/json, */*;q=0.1",
             Self::Page => "text/html, application/xhtml+xml",
-            Self::Image => "image/png, image/jpeg, image/webp, image/avif, image/gif",
+            Self::Image => "image/png, image/jpeg, image/webp, image/avif, image/gif, image/x-icon, image/vnd.microsoft.icon",
         }
     }
 
@@ -140,7 +144,13 @@ impl Resource {
             Self::Page => matches!(content_type, "text/html" | "application/xhtml+xml" | ""),
             Self::Image => matches!(
                 content_type,
-                "image/png" | "image/jpeg" | "image/webp" | "image/avif" | "image/gif"
+                "image/png"
+                    | "image/jpeg"
+                    | "image/webp"
+                    | "image/avif"
+                    | "image/gif"
+                    | "image/x-icon"
+                    | "image/vnd.microsoft.icon"
             ),
         }
     }
@@ -231,6 +241,7 @@ pub async fn get_rss_article_preview(
     allow_page_fallback: bool,
 ) -> Option<ArticlePreview> {
     let article = preview_url(&article_url)?;
+    let google_news_link = is_google_news(&article);
     let feed = if let Some(url) = preview_url(&feed_url) {
         Some(fetch_feed(url).await)
     } else {
@@ -243,7 +254,15 @@ pub async fn get_rss_article_preview(
     if preview.is_none() && !allow_page_fallback {
         return None;
     }
-    if let Some((base, _, body)) = fetch(article, Resource::Page).await {
+    let page = fetch(article, Resource::Page).await.filter(|(base, _, _)| {
+        // The redirect can stop on a Google interstitial or a publisher homepage.
+        !google_news_link
+            || (base.path() != "/"
+                && !base
+                    .domain()
+                    .is_some_and(|host| host == "google.com" || host.ends_with(".google.com")))
+    });
+    if let Some((base, _, body)) = page {
         if preview.is_none() {
             preview = feed.and_then(|feed| feed.preview_for(&base));
         }
@@ -255,7 +274,7 @@ pub async fn get_rss_article_preview(
         let page = metadata::parse_article(&String::from_utf8_lossy(&body), &base, feed_author);
         preview.fill_from(page);
     }
-    preview
+    preview.map(ArticlePreview::with_publisher_icon)
 }
 
 #[tauri::command]

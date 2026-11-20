@@ -35,6 +35,7 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 
+use futures_util::{stream, StreamExt};
 use matrix_sdk::ruma::api::client::receipt::create_receipt::v3::ReceiptType;
 use matrix_sdk::ruma::events::receipt::ReceiptThread;
 use matrix_sdk::ruma::{EventId, OwnedEventId, OwnedRoomId};
@@ -45,6 +46,7 @@ use tokio::sync::Mutex;
 
 use crate::AppState;
 
+pub(crate) use super::rss::activity::UnreadCache as RssUnreadCache;
 use super::{fmt_error_chain, get_client, resolve_room};
 
 // ---------- Serialised payloads ----------
@@ -145,7 +147,7 @@ pub async fn get_room_unread_state(
         .get(room.room_id())
         .cloned();
     Ok(super::unavailable_messages::apply_pending(
-        RoomUnreadState::from_room_with_raw(&room, raw),
+        state.rss_unread_cache.snapshot(&room, raw).await,
         pending.as_ref(),
     ))
 }
@@ -159,18 +161,11 @@ pub async fn get_all_unread_states(
     let client = get_client(&state).await?;
     let raw_map = state.raw_unread_messages.lock().await.clone();
     let pending = state.pending_unavailable_reads.lock().await.clone();
-    let mut out = HashMap::new();
-    for room in client.joined_rooms() {
-        let raw = raw_map.get(room.room_id()).copied().unwrap_or(0);
-        out.insert(
-            room.room_id().to_string(),
-            super::unavailable_messages::apply_pending(
-                RoomUnreadState::from_room_with_raw(&room, raw),
-                pending.get(room.room_id()),
-            ),
-        );
-    }
-    Ok(out)
+    let snapshots = unread_snapshots(&client, &state.rss_unread_cache, &raw_map, &pending).await;
+    Ok(snapshots
+        .into_iter()
+        .map(|(id, snapshot)| (id.to_string(), snapshot))
+        .collect())
 }
 
 async fn apply_room_read_receipt(
@@ -202,7 +197,11 @@ async fn apply_room_read_receipt(
     // Publish the current local snapshot. The SDK/server notification counts
     // reconcile through sync. Explicit unavailable-message acknowledgements
     // additionally mask the old counts until their private receipt echoes.
-    let new_state = RoomUnreadState::from_room_with_raw(room, 0);
+    state
+        .rss_unread_cache
+        .invalidate([&room.room_id().to_owned()])
+        .await;
+    let new_state = state.rss_unread_cache.snapshot(room, 0).await;
     let payload = RoomUnreadChangedPayload {
         room_id: room.room_id().to_string(),
         state: new_state.clone(),
@@ -272,12 +271,13 @@ pub async fn set_room_marked_unread(
 /// `room-unread-changed` for each room whose values moved.  Called from the
 /// `start_sync` loop after each `sync_once` returns.
 ///
-/// The walk is a synchronous `RwLock` read per room (no IO, no `await` on the
-/// network), so even for hundreds of rooms this is sub-millisecond work.
+/// RSS rooms with changed unread activity use a cached view of the unread
+/// timeline to exclude feed-management traffic from the SDK/server totals.
 pub async fn emit_unread_snapshot_if_changed(
     client: &Client,
     cache: &UnreadStateCache,
     raw_unread: &RawUnreadMessageCounts,
+    rss_unread: &RssUnreadCache,
     pending_reads: &super::unavailable_messages::PendingUnavailableReads,
     app: &AppHandle,
 ) {
@@ -287,20 +287,7 @@ pub async fn emit_unread_snapshot_if_changed(
     let pending = pending_reads.lock().await.clone();
 
     // Snapshot current state first (no locks held across .emit()).
-    let snapshots: Vec<(OwnedRoomId, RoomUnreadState)> = client
-        .joined_rooms()
-        .into_iter()
-        .map(|r| {
-            let raw = raw_map.get(r.room_id()).copied().unwrap_or(0);
-            (
-                r.room_id().to_owned(),
-                super::unavailable_messages::apply_pending(
-                    RoomUnreadState::from_room_with_raw(&r, raw),
-                    pending.get(r.room_id()),
-                ),
-            )
-        })
-        .collect();
+    let snapshots = unread_snapshots(client, rss_unread, &raw_map, &pending).await;
 
     // Also detect rooms that have been left since last pass: emit a zero state so
     // the UI can drop them cleanly.
@@ -340,9 +327,29 @@ pub async fn emit_unread_snapshot_if_changed(
     }
 }
 
+async fn unread_snapshots(
+    client: &Client,
+    rss_unread: &RssUnreadCache,
+    raw_map: &HashMap<OwnedRoomId, u64>,
+    pending: &HashMap<OwnedRoomId, super::unavailable_messages::PendingRead>,
+) -> Vec<(OwnedRoomId, RoomUnreadState)> {
+    stream::iter(client.joined_rooms().into_iter().map(|room| async move {
+        let raw = raw_map.get(room.room_id()).copied().unwrap_or(0);
+        let snapshot = rss_unread.snapshot(&room, raw).await;
+        (
+            room.room_id().to_owned(),
+            super::unavailable_messages::apply_pending(snapshot, pending.get(room.room_id())),
+        )
+    }))
+    .buffer_unordered(24)
+    .collect()
+    .await
+}
+
 /// Clear unread caches on logout / account switch so the next login starts fresh.
 pub async fn clear_unread_cache(state: &Arc<AppState>) {
     state.unread_cache.lock().await.clear();
+    state.rss_unread_cache.clear().await;
     state.raw_unread_messages.lock().await.clear();
     state.pending_unavailable_reads.lock().await.clear();
 }

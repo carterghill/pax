@@ -7,6 +7,7 @@ const article = {
   title: "A headline",
   description: null,
   siteName: null,
+  via: null,
   image: null,
   authorImage: null,
   siteImage: null,
