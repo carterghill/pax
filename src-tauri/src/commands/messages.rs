@@ -2349,6 +2349,12 @@ pub async fn start_sync(
                 }
             };
 
+            // Invites arrive as stripped state, outside the full membership
+            // event handler that normally invalidates the room list.
+            if !response.rooms.invited.is_empty() {
+                let _ = app.emit("rooms-changed", ());
+            }
+
             rss_unread_cache.invalidate(response.rooms.joined.iter()
                 .filter(|(_, update)| !update.timeline.events.is_empty() || update.ephemeral.iter().any(|event| {
                     event.get_field::<String>("type").ok().flatten().as_deref() == Some("m.receipt")
