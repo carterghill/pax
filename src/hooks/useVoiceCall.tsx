@@ -25,6 +25,9 @@ export interface VoiceParticipant {
  * Matches voice::VoiceStateEvent on the Rust side.
  */
 interface VoiceStateEvent {
+  roomId: string;
+  attemptId: string;
+  isReconnecting: boolean;
   connectedRoomId: string | null;
   isConnecting: boolean;
   isMicEnabled: boolean;
@@ -37,6 +40,9 @@ interface VoiceStateEvent {
 }
 
 export interface VoiceCallState {
+  targetRoomId: string | null;
+  isReconnecting: boolean;
+  endedRoomId: string | null;
   connectedRoomId: string | null;
   isConnecting: boolean;
   isMicEnabled: boolean;
@@ -88,8 +94,11 @@ export type VoiceCall = VoiceCallState & VoiceCallActions & {
   localParticipant: VoiceParticipant | null;
 };
 
-export function useVoiceCall() {
+export function useVoiceCall(isVoiceChannel: (roomId: string) => boolean) {
   const [state, setState] = useState<VoiceCallState>({
+    targetRoomId: null,
+    isReconnecting: false,
+    endedRoomId: null,
     connectedRoomId: null,
     isConnecting: false,
     isMicEnabled: false,
@@ -102,270 +111,190 @@ export function useVoiceCall() {
     disconnectingFromRoomId: null,
   });
 
+  const targetRoomIdRef = useRef<string | null>(null);
   const connectedRoomIdRef = useRef<string | null>(null);
-  connectedRoomIdRef.current = state.connectedRoomId;
-  const isConnectingRef = useRef(false);
+  const revision = useRef(0);
+  const transportAttempt = useRef<string | null>(null);
+  const pendingConnect = useRef<Promise<boolean> | null>(null);
+  const pendingDisconnect = useRef<Promise<void> | null>(null);
   const activeScreenShare = useRef<{
     roomId: string;
     source: Parameters<VoiceCallActions["startScreenShare"]>;
   } | null>(null);
-  /** Tracks which room is being auto-rejoined (null = none). Set to null
-   *  by disconnect() to cancel an in-progress rejoin attempt. */
-  const rejoinRoomRef = useRef<string | null>(null);
+  const previousParticipants = useRef<Set<string>>(new Set());
+  const checkVoiceChannel = useRef(isVoiceChannel);
+  checkVoiceChannel.current = isVoiceChannel;
 
-  const wasConnectedRef = useRef(false);
-  const prevParticipantIdsRef = useRef<Set<string>>(new Set());
+  const disconnect = useCallback((expectedRoomId?: string) => {
+    const target = targetRoomIdRef.current;
+    const roomId = expectedRoomId ?? target;
+    if (!roomId) return Promise.resolve();
+    if (target && target !== roomId) return Promise.resolve();
+    if (pendingDisconnect.current) return pendingDisconnect.current;
 
-  // Listen for voice state events from the Rust backend
-  useEffect(() => {
-    let unlisten: UnlistenFn | null = null;
-    listen<VoiceStateEvent>("voice-state-changed", (event) => {
-      const ev = event.payload;
-      setState((prev) => ({
-        connectedRoomId: ev.connectedRoomId,
-        isConnecting: ev.isConnecting,
-        isMicEnabled: ev.isMicEnabled,
-        isDeafened: ev.isDeafened ?? false,
-        isNoiseSuppressed: ev.isNoiseSuppressed,
-        screenSharingOwners: ev.screenSharingOwners ?? [],
-        isLocalScreenSharing: ev.isLocalScreenSharing ?? false,
-        error: ev.error,
-        participants: ev.participants,
-        // Clear disconnecting when we connect to a room; otherwise preserve
-        disconnectingFromRoomId: ev.connectedRoomId ? null : prev.disconnectingFromRoomId,
-      }));
-
-      const isNowConnected =
-        ev.connectedRoomId !== null && !ev.isConnecting && !ev.error;
-
-      // Local user just finished connecting
-      if (isNowConnected && !wasConnectedRef.current) {
-        playSound("ui/pop_open");
-      }
-
-      // Detect remote participant joins/leaves by diffing identities
-      if (isNowConnected) {
-        const currentIds = new Set(ev.participants.filter(p => !p.isLocal).map(p => p.identity));
-        const prevIds = prevParticipantIdsRef.current;
-        for (const id of currentIds) {
-          if (!prevIds.has(id)) playSound("ui/pop_open");
-        }
-        for (const id of prevIds) {
-          if (!currentIds.has(id)) playSound("ui/pop_close");
-        }
-        prevParticipantIdsRef.current = currentIds;
-      } else {
-        prevParticipantIdsRef.current = new Set();
-      }
-
-      wasConnectedRef.current = isNowConnected;
-    }).then((fn) => {
-      unlisten = fn;
-    });
-    return () => {
-      if (unlisten) unlisten();
-    };
-  }, []);
-
-  // Explicit removal/session replacement must stop rejoin attempts and clean
-  // up this device's membership, without disturbing the device taking over.
-  useEffect(() => {
-    let cancelled = false;
-    const unlisteners: UnlistenFn[] = [];
-    const timers: ReturnType<typeof setTimeout>[] = [];
-    function endSession(roomId: string, message: string) {
-      if (cancelled || (connectedRoomIdRef.current !== roomId && rejoinRoomRef.current !== roomId)) return;
-      rejoinRoomRef.current = null;
-      isConnectingRef.current = false;
-      connectedRoomIdRef.current = null;
-      playSound("ui/pop_close");
-      setState((prev) => ({
-        ...prev,
-        connectedRoomId: null,
-        isConnecting: false,
-        isMicEnabled: false,
-        isDeafened: false,
-        isNoiseSuppressed: false,
-        screenSharingOwners: [],
-        isLocalScreenSharing: false,
-        error: message,
-        participants: [],
-        disconnectingFromRoomId: roomId,
-      }));
-      invoke("voice_disconnect", { roomId }).catch((error) => {
-        console.error("Failed to clean up ended voice session:", error);
-      });
-      timers.push(setTimeout(() => {
-        setState((prev) => prev.disconnectingFromRoomId === roomId
-          ? { ...prev, disconnectingFromRoomId: null } : prev);
-      }, 4000));
-    }
-    void Promise.allSettled([
-      listen<string>("voice-force-disconnect", ({ payload }) => {
-        endSession(payload, "Disconnected: call membership expired");
-      }),
-      listen<{ roomId: string; message: string }>("voice-session-ended", ({ payload }) => {
-        endSession(payload.roomId, payload.message);
-      }),
-    ]).then((results) => {
-      for (const result of results) {
-        if (result.status === "fulfilled") {
-          if (cancelled) result.value(); else unlisteners.push(result.value);
-        } else console.error("Failed to subscribe to voice session events:", result.reason);
-      }
-    });
-    return () => {
-      cancelled = true;
-      unlisteners.forEach((stop) => stop());
-      timers.forEach(clearTimeout);
-    };
-  }, []);
-
-  // Auto-rejoin when LiveKit kicks us unexpectedly (JWT expiry, server restart, etc.).
-  // This event only fires on unexpected disconnects — manual disconnect takes the
-  // shutdown_rx branch in the Rust event loop and never emits this event.
-  useEffect(() => {
-    let unlisten: UnlistenFn | null = null;
-    listen<string>("voice-livekit-kicked", async (event) => {
-      const roomId = event.payload;
-      console.warn(
-        `[Pax] LiveKit kicked from ${roomId} — auto-rejoining`
-      );
-      rejoinRoomRef.current = roomId;
-
-      const MAX_RETRIES = 5;
-      for (let attempt = 0; attempt < MAX_RETRIES; attempt++) {
-        // Cancelled by disconnect() or connect() to a different room
-        if (rejoinRoomRef.current !== roomId) return;
-
-        const delay = Math.min(2000 * Math.pow(2, attempt), 30000);
-        setState((prev) => ({
-          ...prev,
-          connectedRoomId: roomId,
-          isConnecting: true,
-          error: null,
-        }));
-
-        await new Promise((r) => setTimeout(r, delay));
-        if (rejoinRoomRef.current !== roomId) return;
-
-        try {
-          isConnectingRef.current = true;
-          const { inputDeviceId, outputDeviceId } = getStoredAudioDevicePreferences();
-          await invoke("voice_connect", { roomId, inputDeviceId, outputDeviceId, replaceOtherSessions: false });
-          isConnectingRef.current = false;
-          console.log(
-            `[Pax] Auto-rejoin succeeded on attempt ${attempt + 1}`
-          );
-          rejoinRoomRef.current = null;
-          return;
-        } catch (e) {
-          isConnectingRef.current = false;
-          console.error(
-            `[Pax] Auto-rejoin attempt ${attempt + 1}/${MAX_RETRIES} failed:`,
-            e
-          );
-        }
-      }
-
-      // All retries exhausted
-      rejoinRoomRef.current = null;
-      playSound("ui/pop_close");
-      setState((prev) => ({
-        ...prev,
-        connectedRoomId: null,
-        isConnecting: false,
-        error: "Lost connection to voice chat",
-        participants: [],
-      }));
-    }).then((fn) => {
-      unlisten = fn;
-    });
-    return () => {
-      rejoinRoomRef.current = null;
-      if (unlisten) unlisten();
-    };
-  }, []);
-
-  const connect = useCallback(async (
-    roomId: string,
-    options?: { forceReconnect?: boolean; replaceOtherSessions?: boolean },
-  ) => {
-    const forceReconnect = options?.forceReconnect ?? false;
-    if (isConnectingRef.current) return false;
-    if (!forceReconnect && connectedRoomIdRef.current === roomId) return true;
-    activeScreenShare.current = null;
-    // Cancel any in-progress auto-rejoin (e.g. user connects to a different room)
-    rejoinRoomRef.current = null;
-    isConnectingRef.current = true;
-    connectedRoomIdRef.current = roomId;
-    const { inputDeviceId, outputDeviceId } = getStoredAudioDevicePreferences();
-    setState((prev) => ({
-      ...prev,
-      isConnecting: true,
-      error: null,
-      connectedRoomId: roomId,
-    }));
-    try {
-      await invoke("voice_connect", {
-        roomId, inputDeviceId, outputDeviceId, replaceOtherSessions: options?.replaceOtherSessions,
-      });
-      isConnectingRef.current = false;
-      // State will be updated via the event listener
-      return true;
-    } catch (e) {
-      isConnectingRef.current = false;
-      connectedRoomIdRef.current = null;
-      setState((prev) => ({
-        ...prev,
-        connectedRoomId: null,
-        isConnecting: false,
-        isMicEnabled: false,
-        isDeafened: false,
-        isNoiseSuppressed: false,
-        screenSharingOwners: [],
-        isLocalScreenSharing: false,
-        error: String(e),
-        participants: [],
-      }));
-      return false;
-    }
-  }, []);
-
-  const disconnect = useCallback(async (expectedRoomId?: string) => {
-    const roomId = connectedRoomIdRef.current;
-    if (!roomId || (expectedRoomId && roomId !== expectedRoomId)) return;
+    revision.current++;
+    transportAttempt.current = null;
+    targetRoomIdRef.current = null;
     connectedRoomIdRef.current = null;
     activeScreenShare.current = null;
-    // Cancel any in-progress auto-rejoin
-    rejoinRoomRef.current = null;
-    playSound("ui/pop_close");
-    // Optimistic update: clear UI immediately so disconnect feels instant
+    previousParticipants.current.clear();
+    if (target) playSound("ui/pop_close");
     setState((prev) => ({
       ...prev,
+      targetRoomId: null,
       connectedRoomId: null,
       isConnecting: false,
+      isReconnecting: false,
       isMicEnabled: false,
       isDeafened: false,
-      isNoiseSuppressed: false,
       screenSharingOwners: [],
       isLocalScreenSharing: false,
       error: null,
       participants: [],
       disconnectingFromRoomId: roomId,
     }));
-    await invoke("voice_disconnect", { roomId }).catch((e) => {
-      console.error("Failed to disconnect:", e);
+    const stopping = (pendingConnect.current ?? Promise.resolve()).then(() =>
+      invoke<void>("voice_disconnect", { roomId }),
+    ).catch((error) => {
+      console.error("Failed to disconnect voice:", error);
+    }).finally(() => {
+      pendingDisconnect.current = null;
+      setState((prev) => ({ ...prev, disconnectingFromRoomId: null }));
     });
-    // Clear disconnecting state after Matrix has had time to sync
-    setTimeout(() => {
-      setState((prev) =>
-        prev.disconnectingFromRoomId === roomId
-          ? { ...prev, disconnectingFromRoomId: null }
-          : prev
-      );
-    }, 4000);
+    pendingDisconnect.current = stopping;
+    return stopping;
   }, []);
+
+  const connectAttempt = useCallback(async (roomId: string, attempt: number, replaceOtherSessions: boolean) => {
+    if (pendingDisconnect.current) await pendingDisconnect.current;
+    if (revision.current !== attempt) return false;
+    const { inputDeviceId, outputDeviceId } = getStoredAudioDevicePreferences();
+    const attemptId = crypto.randomUUID();
+    transportAttempt.current = attemptId;
+    try {
+      await invoke("voice_connect", { roomId, attemptId, inputDeviceId, outputDeviceId, replaceOtherSessions });
+      return revision.current === attempt && targetRoomIdRef.current === roomId;
+    } catch (error) {
+      if (revision.current === attempt) {
+        connectedRoomIdRef.current = null;
+        setState((prev) => ({
+          ...prev, connectedRoomId: null, participants: [], isMicEnabled: false,
+          isDeafened: false, isLocalScreenSharing: false, screenSharingOwners: [],
+          error: String(error),
+        }));
+      }
+      return false;
+    }
+  }, []);
+
+  const connect = useCallback<VoiceCallActions["connect"]>((roomId, options) => {
+    if (pendingConnect.current && !pendingDisconnect.current) return Promise.resolve(false);
+    if (!options?.forceReconnect && connectedRoomIdRef.current === roomId && !pendingDisconnect.current) {
+      return Promise.resolve(true);
+    }
+    const wasInRoom = targetRoomIdRef.current === roomId;
+    const attempt = ++revision.current;
+    transportAttempt.current = null;
+    targetRoomIdRef.current = roomId;
+    connectedRoomIdRef.current = null;
+    activeScreenShare.current = null;
+    previousParticipants.current.clear();
+    setState((prev) => ({
+      ...prev, targetRoomId: roomId, connectedRoomId: null, isConnecting: true,
+      isReconnecting: wasInRoom || !!options?.forceReconnect, endedRoomId: null,
+      error: null, participants: [], screenSharingOwners: [], isLocalScreenSharing: false,
+      disconnectingFromRoomId: null,
+    }));
+    const joining = connectAttempt(roomId, attempt, options?.replaceOtherSessions ?? !wasInRoom)
+      .then((joined) => {
+        if (!joined && revision.current === attempt) {
+          setState((prev) => ({ ...prev, isConnecting: false, isReconnecting: false }));
+        }
+        return joined;
+      }).finally(() => {
+        if (pendingConnect.current === joining) pendingConnect.current = null;
+      });
+    pendingConnect.current = joining;
+    return joining;
+  }, [connectAttempt]);
+
+  useEffect(() => {
+    let disposed = false;
+    const unlisteners: UnlistenFn[] = [];
+    void Promise.allSettled([
+      listen<VoiceStateEvent>("voice-state-changed", ({ payload: event }) => {
+        if (disposed || targetRoomIdRef.current !== event.roomId || transportAttempt.current !== event.attemptId) return;
+        const connected = event.connectedRoomId !== null && !event.isConnecting;
+        const wasConnected = connectedRoomIdRef.current === event.roomId;
+        connectedRoomIdRef.current = connected ? event.roomId : null;
+        setState((prev) => ({
+          ...prev,
+          connectedRoomId: connected ? event.roomId : null,
+          isConnecting: event.isConnecting || (!!event.error && prev.isReconnecting),
+          isReconnecting: connected ? false : event.isReconnecting || prev.isReconnecting,
+          isMicEnabled: connected && event.isMicEnabled,
+          isDeafened: connected && (event.isDeafened ?? false),
+          isNoiseSuppressed: event.isNoiseSuppressed,
+          screenSharingOwners: connected ? event.screenSharingOwners : [],
+          isLocalScreenSharing: connected && event.isLocalScreenSharing,
+          error: event.error,
+          participants: connected ? event.participants : [],
+        }));
+
+        if (!connected) return;
+        const ids = new Set(event.participants.filter((p) => !p.isLocal).map((p) => p.identity));
+        if (!wasConnected && previousParticipants.current.size === 0) playSound("ui/pop_open");
+        for (const id of ids) {
+          if (!previousParticipants.current.has(id)) playSound("ui/pop_open");
+        }
+        if (wasConnected && checkVoiceChannel.current(event.roomId)) {
+          for (const id of previousParticipants.current) {
+            if (!ids.has(id)) playSound("ui/pop_close");
+          }
+        }
+        previousParticipants.current = ids;
+      }),
+      listen<{ roomId: string; attemptId: string; message: string }>("voice-session-ended", ({ payload }) => {
+        if (disposed || targetRoomIdRef.current !== payload.roomId || transportAttempt.current !== payload.attemptId) return;
+        void disconnect(payload.roomId);
+        setState((prev) => ({ ...prev, endedRoomId: payload.roomId, error: payload.message }));
+      }),
+      listen<{ roomId: string; attemptId: string }>("voice-livekit-kicked", async ({ payload: { roomId, attemptId } }) => {
+        if (disposed || targetRoomIdRef.current !== roomId || transportAttempt.current !== attemptId) return;
+        const attempt = ++revision.current;
+        connectedRoomIdRef.current = null;
+        activeScreenShare.current = null;
+        setState((prev) => ({
+          ...prev, connectedRoomId: null, isConnecting: true, isReconnecting: true,
+          participants: [], screenSharingOwners: [], isLocalScreenSharing: false,
+        }));
+
+        for (const delay of [2000, 4000, 8000, 16000, 30000]) {
+          await new Promise((resolve) => setTimeout(resolve, delay));
+          if (disposed || revision.current !== attempt) return;
+          const joining = connectAttempt(roomId, attempt, false);
+          pendingConnect.current = joining;
+          const joined = await joining;
+          if (pendingConnect.current === joining) pendingConnect.current = null;
+          if (disposed || revision.current !== attempt || joined) return;
+        }
+        setState((prev) => ({
+          ...prev, isConnecting: false, isReconnecting: false, error: "Lost connection to voice chat",
+        }));
+      }),
+    ]).then((results) => {
+      for (const result of results) {
+        if (result.status === "fulfilled") {
+          if (disposed) result.value();
+          else unlisteners.push(result.value);
+        } else console.error("Failed to subscribe to voice events:", result.reason);
+      }
+    });
+    return () => {
+      disposed = true;
+      unlisteners.forEach((stop) => stop());
+    };
+  }, [connectAttempt, disconnect]);
 
   const toggleMic = useCallback(async () => {
     try {
@@ -534,7 +463,7 @@ export function useVoiceCall() {
   // Cleanup on unmount
   useEffect(() => {
     return () => {
-      const roomId = connectedRoomIdRef.current;
+      const roomId = targetRoomIdRef.current;
       if (roomId) {
         invoke("voice_disconnect", { roomId }).catch(() => {});
       }

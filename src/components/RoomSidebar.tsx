@@ -12,7 +12,6 @@ import {
   MicOff,
   Headphones,
   Slash,
-  Loader2,
   UserPlus,
   Plus,
   ChevronRight,
@@ -22,7 +21,9 @@ import {
 import { Room, VoiceParticipant } from "../types/matrix";
 import { useTheme } from "../theme/ThemeContext";
 import StatusDropdown from "./StatusDropdown";
-import ActiveCallBar from "./ActiveCallBar";
+import ActiveCallBar, { type ActiveCallBarProps } from "./ActiveCallBar";
+import VoiceLinkStatus from "./VoiceLinkStatus";
+import type { VoiceParticipantState } from "../hooks/useVoiceParticipantStates";
 import VolumeContextMenu from "./VolumeContextMenu";
 import RoomContextMenu from "./RoomContextMenu";
 import RoomSettingsDialog from "./RoomSettingsDialog";
@@ -42,7 +43,6 @@ import {
   isPendingDmRoomId,
   normalizeUserId,
   parsePendingDmPeerUserId,
-  voiceStateLookupKeysForParticipant,
 } from "../utils/matrix";
 import {
   buildReorderPlan,
@@ -51,20 +51,6 @@ import {
 
 /** DM peer circle in the channel list (slightly larger than default 16px icons). */
 const DM_SIDEBAR_AVATAR_PX = 28;
-
-function resolveVoiceStateForRoom(
-  participant: VoiceParticipant,
-  roomStateMap: Record<
-    string,
-    { isMuted: boolean; isDeafened: boolean; isSpeaking: boolean }
-  >
-) {
-  for (const key of voiceStateLookupKeysForParticipant(participant)) {
-    const state = roomStateMap[key];
-    if (state) return state;
-  }
-  return undefined;
-}
 
 /**
  * Wrapper that adds drag + drop-indicator visuals to any row (room or
@@ -206,17 +192,15 @@ interface RoomSidebarProps {
   userAvatarUrl: string | null;
   voiceParticipants: Record<string, VoiceParticipant[]>;
   connectedVoiceRoomId: string | null;
-  isVoiceConnecting: boolean;
-  disconnectingFromRoomId: string | null;
   screenSharingOwners: string[];
   /** Per Matrix voice room id: lookup keys → mute/deafen/speaking (LiveKit snapshot + in-call overlay). */
   voiceParticipantStatesByRoom: Record<
     string,
-    Record<string, { isMuted: boolean; isDeafened: boolean; isSpeaking: boolean }>
+    Record<string, VoiceParticipantState>
   >;
   onSetParticipantVolume: (identity: string, volume: number, source: string) => void;
   audioControls: AudioControls;
-  onDisconnectVoice: () => void;
+  callBar?: ActiveCallBarProps;
   /** Called after successfully leaving a room from the context menu */
   onLeftRoom?: (roomId: string) => void;
   /** Active space (for moderation scope in room settings when the room is in its tree). */
@@ -289,7 +273,7 @@ function VoiceParticipantRow({
   isMuted,
   isDeafened,
   isSpeaking,
-  isConnecting,
+  status,
   onContextMenu,
 }: {
   participant: VoiceParticipant;
@@ -298,7 +282,7 @@ function VoiceParticipantRow({
   isMuted: boolean;
   isDeafened: boolean;
   isSpeaking: boolean;
-  isConnecting: boolean;
+  status?: VoiceParticipantState["status"];
   onContextMenu: (e: React.MouseEvent) => void;
 }) {
   const { palette, spacing, typography } = useTheme();
@@ -351,13 +335,7 @@ function VoiceParticipantRow({
         gap: spacing.unit,
         flexShrink: 0,
       }}>
-        {isConnecting && (
-          <Loader2
-            size={12}
-            color={palette.textSecondary}
-            style={{ animation: "spin 1s linear infinite" }}
-          />
-        )}
+        <VoiceLinkStatus status={status} />
         {isSharingScreen && <Monitor size={12} color="#23a55a" />}
         {isMuted && <MicOff size={12} color={palette.textSecondary} />}
         {isDeafened && (
@@ -379,8 +357,6 @@ function ChannelBlock({
   onRoomContextMenu,
   voiceParticipants,
   connectedVoiceRoomId,
-  isVoiceConnecting,
-  disconnectingFromRoomId,
   screenSharingOwners,
   voiceParticipantStatesByRoom,
   onParticipantContextMenu,
@@ -400,12 +376,10 @@ function ChannelBlock({
   onRoomContextMenu: (roomId: string, roomName: string, e: React.MouseEvent) => void;
   voiceParticipants: Record<string, VoiceParticipant[]>;
   connectedVoiceRoomId: string | null;
-  isVoiceConnecting: boolean;
-  disconnectingFromRoomId: string | null;
   screenSharingOwners: string[];
   voiceParticipantStatesByRoom: Record<
     string,
-    Record<string, { isMuted: boolean; isDeafened: boolean; isSpeaking: boolean }>
+    Record<string, VoiceParticipantState>
   >;
   onParticipantContextMenu: (
     e: React.MouseEvent,
@@ -587,18 +561,7 @@ function ChannelBlock({
       {isVoice && participants.length > 0 && (
         <div style={{ paddingBottom: spacing.unit }}>
           {participants.map((p) => {
-            const state = resolveVoiceStateForRoom(
-              p,
-              voiceParticipantStatesByRoom[room.id] ?? {}
-            );
-            const isLocalConnecting =
-              isConnectedHere && p.userId === userId && isVoiceConnecting;
-            const isLocalDisconnecting =
-              room.id === disconnectingFromRoomId && p.userId === userId;
-            const isRemoteConnecting =
-              isConnectedHere && !isVoiceConnecting && p.userId !== userId && !state;
-            const isParticipantConnecting =
-              isLocalConnecting || isLocalDisconnecting || isRemoteConnecting;
+            const state = voiceParticipantStatesByRoom[room.id]?.[p.userId];
             return (
               <VoiceParticipantRow
                 key={p.userId}
@@ -608,7 +571,7 @@ function ChannelBlock({
                 isMuted={!!state?.isMuted}
                 isDeafened={!!state?.isDeafened}
                 isSpeaking={!!state?.isSpeaking}
-                isConnecting={isParticipantConnecting}
+                status={state?.status}
                 onContextMenu={(e) => {
                   onParticipantContextMenu(e, p.userId, p.displayName ?? p.userId);
                 }}
@@ -694,13 +657,11 @@ export default function RoomSidebar({
   userAvatarUrl,
   voiceParticipants,
   connectedVoiceRoomId,
-  isVoiceConnecting,
-  disconnectingFromRoomId,
   screenSharingOwners,
   voiceParticipantStatesByRoom,
   onSetParticipantVolume,
   audioControls,
-  onDisconnectVoice,
+  callBar,
   onLeftRoom,
   activeSpaceId,
   roomsBySpace,
@@ -1718,8 +1679,6 @@ export default function RoomSidebar({
                           }}
                           voiceParticipants={voiceParticipants}
                           connectedVoiceRoomId={connectedVoiceRoomId}
-                          isVoiceConnecting={isVoiceConnecting}
-                          disconnectingFromRoomId={disconnectingFromRoomId}
                           screenSharingOwners={screenSharingOwners}
                           voiceParticipantStatesByRoom={voiceParticipantStatesByRoom}
                           onParticipantContextMenu={(e, identity, displayName) => {
@@ -1792,8 +1751,6 @@ export default function RoomSidebar({
                 }}
                 voiceParticipants={voiceParticipants}
                 connectedVoiceRoomId={connectedVoiceRoomId}
-                isVoiceConnecting={isVoiceConnecting}
-                disconnectingFromRoomId={disconnectingFromRoomId}
                 screenSharingOwners={screenSharingOwners}
                 voiceParticipantStatesByRoom={voiceParticipantStatesByRoom}
                 onParticipantContextMenu={(e, identity, displayName) => {
@@ -1828,14 +1785,7 @@ export default function RoomSidebar({
 
       {/* Active call + user status at bottom */}
       <div style={{ flexShrink: 0 }}>
-        {(connectedVoiceRoomId || disconnectingFromRoomId) && (
-          <ActiveCallBar
-            roomName={getRoom(connectedVoiceRoomId ?? disconnectingFromRoomId!)?.name ?? "Voice Channel"}
-            isConnecting={isVoiceConnecting}
-            isDisconnecting={disconnectingFromRoomId !== null}
-            onDisconnect={onDisconnectVoice}
-          />
-        )}
+        {callBar && <ActiveCallBar {...callBar} />}
         <StatusDropdown
           displayName={displayName}
           avatarUrl={userAvatarUrl}

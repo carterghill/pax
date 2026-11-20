@@ -3,7 +3,11 @@ import { compareByDisplayThenKey } from "../utils/matrix.ts";
 
 type MatrixMap = Record<string, VoiceParticipant[]>;
 type LivekitMap = Record<string, LivekitVoiceParticipantInfo[]>;
-export type VoicePresenceSnapshot = { participantsByRoom: MatrixMap; livekitByRoom: LivekitMap };
+export type VoicePresenceSnapshot = {
+  participantsByRoom: MatrixMap;
+  livekitByRoom: LivekitMap;
+  livekitFreshByRoom: Record<string, boolean>;
+};
 type Options = {
   loadMatrix: (roomIds?: string[]) => Promise<VoiceMembershipSnapshot>;
   loadLivekit: (roomIds: string[]) => Promise<LivekitVoiceSnapshot>;
@@ -29,7 +33,7 @@ const sameMap = <T>(a: Record<string, T>, b: Record<string, T>) => Object.keys(a
  * one request in flight, so a slow SFU cannot hold up local Matrix changes. */
 export class VoicePresenceStore {
   private options: Options;
-  private snapshot: VoicePresenceSnapshot = { participantsByRoom: {}, livekitByRoom: {} };
+  private snapshot: VoicePresenceSnapshot = { participantsByRoom: {}, livekitByRoom: {}, livekitFreshByRoom: {} };
   private listeners = new Set<() => void>();
   private active = false;
   private epoch = 0;
@@ -45,6 +49,7 @@ export class VoicePresenceStore {
   private livekitDue = new Map<string, number>();
   private livekitRevision = new Map<string, number>();
   private livekitFailures = new Map<string, number>();
+  private livekitExpires = new Map<string, number>();
   private scopes = new Map<symbol, Set<string>>();
   private demanded = new Set<string>();
   private joined: Set<string> | null = null;
@@ -53,13 +58,15 @@ export class VoicePresenceStore {
   constructor(options: Options) { this.options = options; }
   getSnapshot = () => this.snapshot;
   subscribe = (listener: () => void) => { this.listeners.add(listener); return () => { this.listeners.delete(listener); }; };
-  private publish(matrix: MatrixMap, livekit = this.snapshot.livekitByRoom) {
+  private publish(matrix: MatrixMap, livekit = this.snapshot.livekitByRoom, fresh = this.snapshot.livekitFreshByRoom) {
     const sameMemberships = sameMap(matrix, this.snapshot.participantsByRoom);
     const sameActivity = sameMap(livekit, this.snapshot.livekitByRoom);
-    if (sameMemberships && sameActivity) return;
+    const sameFreshness = sameMap(fresh, this.snapshot.livekitFreshByRoom);
+    if (sameMemberships && sameActivity && sameFreshness) return;
     this.snapshot = {
       participantsByRoom: sameMemberships ? this.snapshot.participantsByRoom : matrix,
       livekitByRoom: sameActivity ? this.snapshot.livekitByRoom : livekit,
+      livekitFreshByRoom: sameFreshness ? this.snapshot.livekitFreshByRoom : fresh,
     };
     for (const listener of this.listeners) listener();
   }
@@ -98,6 +105,7 @@ export class VoicePresenceStore {
     if (roomId === this.connectedRoom) return;
     const changed = [this.connectedRoom, roomId].filter((id): id is string => id !== null);
     this.connectedRoom = roomId;
+    this.expireLivekit(changed);
     this.invalidateMatrix(changed);
     this.invalidateLivekit(changed);
   }
@@ -111,6 +119,7 @@ export class VoicePresenceStore {
 
   private updateDemand() {
     const next = new Set([...this.scopes.values()].flatMap((ids) => [...ids]));
+    this.expireLivekit([...this.demanded].filter((id) => !next.has(id)));
     for (const id of next) if (!this.demanded.has(id)) {
       this.livekitRevision.set(id, (this.livekitRevision.get(id) ?? 0) + 1);
       this.livekitDue.set(id, 0);
@@ -124,6 +133,16 @@ export class VoicePresenceStore {
     this.schedule();
   }
 
+  private expireLivekit(ids: string[]) {
+    if (!ids.length) return;
+    const fresh = { ...this.snapshot.livekitFreshByRoom };
+    for (const id of ids) {
+      delete fresh[id];
+      this.livekitExpires.delete(id);
+    }
+    this.publish(this.snapshot.participantsByRoom, this.snapshot.livekitByRoom, fresh);
+  }
+
   private retry(failures: number) { return Math.min((this.options.retryMs ?? 1000) * 2 ** Math.min(failures - 1, 5), 30_000); }
 
   private schedule() {
@@ -132,11 +151,13 @@ export class VoicePresenceStore {
     if (!this.active) return;
     const matrix = this.matrixFlight ? Infinity : Math.min(this.fullDue ?? Infinity, ...this.matrixDue.values());
     const livekit = this.livekitFlight ? Infinity : Math.min(...[...this.livekitDue].filter(([id]) => id !== this.connectedRoom).map(([, due]) => due));
-    const next = Math.min(matrix, livekit);
+    const expiry = Math.min(...this.livekitExpires.values());
+    const next = Math.min(matrix, livekit, expiry);
     if (!Number.isFinite(next)) return;
     this.timer = setTimeout(() => {
       this.timer = null;
       const now = Date.now();
+      this.expireLivekit([...this.livekitExpires].filter(([, at]) => at <= now).map(([id]) => id));
       if (!this.matrixFlight) {
         if (this.fullDue !== null && this.fullDue <= now) void this.refreshMatrix();
         else {
@@ -186,7 +207,9 @@ export class VoicePresenceStore {
         if (expiry !== undefined) this.matrixDue.set(id, Math.max(Date.now() + 25, expiry));
         this.options.onParticipants?.(matrix[id]);
       }
-      this.publish(matrix, livekit);
+      const fresh = Object.fromEntries(Object.entries(this.snapshot.livekitFreshByRoom).filter(([id]) => this.joined!.has(id)));
+      for (const id of this.livekitExpires.keys()) if (!this.joined.has(id)) this.livekitExpires.delete(id);
+      this.publish(matrix, livekit, fresh);
     } catch (error) {
       if (!this.active || epoch !== this.epoch || allRevision !== this.allRevision) return;
       if (!ids) this.fullDue = Date.now() + this.retry(++this.fullFailures);
@@ -226,26 +249,34 @@ export class VoicePresenceStore {
     unsupported = new Set<string>(), retryAfterMs = 60_000,
   ) {
     const livekit = { ...this.snapshot.livekitByRoom };
+    const fresh = { ...this.snapshot.livekitFreshByRoom };
     for (const id of ids) {
       if (!this.demanded.has(id) || revisions.get(id) !== this.livekitRevision.get(id)) continue;
       if (this.joined && !this.joined.has(id)) { this.livekitDue.delete(id); continue; }
       if (unsupported.has(id)) {
         delete livekit[id];
+        delete fresh[id];
+        this.livekitExpires.delete(id);
         this.livekitFailures.delete(id);
         this.livekitDue.set(id, Date.now() + Math.max(1000, retryAfterMs));
         continue;
       }
       const rows = incoming[id];
       if (rows === undefined) {
+        delete fresh[id];
+        this.livekitExpires.delete(id);
         const failures = (this.livekitFailures.get(id) ?? 0) + 1;
         this.livekitFailures.set(id, failures);
         this.livekitDue.set(id, Date.now() + this.retry(failures));
       } else {
+        fresh[id] = true;
+        const pollMs = this.options.pollMs ?? 5000;
+        this.livekitExpires.set(id, Date.now() + Math.max(15_000, pollMs + 5000));
         this.livekitFailures.delete(id);
         livekit[id] = stableRows(livekit[id], rows, (p) => p.identity, sameLivekit, (a, b) => a.identity.localeCompare(b.identity));
-        this.livekitDue.set(id, Date.now() + (this.options.pollMs ?? 5000));
+        this.livekitDue.set(id, Date.now() + pollMs);
       }
     }
-    this.publish(this.snapshot.participantsByRoom, livekit);
+    this.publish(this.snapshot.participantsByRoom, livekit, fresh);
   }
 }

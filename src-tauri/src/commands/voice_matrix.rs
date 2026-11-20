@@ -2,9 +2,8 @@ use std::sync::atomic::Ordering;
 use std::sync::Arc;
 use std::time::Duration;
 
-use futures_util::future::join_all;
 use matrix_sdk::ruma::events::StateEventType;
-use matrix_sdk::{Client, Room};
+use matrix_sdk::{Client, Room, RoomState};
 use tauri::{Emitter, State};
 
 use crate::types::{LivekitVoiceParticipantInfo, VoiceJoinResult, VoiceParticipant};
@@ -30,6 +29,16 @@ const HEARTBEAT_INTERVAL_SECS: u64 = 15;
 /// membership alive. Must be well under VOICE_CALL_MEMBER_EXPIRES_MS (4 h).
 /// 3.5 hours = 12 600 s, matching matrix-js-sdk's membershipExpiryTimeout pattern.
 const MEMBERSHIP_REFRESH_INTERVAL_SECS: u64 = 3 * 60 * 60 + 30 * 60;
+const FALLBACK_MEMBERSHIP_EXPIRES_MS: u64 = 2 * 60_000;
+const FALLBACK_MEMBERSHIP_REFRESH_SECS: u64 = 45;
+const MEMBERSHIP_REPAIR_SECS: u64 = 30;
+const CALL_MEMBER_EVENT: &str = "org.matrix.msc3401.call.member";
+
+fn call_member_key(client: &Client) -> Result<String, String> {
+    let user_id = client.user_id().ok_or("No user ID")?;
+    let device_id = client.device_id().ok_or("No device ID")?;
+    Ok(format!("_{user_id}_{device_id}_m.call"))
+}
 
 /// A scoped read also returns the joined voice-room catalog. Failed rooms are
 /// omitted so consumers can retain their last successful snapshot.
@@ -319,13 +328,7 @@ async fn send_delayed_leave_event(
     http: &reqwest::Client,
     room_id: &str,
 ) -> Result<String, DelayedLeaveError> {
-    let user_id = client
-        .user_id()
-        .ok_or_else(|| DelayedLeaveError::Other("No user ID".into()))?;
-    let device_id = client
-        .device_id()
-        .ok_or_else(|| DelayedLeaveError::Other("No device ID".into()))?;
-    let state_key = format!("_{}_{}_{}", user_id, device_id, "m.call");
+    let state_key = call_member_key(client).map_err(DelayedLeaveError::Other)?;
     let homeserver = client.homeserver().to_string();
     let access_token = client
         .access_token()
@@ -337,7 +340,7 @@ async fn send_delayed_leave_event(
         "{}/_matrix/client/v3/rooms/{}/state/{}/{}?org.matrix.msc4140.delay={}",
         homeserver.trim_end_matches('/'),
         urlencoding::encode(room_id),
-        urlencoding::encode("org.matrix.msc3401.call.member"),
+        urlencoding::encode(CALL_MEMBER_EVENT),
         urlencoding::encode(&state_key),
         DELAYED_LEAVE_DELAY_MS,
     );
@@ -463,8 +466,29 @@ async fn send_or_fallback_leave(
         }
     }
 
-    // Fallback: clear all memberships manually (same as before)
-    matrix_voice_clear_device_memberships_in_room(client, http, room_id, None).await
+    let key = call_member_key(client)?;
+    // The join may have reached the server before it appeared in local sync.
+    // Clear the event Pax writes directly, even when the cached roster is empty.
+    matrix_voice_leave_state_key(client, http, room_id, CALL_MEMBER_EVENT, &key).await?;
+    let room_id_parsed = matrix_sdk::ruma::RoomId::parse(room_id).map_err(|e| e.to_string())?;
+    if let Some(room) = client.get_room(&room_id_parsed) {
+        use matrix_sdk::deserialized_responses::RawAnySyncOrStrippedState;
+        if let Ok(Some(RawAnySyncOrStrippedState::Sync(raw))) = room
+            .get_state_event("m.call.member".into(), key.as_str())
+            .await
+        {
+            let sender = raw.get_field::<String>("sender").ok().flatten();
+            if own_device_membership(
+                sender.as_deref().unwrap_or_default(),
+                &key,
+                room.own_user_id().as_str(),
+                client.device_id().ok_or("No device ID")?.as_str(),
+            ) {
+                matrix_voice_leave_state_key(client, http, room_id, "m.call.member", &key).await?;
+            }
+        }
+    }
+    Ok(())
 }
 
 /// PUT `org.matrix.msc3401.call.member` for this device using a validated JWT service base URL.
@@ -473,15 +497,18 @@ async fn matrix_voice_put_call_member(
     http: &reqwest::Client,
     room_id: &str,
     livekit_service_url: &str,
+    expires_ms: u64,
 ) -> Result<(), String> {
     let room_id_parsed =
         matrix_sdk::ruma::RoomId::parse(room_id).map_err(|e| format!("Invalid room ID: {e}"))?;
-    let _room = client.get_room(&room_id_parsed).ok_or("Room not found")?;
-    let user_id = client.user_id().ok_or("No user ID")?;
+    client
+        .get_room(&room_id_parsed)
+        .filter(|room| room.state() == RoomState::Joined && !room.is_tombstoned())
+        .ok_or("You no longer have access to this voice call")?;
     let device_id = client.device_id().ok_or("No device ID")?;
 
     let homeserver = client.homeserver().to_string();
-    let state_key = format!("_{}_{}_{}", user_id, device_id, "m.call");
+    let state_key = call_member_key(client)?;
     let now_ms = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap_or_default()
@@ -491,7 +518,7 @@ async fn matrix_voice_put_call_member(
         "call_id": "",
         "created_ts": now_ms,
         "device_id": device_id.as_str(),
-        "expires": VOICE_CALL_MEMBER_EXPIRES_MS,
+        "expires": expires_ms,
         "foci_preferred": [{
             "livekit_alias": room_id,
             "livekit_service_url": livekit_service_url,
@@ -510,7 +537,7 @@ async fn matrix_voice_put_call_member(
         "{}/_matrix/client/v3/rooms/{}/state/{}/{}",
         homeserver.trim_end_matches('/'),
         urlencoding::encode(room_id),
-        urlencoding::encode("org.matrix.msc3401.call.member"),
+        urlencoding::encode(CALL_MEMBER_EVENT),
         urlencoding::encode(&state_key),
     );
 
@@ -534,10 +561,11 @@ async fn matrix_voice_put_call_member(
 
 /// Discover JWT service URL, validate via `/sfu/get`, then PUT `m.call.member` with the working URL.
 /// Returns the join payload and the validated JWT service base URL (for heartbeat refresh).
-pub(crate) async fn matrix_voice_join(
+async fn matrix_voice_join(
     client: &Client,
     http: &reqwest::Client,
     room_id: &str,
+    expires_ms: u64,
 ) -> Result<(VoiceJoinResult, String), String> {
     let room_id_parsed =
         matrix_sdk::ruma::RoomId::parse(room_id).map_err(|e| format!("Invalid room ID: {e}"))?;
@@ -592,7 +620,7 @@ pub(crate) async fn matrix_voice_join(
 
     let join = join?;
     let service_url = discovered.url;
-    matrix_voice_put_call_member(client, http, room_id, &service_url).await?;
+    matrix_voice_put_call_member(client, http, room_id, &service_url, expires_ms).await?;
 
     Ok((join, service_url))
 }
@@ -641,96 +669,24 @@ async fn matrix_voice_leave_state_key(
     Ok(())
 }
 
-/// Clear only this device's call.member state. A replaced device must not
-/// erase the membership of the device that just took over the call.
-/// If `skip_state_key` is Some(key), we do not send leave for that state_key (used when
-/// we're about to join so we don't leave-then-immediately-join the same key).
-async fn matrix_voice_clear_device_memberships_in_room(
-    client: &Client,
-    http: &reqwest::Client,
-    room_id: &str,
-    skip_state_key: Option<&str>,
-) -> Result<(), String> {
-    let user_id_str = client.user_id().ok_or("No user ID")?.to_string();
-    let device_id = client.device_id().ok_or("No device ID")?;
-
-    let room_id_parsed =
-        matrix_sdk::ruma::RoomId::parse(room_id).map_err(|e| format!("Invalid room ID: {e}"))?;
-    let room = match client.get_room(&room_id_parsed) {
-        Some(r) => r,
-        None => return Ok(()),
-    };
-
-    for event_type_str in &["org.matrix.msc3401.call.member", "m.call.member"] {
-        let event_type: StateEventType = event_type_str.to_string().into();
-        let events = match room.get_state_events(event_type).await {
-            Ok(evs) => evs,
-            Err(_) => continue,
-        };
-        for event in &events {
-            let json = match serde_json::to_value(event) {
-                Ok(v) => v,
-                Err(_) => continue,
-            };
-            let sender = json
-                .get("sender")
-                .and_then(|s| s.as_str())
-                .unwrap_or_default();
-            let state_key = json
-                .get("state_key")
-                .and_then(|s| s.as_str())
-                .unwrap_or_default();
-            if !own_device_membership(sender, state_key, &user_id_str, device_id.as_str()) {
-                continue;
-            }
-            if skip_state_key == Some(state_key) {
-                continue;
-            }
-            let _ = matrix_voice_leave_state_key(client, http, room_id, event_type_str, state_key)
-                .await;
+/// A missing event can follow server-side expiry even while LiveKit is healthy.
+async fn own_voice_membership_missing(room: &Room, state_key: &str) -> bool {
+    match room
+        .get_state_event(CALL_MEMBER_EVENT.into(), state_key)
+        .await
+    {
+        Ok(Some(matrix_sdk::deserialized_responses::RawAnySyncOrStrippedState::Sync(raw))) => {
+            raw.deserialize_as().ok().is_some_and(|event| {
+                voice_presence::active_membership(&event, voice_presence::now_ms()).is_none()
+            })
         }
+        Ok(None) => true,
+        _ => false,
     }
-    Ok(())
 }
 
 fn own_device_membership(sender: &str, state_key: &str, user_id: &str, device_id: &str) -> bool {
     sender == user_id && state_key == format!("_{user_id}_{device_id}_m.call")
-}
-
-/// Clear this device's call.member state in every joined room.
-/// If `join_room_state_key` is Some((room_id, state_key)), we skip sending leave for that
-/// state_key in that room (avoids leave-then-join for same key, which can fail on some servers).
-/// Runs room cleanups in parallel to reduce total time.
-pub(crate) async fn matrix_voice_leave_all_joined_rooms(
-    client: &Client,
-    http: &reqwest::Client,
-    join_room_state_key: Option<(&str, &str)>,
-) -> Result<(), String> {
-    let room_ids: Vec<String> = client
-        .joined_rooms()
-        .iter()
-        .map(|r| r.room_id().to_string())
-        .collect();
-    let tasks: Vec<_> = room_ids
-        .into_iter()
-        .map(|room_id| {
-            let client = client.clone();
-            let http = http.clone();
-            let skip = join_room_state_key.and_then(|(r, sk)| {
-                if r == room_id {
-                    Some(sk.to_string())
-                } else {
-                    None
-                }
-            });
-            async move {
-                matrix_voice_clear_device_memberships_in_room(&client, &http, &room_id, skip.as_deref())
-                    .await
-            }
-        })
-        .collect();
-    let _ = join_all(tasks).await;
-    Ok(())
 }
 
 /// Heartbeat loop: when MSC4140 is in use, restart the delayed leave every 15s
@@ -748,7 +704,7 @@ fn start_heartbeat_loop(
     state: Arc<AppState>,
     initial_delay_id: Option<String>,
     room_id: String,
-    reconnect_notify: Arc<tokio::sync::Notify>,
+    media: voice::VoiceMembershipHeartbeat,
 ) {
     state.stop_heartbeat_loop();
     state.heartbeat_stop.store(false, Ordering::SeqCst);
@@ -761,7 +717,10 @@ fn start_heartbeat_loop(
 
         let mut current_delay_id = initial_delay_id;
         let mut last_membership_refresh = tokio::time::Instant::now();
-        let refresh_threshold = Duration::from_secs(MEMBERSHIP_REFRESH_INTERVAL_SECS);
+        let mut membership_missing_since = None;
+        let Ok(parsed_room) = matrix_sdk::ruma::RoomId::parse(&room_id) else {
+            return;
+        };
 
         loop {
             // Wait for either the regular heartbeat tick OR a LiveKit reconnect signal.
@@ -769,15 +728,12 @@ fn start_heartbeat_loop(
             // knows we're still alive, rather than waiting up to 15s for the next tick.
             let reconnected = tokio::select! {
                 _ = interval.tick() => false,
-                _ = reconnect_notify.notified() => true,
+                _ = media.reconnected.notified() => true,
             };
-            if stop.load(Ordering::SeqCst) {
+            if stop.load(Ordering::SeqCst)
+                || media.room.connection_state() == livekit::ConnectionState::Disconnected
+            {
                 break;
-            }
-            // If LiveKit just reconnected, force an immediate membership refresh
-            if reconnected {
-                log::info!("LiveKit reconnected — forcing immediate call.member refresh");
-                last_membership_refresh = tokio::time::Instant::now() - refresh_threshold;
             }
             let client = {
                 let guard = st.client.lock().await;
@@ -786,11 +742,34 @@ fn start_heartbeat_loop(
             let Some(ref c) = client else {
                 break;
             };
+            let Some(matrix_room) = c
+                .get_room(&parsed_room)
+                .filter(|room| room.state() == RoomState::Joined && !room.is_tombstoned())
+            else {
+                let _ = media.room.close().await;
+                break;
+            };
+            let Ok(state_key) = call_member_key(c) else {
+                break;
+            };
             let homeserver = c.homeserver().to_string();
             let access_token = match c.access_token() {
                 Some(t) => t.to_string(),
                 None => break,
             };
+
+            if last_membership_refresh.elapsed() >= Duration::from_secs(HEARTBEAT_INTERVAL_SECS)
+                && own_voice_membership_missing(&matrix_room, &state_key).await
+            {
+                let first_missing =
+                    membership_missing_since.get_or_insert_with(tokio::time::Instant::now);
+                if first_missing.elapsed() >= Duration::from_secs(MEMBERSHIP_REPAIR_SECS) {
+                    media.reconnect_after_membership_loss().await;
+                    break;
+                }
+            } else {
+                membership_missing_since = None;
+            }
 
             // 1. Restart the delayed leave (MSC4140 only)
             if let Some(ref did) = current_delay_id {
@@ -810,6 +789,7 @@ fn start_heartbeat_loop(
                                 log::info!("Session recovered: new delay_id={}", new_delay_id);
                                 current_delay_id = Some(new_delay_id.clone());
                                 last_membership_refresh = tokio::time::Instant::now();
+                                membership_missing_since = None;
                                 if let Ok(mut g) = st.delayed_leave_id.lock() {
                                     *g = Some(new_delay_id);
                                 }
@@ -820,6 +800,7 @@ fn start_heartbeat_loop(
                                 );
                                 current_delay_id = None;
                                 last_membership_refresh = tokio::time::Instant::now();
+                                membership_missing_since = None;
                                 if let Ok(mut g) = st.delayed_leave_id.lock() {
                                     *g = None;
                                 }
@@ -837,16 +818,39 @@ fn start_heartbeat_loop(
                 }
             }
 
-            // 2. Periodically re-PUT call.member to bump origin_server_ts
-            if last_membership_refresh.elapsed() >= refresh_threshold {
+            let delayed_leave = current_delay_id.is_some();
+            let (refresh_secs, expires_ms) = if delayed_leave {
+                (
+                    MEMBERSHIP_REFRESH_INTERVAL_SECS,
+                    VOICE_CALL_MEMBER_EXPIRES_MS,
+                )
+            } else {
+                (
+                    FALLBACK_MEMBERSHIP_REFRESH_SECS,
+                    FALLBACK_MEMBERSHIP_EXPIRES_MS,
+                )
+            };
+            let elapsed = last_membership_refresh.elapsed();
+            if reconnected
+                || membership_missing_since.is_some()
+                || elapsed >= Duration::from_secs(refresh_secs)
+            {
                 log::info!("Refreshing m.call.member to extend expiry window");
                 match livekit_jwt_service_url_for_refresh(c, &st.http_client, &room_id, &st).await {
                     Ok(url) => {
-                        match matrix_voice_put_call_member(c, &st.http_client, &room_id, &url).await
+                        match matrix_voice_put_call_member(
+                            c,
+                            &st.http_client,
+                            &room_id,
+                            &url,
+                            expires_ms,
+                        )
+                        .await
                         {
                             Ok(()) => {
                                 log::info!("m.call.member refreshed successfully");
                                 last_membership_refresh = tokio::time::Instant::now();
+                                membership_missing_since = None;
                             }
                             Err(e) => {
                                 log::warn!("m.call.member refresh failed: {}", e);
@@ -877,14 +881,28 @@ async fn recover_session(
     match send_delayed_leave_event(client, http, room_id).await {
         Ok(new_delay_id) => {
             let jwt_url = livekit_jwt_service_url_for_refresh(client, http, room_id, app).await?;
-            matrix_voice_put_call_member(client, http, room_id, &jwt_url).await?;
+            matrix_voice_put_call_member(
+                client,
+                http,
+                room_id,
+                &jwt_url,
+                VOICE_CALL_MEMBER_EXPIRES_MS,
+            )
+            .await?;
             Ok(Some(new_delay_id))
         }
         Err(DelayedLeaveError::Unsupported) => {
             log::warn!("MSC4140 unsupported during session recovery — re-PUT call.member only");
             app.msc4140_supported.store(false, Ordering::SeqCst);
             let jwt_url = livekit_jwt_service_url_for_refresh(client, http, room_id, app).await?;
-            matrix_voice_put_call_member(client, http, room_id, &jwt_url).await?;
+            matrix_voice_put_call_member(
+                client,
+                http,
+                room_id,
+                &jwt_url,
+                FALLBACK_MEMBERSHIP_EXPIRES_MS,
+            )
+            .await?;
             Ok(None)
         }
         Err(DelayedLeaveError::Other(e)) => Err(e),
@@ -928,11 +946,79 @@ fn decode_jwt_expiry(jwt: &str) -> Option<String> {
 }
 
 #[tauri::command]
+pub async fn voice_device_id(
+    state: State<'_, Arc<AppState>>,
+    user_id: String,
+) -> Result<String, String> {
+    let client = super::get_client(&state).await?;
+    if !client.user_id().is_some_and(|id| id.as_str() == user_id) {
+        return Err("The voice account changed".into());
+    }
+    client
+        .device_id()
+        .map(ToString::to_string)
+        .ok_or("No device ID".into())
+}
+
+#[tauri::command]
+pub async fn voice_find_previous_room(
+    state: State<'_, Arc<AppState>>,
+) -> Result<Option<String>, String> {
+    use futures_util::{stream, StreamExt};
+    use matrix_sdk::deserialized_responses::RawAnySyncOrStrippedState;
+
+    let client = super::get_client(&state).await?;
+    let key = call_member_key(&client)?;
+    let now = voice_presence::now_ms();
+    let rooms = client.joined_rooms().into_iter().filter(|room| {
+        !room.is_tombstoned()
+            && room
+                .room_type()
+                .is_some_and(|kind| kind.as_str() == crate::voice_presence::VOICE_ROOM_TYPE)
+    });
+    let reads = stream::iter(rooms)
+        .map(|room| {
+            let key = &key;
+            async move {
+                let Ok(Some(RawAnySyncOrStrippedState::Sync(raw))) =
+                    room.get_state_event(CALL_MEMBER_EVENT.into(), key).await
+                else {
+                    return None;
+                };
+                let event: serde_json::Value = raw.deserialize_as().ok()?;
+                if event.get("sender")?.as_str()? != room.own_user_id().as_str() {
+                    return None;
+                }
+                voice_presence::active_membership(&event, now)?;
+                Some((
+                    event.get("origin_server_ts")?.as_u64()?,
+                    room.room_id().to_string(),
+                ))
+            }
+        })
+        .buffer_unordered(8)
+        .filter_map(std::future::ready);
+    let latest = tokio::time::timeout(
+        Duration::from_secs(2),
+        reads.fold(None, |latest, candidate| {
+            std::future::ready(Some(match latest {
+                Some(previous) => std::cmp::max(previous, candidate),
+                None => candidate,
+            }))
+        }),
+    )
+    .await
+    .map_err(|_| "Voice membership lookup timed out")?;
+    Ok(latest.map(|(_, room_id)| room_id))
+}
+
+#[tauri::command]
 pub async fn voice_connect(
     state: State<'_, Arc<AppState>>,
     voice_mgr: State<'_, voice::VoiceManager>,
     app_handle: tauri::AppHandle,
     room_id: String,
+    attempt_id: String,
     input_device_id: Option<String>,
     output_device_id: Option<String>,
     replace_other_sessions: Option<bool>,
@@ -940,37 +1026,53 @@ pub async fn voice_connect(
     log::debug!("voice_connect called for room {}", room_id);
     let state_arc: Arc<AppState> = (*state).clone();
     let presence_session = state_arc.voice_presence.session();
+    let mut voice_room = state_arc.voice_room.lock().await;
+    let client = super::get_client(&state).await?;
+    let parsed_room = matrix_sdk::ruma::RoomId::parse(&room_id).map_err(|e| e.to_string())?;
+    client
+        .get_room(&parsed_room)
+        .filter(|room| room.state() == RoomState::Joined && !room.is_tombstoned())
+        .ok_or("You no longer have access to this voice call")?;
     state_arc.stop_heartbeat_loop();
     if let Ok(mut g) = state_arc.voice_livekit_jwt_service_url.lock() {
         *g = None;
     }
     state_arc.msc4140_supported.store(true, Ordering::SeqCst);
-    let client = super::get_client(&state).await?;
     let http_client = state.http_client.clone();
-
-    let state_key = format!(
-        "_{}_{}_{}",
-        client.user_id().ok_or("No user ID")?,
-        client.device_id().ok_or("No device ID")?,
-        "m.call"
-    );
-
-    // Clean up stale memberships in other rooms (fire-and-forget)
-    let client_cleanup = client.clone();
-    let http_cleanup = http_client.clone();
-    let room_id_cleanup = room_id.clone();
-    let state_key_cleanup = state_key.clone();
-    tokio::spawn(async move {
-        let _ = matrix_voice_leave_all_joined_rooms(
-            &client_cleanup,
-            &http_cleanup,
-            Some((&room_id_cleanup, &state_key_cleanup)),
-        )
-        .await;
-    });
+    let previous_delay = state_arc
+        .delayed_leave_id
+        .lock()
+        .ok()
+        .and_then(|mut id| id.take());
+    let mut reused_delay = None;
+    if let Some(previous_room) = voice_room.take() {
+        voice_mgr.disconnect().await;
+        if previous_room == room_id {
+            if let (Some(id), Some(token)) = (previous_delay, client.access_token()) {
+                if restart_delayed_event(&http_client, client.homeserver().as_str(), &token, &id)
+                    .await
+                    .unwrap_or(false)
+                {
+                    reused_delay = Some(id);
+                }
+            }
+        } else {
+            let _ = send_or_fallback_leave(
+                &client,
+                &http_client,
+                &previous_room,
+                previous_delay.as_deref(),
+            )
+            .await;
+        }
+    }
 
     // ── Join: delayed leave (MSC4140) when supported, else expires + refresh only ──
-    let delay_id_opt = match send_delayed_leave_event(&client, &http_client, &room_id).await {
+    let delay_id_opt = match reused_delay {
+        Some(id) => Ok(id),
+        None => send_delayed_leave_event(&client, &http_client, &room_id).await,
+    };
+    let delay_id_opt = match delay_id_opt {
         Ok(id) => {
             log::info!("Delayed leave registered: delay_id={}", id);
             Some(id)
@@ -988,7 +1090,25 @@ pub async fn voice_connect(
     };
 
     // Discover + validate `/sfu/get`, PUT `m.call.member` with the working JWT service URL
-    let (result, jwt_service_url) = matrix_voice_join(&client, &http_client, &room_id).await?;
+    let expires_ms = if delay_id_opt.is_some() {
+        VOICE_CALL_MEMBER_EXPIRES_MS
+    } else {
+        FALLBACK_MEMBERSHIP_EXPIRES_MS
+    };
+    let (result, jwt_service_url) =
+        match matrix_voice_join(&client, &http_client, &room_id, expires_ms).await {
+            Ok(result) => result,
+            Err(error) => {
+                let _ = send_or_fallback_leave(
+                    &client,
+                    &http_client,
+                    &room_id,
+                    delay_id_opt.as_deref(),
+                )
+                .await;
+                return Err(error);
+            }
+        };
     // Manual joins may replace other devices, but automatic reconnects must
     // never take a newer session away from another device. Extras are optional.
     if replace_other_sessions.unwrap_or(true) {
@@ -1005,20 +1125,12 @@ pub async fn voice_connect(
     }
     let identity = client.user_id().ok_or("No user ID")?.to_string();
 
-    // Store delay_id so voice_disconnect can fire the delayed event (MSC4140 only)
-    if let Ok(mut g) = state_arc.delayed_leave_id.lock() {
-        *g = delay_id_opt.clone();
-    }
-
-    if let Ok(mut g) = state_arc.voice_livekit_jwt_service_url.lock() {
-        *g = Some(jwt_service_url);
-    }
-
-    // 4. Connect to LiveKit
+    // Connect to LiveKit after the homeserver accepts this device's membership.
     let app_handle_for_emit = app_handle.clone();
     let connect_result = voice_mgr
         .connect(
             room_id.clone(),
+            attempt_id,
             result.livekit_url,
             result.jwt,
             identity,
@@ -1027,26 +1139,33 @@ pub async fn voice_connect(
             output_device_id,
         )
         .await;
-    if connect_result.is_err() {
-        if let Ok(mut g) = state_arc.voice_livekit_jwt_service_url.lock() {
-            *g = None;
-        }
+    if let Err(error) = connect_result {
+        let _ =
+            send_or_fallback_leave(&client, &http_client, &room_id, delay_id_opt.as_deref()).await;
+        return Err(error);
     }
-    connect_result?;
+
+    *voice_room = Some(room_id.clone());
+    if let Ok(mut g) = state_arc.delayed_leave_id.lock() {
+        *g = delay_id_opt.clone();
+    }
+    if let Ok(mut g) = state_arc.voice_livekit_jwt_service_url.lock() {
+        *g = Some(jwt_service_url);
+    }
 
     // 5. Start heartbeat (restarts the delayed leave every 15s, refreshes membership before expiry).
     //    Started after connect so we can pass the reconnect_notify from the VoiceSession —
     //    on LiveKit reconnection it triggers an immediate call.member refresh instead of
     //    waiting up to 15s for the next tick. Safe timing: delayed leave timeout is 60s,
     //    connect takes ~1-2s, and the heartbeat's first tick fires at 15s.
-    let reconnect_notify = voice_mgr
-        .reconnect_notify()
-        .expect("reconnect_notify missing right after connect");
+    let membership_heartbeat = voice_mgr
+        .membership_heartbeat()
+        .expect("voice session missing right after connect");
     start_heartbeat_loop(
         state_arc.clone(),
         delay_id_opt,
         room_id.clone(),
-        reconnect_notify,
+        membership_heartbeat,
     );
 
     // The shared store refreshes this room; sync supplies the authoritative
@@ -1070,48 +1189,37 @@ pub async fn voice_disconnect(
     voice_mgr: State<'_, voice::VoiceManager>,
     room_id: String,
 ) -> Result<(), String> {
-    // 1. Stop the heartbeat so the delayed leave fires naturally (or we fire it now)
-    state.stop_heartbeat_loop();
-    if let Ok(mut g) = state.voice_livekit_jwt_service_url.lock() {
-        *g = None;
+    let mut voice_room = state.voice_room.lock().await;
+    let mut delay_id = None;
+    if voice_room.as_deref() == Some(room_id.as_str()) {
+        state.stop_heartbeat_loop();
+        if let Ok(mut g) = state.voice_livekit_jwt_service_url.lock() {
+            *g = None;
+        }
+        delay_id = state
+            .delayed_leave_id
+            .lock()
+            .ok()
+            .and_then(|mut id| id.take());
+        voice_mgr.disconnect().await;
+        *voice_room = None;
+    }
+    let presence_session = state.voice_presence.session();
+    let result = if let Ok(client) = super::get_client(&state).await {
+        send_or_fallback_leave(&client, &state.http_client, &room_id, delay_id.as_deref()).await
+    } else {
+        Ok(())
+    };
+    if presence_session.is_active() {
+        let _ = app_handle.emit(
+            "voice-participants-invalidated",
+            crate::types::VoiceParticipantsInvalidatedPayload {
+                room_ids: vec![room_id],
+            },
+        );
     }
 
-    // 2. Grab the delay_id before disconnecting
-    let delay_id = state
-        .delayed_leave_id
-        .lock()
-        .ok()
-        .and_then(|mut g| g.take());
-
-    // 3. Disconnect from LiveKit
-    voice_mgr.disconnect().await;
-
-    // 4. Fire the delayed leave immediately (graceful) or fall back to manual PUT
-    let state_clone = state.inner().clone();
-    let presence_session = state.voice_presence.session();
-    tauri::async_runtime::spawn(async move {
-        // Clone before awaiting the leave request; presence reads must not wait
-        // on the global client lock while the homeserver is slow.
-        if let Ok(client) = super::get_client(&state_clone).await {
-            let _ = send_or_fallback_leave(
-                &client,
-                &state_clone.http_client,
-                &room_id,
-                delay_id.as_deref(),
-            )
-            .await;
-            if presence_session.is_active() {
-                let _ = app_handle.emit(
-                    "voice-participants-invalidated",
-                    crate::types::VoiceParticipantsInvalidatedPayload {
-                        room_ids: vec![room_id],
-                    },
-                );
-            }
-        }
-    });
-
-    Ok(())
+    result
 }
 
 #[tauri::command]

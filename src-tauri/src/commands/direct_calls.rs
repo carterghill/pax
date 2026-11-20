@@ -22,6 +22,7 @@ use crate::{
 
 pub(super) const CALL_EVENT: &str = "com.carter.pax.direct_call";
 const RING_MS: u64 = 30_000;
+const END_SIGNAL_MS: u64 = 120_000;
 const MAX_PENDING_SIGNALS: usize = 128;
 
 #[derive(Deserialize, Serialize)]
@@ -32,6 +33,21 @@ struct SignalContent {
     device_id: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     answer_device_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    target_device_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    request_id: Option<String>,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    connection_lost: bool,
+}
+
+impl SignalKind {
+    fn is_recovery(self) -> bool {
+        matches!(
+            self,
+            Self::Resume | Self::ResumeAccepted | Self::ResumeRejected
+        )
+    }
 }
 
 impl SignalContent {
@@ -43,6 +59,20 @@ impl SignalContent {
                 .as_ref()
                 .is_none_or(|id| !id.is_empty())
             && (self.kind == SignalKind::Connect) == self.answer_device_id.is_some()
+            && if self.kind.is_recovery() {
+                self.target_device_id
+                    .as_ref()
+                    .is_some_and(|id| !id.is_empty())
+                    && self
+                        .request_id
+                        .as_ref()
+                        .is_some_and(|id| uuid::Uuid::parse_str(id).is_ok())
+                    && !self.connection_lost
+            } else {
+                self.target_device_id.is_none()
+                    && self.request_id.is_none()
+                    && (!self.connection_lost || self.kind == SignalKind::End)
+            }
     }
 }
 
@@ -103,6 +133,9 @@ pub(crate) async fn send_direct_call_signal(
     call_id: String,
     kind: SignalKind,
     answer_device_id: Option<String>,
+    target_device_id: Option<String>,
+    request_id: Option<String>,
+    connection_lost: Option<bool>,
 ) -> Result<(), String> {
     let client = super::get_client(&state).await?;
     let room = super::resolve_room(&client, &room_id)?;
@@ -111,6 +144,9 @@ pub(crate) async fn send_direct_call_signal(
         call_id,
         device_id: client.device_id().ok_or("No device ID")?.to_string(),
         answer_device_id,
+        target_device_id,
+        request_id,
+        connection_lost: connection_lost.unwrap_or_default(),
     };
     if !content.is_valid() {
         return Err("Invalid call signal.".into());
@@ -161,6 +197,9 @@ pub(super) fn call_notice(
         return None;
     }
     let call = parse_call_event(raw)?;
+    if call.content.kind.is_recovery() {
+        return None;
+    }
     Some(MessageInfo {
         direct_call_notice: Some(DirectCallNotice {
             call_id: call.content.call_id,
@@ -176,10 +215,18 @@ pub(super) fn call_notice(
 fn fresh_call_event(event: &TimelineEvent, now: u64) -> Option<(CallEvent, u64, bool)> {
     let call = parse_call_event(event.raw())?;
     // Ignore old offers from the initial sync and limit clock skew.
-    let expires_at = call.origin_server_ts.saturating_add(RING_MS);
+    let lifetime = if call.content.kind == SignalKind::End {
+        END_SIGNAL_MS
+    } else {
+        RING_MS
+    };
+    let expires_at = call.origin_server_ts.saturating_add(lifetime);
     let decrypted = matches!(event.kind, TimelineEventKind::Decrypted(_));
-    (expires_at > now && call.origin_server_ts <= now + RING_MS)
-        .then_some((call, expires_at.min(now + RING_MS), decrypted))
+    (expires_at > now && call.origin_server_ts <= now + RING_MS).then_some((
+        call,
+        expires_at.min(now + lifetime),
+        decrypted,
+    ))
 }
 
 pub(super) async fn receive_signals(
@@ -217,6 +264,11 @@ pub(super) async fn receive_signals(
                 continue;
             }
             if encrypted_room && !decrypted {
+                continue;
+            }
+            if call.content.kind.is_recovery()
+                && (!from_peer || call.content.target_device_id.as_deref() != Some(device.as_str()))
+            {
                 continue;
             }
             incoming.push(DirectCallSignal {
@@ -279,6 +331,38 @@ mod tests {
         assert!(fresh_call_event(&event(now, "ring", Some("OTHER")), now).is_none());
         let (connect, _, _) = fresh_call_event(&event(now, "connect", Some("OTHER")), now).unwrap();
         assert_eq!(connect.content.answer_device_id.as_deref(), Some("OTHER"));
+    }
+
+    #[test]
+    fn recovery_signals_require_a_device_and_request_and_stay_out_of_history() {
+        let now = 500_000;
+        let offer = event(now, "resume", None);
+        assert!(fresh_call_event(&offer, now).is_none());
+        let mut value: serde_json::Value = serde_json::from_str(offer.raw().json().get()).unwrap();
+        value["content"]["targetDeviceId"] = json!("PEER_DEVICE");
+        value["content"]["requestId"] = json!("invalid");
+        let malformed =
+            TimelineEvent::from_plaintext(Raw::from_json_string(value.to_string()).unwrap());
+        assert!(fresh_call_event(&malformed, now).is_none());
+        value["content"]["requestId"] = json!("81db73fd-c64e-44f0-8ee7-de5d7943b83e");
+        for kind in ["resume", "resumeAccepted", "resumeRejected"] {
+            value["content"]["kind"] = json!(kind);
+            let valid =
+                TimelineEvent::from_plaintext(Raw::from_json_string(value.to_string()).unwrap());
+            let (call, _, _) = fresh_call_event(&valid, now).unwrap();
+            assert_eq!(
+                call.content.target_device_id.as_deref(),
+                Some("PEER_DEVICE")
+            );
+            assert!(call_notice(valid.raw(), true, true).is_none());
+        }
+    }
+
+    #[test]
+    fn a_recent_hangup_can_be_delivered_after_the_ring_timeout() {
+        let now = 500_000;
+        assert!(fresh_call_event(&event(now - RING_MS - 1, "end", None), now).is_some());
+        assert!(fresh_call_event(&event(now - END_SIGNAL_MS, "end", None), now).is_none());
     }
 
     #[test]

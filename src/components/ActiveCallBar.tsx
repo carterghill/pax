@@ -1,32 +1,35 @@
-import { Phone, Loader2, Wifi } from "lucide-react";
+import { PhoneOff, Loader2, Wifi, WifiOff, X } from "lucide-react";
 import { useTheme } from "../theme/ThemeContext";
 
-interface ActiveCallBarProps {
+export interface ActiveCallBarProps {
   roomName: string;
-  isConnecting: boolean;
-  isDisconnecting: boolean;
+  status: "connecting" | "reconnecting" | "connected" | "disconnected" | "disconnecting";
+  detail?: string;
+  canReconnect: boolean;
+  onReconnect: () => void;
   onDisconnect: () => void;
 }
 
 export default function ActiveCallBar({
   roomName,
-  isConnecting,
-  isDisconnecting,
+  status,
+  detail,
+  canReconnect,
+  onReconnect,
   onDisconnect,
 }: ActiveCallBarProps) {
   const { palette, spacing, typography } = useTheme();
 
-  const statusLabel = isDisconnecting
-    ? "Disconnecting..."
-    : isConnecting
-      ? "Connecting..."
-      : "Connected";
-
-  const statusColor = isDisconnecting
-    ? palette.textSecondary
-    : isConnecting
-      ? palette.textSecondary
-      : "#23a55a";
+  const labels = {
+    connecting: "Connecting…",
+    reconnecting: "Reconnecting…",
+    connected: "Connected",
+    disconnected: "Connection lost",
+    disconnecting: "Disconnecting…",
+  };
+  const statusColor = status === "connected" && !detail ? "#23a55a" : palette.textSecondary;
+  const isWaiting = status !== "connected" && status !== "disconnected";
+  const statusIconSize = typography.fontSizeSmall * 2 - 1;
 
   return (
     <div
@@ -39,13 +42,13 @@ export default function ActiveCallBar({
       }}
     >
       <div style={{ flexShrink: 0, display: "flex", alignItems: "center", color: statusColor }}>
-        {isConnecting || isDisconnecting ? (
+        {isWaiting ? (
           <Loader2
-            size={typography.fontSizeSmall + typography.fontSizeSmall - 1}
+            size={statusIconSize}
             style={{ animation: "spin 1s linear infinite" }}
           />
         ) : (
-          <Wifi size={typography.fontSizeSmall + typography.fontSizeSmall - 1} />
+          status === "disconnected" || detail ? <WifiOff size={statusIconSize} /> : <Wifi size={statusIconSize} />
         )}
       </div>
       <div style={{ flex: 1, minWidth: 0 }}>
@@ -61,18 +64,29 @@ export default function ActiveCallBar({
         >
           {roomName}
         </div>
-        <div
+        <div role="status"
           style={{
             fontSize: typography.fontSizeSmall - 1,
             color: statusColor,
           }}
         >
-          {statusLabel}
+          {detail ?? labels[status]}
         </div>
       </div>
 
+      {status === "disconnected" && canReconnect && (
+        <button type="button" onClick={onReconnect} style={{
+          border: "none", borderRadius: spacing.unit, padding: spacing.unit,
+          background: palette.bgHover, color: palette.textPrimary, cursor: "pointer", font: "inherit",
+          fontSize: typography.fontSizeSmall, flexShrink: 0,
+        }}>
+          Reconnect
+        </button>
+      )}
       <button
+        type="button"
         onClick={onDisconnect}
+        disabled={status === "disconnecting"}
         style={{
           display: "flex",
           alignItems: "center",
@@ -92,9 +106,10 @@ export default function ActiveCallBar({
         onMouseLeave={(e) => {
           (e.currentTarget as HTMLButtonElement).style.backgroundColor = "transparent";
         }}
-        title="Disconnect"
+        aria-label={status === "disconnected" ? "Dismiss voice session" : "Disconnect"}
+        title={status === "disconnected" ? "Dismiss voice session" : "Disconnect"}
       >
-        <Phone size={18} />
+        {status === "disconnected" ? <X size={18} /> : <PhoneOff size={18} />}
       </button>
     </div>
   );

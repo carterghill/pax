@@ -114,6 +114,9 @@ pub(crate) enum DirectCallSignalKind {
     Answer,
     Connect,
     End,
+    Resume,
+    ResumeAccepted,
+    ResumeRejected,
 }
 
 #[derive(Clone, Serialize)]
@@ -392,6 +395,7 @@ pub struct VoiceParticipantsInvalidatedPayload {
 #[serde(rename_all = "camelCase")]
 pub struct VoiceSessionEndedPayload {
     pub room_id: String,
+    pub attempt_id: String,
     pub message: String,
 }
 

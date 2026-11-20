@@ -3,9 +3,13 @@ import { useVoicePresence } from "../context/VoicePresenceContext";
 
 /** Declare which sidebar/lobby rooms need remote activity snapshots. Overlapping
  * consumers share one batch and polling starts after the preceding read ends. */
-export function useLivekitVoiceSnapshots(roomIds: string[]) {
+export function useLivekitVoiceSnapshots(roomIds: string[], connectedRoomId: string | null) {
   const [snapshot, store] = useVoicePresence();
   const key = [...new Set(roomIds)].sort().join("\0");
   useEffect(() => store.watchLivekit(key ? key.split("\0") : []), [store, key]);
-  return snapshot.livekitByRoom;
+  useEffect(() => {
+    store.setConnectedRoom(connectedRoomId);
+    return () => store.setConnectedRoom(null);
+  }, [store, connectedRoomId]);
+  return snapshot;
 }

@@ -113,8 +113,11 @@ pub struct VoiceParticipantInfo {
 #[derive(Clone, Serialize, Debug)]
 #[serde(rename_all = "camelCase")]
 pub struct VoiceStateEvent {
+    pub room_id: String,
+    pub attempt_id: String,
     pub connected_room_id: Option<String>,
     pub is_connecting: bool,
+    pub is_reconnecting: bool,
     pub is_mic_enabled: bool,
     pub is_deafened: bool,
     pub is_noise_suppressed: bool,
@@ -142,6 +145,9 @@ pub struct AudioDeviceList {
 }
 // ─── Internal shared audio state ────────────────────────────────────────────
 struct AudioState {
+    attempt_id: String,
+    transport_reconnecting: bool,
+    reconnect_after_matrix_loss: bool,
     /// Per-track playback buffers from remote participants (f32, mono).
     /// Key is a track identifier like "identity::Microphone" or "identity::ScreenshareAudio".
     /// The speaker output callback sums all buffers to produce the final mix.
@@ -179,6 +185,9 @@ struct AudioState {
 impl Default for AudioState {
     fn default() -> Self {
         Self {
+            attempt_id: String::new(),
+            transport_reconnecting: false,
+            reconnect_after_matrix_loss: false,
             playback_buffers: HashMap::new(),
             user_volumes: HashMap::new(),
             active_speakers: Vec::new(),
@@ -226,6 +235,20 @@ pub struct VoiceSession {
 pub struct VoiceManager {
     session: Mutex<Option<VoiceSession>>,
 }
+
+pub struct VoiceMembershipHeartbeat {
+    pub room: Arc<livekit::Room>,
+    pub reconnected: Arc<tokio::sync::Notify>,
+    audio: Arc<Mutex<AudioState>>,
+}
+
+impl VoiceMembershipHeartbeat {
+    pub async fn reconnect_after_membership_loss(&self) {
+        self.audio.lock().reconnect_after_matrix_loss = true;
+        let _ = self.room.close().await;
+    }
+}
+
 impl VoiceManager {
     pub fn new() -> Self {
         Self {
@@ -236,6 +259,7 @@ impl VoiceManager {
     pub async fn connect(
         &self,
         room_id: String,
+        attempt_id: String,
         livekit_url: String,
         jwt: String,
         local_identity: String,
@@ -252,8 +276,11 @@ impl VoiceManager {
         let _ = app_handle.emit(
             "voice-state-changed",
             VoiceStateEvent {
+                room_id: room_id.clone(),
+                attempt_id: attempt_id.clone(),
                 connected_room_id: Some(room_id.clone()),
                 is_connecting: true,
+                is_reconnecting: false,
                 is_mic_enabled: false,
                 is_deafened: false,
                 is_noise_suppressed: true,
@@ -263,7 +290,10 @@ impl VoiceManager {
                 participants: vec![],
             },
         );
-        let audio_state = Arc::new(Mutex::new(AudioState::default()));
+        let audio_state = Arc::new(Mutex::new(AudioState {
+            attempt_id,
+            ..AudioState::default()
+        }));
         // 1. Create audio source for mic
         let audio_source = NativeAudioSource::new(
             AudioSourceOptions {
@@ -287,7 +317,8 @@ impl VoiceManager {
             "microphone",
             RtcAudioSource::Native(audio_source.clone()),
         );
-        room.local_participant()
+        if let Err(error) = room
+            .local_participant()
             .publish_track(
                 LocalTrack::Audio(mic_track),
                 TrackPublishOptions {
@@ -296,7 +327,10 @@ impl VoiceManager {
                 },
             )
             .await
-            .map_err(|e| format!("Failed to publish mic track: {}", e))?;
+        {
+            let _ = room.close().await;
+            return Err(format!("Failed to publish mic track: {error}"));
+        }
         // 4. Set up audio streams (GStreamer pulsesrc on Linux, cpal elsewhere)
         // Create a channel for mic frames: capture callback → pump task
         let (mic_frame_tx, mic_frame_rx) = mpsc::channel::<Vec<i16>>(10); // small bounded buffer
@@ -304,15 +338,31 @@ impl VoiceManager {
         noise_proc
             .lock()
             .set_enabled(audio_state.lock().noise_suppression_enabled);
-        let input_stream = setup_mic_input(
-            audio_state.clone(),
-            noise_proc.clone(),
-            mic_frame_tx,
-            input_device_id.as_deref(),
-        )
-        .map_err(|e| format!("Failed to open microphone: {}", e))?;
-        let output_stream = setup_speaker_output(audio_state.clone(), output_device_id.as_deref())
-            .map_err(|e| format!("Failed to open speakers: {}", e))?;
+        let streams = (|| {
+            let input = setup_mic_input(
+                audio_state.clone(),
+                noise_proc.clone(),
+                mic_frame_tx,
+                input_device_id.as_deref(),
+            )
+            .map_err(|error| format!("Failed to open microphone: {error}"))?;
+            let output = setup_speaker_output(audio_state.clone(), output_device_id.as_deref())
+                .map_err(|error| format!("Failed to open speakers: {error}"))?;
+            input
+                .play()
+                .map_err(|error| format!("Mic stream error: {error}"))?;
+            output
+                .play()
+                .map_err(|error| format!("Speaker stream error: {error}"))?;
+            Ok((input, output))
+        })();
+        let (input_stream, output_stream) = match streams {
+            Ok(streams) => streams,
+            Err(error) => {
+                let _ = room.close().await;
+                return Err(error);
+            }
+        };
         // 5. Start mic capture pump (receives frames from mic callback → LiveKit)
         let mic_source = audio_source.clone();
         tokio::spawn(async move {
@@ -339,13 +389,6 @@ impl VoiceManager {
             )
             .await;
         });
-        // 7. Start audio streams
-        input_stream
-            .play()
-            .map_err(|e| format!("Mic stream error: {}", e))?;
-        output_stream
-            .play()
-            .map_err(|e| format!("Speaker stream error: {}", e))?;
         // Store session
         {
             let mut guard = self.session.lock();
@@ -504,9 +547,13 @@ impl VoiceManager {
 
     /// Get the reconnect notify handle for the current session (if any).
     /// Used by the call-member refresh loop to wake up immediately on LiveKit reconnection.
-    pub fn reconnect_notify(&self) -> Option<Arc<tokio::sync::Notify>> {
+    pub fn membership_heartbeat(&self) -> Option<VoiceMembershipHeartbeat> {
         let guard = self.session.lock();
-        guard.as_ref().map(|s| s.reconnect_notify.clone())
+        guard.as_ref().map(|session| VoiceMembershipHeartbeat {
+            room: session.room.clone(),
+            reconnected: session.reconnect_notify.clone(),
+            audio: session.audio_state.clone(),
+        })
     }
 
     /// Start sharing screen. Returns error if not in a call or capture fails.
@@ -1147,14 +1194,22 @@ async fn run_event_loop(
                         emit_state(app_handle.as_ref(), &room_id, &local_identity, &audio_state, false, true, None);
                     }
                     Some(RoomEvent::Disconnected { reason }) => {
+                        let (attempt_id, reconnect_after_matrix_loss) = {
+                            let mut audio = audio_state.lock();
+                            audio.transport_reconnecting = false;
+                            (audio.attempt_id.clone(), audio.reconnect_after_matrix_loss)
+                        };
                         log::warn!("Permanently disconnected from LiveKit room: {:?}", reason);
-                        let message = if should_auto_rejoin(reason) {
-                            let _ = app_handle.emit("voice-livekit-kicked", room_id.clone());
+                        let repair = reconnect_after_matrix_loss && reason == livekit::DisconnectReason::ClientInitiated;
+                        let message = if repair || should_auto_rejoin(reason) {
+                            let _ = app_handle.emit("voice-livekit-kicked", crate::types::VoiceSessionEndedPayload {
+                                room_id: room_id.clone(), attempt_id, message: "Disconnected from voice".into(),
+                            });
                             "Disconnected from voice"
                         } else {
                             let message = "Voice session ended on this device";
                             let _ = app_handle.emit("voice-session-ended", crate::types::VoiceSessionEndedPayload {
-                                room_id: room_id.clone(), message: message.into(),
+                                room_id: room_id.clone(), attempt_id, message: message.into(),
                             });
                             message
                         };
@@ -1163,9 +1218,12 @@ async fn run_event_loop(
                     }
                     Some(RoomEvent::Reconnecting) => {
                         log::warn!("LiveKit connection lost — reconnecting...");
+                        audio_state.lock().transport_reconnecting = true;
+                        emit_state(app_handle.as_ref(), &room_id, &local_identity, &audio_state, true, false, None);
                     }
                     Some(RoomEvent::Reconnected) => {
                         log::info!("LiveKit reconnected — signaling immediate call.member refresh");
+                        audio_state.lock().transport_reconnecting = false;
                         // Wake up the refresh loop so it re-PUTs call.member immediately
                         reconnect_notify.notify_one();
                         // Re-emit state so the frontend knows we're still connected
@@ -1382,6 +1440,9 @@ fn emit_state(
     error: Option<String>,
 ) {
     let st = audio_state.lock();
+    let is_reconnecting = st.transport_reconnecting;
+    let is_connecting = is_connecting || is_reconnecting;
+    let is_connected = is_connected && !is_reconnecting;
     let mut participants = Vec::new();
     // Local participant
     if is_connected {
@@ -1417,19 +1478,26 @@ fn emit_state(
         });
     }
     let event = VoiceStateEvent {
+        room_id: room_id.to_owned(),
+        attempt_id: st.attempt_id.clone(),
         connected_room_id: if is_connected || is_connecting {
             Some(room_id.to_string())
         } else {
             None
         },
         is_connecting,
+        is_reconnecting,
         is_mic_enabled: st.mic_enabled,
         is_deafened: st.deafened,
         is_noise_suppressed: st.noise_suppression_enabled,
         screen_sharing_owners: st.screen_sharing_owners.clone(),
         is_local_screen_sharing: st.is_local_screen_sharing,
         error,
-        participants,
+        participants: if is_connected {
+            participants
+        } else {
+            Vec::new()
+        },
     };
     let _ = app_handle.emit("voice-state-changed", event);
 }

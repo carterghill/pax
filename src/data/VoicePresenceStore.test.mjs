@@ -110,13 +110,17 @@ test("partial LiveKit failures retain known rows while successful rooms update",
   store.watchLivekit([a, b]); store.start();
   await until(() => store.getSnapshot().livekitByRoom[a]);
   const previous = store.getSnapshot().livekitByRoom[a];
+  assert.equal(store.getSnapshot().livekitFreshByRoom[a], true);
   response = activity({ [b]: [live("@bob:server", true)] });
   store.invalidateLivekit([a, b]);
   await until(() => store.getSnapshot().livekitByRoom[b][0].isMuted);
   assert.equal(store.getSnapshot().livekitByRoom[a], previous);
+  assert.equal(store.getSnapshot().livekitFreshByRoom[a], undefined);
+  assert.equal(store.getSnapshot().livekitFreshByRoom[b], true);
   response = activity({ [a]: [] });
   store.invalidateLivekit([a]);
   await until(() => store.getSnapshot().livekitByRoom[a].length === 0);
+  assert.equal(store.getSnapshot().livekitFreshByRoom[a], true);
   assert.equal(calls.livekit.length, 3);
 });
 

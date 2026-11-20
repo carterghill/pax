@@ -2,13 +2,12 @@ import { useState, useCallback, useEffect, useMemo, useRef } from "react";
 import { Volume2, Mic, MicOff, PhoneOff, Loader2, Monitor, MonitorUp, Headphones, Settings, Slash } from "lucide-react";
 import { createPortal } from "react-dom";
 import { useTheme } from "../theme/ThemeContext";
-import { LivekitVoiceParticipantInfo, Room, VoiceParticipant as MatrixVoiceParticipant } from "../types/matrix";
+import { Room, VoiceParticipant as MatrixVoiceParticipant } from "../types/matrix";
 import { ScreenShareWindowOption, VoiceCall } from "../hooks/useVoiceCall";
 import {
   compareByDisplayThenKey,
-  extractMatrixUserId,
+  isVoiceParticipantOnDevice,
   localpartFromUserId,
-  normalizeUserId,
 } from "../utils/matrix";
 import UserAvatar from "./UserAvatar";
 import RoomHeaderTitle from "./RoomHeaderTitle";
@@ -16,20 +15,22 @@ import { useUserVolume } from "../hooks/useUserVolume";
 import VolumeContextMenu from "./VolumeContextMenu";
 import VoiceAudioSettingsSection from "./VoiceAudioSettingsSection";
 import ScreenShareGrid from "./ScreenShareGrid";
+import VoiceLinkStatus from "./VoiceLinkStatus";
+import type { VoiceParticipantState } from "../hooks/useVoiceParticipantStates";
 import { useOverlayObstruction } from "../hooks/useOverlayObstruction";
 
 interface VoiceCallPanelProps {
   roomId: string;
   voiceCall: VoiceCall;
   voiceParticipants?: MatrixVoiceParticipant[];
-  /** LiveKit Room Service snapshot (mute/deafen/speaking) when not connected */
-  livekitInRoom?: LivekitVoiceParticipantInfo[];
+  participantStates?: Record<string, VoiceParticipantState>;
+  canReconnect?: boolean;
   userId: string;
-  directCall?: { peer: MatrixVoiceParticipant; onEnd: () => void };
+  directCall?: { peer: MatrixVoiceParticipant; peerDeviceId?: string; onEnd: () => void; peerConnectionLost: boolean };
 }
 
 const EMPTY_VOICE_PARTICIPANTS: MatrixVoiceParticipant[] = [];
-const EMPTY_LIVEKIT_PARTICIPANTS: LivekitVoiceParticipantInfo[] = [];
+const EMPTY_PARTICIPANT_STATES: Record<string, VoiceParticipantState> = {};
 
 export default function VoiceRoomView({
   room,
@@ -74,7 +75,8 @@ export function VoiceCallPanel({
   roomId,
   voiceCall: callState,
   voiceParticipants = EMPTY_VOICE_PARTICIPANTS,
-  livekitInRoom = EMPTY_LIVEKIT_PARTICIPANTS,
+  participantStates = EMPTY_PARTICIPANT_STATES,
+  canReconnect = false,
   userId,
   directCall,
 }: VoiceCallPanelProps) {
@@ -97,7 +99,8 @@ export function VoiceCallPanel({
   const { palette, spacing, typography } = useTheme();
   const { getVolume, setVolume } = useUserVolume();
   const isConnected = callState.connectedRoomId === roomId && !callState.isConnecting;
-  const isConnecting = callState.isConnecting && callState.connectedRoomId === roomId;
+  const isConnecting = callState.isConnecting && callState.targetRoomId === roomId;
+  const error = callState.targetRoomId === roomId || callState.endedRoomId === roomId ? callState.error : null;
   const isDirectCall = directCall != null;
   const hasScreenShare = isConnected && (callState.screenSharingOwners.length > 0 || callState.isLocalScreenSharing);
   const participantsBesideShare = hasScreenShare && !directCall;
@@ -290,146 +293,35 @@ export function VoiceCallPanel({
     [getVolume],
   );
 
-  // Build set of LiveKit participant identities (normalized) for matching
-  // Build avatar lookup from Matrix roster (keyed by normalized userId)
-  const avatarByUserId = useMemo(() => {
-    const map = new Map<string, string | null>();
-    for (const p of voiceParticipants) {
-      map.set(normalizeUserId(p.userId), p.avatarUrl);
-    }
-    return map;
-  }, [voiceParticipants]);
+  const showLobby = !isDirectCall && !isConnected && !isConnecting;
+  const peerConnectionLost = directCall?.peerConnectionLost;
+  const peerDeviceId = directCall?.peerDeviceId;
+  const participants = useMemo(() => {
+    const roster = new Map(voiceParticipants.map((participant) => [participant.userId, participant]));
+    if (peer) roster.set(peer.userId, peer);
+    const rows = new Map<string, VoiceParticipantState>(Object.entries(participantStates));
+    if (peerConnectionLost && peer) rows.set(peer.userId, { status: "lost" });
 
-  const liveKitIdentitySet = useMemo(() => {
-    const set = new Set<string>();
-    for (const p of callState.participants) {
-      set.add(normalizeUserId(p.identity));
-      set.add(normalizeUserId(localpartFromUserId(p.identity)));
-    }
-    return set;
-  }, [callState.participants]);
-
-  // Merged participants: LiveKit-connected + room participants who are still connecting
-  const allParticipants = useMemo(() => {
-    const result: Array<{
-      identity: string;
-      userId: string;
-      displayName: string;
-      avatarUrl?: string | null;
-      isLocal: boolean;
-      isConnecting: boolean;
-      isSpeaking?: boolean;
-      isMuted?: boolean;
-      isDeafened?: boolean;
-    }> = [];
-
-    // Add connected LiveKit participants
-    for (const p of callState.participants) {
-      const isPeer = peer && (
-        p.identity === peer.userId ||
-        p.identity.startsWith(`${peer.userId}:`) ||
-        p.identity.startsWith(`${peer.userId}|`)
-      );
-      const profile = isPeer ? peer : null;
-      const mxid = profile?.userId ?? extractMatrixUserId(p.identity);
-      result.push({
-        identity: p.identity,
-        userId: isDirectCall && p.isLocal ? userId : mxid,
-        displayName: localpartFromUserId(profile?.displayName ?? p.identity),
-        avatarUrl: profile?.avatarUrl ?? avatarByUserId.get(normalizeUserId(mxid)) ?? null,
-        isLocal: p.isLocal,
-        isConnecting: false,
-        isSpeaking: p.isSpeaking,
-        isMuted: p.isMuted,
-        isDeafened: p.isDeafened,
-      });
-    }
-
-    // When we're connected (not just connecting), add room participants not yet in LiveKit
-    if (isConnected) {
-      for (const p of voiceParticipants) {
-        const normalized = normalizeUserId(p.userId);
-        const localpart = localpartFromUserId(p.userId);
-        const inLiveKit = liveKitIdentitySet.has(normalized) || liveKitIdentitySet.has(normalizeUserId(localpart));
-        if (inLiveKit) continue;
-
-        const displayName = p.displayName ?? p.userId;
-        const localDisplayName = localpartFromUserId(displayName);
-        const isLocal = p.userId === userId;
-        result.push({
-          identity: p.userId,
-          userId: p.userId,
-          displayName: localDisplayName,
-          avatarUrl: p.avatarUrl,
-          isLocal,
-          isConnecting: true,
-        });
+    if (isConnected && isDirectCall) {
+      for (const participant of callState.participants) {
+        const id = participant.isLocal ? userId : peer?.userId;
+        if (!id || (!participant.isLocal && !isVoiceParticipantOnDevice(participant.identity, id, peerDeviceId))) continue;
+        rows.set(id, { ...participant, status: "connected" });
       }
     }
 
-    result.sort((a, b) =>
-      compareByDisplayThenKey(a.displayName, a.identity, b.displayName, b.identity)
-    );
-    return result;
-  }, [callState.participants, isConnected, voiceParticipants, userId, liveKitIdentitySet, avatarByUserId, peer, isDirectCall]);
-
-  const showLobby = !isDirectCall && !isConnected && !isConnecting && !callState.error;
-
-  const lobbyParticipants = useMemo(() => {
-    if (!showLobby) return [];
-    type Row = {
-      identity: string;
-      displayName: string;
-      avatarUrl: string | null;
-      isLocal: boolean;
-      isMuted: boolean;
-      isDeafened: boolean;
-      isSpeaking: boolean;
-    };
-    const result: Row[] = [];
-    const liveByMxid = new Map<string, LivekitVoiceParticipantInfo>();
-    for (const lp of livekitInRoom) {
-      const mxid = extractMatrixUserId(lp.identity);
-      liveByMxid.set(normalizeUserId(mxid), lp);
-      liveByMxid.set(normalizeUserId(lp.identity), lp);
-    }
-    const covered = new Set<string>();
-    for (const p of voiceParticipants) {
-      const nk = normalizeUserId(p.userId);
-      covered.add(nk);
-      const lp = liveByMxid.get(nk);
-      const displayName = p.displayName ?? p.userId;
-      const localDisplayName = localpartFromUserId(displayName);
-      result.push({
-        identity: p.userId,
-        displayName: localDisplayName,
-        avatarUrl: p.avatarUrl,
-        isLocal: p.userId === userId,
-        isMuted: lp?.isMuted ?? false,
-        isDeafened: lp?.isDeafened ?? false,
-        isSpeaking: lp?.isSpeaking ?? false,
-      });
-    }
-    for (const lp of livekitInRoom) {
-      const mxid = extractMatrixUserId(lp.identity);
-      const nk = normalizeUserId(mxid);
-      if (covered.has(nk)) continue;
-      const localDisplayName = localpartFromUserId(mxid);
-      result.push({
-        identity: lp.identity,
-        displayName: localDisplayName,
-        avatarUrl: avatarByUserId.get(nk) ?? null,
-        isLocal: nk === normalizeUserId(userId),
-        isMuted: lp.isMuted === true,
-        isDeafened: lp.isDeafened === true,
-        isSpeaking: lp.isSpeaking === true,
-      });
-    }
-    result.sort((a, b) =>
-      compareByDisplayThenKey(a.displayName, a.identity, b.displayName, b.identity)
-    );
-    return result;
-  }, [showLobby, voiceParticipants, livekitInRoom, userId, avatarByUserId]);
+    return Array.from(rows, ([id, state]) => {
+      const profile = roster.get(id);
+      return {
+        userId: id,
+        ...state,
+        identity: state.identity ?? id,
+        displayName: profile?.displayName || localpartFromUserId(id),
+        avatarUrl: profile?.avatarUrl ?? null,
+        isLocal: id === userId,
+      };
+    }).sort((a, b) => compareByDisplayThenKey(a.displayName, a.identity, b.displayName, b.identity));
+  }, [callState.participants, isConnected, isDirectCall, participantStates, peer, peerDeviceId, peerConnectionLost, userId, voiceParticipants]);
 
   return (
     <section aria-label={directCall ? "Voice call" : undefined} style={{
@@ -477,7 +369,13 @@ export function VoiceCallPanel({
           overflowY: "auto",
           width: participantsBesideShare ? 180 : undefined,
         }}>
-        <style>{`@keyframes spin { from { transform: rotate(0deg); } to { transform: rotate(360deg); } }`}</style>
+        <style>{`
+          @keyframes spin { from { transform: rotate(0deg); } to { transform: rotate(360deg); } }
+          .voice-peer-reconnect-ring { animation: spin 1s linear infinite; }
+          @media (prefers-reduced-motion: reduce) {
+            .voice-peer-reconnect-ring { animation: none; }
+          }
+        `}</style>
         {isConnecting && (
           <div style={{
             display: "flex",
@@ -491,11 +389,11 @@ export function VoiceCallPanel({
               color={palette.textSecondary}
               style={{ animation: "spin 1s linear infinite" }}
             />
-            <span style={{ fontSize: typography.fontSizeLarge }}>Connecting...</span>
+            <span style={{ fontSize: typography.fontSizeLarge }}>{callState.isReconnecting ? "Reconnecting…" : "Connecting…"}</span>
           </div>
         )}
 
-        {callState.error && !isConnected && !isConnecting && (
+        {error && !isConnected && !isConnecting && (
           <div style={{
             display: "flex",
             flexDirection: "column",
@@ -507,12 +405,12 @@ export function VoiceCallPanel({
           }}>
             <Volume2 size={64} color={palette.textSecondary} opacity={0.4} />
             <span style={{ fontSize: typography.fontSizeBase, color: "#f23f43" }}>
-              {callState.error}
+              {error}
             </span>
           </div>
         )}
 
-        {showLobby && lobbyParticipants.map((p) => (
+        {showLobby && participants.map((p) => (
           <div
             key={p.identity}
             style={{
@@ -524,7 +422,7 @@ export function VoiceCallPanel({
             }}
           >
             <UserAvatar
-              userId={extractMatrixUserId(p.identity)}
+              userId={p.userId}
               displayName={p.displayName}
               avatarUrlHint={p.avatarUrl}
               size={80}
@@ -549,6 +447,7 @@ export function VoiceCallPanel({
             }}>
               {p.displayName}{p.isLocal ? " (you)" : ""}
               <span style={{ marginLeft: spacing.unit, display: "inline-flex", alignItems: "center", gap: spacing.unit }}>
+                <VoiceLinkStatus status={p.status} />
                 {p.isMuted && <MicOff size={12} color={palette.textSecondary} />}
                 {p.isDeafened && (
                   <span style={{ position: "relative", width: 12, height: 12, display: "inline-flex", alignItems: "center", justifyContent: "center" }}>
@@ -561,19 +460,19 @@ export function VoiceCallPanel({
           </div>
         ))}
 
-        {showLobby && lobbyParticipants.length === 0 && (
+        {showLobby && participants.length === 0 && (
           <div style={{
             color: palette.textSecondary,
             fontSize: typography.fontSizeBase,
             textAlign: "center",
             maxWidth: 360,
           }}>
-            No one is listed in this call yet. Join to connect, or wait for Matrix roster updates.
+            No one is in this call yet.
           </div>
         )}
 
         {/* Show errors (e.g. screen share failure) even when connected */}
-        {callState.error && isConnected && (
+        {error && isConnected && (
           <div role="alert" style={{
             padding: spacing.unit * 2,
             margin: spacing.unit * 2,
@@ -582,15 +481,15 @@ export function VoiceCallPanel({
             color: "#f23f43",
             fontSize: typography.fontSizeSmall,
           }}>
-            {callState.error}
+            {error}
           </div>
         )}
 
-        {isConnected && allParticipants.map((p) => (
+        {isConnected && participants.map((p) => (
           <div
-            key={p.identity}
+            key={p.userId}
             onContextMenu={(e) => {
-              if (p.isLocal || p.isConnecting) return; // No volume control for yourself or connecting users
+              if (p.isLocal || p.status !== "connected") return;
               e.preventDefault();
               setContextMenu({
                 x: e.clientX,
@@ -608,24 +507,7 @@ export function VoiceCallPanel({
               cursor: p.isLocal ? "default" : "context-menu",
             }}
           >
-            {/* Avatar circle - circular progress when connecting */}
-            {p.isConnecting ? (
-              <div style={{
-                width: avatarSize,
-                height: avatarSize,
-                borderRadius: "50%",
-                backgroundColor: palette.bgActive,
-                display: "flex",
-                alignItems: "center",
-                justifyContent: "center",
-              }}>
-                <Loader2
-                  size={32}
-                  color={palette.textSecondary}
-                  style={{ animation: "spin 1s linear infinite" }}
-                />
-              </div>
-            ) : (
+            <div style={{ position: "relative", display: "flex" }}>
               <UserAvatar
                 userId={p.userId}
                 displayName={p.displayName}
@@ -637,7 +519,17 @@ export function VoiceCallPanel({
                   transition: "box-shadow 0.15s ease",
                 }}
               />
-            )}
+              {isDirectCall && p.userId === peer?.userId && p.status === "lost" && (
+                <span className="voice-peer-reconnect-ring" aria-hidden="true" style={{
+                  position: "absolute",
+                  inset: -3,
+                  borderRadius: "50%",
+                  border: `2px solid ${palette.border}`,
+                  borderTopColor: palette.textPrimary,
+                  pointerEvents: "none",
+                }} />
+              )}
+            </div>
             <span style={{
               fontSize: typography.fontSizeSmall,
               color: palette.textPrimary,
@@ -653,29 +545,23 @@ export function VoiceCallPanel({
             }}>
               {p.displayName}{p.isLocal ? " (you)" : ""}
               <span style={{ marginLeft: spacing.unit, display: "inline-flex", alignItems: "center", gap: spacing.unit }}>
-                {!p.isConnecting && callState.screenSharingOwners.includes(p.identity) && (
+                {p.status === "connected" && callState.screenSharingOwners.includes(p.identity) && (
                   <Monitor size={12} color="#23a55a" />
                 )}
-                {!p.isConnecting && p.isMuted && <MicOff size={12} color={palette.textSecondary} />}
-                {!p.isConnecting && p.isDeafened && (
+                {p.status === "connected" && p.isMuted && <MicOff size={12} color={palette.textSecondary} />}
+                {p.status === "connected" && p.isDeafened && (
                   <span style={{ position: "relative", width: 12, height: 12, display: "inline-flex", alignItems: "center", justifyContent: "center" }}>
                     <Headphones size={12} color={palette.textSecondary} />
                     <Slash size={10} color={palette.textSecondary} style={{ position: "absolute" }} />
                   </span>
                 )}
-                {p.isConnecting && (
-                  <Loader2
-                    size={12}
-                    color={palette.textSecondary}
-                    style={{ animation: "spin 1s linear infinite" }}
-                  />
-                )}
+                <VoiceLinkStatus status={p.status} />
               </span>
             </span>
           </div>
         ))}
 
-        {isConnected && allParticipants.length === 0 && !hasScreenShare && (
+        {isConnected && participants.length === 0 && !hasScreenShare && (
           <div style={{
             color: palette.textSecondary,
             fontSize: typography.fontSizeBase,
@@ -683,7 +569,7 @@ export function VoiceCallPanel({
             No one else is here yet
           </div>
         )}
-        {isConnected && allParticipants.length === 0 && hasScreenShare && (
+        {isConnected && participants.length === 0 && hasScreenShare && (
           <div style={{
             color: palette.textSecondary,
             fontSize: typography.fontSizeSmall,
@@ -716,7 +602,7 @@ export function VoiceCallPanel({
               color: "#fff",
             }}
           >
-            Join voice
+            {canReconnect ? "Reconnect" : "Join voice"}
           </button>
         </div>
       )}

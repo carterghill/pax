@@ -11,6 +11,9 @@ interface DirectCallControlsProps {
   avatarUrl?: string | null;
   isMicEnabled: boolean;
   peerJoined: boolean;
+  peerConnectionLost: boolean;
+  canMute: boolean;
+  isReconnecting: boolean;
   showActions?: boolean;
   onAnswer: () => void;
   onEnd: () => void;
@@ -18,7 +21,8 @@ interface DirectCallControlsProps {
 }
 
 export default function DirectCallControls({
-  call, name, avatarUrl, isMicEnabled, peerJoined, showActions = true, onAnswer, onEnd, onToggleMic,
+  call, name, avatarUrl, isMicEnabled, peerJoined, peerConnectionLost, canMute, isReconnecting,
+  showActions = true, onAnswer, onEnd, onToggleMic,
 }: DirectCallControlsProps) {
   const { palette, spacing, typography } = useTheme();
   const incoming = call.phase === "incoming";
@@ -69,8 +73,11 @@ export default function DirectCallControls({
 
   const active = call.phase === "active";
   const status = call.phase === "dialing" ? `Calling ${name}…`
+    : peerConnectionLost ? `${name} lost connection and may reconnect.`
+    : call.phase === "resuming" || isReconnecting ? "Reconnecting…"
+    : call.phase === "interrupted" || (call.established && !canMute) ? "Your voice connection was interrupted."
     : active && peerJoined ? `In a call with ${name}` : `Connecting to ${name}…`;
-  const endLabel = active ? "Hang up" : "Cancel call";
+  const endLabel = active || call.established ? "Hang up" : "Cancel call";
   const muteLabel = isMicEnabled ? "Mute microphone" : "Unmute microphone";
 
   return (
@@ -83,7 +90,7 @@ export default function DirectCallControls({
       <span role="status" style={{ flex: 1, minWidth: 0, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
         {status}
       </span>
-      {showActions && active && (
+      {showActions && active && canMute && (
         <button type="button" aria-label={muteLabel} title={muteLabel} onClick={onToggleMic} style={buttonStyle}>
           {isMicEnabled ? <Mic size={17} aria-hidden="true" /> : <MicOff size={17} aria-hidden="true" />}
         </button>

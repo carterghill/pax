@@ -26,9 +26,6 @@ export function VoicePresenceProvider({ children }: { children: ReactNode }) {
       }),
       listen("sync-ready", () => { if (!cancelled) store.invalidateMatrix(); }),
       listen("rooms-changed", () => { if (!cancelled) store.invalidateMatrix(); }),
-      listen<{ connectedRoomId: string | null; isConnecting: boolean; error: string | null }>("voice-state-changed", ({ payload }) => {
-        if (!cancelled) store.setConnectedRoom(!payload.isConnecting && !payload.error ? payload.connectedRoomId : null);
-      }),
     ]).then((results) => {
       for (const result of results) {
         if (result.status === "fulfilled") {

@@ -119,39 +119,9 @@ export const SPACE_ROOM_TYPE = "m.space";
    return normalizeUserId(trimmed);
  };
  
- /** Keys used to match Matrix roster rows to LiveKit / in-call participant state. */
- export function voiceStateLookupKeysForParticipant(p: {
-   userId: string;
-   displayName?: string | null;
- }): string[] {
-   const keys = new Set<string>();
-   const add = (raw: string) => {
-     const n = normalizeUserId(raw);
-     if (n) keys.add(n);
-   };
-   add(p.userId.split("|")[0]);
-   add(localpartFromUserId(p.userId));
-   if (p.displayName) add(p.displayName);
-   return [...keys];
- }
- 
- /** Keys to store LiveKit snapshot / in-call state under (per voice room). */
- export function voiceStateLookupKeysForLiveKitIdentity(identity: string): string[] {
-   const keys = new Set<string>();
-   const add = (raw: string) => {
-     const n = normalizeUserId(raw);
-     if (n) keys.add(n);
-   };
-   const base = identity.trim().split("|")[0].trim();
-   add(identity.trim());
-   add(base);
-   if (!base.startsWith("@") && base.includes(":")) {
-     add(`@${base}`);
-   }
-   const mxid = extractMatrixUserId(identity);
-   add(mxid);
-   add(localpartFromUserId(mxid.startsWith("@") ? mxid : `@${mxid}`));
-   return [...keys];
+ export function isVoiceParticipantOnDevice(identity: string, userId: string, deviceId?: string): boolean {
+   return identity === userId ||
+     (!!deviceId && (identity === `${userId}:${deviceId}` || identity === `${userId}|${deviceId}`));
  }
 
 /** Synthetic room id for a DM draft before the Matrix room exists (must not collide with real ids). */
