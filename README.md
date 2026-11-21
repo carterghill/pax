@@ -6,6 +6,12 @@ This template should help get you started developing with Tauri, React and Types
 
 - [VS Code](https://code.visualstudio.com/) + [Tauri](https://marketplace.visualstudio.com/items?itemName=tauri-apps.tauri-vscode) + [rust-analyzer](https://marketplace.visualstudio.com/items?itemName=rust-lang.rust-analyzer)
 
+## Linux media dependencies
+
+On Debian-based Linux, install the Pax `.deb` with APT (for example, `sudo apt install ./pax_0.1.0_arm64.deb`) so it resolves the GStreamer dependencies. When running Pax from source, use `npm run setup:linux-media` before `npm start`. The setup command reads the same dependency list and uses APT to install missing packages. Restart Pax if it was already running.
+
+Build AppImages on Ubuntu with the GStreamer packages installed so Tauri can include the media framework.
+
 ## Unavailable encrypted messages
 
 Encrypted events that cannot currently be decrypted remain in the timeline as **Message unavailable on this device**, with their sender and timestamp. Opening a chat with such messages shows a notice rather than silently hiding a reply.

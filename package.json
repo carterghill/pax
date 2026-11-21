@@ -6,6 +6,7 @@
   "scripts": {
     "dev": "vite",
     "start": "concurrently \"vite\" \"tauri dev\"",
+    "setup:linux-media": "node scripts/setup-linux-media.mjs",
     "build": "tsc && vite build",
     "test:attachments": "node --test src/data/AttachmentLease.test.mjs",
     "test:composer": "node --test src/features/chat/composer/clipboardImage.test.mjs",

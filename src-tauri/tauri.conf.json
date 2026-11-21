@@ -42,6 +42,9 @@
       "entitlements": "Entitlements.plist"
     },
     "linux": {
+      "appimage": {
+        "bundleMediaFramework": true
+      },
       "deb": {
         "depends": [
           "gstreamer1.0-plugins-base",
