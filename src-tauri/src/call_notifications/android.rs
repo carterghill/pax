@@ -110,22 +110,18 @@ async fn inspect_event(base: PathBuf, room_id: String, event_id: String) -> Opti
     let room = client.get_room(&room_id)?;
     let peer = direct_calls::direct_call_peer(&room).await?;
     let context = room
-        .event_with_context(&event_id, true, 12u32.into(), None)
+        .event_with_context(&event_id, true, 24u32.into(), None)
         .await
         .ok()?;
-    let event = context.event?;
-    let now = now_ms();
-    let resolution = direct_calls::call_push_event(&room, &peer, &event, now).await?;
-    if resolution["kind"] == "ring" {
-        for later in context.events_after {
-            if let Some(ended) = direct_calls::call_push_event(&room, &peer, &later, now).await {
-                if ended["kind"] == "ended" && ended["callId"] == resolution["callId"] {
-                    return Some(ended);
-                }
-            }
-        }
-    }
-    Some(resolution)
+    direct_calls::call_push_event(
+        &room,
+        &peer,
+        context.event.as_ref()?,
+        &context.events_before,
+        &context.events_after,
+        now_ms(),
+    )
+    .await
 }
 
 #[no_mangle]

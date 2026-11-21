@@ -1,5 +1,7 @@
 use std::{collections::VecDeque, sync::Arc, time::Duration};
 
+#[cfg(any(target_os = "android", test))]
+use matrix_sdk::ruma::UserId;
 use matrix_sdk::{
     deserialized_responses::{TimelineEvent, TimelineEventKind},
     ruma::{
@@ -130,24 +132,47 @@ pub(crate) async fn direct_call_peer(room: &Room) -> Option<OwnedUserId> {
 #[cfg(target_os = "android")]
 pub(crate) async fn call_push_event(
     room: &Room,
-    peer: &matrix_sdk::ruma::UserId,
+    peer: &UserId,
     event: &TimelineEvent,
+    before: &[TimelineEvent],
+    after: &[TimelineEvent],
     now: u64,
 ) -> Option<serde_json::Value> {
-    let call = parse_call_event(event.raw())?;
-    let ignored = serde_json::json!({ "kind": "ignore" });
-    if room.encryption_state().is_encrypted() && !matches!(event.kind, TimelineEventKind::Decrypted(_)) {
-        return Some(ignored);
+    if event.raw().get_field::<&str>("type").ok().flatten() != Some(CALL_EVENT) {
+        return None;
     }
-    let Some(expires_at) = call.signal_expiry(now) else { return Some(ignored) };
-    let from_peer = call.sender == peer;
-    let kind = match call.content.kind {
-        SignalKind::Ring if from_peer => "ring",
-        SignalKind::End | SignalKind::Answer | SignalKind::Connect
-            if from_peer || call.sender == room.own_user_id() => "ended",
-        _ => return Some(ignored),
+    let ignored = serde_json::json!({ "kind": "ignore" });
+    let encrypted = room.encryption_state().is_encrypted();
+    let parse = |event: &TimelineEvent| {
+        if encrypted && !matches!(event.kind, TimelineEventKind::Decrypted(_)) {
+            return None;
+        }
+        parse_call_event(event.raw())
     };
-    let caller = room.get_member_no_sync(peer).await.ok().flatten()
+    let Some(call) = parse(event) else {
+        return Some(ignored);
+    };
+    let related = |events: &[TimelineEvent]| {
+        events
+            .iter()
+            .filter_map(parse)
+            .filter(|event| event.content.call_id == call.content.call_id)
+            .collect::<Vec<_>>()
+    };
+    let before = related(before);
+    let after = related(after);
+    let outcome = call_push_outcome(&call, &before, &after, peer, room.own_user_id(), now);
+    let (kind, expires_at, ring_event_id) = match outcome {
+        CallPushOutcome::Ring(expires_at) => ("ring", expires_at, None),
+        CallPushOutcome::Ended => ("ended", 0, None),
+        CallPushOutcome::Missed(ring) => ("missed", 0, Some(&ring.event_id)),
+        CallPushOutcome::Ignore => return Some(ignored),
+    };
+    let caller = room
+        .get_member_no_sync(peer)
+        .await
+        .ok()
+        .flatten()
         .and_then(|member| member.display_name().map(str::to_owned))
         .unwrap_or_else(|| peer.to_string());
     Some(serde_json::json!({
@@ -156,7 +181,84 @@ pub(crate) async fn call_push_event(
         "caller": caller,
         "roomId": room.room_id(),
         "expiresAt": expires_at,
+        "ringEventId": ring_event_id,
     }))
+}
+
+#[cfg(any(target_os = "android", test))]
+enum CallPushOutcome<'a> {
+    Ring(u64),
+    Ended,
+    Missed(&'a CallEvent),
+    Ignore,
+}
+
+#[cfg(any(target_os = "android", test))]
+fn call_push_outcome<'a>(
+    call: &'a CallEvent,
+    before: &'a [CallEvent],
+    after: &'a [CallEvent],
+    peer: &UserId,
+    me: &UserId,
+    now: u64,
+) -> CallPushOutcome<'a> {
+    // An answer on any of our devices or a connect from the caller settles the ring.
+    let settles_ring = |event: &CallEvent, ring: &CallEvent| {
+        if event.content.call_id != ring.content.call_id {
+            return false;
+        }
+        let from_caller =
+            event.sender == ring.sender && event.content.device_id == ring.content.device_id;
+        match event.content.kind {
+            SignalKind::Answer => event.sender == me,
+            SignalKind::Connect => from_caller,
+            SignalKind::End => event.sender == me,
+            _ => false,
+        }
+    };
+    let is_caller_end = |end: &CallEvent, ring: &CallEvent| {
+        end.content.kind == SignalKind::End
+            && end.content.call_id == ring.content.call_id
+            && end.sender == peer
+            && end.content.device_id == ring.content.device_id
+    };
+    let from_peer = call.sender == peer;
+    let expires_at = call.signal_expiry(now);
+    match call.content.kind {
+        SignalKind::Ring if from_peer => {
+            // A delayed ring push can arrive after the caller hung up.
+            if after.iter().any(|event| settles_ring(event, call)) {
+                return CallPushOutcome::Ended;
+            }
+            if let Some(end) = after.iter().find(|event| is_caller_end(event, call)) {
+                return if end.signal_expiry(now).is_some() && !end.content.connection_lost {
+                    CallPushOutcome::Missed(call)
+                } else {
+                    CallPushOutcome::Ended
+                };
+            }
+            expires_at.map_or(CallPushOutcome::Ignore, CallPushOutcome::Ring)
+        }
+        SignalKind::End if from_peer && expires_at.is_some() && !call.content.connection_lost => {
+            let ring = before.iter().find(|event| {
+                event.content.kind == SignalKind::Ring
+                    && event.sender == peer
+                    && is_caller_end(call, event)
+            });
+            if let Some(ring) = ring {
+                if !before.iter().chain(after).any(|event| settles_ring(event, ring)) {
+                    return CallPushOutcome::Missed(ring);
+                }
+            }
+            CallPushOutcome::Ended
+        }
+        SignalKind::End | SignalKind::Answer | SignalKind::Connect
+            if expires_at.is_some() && (from_peer || call.sender == me) =>
+        {
+            CallPushOutcome::Ended
+        }
+        _ => CallPushOutcome::Ignore,
+    }
 }
 
 #[cfg(target_os = "android")]
@@ -465,6 +567,83 @@ mod tests {
         let now = 500_000;
         assert!(fresh_call_event(&event(now - RING_MS - 1, "end", None), now).is_some());
         assert!(fresh_call_event(&event(now - END_SIGNAL_MS, "end", None), now).is_none());
+    }
+
+    fn push_event(
+        id: &str,
+        timestamp: u64,
+        kind: &str,
+        sender: &str,
+        device: &str,
+    ) -> CallEvent {
+        let answer_device = (kind == "connect").then_some("CALLEE");
+        let event = event(timestamp, kind, answer_device);
+        let mut data: serde_json::Value = serde_json::from_str(event.raw().json().get()).unwrap();
+        data["event_id"] = json!(id);
+        data["sender"] = json!(sender);
+        data["content"]["deviceId"] = json!(device);
+        serde_json::from_value(data).unwrap()
+    }
+
+    #[test]
+    fn either_push_for_an_unanswered_incoming_call_points_to_its_ring() {
+        let peer = UserId::parse("@peer:example.org").unwrap();
+        let me = UserId::parse("@me:example.org").unwrap();
+        let ring = push_event("$ring", 1000, "ring", peer.as_str(), "CALLER");
+        let end = push_event("$end", 1000 + RING_MS, "end", peer.as_str(), "CALLER");
+        let now = 1000 + RING_MS + 100;
+        assert!(matches!(
+            call_push_outcome(&ring, &[], &[], &peer, &me, 2000),
+            CallPushOutcome::Ring(expires_at) if expires_at == 1000 + RING_MS
+        ));
+        assert!(matches!(
+            call_push_outcome(&end, std::slice::from_ref(&ring), &[], &peer, &me, now),
+            CallPushOutcome::Missed(ring) if ring.event_id.as_str() == "$ring"
+        ));
+        assert!(matches!(
+            call_push_outcome(&ring, &[], &[end], &peer, &me, now),
+            CallPushOutcome::Missed(ring) if ring.event_id.as_str() == "$ring"
+        ));
+    }
+
+    #[test]
+    fn answered_declined_and_outgoing_calls_are_not_missed_incoming_calls() {
+        let peer = UserId::parse("@peer:example.org").unwrap();
+        let me = UserId::parse("@me:example.org").unwrap();
+        let end = push_event("$end", 3000, "end", peer.as_str(), "CALLER");
+        for (kind, sender, device) in [
+            ("answer", me.as_str(), "OTHER_CALLEE"),
+            ("connect", peer.as_str(), "CALLER"),
+            ("end", me.as_str(), "CALLEE"),
+        ] {
+            let ring = push_event("$ring", 1000, "ring", peer.as_str(), "CALLER");
+            let settled = push_event("$settled", 2000, kind, sender, device);
+            assert!(matches!(
+                call_push_outcome(&end, &[ring, settled], &[], &peer, &me, 4000),
+                CallPushOutcome::Ended
+            ));
+        }
+        let outgoing = push_event("$outgoing", 1000, "ring", me.as_str(), "CALLEE");
+        assert!(matches!(
+            call_push_outcome(&end, &[outgoing], &[], &peer, &me, 4000),
+            CallPushOutcome::Ended
+        ));
+    }
+
+    #[test]
+    fn unrelated_signals_do_not_mark_a_call_missed_or_stop_a_live_ring() {
+        let peer = UserId::parse("@peer:example.org").unwrap();
+        let me = UserId::parse("@me:example.org").unwrap();
+        let ring = push_event("$ring", 1000, "ring", peer.as_str(), "CALLER");
+        let end = push_event("$other", 2000, "end", peer.as_str(), "OTHER_CALLER");
+        assert!(matches!(
+            call_push_outcome(&end, std::slice::from_ref(&ring), &[], &peer, &me, 3000),
+            CallPushOutcome::Ended
+        ));
+        assert!(matches!(
+            call_push_outcome(&ring, &[], &[end], &peer, &me, 3000),
+            CallPushOutcome::Ring(_)
+        ));
     }
 
     #[test]

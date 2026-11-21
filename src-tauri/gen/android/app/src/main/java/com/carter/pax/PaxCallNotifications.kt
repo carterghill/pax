@@ -13,6 +13,7 @@ import android.os.Build
 import android.os.Handler
 import android.os.Looper
 import android.util.Log
+import android.widget.RemoteViews
 import androidx.core.app.NotificationCompat
 import org.json.JSONObject
 import java.lang.ref.WeakReference
@@ -112,12 +113,17 @@ internal object PaxCallNotifications {
             return
         }
         val caller = call.caller.ifBlank { "Pax contact" }
+        val heading = context.getString(R.string.pax_incoming_call_from, caller)
+        val controls = RemoteViews(context.packageName, R.layout.notification_incoming_call).apply {
+            setTextViewText(R.id.pax_call_heading, heading)
+            setOnClickPendingIntent(R.id.pax_call_decline, intent(context, call.id, DECLINE))
+            setOnClickPendingIntent(R.id.pax_call_answer, intent(context, call.id, ANSWER))
+        }
         // Firebase can post this directly. Android reserves CallStyle for notifications
         // attached to a foreground service, user-initiated job, or full-screen intent.
         val notification = NotificationCompat.Builder(context, CHANNEL)
             .setSmallIcon(R.drawable.ic_stat_pax)
-            .setContentTitle(caller)
-            .setContentText("Incoming call")
+            .setContentTitle(heading)
             .setCategory(NotificationCompat.CATEGORY_CALL)
             .setVisibility(NotificationCompat.VISIBILITY_PRIVATE)
             .setPriority(NotificationCompat.PRIORITY_MAX)
@@ -125,8 +131,9 @@ internal object PaxCallNotifications {
             .setOnlyAlertOnce(true)
             .setTimeoutAfter(duration)
             .setContentIntent(intent(context, call.id, OPEN))
-            .addAction(android.R.drawable.ic_menu_close_clear_cancel, "Decline", intent(context, call.id, DECLINE))
-            .addAction(android.R.drawable.ic_menu_call, "Answer", intent(context, call.id, ANSWER))
+            .setStyle(NotificationCompat.DecoratedCustomViewStyle())
+            .setCustomHeadsUpContentView(controls)
+            .setCustomBigContentView(controls)
             .build()
         try {
             manager(context).notify(call.id, NOTIFICATION_ID, notification)
