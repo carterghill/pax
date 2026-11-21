@@ -17,16 +17,18 @@ import VoiceAudioSettingsSection from "./VoiceAudioSettingsSection";
 import ScreenShareGrid from "./ScreenShareGrid";
 import VoiceLinkStatus from "./VoiceLinkStatus";
 import type { VoiceParticipantState } from "../hooks/useVoiceParticipantStates";
+import type { DirectCallPeerConnection } from "../hooks/useDirectCall";
 import { useOverlayObstruction } from "../hooks/useOverlayObstruction";
 
 interface VoiceCallPanelProps {
   roomId: string;
   voiceCall: VoiceCall;
+  onDisconnect: () => void;
   voiceParticipants?: MatrixVoiceParticipant[];
   participantStates?: Record<string, VoiceParticipantState>;
   canReconnect?: boolean;
   userId: string;
-  directCall?: { peer: MatrixVoiceParticipant; peerDeviceId?: string; onEnd: () => void; peerConnectionLost: boolean };
+  directCall?: { peer: MatrixVoiceParticipant; peerDeviceId?: string; peerConnection: DirectCallPeerConnection };
 }
 
 const EMPTY_VOICE_PARTICIPANTS: MatrixVoiceParticipant[] = [];
@@ -74,6 +76,7 @@ export default function VoiceRoomView({
 export function VoiceCallPanel({
   roomId,
   voiceCall: callState,
+  onDisconnect,
   voiceParticipants = EMPTY_VOICE_PARTICIPANTS,
   participantStates = EMPTY_PARTICIPANT_STATES,
   canReconnect = false,
@@ -82,7 +85,6 @@ export function VoiceCallPanel({
 }: VoiceCallPanelProps) {
   const {
     connect: onConnect,
-    disconnect: onDisconnect,
     toggleMic: onToggleMic,
     toggleDeafen: onToggleDeafen,
     toggleNoiseSuppression: onToggleNoiseSuppression,
@@ -294,19 +296,20 @@ export function VoiceCallPanel({
   );
 
   const showLobby = !isDirectCall && !isConnected && !isConnecting;
-  const peerConnectionLost = directCall?.peerConnectionLost;
+  const peerConnection = directCall?.peerConnection;
   const peerDeviceId = directCall?.peerDeviceId;
   const participants = useMemo(() => {
     const roster = new Map(voiceParticipants.map((participant) => [participant.userId, participant]));
     if (peer) roster.set(peer.userId, peer);
     const rows = new Map<string, VoiceParticipantState>(Object.entries(participantStates));
-    if (peerConnectionLost && peer) rows.set(peer.userId, { status: "lost" });
+    if (peerConnection === "lost" && peer) rows.set(peer.userId, { status: "lost" });
 
     if (isConnected && isDirectCall) {
       for (const participant of callState.participants) {
         const id = participant.isLocal ? userId : peer?.userId;
         if (!id || (!participant.isLocal && !isVoiceParticipantOnDevice(participant.identity, id, peerDeviceId))) continue;
-        rows.set(id, { ...participant, status: "connected" });
+        const status = !participant.isLocal && peerConnection === "interrupted" ? "interrupted" : "connected";
+        rows.set(id, { ...participant, status });
       }
     }
 
@@ -321,7 +324,7 @@ export function VoiceCallPanel({
         isLocal: id === userId,
       };
     }).sort((a, b) => compareByDisplayThenKey(a.displayName, a.identity, b.displayName, b.identity));
-  }, [callState.participants, isConnected, isDirectCall, participantStates, peer, peerDeviceId, peerConnectionLost, userId, voiceParticipants]);
+  }, [callState.participants, isConnected, isDirectCall, participantStates, peer, peerDeviceId, peerConnection, userId, voiceParticipants]);
 
   return (
     <section aria-label={directCall ? "Voice call" : undefined} style={{
@@ -489,7 +492,7 @@ export function VoiceCallPanel({
           <div
             key={p.userId}
             onContextMenu={(e) => {
-              if (p.isLocal || p.status !== "connected") return;
+              if (p.isLocal || (p.status !== "connected" && p.status !== "interrupted")) return;
               e.preventDefault();
               setContextMenu({
                 x: e.clientX,
@@ -519,7 +522,7 @@ export function VoiceCallPanel({
                   transition: "box-shadow 0.15s ease",
                 }}
               />
-              {isDirectCall && p.userId === peer?.userId && p.status === "lost" && (
+              {isDirectCall && p.userId === peer?.userId && (p.status === "interrupted" || p.status === "lost") && (
                 <span className="voice-peer-reconnect-ring" aria-hidden="true" style={{
                   position: "absolute",
                   inset: -3,
@@ -545,11 +548,11 @@ export function VoiceCallPanel({
             }}>
               {p.displayName}{p.isLocal ? " (you)" : ""}
               <span style={{ marginLeft: spacing.unit, display: "inline-flex", alignItems: "center", gap: spacing.unit }}>
-                {p.status === "connected" && callState.screenSharingOwners.includes(p.identity) && (
+                {(p.status === "connected" || p.status === "interrupted") && callState.screenSharingOwners.includes(p.identity) && (
                   <Monitor size={12} color="#23a55a" />
                 )}
-                {p.status === "connected" && p.isMuted && <MicOff size={12} color={palette.textSecondary} />}
-                {p.status === "connected" && p.isDeafened && (
+                {p.isMuted && <MicOff size={12} color={palette.textSecondary} />}
+                {p.isDeafened && (
                   <span style={{ position: "relative", width: 12, height: 12, display: "inline-flex", alignItems: "center", justifyContent: "center" }}>
                     <Headphones size={12} color={palette.textSecondary} />
                     <Slash size={10} color={palette.textSecondary} style={{ position: "absolute" }} />
@@ -1093,7 +1096,7 @@ export function VoiceCallPanel({
           {/* Disconnect */}
           <button
             type="button"
-            onClick={() => void (directCall ? directCall.onEnd() : onDisconnect())}
+            onClick={onDisconnect}
             title={directCall ? "Hang up" : "Disconnect"}
             style={{
               width: 48,

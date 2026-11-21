@@ -21,7 +21,7 @@ use serde::Serialize;
 /// Architecture:
 ///   Mic:  cpal input → ring buffer → tokio task → NativeAudioSource → LiveKit
 ///   Spkr: LiveKit → NativeAudioStream → per-user volume → mix → ring buffer → cpal output
-use std::collections::{HashMap, VecDeque};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
@@ -109,6 +109,7 @@ pub struct VoiceParticipantInfo {
     pub is_local: bool,
     pub is_muted: bool,
     pub is_deafened: bool,
+    pub connection_interrupted: bool,
 }
 #[derive(Clone, Serialize, Debug)]
 #[serde(rename_all = "camelCase")]
@@ -162,6 +163,8 @@ struct AudioState {
     remote_mic_level_smooth: HashMap<String, f32>,
     /// All remote participant identities we know about
     remote_participants: Vec<String>,
+    /// Remote participants with LiveKit quality Lost who are still in the room.
+    interrupted_participants: HashSet<String>,
     /// Per-remote participant mic mute state (true = muted)
     remote_mic_muted: HashMap<String, bool>,
     /// Count of subscribed remote audio tracks that are not the participant's microphone.
@@ -194,6 +197,7 @@ impl Default for AudioState {
             local_mic_level_smooth: 0.0,
             remote_mic_level_smooth: HashMap::new(),
             remote_participants: Vec::new(),
+            interrupted_participants: HashSet::new(),
             remote_mic_muted: HashMap::new(),
             remote_non_mic_audio_tracks: HashMap::new(),
             remote_deafened: HashMap::new(),
@@ -413,6 +417,23 @@ impl VoiceManager {
     pub async fn disconnect(&self) {
         self.disconnect_inner().await;
     }
+
+    /// Notify LiveKit before the process exits. The saved session and Matrix call
+    /// lifecycle stay available for recovery, and capture threads exit with Pax.
+    pub async fn close_media_for_exit(&self) {
+        let session = self
+            .session
+            .lock()
+            .as_ref()
+            .map(|session| (session.room.clone(), session.shutdown_tx.clone()));
+        if let Some((room, shutdown)) = session {
+            let _ = shutdown.try_send(());
+            if let Err(error) = room.close().await {
+                log::debug!("Closing LiveKit during app exit: {error}");
+            }
+        }
+    }
+
     async fn disconnect_inner(&self) {
         let session = {
             let mut guard = self.session.lock();
@@ -977,6 +998,7 @@ async fn run_event_loop(
     speaking_tick.set_missed_tick_behavior(MissedTickBehavior::Skip);
     loop {
         tokio::select! {
+            biased;
             _ = shutdown_rx.recv() => {
                 break;
             }
@@ -1164,6 +1186,7 @@ async fn run_event_loop(
                         {
                             let mut st = audio_state.lock();
                             st.remote_participants.retain(|id| id != &identity);
+                            st.interrupted_participants.remove(&identity);
                             st.remote_mic_muted.remove(&identity);
                             st.remote_non_mic_audio_tracks.remove(&identity);
                             st.remote_deafened.remove(&identity);
@@ -1181,6 +1204,20 @@ async fn run_event_loop(
                             }
                         }
                         emit_state(app_handle.as_ref(), &room_id, &local_identity, &audio_state, false, true, None);
+                    }
+                    Some(RoomEvent::ConnectionQualityChanged { participant: Participant::Remote(participant), quality }) => {
+                        let identity = participant.identity().to_string();
+                        let changed = {
+                            let mut st = audio_state.lock();
+                            if quality == ConnectionQuality::Lost {
+                                st.interrupted_participants.insert(identity)
+                            } else {
+                                st.interrupted_participants.remove(&identity)
+                            }
+                        };
+                        if changed {
+                            emit_state(app_handle.as_ref(), &room_id, &local_identity, &audio_state, false, true, None);
+                        }
                     }
                     Some(RoomEvent::ActiveSpeakersChanged { speakers }) => {
                         let speaker_ids: Vec<String> = speakers
@@ -1218,7 +1255,11 @@ async fn run_event_loop(
                     }
                     Some(RoomEvent::Reconnecting) => {
                         log::warn!("LiveKit connection lost — reconnecting...");
-                        audio_state.lock().transport_reconnecting = true;
+                        {
+                            let mut st = audio_state.lock();
+                            st.transport_reconnecting = true;
+                            st.interrupted_participants.clear();
+                        }
                         emit_state(app_handle.as_ref(), &room_id, &local_identity, &audio_state, true, false, None);
                     }
                     Some(RoomEvent::Reconnected) => {
@@ -1458,6 +1499,7 @@ fn emit_state(
             is_local: true,
             is_muted: !st.mic_enabled,
             is_deafened: st.deafened,
+            connection_interrupted: false,
         });
     }
     // Remote participants
@@ -1469,12 +1511,14 @@ fn emit_state(
         let muted = *st.remote_mic_muted.get(id).unwrap_or(&false);
         let smooth = *st.remote_mic_level_smooth.get(id).unwrap_or(&0.0);
         let level_speaking = merge_speaking_from_level(server, smooth, !muted);
+        let connection_interrupted = st.interrupted_participants.contains(id);
         participants.push(VoiceParticipantInfo {
             identity: id.clone(),
-            is_speaking: level_speaking,
+            is_speaking: level_speaking && !connection_interrupted,
             is_local: false,
             is_muted: muted,
             is_deafened: *st.remote_deafened.get(id).unwrap_or(&false),
+            connection_interrupted,
         });
     }
     let event = VoiceStateEvent {

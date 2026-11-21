@@ -93,7 +93,7 @@ pub struct AppState {
     /// (tl;dr: matrix-sdk 0.16 only flags the broadcast's READ_RECEIPT reason on
     /// the sliding-sync path; legacy sync_once doesn't, so we poll instead).
     pub unread_cache: commands::unread::UnreadStateCache,
-    pub(crate) rss_unread_cache: Arc<commands::unread::RssUnreadCache>,
+    pub(crate) unread_projection: Arc<commands::unread_projection::UnreadProjectionCache>,
     pub pending_unavailable_reads: commands::unavailable_messages::PendingUnavailableReads,
     /// Per-room raw message count since the user's last read receipt, observed
     /// by counting non-self `m.room.message` events in the sync loop's event
@@ -331,7 +331,7 @@ pub fn run() {
         voice_livekit_jwt_service_url: StdMutex::new(None),
         desired_presence: Arc::new(StdMutex::new("online".to_string())),
         unread_cache: Arc::new(Mutex::new(HashMap::new())),
-        rss_unread_cache: Arc::default(),
+        unread_projection: Arc::default(),
         pending_unavailable_reads: Arc::new(Mutex::new(HashMap::new())),
         raw_unread_messages: Arc::new(Mutex::new(HashMap::new())),
     });
@@ -633,8 +633,13 @@ pub fn run() {
             commands::lifecycle::clear_close_window_preference,
         ])
         .setup(setup::setup)
-        .run(tauri::generate_context!())
-        .expect("error while running tauri application");
+        .build(tauri::generate_context!())
+        .expect("error while building tauri application")
+        .run(|app, event| {
+            if let tauri::RunEvent::Exit = event {
+                tauri::async_runtime::block_on(commands::lifecycle::close_voice_before_exit(app));
+            }
+        });
 }
 
 /// Detect the best video codec by probing the GPU adapter at startup.

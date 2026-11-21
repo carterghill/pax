@@ -37,6 +37,7 @@ pub mod rss_search;
 pub mod space_order;
 pub mod tray_indicator;
 pub mod unread;
+pub(crate) mod unread_projection;
 pub mod unavailable_messages;
 pub mod voice_matrix;
 

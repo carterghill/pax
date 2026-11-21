@@ -5,7 +5,7 @@ import type { VoicePresenceSnapshot } from "../data/VoicePresenceStore";
 import type { VoiceCall } from "./useVoiceCall";
 
 export type VoiceParticipantState = {
-  status: "connected" | "connecting" | "lost" | "unknown";
+  status: "connected" | "connecting" | "interrupted" | "lost" | "unknown";
   isMuted?: boolean | null;
   isDeafened?: boolean | null;
   isSpeaking?: boolean | null;
@@ -40,8 +40,10 @@ export function useVoiceParticipantStates(
       const id = "isLocal" in participant && participant.isLocal ? userId : ids.find((mxid) =>
         identity === mxid || identity.startsWith(`${mxid}:`) || identity.startsWith(`${mxid}|`),
       ) ?? extractMatrixUserId(identity);
+      const interrupted = "connectionInterrupted" in participant && participant.connectionInterrupted;
+      if (interrupted && rows[id]?.status === "connected") continue;
       rows[id] = {
-        status: "connected",
+        status: interrupted ? "interrupted" : "connected",
         identity,
         isMuted: participant.isMuted,
         isDeafened: participant.isDeafened,
@@ -57,7 +59,7 @@ export function useVoiceParticipantStates(
       } else if (id === userId && recoveryRoomId === roomId && !isHere) {
         rows[id] = { status: "lost" };
       } else if (!rows[id]) {
-        rows[id] = { status: fresh && previous?.has(id) ? "lost" : "unknown" };
+        rows[id] = { status: id !== userId && fresh && previous?.has(id) ? "lost" : "unknown" };
       }
     }
     states[roomId] = rows;

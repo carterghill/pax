@@ -2,7 +2,7 @@ import { useEffect, type CSSProperties } from "react";
 import { Mic, MicOff, Phone, PhoneOff, X } from "lucide-react";
 import Dialog from "./Dialog";
 import UserAvatar from "./UserAvatar";
-import type { DirectCall } from "../hooks/useDirectCall";
+import type { DirectCall, DirectCallPeerConnection } from "../hooks/useDirectCall";
 import { useTheme } from "../theme/ThemeContext";
 
 interface DirectCallControlsProps {
@@ -10,8 +10,7 @@ interface DirectCallControlsProps {
   name: string;
   avatarUrl?: string | null;
   isMicEnabled: boolean;
-  peerJoined: boolean;
-  peerConnectionLost: boolean;
+  peerConnection: DirectCallPeerConnection;
   canMute: boolean;
   isReconnecting: boolean;
   showActions?: boolean;
@@ -21,7 +20,7 @@ interface DirectCallControlsProps {
 }
 
 export default function DirectCallControls({
-  call, name, avatarUrl, isMicEnabled, peerJoined, peerConnectionLost, canMute, isReconnecting,
+  call, name, avatarUrl, isMicEnabled, peerConnection, canMute, isReconnecting,
   showActions = true, onAnswer, onEnd, onToggleMic,
 }: DirectCallControlsProps) {
   const { palette, spacing, typography } = useTheme();
@@ -73,10 +72,11 @@ export default function DirectCallControls({
 
   const active = call.phase === "active";
   const status = call.phase === "dialing" ? `Calling ${name}…`
-    : peerConnectionLost ? `${name} lost connection and may reconnect.`
+    : peerConnection === "lost" ? `${name} lost connection and may reconnect.`
+    : peerConnection === "interrupted" ? `${name}’s connection was interrupted.`
     : call.phase === "resuming" || isReconnecting ? "Reconnecting…"
     : call.phase === "interrupted" || (call.established && !canMute) ? "Your voice connection was interrupted."
-    : active && peerJoined ? `In a call with ${name}` : `Connecting to ${name}…`;
+    : peerConnection === "connected" ? `In a call with ${name}` : `Connecting to ${name}…`;
   const endLabel = active || call.established ? "Hang up" : "Cancel call";
   const muteLabel = isMicEnabled ? "Mute microphone" : "Unmute microphone";
 

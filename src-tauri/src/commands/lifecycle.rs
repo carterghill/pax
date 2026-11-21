@@ -1,11 +1,16 @@
 //! App lifecycle helpers: quit and hide main window (e.g. minimize to tray).
 
 use std::fs;
+use std::sync::Arc;
+use std::time::Duration;
 
 use serde::{Deserialize, Serialize};
 use tauri::{AppHandle, Manager};
 
+use crate::{voice::VoiceManager, AppState};
+
 const PREFS_FILENAME: &str = "close_window_preference.json";
+const VOICE_EXIT_TIMEOUT: Duration = Duration::from_secs(2);
 
 #[derive(Debug, Serialize, Deserialize)]
 struct CloseWindowPreferenceFile {
@@ -60,6 +65,20 @@ pub fn clear_close_window_preference(app: AppHandle) -> Result<(), String> {
 #[tauri::command]
 pub fn exit_app(app: AppHandle) {
     app.exit(0);
+}
+
+pub(crate) async fn close_voice_before_exit(app: &AppHandle) {
+    let state = app.state::<Arc<AppState>>();
+    let voice = app.state::<VoiceManager>();
+    let result = tokio::time::timeout(VOICE_EXIT_TIMEOUT, async {
+        let _voice_operation = state.voice_room.lock().await;
+        state.stop_heartbeat_loop();
+        voice.close_media_for_exit().await;
+    })
+    .await;
+    if result.is_err() {
+        log::warn!("Timed out closing LiveKit during app exit");
+    }
 }
 
 #[tauri::command]

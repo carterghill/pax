@@ -1,28 +1,20 @@
-use std::{
-    collections::{HashMap, HashSet},
-    sync::Arc,
-    time::Duration,
-};
+use std::{collections::HashMap, time::Duration};
 
 use matrix_sdk::{
     config::RequestConfig,
     deserialized_responses::TimelineEvent,
-    room::MessagesOptions,
     ruma::{
         events::{
-            receipt::{ReceiptThread, ReceiptType},
-            room::message::{OriginalSyncRoomMessageEvent, Relation},
-            AnySyncMessageLikeEvent, AnySyncTimelineEvent, SyncMessageLikeEvent,
+            room::message::OriginalSyncRoomMessageEvent, AnySyncMessageLikeEvent,
+            AnySyncTimelineEvent, SyncMessageLikeEvent,
         },
-        EventId, OwnedEventId, OwnedRoomId, UInt,
+        EventId, OwnedEventId,
     },
     Room,
 };
-use serde_json::Value;
-use tokio::sync::{Mutex, OnceCell, Semaphore};
 
 use super::{cached_feed_event, parse_feed_url, RssRoomProvider};
-use crate::commands::{message_display::reply_to_from_message_relation, unread::RoomUnreadState};
+use crate::commands::message_display::reply_to_from_message_relation;
 
 async fn room_provider(room: &Room) -> Option<RssRoomProvider> {
     let value = cached_feed_event(room).await?;
@@ -142,7 +134,7 @@ impl Filter {
         }
     }
 
-    async fn hides_event(&mut self, room: &Room, event: &TimelineEvent) -> bool {
+    pub(crate) async fn hides_event(&mut self, room: &Room, event: &TimelineEvent) -> bool {
         match event.raw().deserialize().ok() {
             Some(AnySyncTimelineEvent::MessageLike(AnySyncMessageLikeEvent::RoomMessage(
                 SyncMessageLikeEvent::Original(message),
@@ -182,222 +174,18 @@ pub(crate) async fn hides_live_confirmation(
     sender.as_str() == filter.bot_id && filter.target_is_command(room, target).await
 }
 
-#[derive(Clone, Copy, Default)]
-struct Counts {
-    messages: u64,
-    notifications: u64,
-    mentions: u64,
-}
-
-impl Counts {
-    fn count(&mut self, event: &TimelineEvent) {
-        self.messages += u64::from(
-            matches!(event.raw().deserialize().ok(),
-                Some(AnySyncTimelineEvent::MessageLike(
-                    AnySyncMessageLikeEvent::RoomMessage(SyncMessageLikeEvent::Original(OriginalSyncRoomMessageEvent { content, .. }))
-                )) if !matches!(content.relates_to, Some(Relation::Replacement(_)))
-            ) || matches!(
-                event
-                    .raw()
-                    .get_field::<String>("type")
-                    .ok()
-                    .flatten()
-                    .as_deref(),
-                Some(
-                    "m.room.encrypted"
-                        | "m.sticker"
-                        | "m.poll.start"
-                        | "m.poll.end"
-                        | "org.matrix.msc3381.poll.start"
-                        | "org.matrix.msc3381.poll.end"
-                )
-            ),
-        );
-        if let Some(actions) = event.push_actions() {
-            self.notifications += u64::from(actions.iter().any(|action| action.should_notify()));
-            self.mentions += u64::from(actions.iter().any(|action| action.is_highlight()));
-        }
-    }
-}
-
-#[derive(Default)]
-struct UnreadScan {
-    complete: bool,
-    hidden: Counts,
-    visible: Counts,
-}
-
-impl UnreadScan {
-    fn adjust(&self, base: &RoomUnreadState, raw: u64) -> RoomUnreadState {
-        let hidden = self.hidden;
-        if hidden.messages == 0 && hidden.notifications == 0 && hidden.mentions == 0 {
-            return base.clone();
-        }
-        let visible = self.visible;
-        let (messages, notifications, mentions) = if self.complete {
-            (visible.messages, visible.notifications, visible.mentions)
-        } else {
-            // An older receipt can fall outside the bounded scan. Keep unread
-            // activity beyond the scanned pages while removing known bot traffic.
-            (
-                visible
-                    .messages
-                    .max(raw)
-                    .max(base.messages.saturating_sub(hidden.messages)),
-                visible
-                    .notifications
-                    .max(base.notifications.saturating_sub(hidden.notifications)),
-                visible
-                    .mentions
-                    .max(base.mentions.saturating_sub(hidden.mentions)),
-            )
-        };
-        RoomUnreadState {
-            messages: messages.max(notifications),
-            notifications,
-            mentions,
-            marked_unread: base.marked_unread,
-        }
-    }
-}
-
-async fn scan_unread(room: &Room, mut filter: Filter) -> Option<UnreadScan> {
-    let me = room.own_user_id();
-    let mut receipts = HashSet::new();
-    for kind in [ReceiptType::Read, ReceiptType::ReadPrivate] {
-        for thread in [ReceiptThread::Unthreaded, ReceiptThread::Main] {
-            if let Some((id, _)) = room
-                .load_user_receipt(kind.clone(), thread, me)
-                .await
-                .ok()?
-            {
-                receipts.insert(id);
-            }
-        }
-    }
-    let mut scan = UnreadScan::default();
-    let mut seen = HashSet::new();
-    let mut from = None;
-    for _ in 0..4 {
-        let mut options = MessagesOptions::backward();
-        options.limit = UInt::from(50u32);
-        options.from = from.clone();
-        let page = room.messages(options).await.ok()?;
-        filter.remember_commands(&page.chunk);
-        for event in page.chunk {
-            let Some(id) = event.event_id() else { continue };
-            if receipts.contains(&id) {
-                scan.complete = true;
-                return Some(scan);
-            }
-            if !seen.insert(id)
-                || event
-                    .raw()
-                    .get_field::<String>("sender")
-                    .ok()
-                    .flatten()
-                    .as_deref()
-                    == Some(me.as_str())
-            {
-                continue;
-            }
-            if filter.hides_event(room, &event).await {
-                scan.hidden.count(&event);
-            } else {
-                scan.visible.count(&event);
-            }
-        }
-        if page.end.is_none() {
-            scan.complete = true;
-            return Some(scan);
-        }
-        if page.end == from {
-            break;
-        }
-        from = page.end;
-    }
-    Some(scan)
-}
-
-struct CachedUnread {
-    base: RoomUnreadState,
-    raw: u64,
-    result: Arc<OnceCell<RoomUnreadState>>,
-}
-
-#[derive(Default)]
-pub(crate) struct UnreadCache {
-    rooms: Mutex<HashMap<OwnedRoomId, CachedUnread>>,
-}
-
-static SCAN_SLOTS: Semaphore = Semaphore::const_new(6);
-
-impl UnreadCache {
-    pub(crate) async fn invalidate<'a>(&self, ids: impl IntoIterator<Item = &'a OwnedRoomId>) {
-        let mut rooms = self.rooms.lock().await;
-        for id in ids {
-            rooms.remove(id);
-        }
-    }
-
-    pub(crate) async fn clear(&self) {
-        self.rooms.lock().await.clear();
-    }
-
-    pub(crate) async fn snapshot(&self, room: &Room, raw: u64) -> RoomUnreadState {
-        let base = RoomUnreadState::from_room_with_raw(room, raw);
-        // The raw counter already excludes management messages. Fetch history
-        // only when SDK or homeserver totals can still include them.
-        if room.num_unread_messages() == 0 && base.notifications == 0 && base.mentions == 0 {
-            return base;
-        }
-        let result = {
-            let mut rooms = self.rooms.lock().await;
-            let entry = rooms
-                .entry(room.room_id().to_owned())
-                .or_insert_with(|| CachedUnread {
-                    base: base.clone(),
-                    raw,
-                    result: Arc::new(OnceCell::new()),
-                });
-            if entry.base != base || entry.raw != raw {
-                *entry = CachedUnread {
-                    base: base.clone(),
-                    raw,
-                    result: Arc::new(OnceCell::new()),
-                };
-            }
-            entry.result.clone()
-        };
-        result
-            .get_or_init(|| async {
-                let Some(filter) = Filter::for_room(room).await else {
-                    return base.clone();
-                };
-                let attempt = tokio::time::timeout(Duration::from_secs(4), async {
-                    let _slot = SCAN_SLOTS.acquire().await.ok()?;
-                    scan_unread(room, filter).await
-                })
-                .await
-                .ok()
-                .flatten();
-                attempt.map(|scan| scan.adjust(&base, raw)).unwrap_or(base)
-            })
-            .await
-            .clone()
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use matrix_sdk::ruma::RoomId;
-    use serde_json::json;
+    use serde_json::{json, Value};
 
     use super::*;
     use crate::commands::{
         auth::SavedSession,
         pax_auth::tests::{client, Server, TestDir, USER},
         rss::RSS_FEED_EVENT,
+        unread::RoomUnreadState,
+        unread_projection::UnreadProjectionCache,
     };
 
     #[test]
@@ -491,7 +279,7 @@ mod tests {
         let room = client
             .get_room(&RoomId::parse("!test:example.org").unwrap())
             .unwrap();
-        let cache = UnreadCache::default();
+        let cache = UnreadProjectionCache::default();
         assert_eq!(
             u64::from(room.unread_notification_counts().notification_count),
             2

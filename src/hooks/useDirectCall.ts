@@ -30,6 +30,8 @@ export interface DirectCall extends CallId {
   expiresAt: number;
 }
 
+export type DirectCallPeerConnection = "connecting" | "connected" | "interrupted" | "lost";
+
 const RING_MS = 30_000;
 const ANSWER_MS = 45_000;
 const PEER_JOIN_MS = 20_000;
@@ -145,7 +147,7 @@ export function useDirectCall(
     });
   }, []);
 
-  const reconnect = useCallback(async () => {
+  const reconnect = useCallback(async (onStarted?: (roomId: string) => void) => {
     const pending = current.current;
     if (!pending?.established || connections.current.busy || pending.phase === "resuming" ||
         !pending.peerDeviceId || connections.current.roomId !== null) return;
@@ -153,6 +155,7 @@ export function useDirectCall(
     const resuming = { ...pending, phase: "resuming" } as const;
     update(resuming);
     setError(null);
+    onStarted?.(resuming.roomId);
     const accepted = await checkResume(resuming);
     if (current.current !== resuming) return;
     if (accepted === false) {
@@ -294,10 +297,13 @@ export function useDirectCall(
     return () => clearTimeout(timer);
   }, [call, finish]);
 
-  const peerJoined = call?.phase === "active" && voice.connectedRoomId === call.roomId && !voice.isConnecting
-    && voice.remoteParticipants.some(({ identity }) =>
+  const inCall = call?.phase === "active" && voice.connectedRoomId === call.roomId && !voice.isConnecting;
+  const peer = inCall ? voice.remoteParticipants.find(({ identity }) =>
       isVoiceParticipantOnDevice(identity, call.peerUserId, call.peerDeviceId),
-    );
+    ) : undefined;
+  // A quality update leaves the peer in the roster. Only their removal starts
+  // the reconnect window while our own connection is healthy.
+  const peerJoined = peer !== undefined;
   useEffect(() => {
     if (!call || (!call.established && call.phase !== "active")) return;
     if (peerJoined) {
@@ -358,11 +364,12 @@ export function useDirectCall(
     });
   }, [finish, update]);
 
-  const answer = useCallback(() => {
+  const answer = useCallback((onStarted?: (roomId: string) => void) => {
     const pending = current.current;
     if (pending?.phase !== "incoming" || pending.expiresAt <= Date.now() || voiceBusy.current) return;
     const answering = { ...pending, phase: "answering", expiresAt: Date.now() + ANSWER_MS } as const;
     update(answering);
+    onStarted?.(answering.roomId);
     void sendSignal(answering, "answer").catch((reason) => {
       if (current.current !== answering) return;
       void finish(true);
@@ -371,7 +378,8 @@ export function useDirectCall(
   }, [finish, update]);
 
   const clearError = useCallback(() => setError(null), []);
-  const peerConnectionLost = !!call?.established && call.phase === "active" &&
-    voice.connectedRoomId === call.roomId && !peerJoined;
-  return { call, error, peerJoined, peerConnectionLost, reconnect, start, answer, end, clearError };
+  const peerConnection: DirectCallPeerConnection = peer
+    ? peer.connectionInterrupted && call?.established ? "interrupted" : "connected"
+    : inCall && call.established ? "lost" : "connecting";
+  return { call, error, peerConnection, reconnect, start, answer, end, clearError };
 }

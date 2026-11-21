@@ -152,10 +152,9 @@ export default function MainLayout({
       ? recoveryRoom.dmPeerUserId === voiceRecovery.direct.peerUserId
       : recoveryRoom.roomType === VOICE_ROOM_TYPE) ? voiceRecovery : null;
   const {
-    call: directCall, error: directCallError, peerJoined: directCallPeerJoined,
+    call: directCall, error: directCallError, peerConnection: directCallPeerConnection,
     start: startDirectCall, answer: answerIncomingCall,
     end: endDirectCall, clearError: clearDirectCallError, reconnect: reconnectDirectCall,
-    peerConnectionLost: directCallPeerLost,
   } = useDirectCall(voiceCall, eligibleRecovery, voiceRecoveryReady, rememberVoice, forgetVoice);
   const audioControls = useAudioControls(voiceCall);
   // Unread state for every joined room, used by the sidebar to paint rooms in
@@ -304,6 +303,20 @@ export default function MainLayout({
       setActiveRoomBySpace((prev) => ({ ...prev, [spaceKey]: roomId }));
     });
   }, [spaceKey]);
+
+  const openDirectCallRoom = useCallback((roomId: string) => {
+    const room = getRoom(roomId, true);
+    if (room?.membership !== "joined") return;
+    const parentSpaceId = activeRoomId === roomId
+      ? activeSpaceId
+      : room.parentSpaceIds.find((id) => joinedSpaceIdSet.has(id)) ?? null;
+    startTransition(() => {
+      setDiscoverOpen(false);
+      setActiveSpaceId(parentSpaceId);
+      setActiveRoomBySpace((previous) => ({ ...previous, [parentSpaceId ?? ""]: roomId }));
+    });
+    if (isMobile) setMobileNavDrawerOpen(false);
+  }, [activeRoomId, activeSpaceId, getRoom, isMobile, joinedSpaceIdSet]);
 
   useEffect(() => {
     invoke<string>("current_homeserver")
@@ -774,9 +787,11 @@ export default function MainLayout({
   }, [connectVoice, connectedVoiceRoomId, directCall?.roomId, disconnectVoice, eligibleRecovery?.roomId, endDirectCall, forgetVoice, targetVoiceRoomId]);
 
   const reconnectVoiceCall = useCallback(() => {
-    if (directCall?.roomId === activeVoiceRoomId || eligibleRecovery?.direct) return reconnectDirectCall();
+    if (directCall?.roomId === activeVoiceRoomId || eligibleRecovery?.direct) {
+      return reconnectDirectCall(openDirectCallRoom);
+    }
     if (activeVoiceRoomId) return connectVoiceCall(activeVoiceRoomId, { forceReconnect: true, replaceOtherSessions: false });
-  }, [activeVoiceRoomId, connectVoiceCall, directCall?.roomId, eligibleRecovery?.direct, reconnectDirectCall]);
+  }, [activeVoiceRoomId, connectVoiceCall, directCall?.roomId, eligibleRecovery?.direct, openDirectCallRoom, reconnectDirectCall]);
 
   const abandonVoiceChannel = useCallback(() => {
     const roomId = targetVoiceRoomId ?? eligibleRecovery?.roomId;
@@ -791,9 +806,11 @@ export default function MainLayout({
   }, [abandonVoiceChannel, startDirectCall]);
 
   const answerDirectCall = useCallback(() => {
-    if (!voiceCall.isConnecting && !connectedVoiceRoomId) abandonVoiceChannel();
-    answerIncomingCall();
-  }, [abandonVoiceChannel, answerIncomingCall, connectedVoiceRoomId, voiceCall.isConnecting]);
+    answerIncomingCall((roomId) => {
+      abandonVoiceChannel();
+      openDirectCallRoom(roomId);
+    });
+  }, [abandonVoiceChannel, answerIncomingCall, openDirectCallRoom]);
 
   useEffect(() => {
     const roomId = directCall?.roomId ?? targetVoiceRoomId;
@@ -1316,7 +1333,8 @@ export default function MainLayout({
             : directCall?.phase === "resuming" || voiceCall.isReconnecting ? "reconnecting"
             : voiceCall.isConnecting ? "connecting"
             : connectedVoiceRoomId ? "connected" : "disconnected",
-          detail: directCallPeerLost ? `${directCallName} lost connection` : undefined,
+          detail: directCallPeerConnection === "lost" ? `${directCallName} lost connection`
+            : directCallPeerConnection === "interrupted" ? `${directCallName}’s connection was interrupted` : undefined,
           canReconnect: !!directCall?.established || !!targetVoiceRoomId || (!!eligibleRecovery && !eligibleRecovery.direct),
           onReconnect: reconnectVoiceCall,
           onDisconnect: disconnectVoiceCall,
@@ -1378,8 +1396,7 @@ export default function MainLayout({
       name={directCallName}
       avatarUrl={directCallRoom?.avatarUrl}
       isMicEnabled={voiceCall.isMicEnabled}
-      peerJoined={directCallPeerJoined}
-      peerConnectionLost={directCallPeerLost}
+      peerConnection={directCallPeerConnection}
       canMute={connectedVoiceRoomId === directCall.roomId}
       isReconnecting={voiceCall.isReconnecting && targetVoiceRoomId === directCall.roomId}
       showActions={!showCallPanel || voiceCall.isConnecting}
@@ -1480,6 +1497,7 @@ export default function MainLayout({
               <VoiceRoomView
                 room={activeRoom}
                 voiceCall={{ ...voiceCall, connect: connectVoiceCall }}
+                onDisconnect={disconnectVoiceCall}
                 voiceParticipants={voiceParticipants[activeRoom.id] ?? []}
                 participantStates={voiceParticipantStatesByRoom[activeRoom.id]}
                 canReconnect={eligibleRecovery?.roomId === activeRoom.id || targetVoiceRoomId === activeRoom.id}
@@ -1508,6 +1526,7 @@ export default function MainLayout({
                         key={chatCall.callId}
                         roomId={chatCall.roomId}
                         voiceCall={voiceCall}
+                        onDisconnect={endDirectCall}
                         userId={userId}
                         directCall={{
                           peer: {
@@ -1515,9 +1534,8 @@ export default function MainLayout({
                             displayName: directCallName,
                             avatarUrl: directCallRoom?.avatarUrl ?? null,
                           },
-                          onEnd: endDirectCall,
                           peerDeviceId: chatCall.peerDeviceId,
-                          peerConnectionLost: directCallPeerLost,
+                          peerConnection: directCallPeerConnection,
                         }}
                       />
                     )}

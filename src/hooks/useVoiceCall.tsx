@@ -18,6 +18,7 @@ export interface VoiceParticipant {
   isLocal: boolean;
   isMuted: boolean;
   isDeafened: boolean;
+  connectionInterrupted: boolean;
 }
 
 /**

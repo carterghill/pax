@@ -46,7 +46,7 @@ use tokio::sync::Mutex;
 
 use crate::AppState;
 
-pub(crate) use super::rss::activity::UnreadCache as RssUnreadCache;
+use super::unread_projection::UnreadProjectionCache;
 use super::{fmt_error_chain, get_client, resolve_room};
 
 // ---------- Serialised payloads ----------
@@ -147,7 +147,7 @@ pub async fn get_room_unread_state(
         .get(room.room_id())
         .cloned();
     Ok(super::unavailable_messages::apply_pending(
-        state.rss_unread_cache.snapshot(&room, raw).await,
+        state.unread_projection.snapshot(&room, raw).await,
         pending.as_ref(),
     ))
 }
@@ -161,7 +161,7 @@ pub async fn get_all_unread_states(
     let client = get_client(&state).await?;
     let raw_map = state.raw_unread_messages.lock().await.clone();
     let pending = state.pending_unavailable_reads.lock().await.clone();
-    let snapshots = unread_snapshots(&client, &state.rss_unread_cache, &raw_map, &pending).await;
+    let snapshots = unread_snapshots(&client, &state.unread_projection, &raw_map, &pending).await;
     Ok(snapshots
         .into_iter()
         .map(|(id, snapshot)| (id.to_string(), snapshot))
@@ -198,10 +198,10 @@ async fn apply_room_read_receipt(
     // reconcile through sync. Explicit unavailable-message acknowledgements
     // additionally mask the old counts until their private receipt echoes.
     state
-        .rss_unread_cache
+        .unread_projection
         .invalidate([&room.room_id().to_owned()])
         .await;
-    let new_state = state.rss_unread_cache.snapshot(room, 0).await;
+    let new_state = state.unread_projection.snapshot(room, 0).await;
     let payload = RoomUnreadChangedPayload {
         room_id: room.room_id().to_string(),
         state: new_state.clone(),
@@ -271,13 +271,13 @@ pub async fn set_room_marked_unread(
 /// `room-unread-changed` for each room whose values moved.  Called from the
 /// `start_sync` loop after each `sync_once` returns.
 ///
-/// RSS rooms with changed unread activity use a cached view of the unread
-/// timeline to exclude feed-management traffic from the SDK/server totals.
+/// Rooms with feed-management traffic or answered calls use a cached view of
+/// the unread timeline to exclude those events from the SDK/server totals.
 pub async fn emit_unread_snapshot_if_changed(
     client: &Client,
     cache: &UnreadStateCache,
     raw_unread: &RawUnreadMessageCounts,
-    rss_unread: &RssUnreadCache,
+    unread_projection: &UnreadProjectionCache,
     pending_reads: &super::unavailable_messages::PendingUnavailableReads,
     app: &AppHandle,
 ) {
@@ -287,7 +287,7 @@ pub async fn emit_unread_snapshot_if_changed(
     let pending = pending_reads.lock().await.clone();
 
     // Snapshot current state first (no locks held across .emit()).
-    let snapshots = unread_snapshots(client, rss_unread, &raw_map, &pending).await;
+    let snapshots = unread_snapshots(client, unread_projection, &raw_map, &pending).await;
 
     // Also detect rooms that have been left since last pass: emit a zero state so
     // the UI can drop them cleanly.
@@ -329,13 +329,13 @@ pub async fn emit_unread_snapshot_if_changed(
 
 async fn unread_snapshots(
     client: &Client,
-    rss_unread: &RssUnreadCache,
+    unread_projection: &UnreadProjectionCache,
     raw_map: &HashMap<OwnedRoomId, u64>,
     pending: &HashMap<OwnedRoomId, super::unavailable_messages::PendingRead>,
 ) -> Vec<(OwnedRoomId, RoomUnreadState)> {
     stream::iter(client.joined_rooms().into_iter().map(|room| async move {
         let raw = raw_map.get(room.room_id()).copied().unwrap_or(0);
-        let snapshot = rss_unread.snapshot(&room, raw).await;
+        let snapshot = unread_projection.snapshot(&room, raw).await;
         (
             room.room_id().to_owned(),
             super::unavailable_messages::apply_pending(snapshot, pending.get(room.room_id())),
@@ -349,7 +349,7 @@ async fn unread_snapshots(
 /// Clear unread caches on logout / account switch so the next login starts fresh.
 pub async fn clear_unread_cache(state: &Arc<AppState>) {
     state.unread_cache.lock().await.clear();
-    state.rss_unread_cache.clear().await;
+    state.unread_projection.clear().await;
     state.raw_unread_messages.lock().await.clear();
     state.pending_unavailable_reads.lock().await.clear();
 }

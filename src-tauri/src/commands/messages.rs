@@ -2301,7 +2301,7 @@ pub async fn start_sync(
     let status_msg_map = state.status_msg_map.clone();
     let desired_presence = state.desired_presence.clone();
     let unread_cache = state.unread_cache.clone();
-    let rss_unread_cache = state.rss_unread_cache.clone();
+    let unread_projection = state.unread_projection.clone();
     let raw_unread = state.raw_unread_messages.clone();
     let pending_unavailable_reads = state.pending_unavailable_reads.clone();
     let reconcile_state_arc = state_arc.clone();
@@ -2355,7 +2355,7 @@ pub async fn start_sync(
                 let _ = app.emit("rooms-changed", ());
             }
 
-            rss_unread_cache.invalidate(response.rooms.joined.iter()
+            unread_projection.invalidate(response.rooms.joined.iter()
                 .filter(|(_, update)| !update.timeline.events.is_empty() || update.ephemeral.iter().any(|event| {
                     event.get_field::<String>("type").ok().flatten().as_deref() == Some("m.receipt")
                 }))
@@ -2464,7 +2464,7 @@ pub async fn start_sync(
                 &client,
                 &unread_cache,
                 &raw_unread,
-                &rss_unread_cache,
+                &unread_projection,
                 &pending_unavailable_reads,
                 &app,
             )

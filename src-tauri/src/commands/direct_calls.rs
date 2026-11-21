@@ -184,8 +184,17 @@ fn parse_call_event(raw: &Raw<AnySyncTimelineEvent>) -> Option<CallEvent> {
         return None;
     }
     let call: CallEvent = serde_json::from_str(raw.json().get()).ok()?;
-    (call.content.is_valid() && call.state_key.is_none() && call.unsigned.redacted_because.is_none())
-        .then_some(call)
+    (call.content.is_valid()
+        && call.state_key.is_none()
+        && call.unsigned.redacted_because.is_none())
+    .then_some(call)
+}
+
+pub(super) fn call_id_for_event(event: &TimelineEvent, encrypted_room: bool) -> Option<String> {
+    if encrypted_room && event.kind.encryption_info().is_none() {
+        return None;
+    }
+    parse_call_event(event.raw()).map(|call| call.content.call_id)
 }
 
 pub(super) fn call_notice(
@@ -212,21 +221,18 @@ pub(super) fn call_notice(
     })
 }
 
-fn fresh_call_event(event: &TimelineEvent, now: u64) -> Option<(CallEvent, u64, bool)> {
-    let call = parse_call_event(event.raw())?;
-    // Ignore old offers from the initial sync and limit clock skew.
-    let lifetime = if call.content.kind == SignalKind::End {
-        END_SIGNAL_MS
-    } else {
-        RING_MS
-    };
-    let expires_at = call.origin_server_ts.saturating_add(lifetime);
-    let decrypted = matches!(event.kind, TimelineEventKind::Decrypted(_));
-    (expires_at > now && call.origin_server_ts <= now + RING_MS).then_some((
-        call,
-        expires_at.min(now + lifetime),
-        decrypted,
-    ))
+impl CallEvent {
+    fn signal_expiry(&self, now: u64) -> Option<u64> {
+        // Ignore old offers from the initial sync and limit clock skew.
+        let lifetime = if self.content.kind == SignalKind::End {
+            END_SIGNAL_MS
+        } else {
+            RING_MS
+        };
+        let expires_at = self.origin_server_ts.saturating_add(lifetime);
+        (expires_at > now && self.origin_server_ts <= now + RING_MS)
+            .then_some(expires_at.min(now + lifetime))
+    }
 }
 
 pub(super) async fn receive_signals(
@@ -245,7 +251,15 @@ pub(super) async fn receive_signals(
             .timeline
             .events
             .iter()
-            .filter_map(|event| fresh_call_event(event, now))
+            .filter_map(|event| {
+                let call = parse_call_event(event.raw())?;
+                let expires_at = call.signal_expiry(now);
+                Some((
+                    call,
+                    expires_at,
+                    matches!(event.kind, TimelineEventKind::Decrypted(_)),
+                ))
+            })
             .collect();
         if call_events.is_empty() {
             continue;
@@ -259,11 +273,22 @@ pub(super) async fn receive_signals(
 
         let encrypted_room = room.encryption_state().is_encrypted();
         for (call, expires_at, decrypted) in call_events {
-            let from_peer = call.sender == peer;
-            if !from_peer && (call.sender != me || call.content.device_id == device.as_str()) {
+            if encrypted_room && !decrypted {
                 continue;
             }
-            if encrypted_room && !decrypted {
+            let from_peer = call.sender == peer;
+            let answered_here = call.sender == me && call.content.kind == SignalKind::Answer;
+            // A past answer can still settle an unread ring on initial sync.
+            if answered_here || from_peer {
+                state
+                    .unread_projection
+                    .note_call_event(room_id, &call.content.call_id, answered_here)
+                    .await;
+            }
+            let Some(expires_at) = expires_at else {
+                continue;
+            };
+            if !from_peer && (call.sender != me || call.content.device_id == device.as_str()) {
                 continue;
             }
             if call.content.kind.is_recovery()
@@ -296,6 +321,16 @@ pub(super) async fn receive_signals(
 mod tests {
     use super::*;
     use serde_json::json;
+
+    fn fresh_call_event(event: &TimelineEvent, now: u64) -> Option<(CallEvent, u64, bool)> {
+        let call = parse_call_event(event.raw())?;
+        let expires_at = call.signal_expiry(now)?;
+        Some((
+            call,
+            expires_at,
+            matches!(event.kind, TimelineEventKind::Decrypted(_)),
+        ))
+    }
 
     fn event(timestamp: u64, kind: &str, answer_device: Option<&str>) -> TimelineEvent {
         let json = json!({
