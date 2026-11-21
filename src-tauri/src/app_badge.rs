@@ -16,6 +16,14 @@ pub fn set_app_notification_count(
     count: u64,
     show_on_desktop: bool,
 ) -> Result<(), String> {
+    set_notification_count(&app, count, show_on_desktop)
+}
+
+pub(crate) fn set_notification_count(
+    app: &AppHandle,
+    count: u64,
+    show_on_desktop: bool,
+) -> Result<(), String> {
     #[cfg(desktop)]
     let count = if show_on_desktop { count } else { 0 };
     #[cfg(target_os = "linux")]

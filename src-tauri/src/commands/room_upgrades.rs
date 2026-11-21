@@ -854,6 +854,7 @@ mod tests {
                     user_id: USER.into(),
                     device_id: "UPGRADE".into(),
                     access_token: "token".into(),
+                    refresh_token: None,
                 },
             )
             .await;
@@ -981,6 +982,7 @@ mod tests {
                 user_id: USER.into(),
                 device_id: "ADMIN".into(),
                 access_token: "token".into(),
+                refresh_token: None,
             },
         )
         .await;

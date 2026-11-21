@@ -488,6 +488,7 @@ mod tests {
                 user_id: USER.into(),
                 device_id: "ANSWERER".into(),
                 access_token: "test-token".into(),
+                refresh_token: None,
             },
         )
         .await;

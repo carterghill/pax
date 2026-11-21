@@ -83,6 +83,7 @@ async fn original(server: &Server, dir: &TestDir) -> Client {
             user_id: USER.into(),
             device_id: "ORIGINAL".into(),
             access_token: "token".into(),
+            refresh_token: None,
         },
     )
     .await
@@ -434,6 +435,7 @@ async fn conversion_refuses_inaccessible_secrets_and_disabled_password_changes()
             user_id: USER.into(),
             device_id: "LOCKED".into(),
             access_token: "token".into(),
+            refresh_token: None,
         },
     )
     .await;

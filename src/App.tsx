@@ -38,6 +38,13 @@ interface AuthConfig {
   hide_server_config: boolean;
 }
 
+interface LoginDetails {
+  homeserver: string;
+  userId: string | null;
+  rememberMe: boolean;
+  message: string | null;
+}
+
 function App() {
   const { palette, typography, spacing, resolvedColorScheme } = useTheme();
 
@@ -277,6 +284,41 @@ function App() {
     !!authConfig.default_homeserver &&
     (tab === "login" || !!authConfig.registration_token);
 
+  const showSignedOut = useCallback(() => {
+    setAndroidBadgeSessionActive(false);
+    syncStartedRef.current = false;
+    clearMessageCache();
+    clearPersistedSpaceHomeCache();
+    clearPersistedRoomsList();
+    setPassword("");
+    setConfirmPassword("");
+    setUserId(null);
+    setTab("login");
+  }, []);
+
+  useEffect(() => {
+    const unlisten = listen<LoginDetails>("session-ended", ({ payload }) => {
+      showSignedOut();
+      setHomeserver(payload.homeserver);
+      setUsername(payload.userId ?? "");
+      setRememberMe(payload.rememberMe);
+      setError(payload.message);
+    });
+    return () => { void unlisten.then((stop) => stop()); };
+  }, [showSignedOut]);
+
+  const enterSession = useCallback(async (id: string) => {
+    setUserId(id);
+    if (syncStartedRef.current) return;
+    syncStartedRef.current = true;
+    try {
+      await invoke("start_sync");
+    } catch (error) {
+      showSignedOut();
+      throw error;
+    }
+  }, [showSignedOut]);
+
   async function handleLogin() {
     if (authBusyRef.current) return;
     if (!username.trim() || !password) { setError("Username and password are required"); return; }
@@ -285,18 +327,13 @@ function App() {
     setLoading(true);
     setError(null);
     try {
-      // The backend preserves the existing device's keys when reauthenticating.
       const id = await invoke<string>("login", {
         homeserver,
         username,
         password,
         persistSession: rememberMe,
       });
-      if (!syncStartedRef.current) {
-        syncStartedRef.current = true;
-        await invoke("start_sync");
-      }
-      setUserId(id);
+      await enterSession(id);
       setPassword("");
       setConfirmPassword("");
     } catch (e) {
@@ -313,8 +350,8 @@ function App() {
     authBusyRef.current = true; setLoading(true); setConversionError(null);
     try {
       const id = await invoke<string>("resume_pax_conversion", { homeserver, username, currentPassword, newPassword, persistSession: rememberMe });
-      await invoke("start_sync"); syncStartedRef.current = true;
-      setConversionOpen(false); setPassword(""); setUserId(id);
+      await enterSession(id);
+      setConversionOpen(false); setPassword("");
     } catch (e) { setConversionError(String(e)); throw e; }
     finally { authBusyRef.current = false; setLoading(false); }
   }
@@ -349,11 +386,7 @@ function App() {
         registrationToken,
         accountMode,
       });
-      if (!syncStartedRef.current) {
-        syncStartedRef.current = true;
-        await invoke("start_sync");
-      }
-      setUserId(id);
+      await enterSession(id);
       setPassword("");
       setConfirmPassword("");
     } catch (e) {
@@ -367,15 +400,12 @@ function App() {
     setAndroidBadgeSessionActive(false);
     try {
       await invoke("logout");
-      await invoke("clear_saved_credentials");
-    } catch {
-      // Ignore errors during sign out
+      setError(null);
+    } catch (error) {
+      setError(String(error));
+    } finally {
+      showSignedOut();
     }
-    syncStartedRef.current = false;
-    clearMessageCache();
-    clearPersistedSpaceHomeCache();
-    clearPersistedRoomsList();
-    setUserId(null);
   }
 
   useEffect(() => {
@@ -386,31 +416,27 @@ function App() {
       let restoreError: string;
       try {
         const id = await invoke<string>("restore_session");
-        if (!syncStartedRef.current) {
-          syncStartedRef.current = true;
-          invoke("start_sync");
-        }
-        setUserId(id);
+        await enterSession(id);
         return;
       } catch (e) {
         restoreError = String(e);
       }
 
       try {
-        const creds = await invoke<{ homeserver: string; session?: { user_id: string } } | null>("load_credentials");
+        const creds = await invoke<LoginDetails | null>("load_credentials");
         if (creds) {
           // Only restore the saved homeserver if no compile-time default is
           // configured — PAX_HOMESERVER is the source of truth when set.
           if (!authConfig?.default_homeserver) {
             setHomeserver(creds.homeserver);
           }
-          setRememberMe(true);
-          if (creds.session?.user_id) {
-            setUsername(creds.session.user_id);
+          setRememberMe(creds.rememberMe);
+          if (creds.userId) {
+            setUsername(creds.userId);
             if (restoreError.startsWith("PAX_CONVERSION_PENDING:")) {
               setConversionOpen(true);
             } else {
-              setError(restoreError);
+              setError(creds.message ?? restoreError);
             }
           }
         }
@@ -420,7 +446,7 @@ function App() {
     })().finally(() => {
       setAutoLoggingIn(false);
     });
-  }, [userId, authConfig]);
+  }, [userId, authConfig, enterSession]);
 
   function switchTab(newTab: "login" | "signup") {
     if (authBusyRef.current) return;

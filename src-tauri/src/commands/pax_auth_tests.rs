@@ -93,6 +93,7 @@ fn envelope_rejects_wrong_password_tampering_and_account_or_key_substitution() {
 pub(crate) struct ServerState {
     versions: Option<Value>,
     pub route_overrides: HashMap<(String, String), (u16, Value)>,
+    pub expired_whoami_token: Option<String>,
     pub requests: Vec<(String, String, Value)>,
     pub credential: Option<String>,
     required_login_identifier: Option<String>,
@@ -201,7 +202,24 @@ async fn serve(mut socket: TcpStream, state: Arc<Mutex<ServerState>>) {
         state
             .requests
             .push((method.into(), path.clone(), body.clone()));
-        respond(&mut state, method, &path, &body)
+        if path.ends_with("/account/whoami")
+            && state.expired_whoami_token.as_ref().is_some_and(|token| {
+                header
+                    .lines()
+                    .filter_map(|line| line.split_once(':'))
+                    .any(|(key, value)| {
+                        key.eq_ignore_ascii_case("authorization")
+                            && value.trim().strip_prefix("Bearer ") == Some(token.as_str())
+                    })
+            })
+        {
+            (
+                401,
+                json!({"errcode":"M_UNKNOWN_TOKEN", "error":"Expired access token", "soft_logout":true}),
+            )
+        } else {
+            respond(&mut state, method, &path, &body)
+        }
     };
     let response = serde_json::to_vec(&response).unwrap();
     if path.contains("/receipt/") {
@@ -270,6 +288,9 @@ fn respond(s: &mut ServerState, method: &str, path: &str, body: &Value) -> (u16,
     }
     if path == "/_matrix/key/v2/server" {
         return (200, json!({"server_name":"example.org"}));
+    }
+    if path.ends_with("/account/whoami") {
+        return (200, json!({"user_id": USER, "device_id": "ORIGINAL"}));
     }
     if path.ends_with("/capabilities") {
         return (200, json!({"capabilities":{"m.change_password":{"enabled":!s.password_disabled}}}));

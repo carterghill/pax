@@ -50,7 +50,7 @@ export function EncryptionSignOut({ onCancel, onSignOut }: { onCancel: () => voi
   return (
     <RecoveryDialog onClose={cancel} title={checking ? "Backing up before sign-out" : "Protect your history before signing out"}>
       {checking ? <p role="status">Checking recovery and backing up your message keys…</p> : <>
-        <p style={{ lineHeight: 1.5 }}>Your encrypted history is not confirmed recoverable yet. Set up or unlock recovery, or save an encrypted file of this device’s available message keys before signing out.</p>
+        <p style={{ lineHeight: 1.5 }}>Signing out removes this device’s local encryption keys. Set up or unlock recovery, or save an encrypted file of this device’s available message keys first.</p>
         {error && <p role="alert">{error}</p>}
         {showRecovery ? <EncryptionSettingsPanel compact />
           : <button type="button" style={button} onClick={() => setShowRecovery(true)}>Recovery and file backup options</button>}

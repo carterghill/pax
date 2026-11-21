@@ -51,7 +51,7 @@ If recovery was never configured but setup asks you to verify another device, th
 
 Save the recovery key outside Pax. Your account password alone does not unlock encrypted history on a new installation. Keys are backed up while Pax is running; historical keys are downloaded as you read conversations. Recovery setup preserves existing backups and identities. Creating a replacement recovery key requires a separate explicit action.
 
-Local key databases survive logout and reauthentication. When saved credentials identify an existing device, password reauthentication reuses its database and device ID. Keys can also be transferred from a previous local session of the same account without deleting its original store. Sign-out checks recovery and attempts to finish pending uploads first.
+Pax renews access automatically when the homeserver provides a refresh token. If the server requests reauthentication for the same device, signing in again reuses its local encryption store. Revocation or sign-out clears that device's local session. Sign-out checks recovery and attempts to finish pending uploads before asking the homeserver to revoke the device.
 
 If you do not have a recovery key or account recovery cannot be unlocked, open **Settings → Encryption → Back up available history → Back up this device’s history**. Choose and confirm a backup file password of at least 12 characters. Pax saves an encrypted `pax-history-….txt` file to **Downloads** and shows how many message keys it contains. Move a copy somewhere safe and keep its password in your password manager. Both the file and its password are needed to restore it. This option is available for standard Matrix and Pax accounts even when the server recovery-status check fails.
 

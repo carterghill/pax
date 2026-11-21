@@ -1646,6 +1646,7 @@ pub async fn start_sync(
     state: State<'_, Arc<AppState>>,
     app: tauri::AppHandle,
 ) -> Result<(), String> {
+    let _operation = state.encryption.operation.lock().await;
     let client = get_client(&state).await?;
 
     // `AppHandle::clone` bumps Tao's `Rc<EventLoopRunner>` — `Rc` is not thread-safe.
@@ -2437,6 +2438,14 @@ pub async fn start_sync(
             let response = match client.sync_once(settings).await {
                 Ok(r) => r,
                 Err(e) => {
+                    if super::auth::handle_sync_session_error(
+                        &e,
+                        &reconcile_state_arc,
+                        &app,
+                        &client,
+                    ) {
+                        break;
+                    }
                     log::warn!("Sync error: {e}");
                     tokio::time::sleep(std::time::Duration::from_secs(5)).await;
                     continue;

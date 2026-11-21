@@ -89,6 +89,7 @@ async fn context_menu_handles_empty_conversations_without_inventing_a_receipt() 
             user_id: USER.into(),
             device_id: "EMPTY".into(),
             access_token: "token".into(),
+            refresh_token: None,
         },
     )
     .await;
@@ -149,6 +150,7 @@ async fn setup() -> (Server, TestDir, Client, Room) {
             user_id: USER.into(),
             device_id: "ORIGINAL".into(),
             access_token: "token".into(),
+            refresh_token: None,
         },
     )
     .await;
@@ -240,6 +242,7 @@ async fn private_clear_is_immediate_persistent_and_independent_of_decryption() {
             user_id: USER.into(),
             device_id: "FRESH".into(),
             access_token: "fresh".into(),
+            refresh_token: None,
         },
     )
     .await;

@@ -155,6 +155,22 @@ fn save_journal(app: &tauri::AppHandle, journal: &ConversionJournal) -> Result<(
     )
 }
 
+pub(super) fn discard_device_binding(
+    app: &tauri::AppHandle,
+    home: &str,
+    user: &str,
+    device: &str,
+) -> Result<(), String> {
+    if let Some(mut journal) = read_journal(app, home, user)? {
+        if !journal.record.complete && journal.device_id == device {
+            journal.device_id = uuid::Uuid::new_v4().simple().to_string();
+            journal.store_dir = format!("matrix_sessions/pw_{}", uuid::Uuid::new_v4());
+            save_journal(app, &journal)?;
+        }
+    }
+    Ok(())
+}
+
 async fn account_data(client: &Client, kind: &str) -> Result<Option<Value>, String> {
     let raw = client
         .account()
@@ -548,14 +564,6 @@ fn validate_passwords(old: &str, new: &str) -> Result<(), String> {
     Ok(())
 }
 
-fn session_for(client: &Client) -> Result<auth::SavedSession, String> {
-    Ok(auth::SavedSession {
-        user_id: client.user_id().ok_or("Not signed in")?.to_string(),
-        device_id: client.device_id().ok_or("Missing device")?.to_string(),
-        access_token: client.access_token().ok_or("Missing session")?,
-    })
-}
-
 // A new login can invalidate the previous token for the same device. Build a
 // client with the SAME persistent store, and install it immediately so failures
 // after this point can still be resumed from Settings.
@@ -617,14 +625,7 @@ async fn finish(
         },
     )?;
     if remember {
-        auth::save_session_to_credentials(
-            app,
-            &journal.homeserver,
-            session_for(client)?,
-            Some(journal.store_dir.clone()),
-            AccountMode::Pax,
-            false,
-        )?;
+        auth::save_client_session(app, client, &journal.store_dir, AccountMode::Pax)?;
     }
     // Server completion first: a lost response leaves local progress pending,
     // which can safely rerun finalization using derived authentication.
@@ -636,6 +637,7 @@ async fn finish(
     *state.account_mode.lock().await = AccountMode::Pax;
     *state.client.lock().await = Some(client.clone());
     *state.session_store_dir.lock().await = Some(journal.store_dir.clone());
+    state.reauthentication.lock().await.take();
     Ok(())
 }
 
@@ -695,7 +697,7 @@ pub async fn convert_account_to_pax(
         journal
     };
     journal.record.check_password(&keys)?;
-    let remember = auth::load_credentials(app.clone())?.is_some_and(|c| {
+    let remember = auth::read_credentials(&app)?.is_some_and(|c| {
         c.session.is_some_and(|s| s.user_id == expected_user_id)
             && c.homeserver.trim_end_matches('/') == home.trim_end_matches('/')
     });

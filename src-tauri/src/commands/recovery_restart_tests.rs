@@ -15,6 +15,7 @@ async fn device(server: &Server, dir: &TestDir, name: &str) -> Client {
             user_id: USER.into(),
             device_id: name.into(),
             access_token: "token".into(),
+            refresh_token: None,
         },
     )
     .await

@@ -1,11 +1,13 @@
-use std::sync::Arc;
+use std::path::Path;
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use matrix_sdk::authentication::matrix::MatrixSession;
 use matrix_sdk::authentication::SessionTokens;
 use matrix_sdk::config::SyncSettings;
 use matrix_sdk::encryption::{BackupDownloadStrategy, EncryptionSettings};
-use matrix_sdk::{Client, SessionMeta};
+use matrix_sdk::ruma::api::client::error::ErrorKind;
+use matrix_sdk::{Client, HttpError, RefreshTokenError, SessionMeta};
 use serde::{Deserialize, Serialize};
 use tauri::{Emitter, Manager, State};
 use tokio::time::timeout;
@@ -16,6 +18,7 @@ use super::fmt_error_chain;
 use super::pax_auth::{self, AccountMode, Descriptor, Enrollment};
 
 pub(crate) const CREDENTIALS_FILENAME: &str = "credentials.json";
+static CREDENTIALS_LOCK: Mutex<()> = Mutex::new(());
 const PAX_SETUP_REQUIRED: &str = "Sign in with your password to finish encrypted account setup.";
 const PAX_RECOVERY_REQUIRED: &str = "Sign in with your Pax password to restore encrypted history.";
 
@@ -24,9 +27,31 @@ pub struct SavedSession {
     pub user_id: String,
     pub device_id: String,
     pub access_token: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub refresh_token: Option<String>,
 }
 
-#[derive(Debug, Serialize, Deserialize)]
+impl SavedSession {
+    pub(super) fn from_client(client: &Client) -> Result<Self, String> {
+        let meta = client.session_meta().ok_or("Missing session identity")?;
+        let tokens = client.session_tokens().ok_or("Missing session tokens")?;
+        Ok(Self {
+            user_id: meta.user_id.to_string(),
+            device_id: meta.device_id.to_string(),
+            access_token: tokens.access_token,
+            refresh_token: tokens.refresh_token,
+        })
+    }
+
+    pub(crate) fn tokens(&self) -> SessionTokens {
+        SessionTokens {
+            access_token: self.access_token.clone(),
+            refresh_token: self.refresh_token.clone(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SavedCredentials {
     pub homeserver: String,
     #[serde(default)]
@@ -38,6 +63,64 @@ pub struct SavedCredentials {
     pub account_mode: AccountMode,
     #[serde(default)]
     pub pax_enrollment_pending: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    reauthentication: Option<Reauthentication>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+enum SessionEnd {
+    SoftLogout,
+    Revoked,
+    AccountLocked,
+}
+
+impl SessionEnd {
+    fn message(self) -> &'static str {
+        match self {
+            Self::SoftLogout => {
+                "Your session expired. Enter your password to continue on this device."
+            }
+            Self::Revoked => "Your session ended. Sign in again to continue.",
+            Self::AccountLocked => {
+                "Your homeserver locked this account. You can sign in once it is unlocked."
+            }
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct Reauthentication {
+    user_id: String,
+    device_id: String,
+    reason: SessionEnd,
+}
+
+#[derive(Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct LoginDetails {
+    homeserver: String,
+    user_id: Option<String>,
+    remember_me: bool,
+    message: Option<&'static str>,
+}
+
+impl SavedCredentials {
+    fn user_id(&self) -> Option<&str> {
+        self.reauthentication
+            .as_ref()
+            .map(|r| r.user_id.as_str())
+            .or_else(|| self.session.as_ref().map(|s| s.user_id.as_str()))
+    }
+
+    fn login_details(&self, remember_me: bool) -> LoginDetails {
+        LoginDetails {
+            homeserver: self.homeserver.clone(),
+            user_id: self.user_id().map(str::to_owned),
+            remember_me,
+            message: self.reauthentication.as_ref().map(|r| r.reason.message()),
+        }
+    }
 }
 
 fn credentials_path(app: &tauri::AppHandle) -> Result<std::path::PathBuf, String> {
@@ -60,10 +143,12 @@ pub async fn get_access_token(state: State<'_, Arc<AppState>>) -> Result<String,
 #[tauri::command]
 pub async fn logout(state: State<'_, Arc<AppState>>, app: tauri::AppHandle) -> Result<(), String> {
     let _operation = state.encryption.operation.lock().await;
-    state.audio_recording.lock().await.take();
-    // Give pending keys a chance to reach backup before stopping the SDK. The
-    // databases remain on disk even if the network is unavailable.
-    if let Some(client) = state.client.lock().await.as_ref() {
+    #[cfg(target_os = "android")]
+    let _cold_store = crate::call_notifications::android::COLD_STORE.lock().await;
+    let client = state.client.lock().await.clone();
+    let store_dir = state.session_store_dir.lock().await.clone();
+    let mut remotely_signed_out = true;
+    if let Some(client) = &client {
         let backups = client.encryption().backups();
         if backups.are_enabled().await {
             let _ = timeout(Duration::from_secs(10), async {
@@ -71,32 +156,59 @@ pub async fn logout(state: State<'_, Arc<AppState>>, app: tauri::AppHandle) -> R
             })
             .await;
         }
-    }
-    // Tell the server we're offline BEFORE tearing anything down, while the
-    // client and access token still exist.
-    //
-    // Cap wait time: a stuck homeserver must not block sign-out indefinitely
-    // (the UI awaits this command before clearing session state).
-    let presence_deadline = Duration::from_secs(3);
-    let send_offline = async {
-        if let Some(client) = state.client.lock().await.as_ref() {
-            if let Some(user_id) = client.user_id() {
-                let request =
-                    matrix_sdk::ruma::api::client::presence::set_presence::v3::Request::new(
-                        user_id.to_owned(),
-                        matrix_sdk::ruma::presence::PresenceState::Offline,
-                    );
-                let _ = client.send(request).await;
-            }
+        // Stop sync before revoking the token to avoid racing a refresh.
+        state.stop_sync_task().await;
+        if let Some(user_id) = client.user_id() {
+            let request = matrix_sdk::ruma::api::client::presence::set_presence::v3::Request::new(
+                user_id.to_owned(),
+                matrix_sdk::ruma::presence::PresenceState::Offline,
+            );
+            let _ = timeout(Duration::from_secs(3), client.send(request)).await;
         }
-    };
-    if timeout(presence_deadline, send_offline).await.is_err() {
-        log::warn!(
-            "logout: presence set_offline timed out after {:?}, continuing teardown",
-            presence_deadline
-        );
+        remotely_signed_out =
+            match timeout(Duration::from_secs(8), client.matrix_auth().logout()).await {
+                Ok(Ok(_)) => true,
+                Ok(Err(error)) => {
+                    log_refresh_failure(&error);
+                    session_end(&error) == Some(SessionEnd::Revoked)
+                }
+                Err(_) => false,
+            };
     }
+    let mut ended = None;
+    if let (Some(client), Some(store_dir)) = (&client, store_dir) {
+        if let Ok(session) = SavedSession::from_client(client) {
+            let mode = *state.account_mode.lock().await;
+            let credentials = ended_credentials(
+                client.homeserver().to_string(),
+                &session,
+                store_dir,
+                mode,
+                SessionEnd::Revoked,
+            );
+            if let Err(error) = remember_session_end(&app, &credentials, &session) {
+                log::error!("Could not record Matrix sign-out: {error}");
+            }
+            ended = Some(credentials);
+        }
+    }
+    drop(client);
+    clear_local_session(&state, &app).await;
+    *state.reauthentication.lock().await = ended.clone();
+    if let Some(ended) = ended.as_ref() {
+        discard_revoked_device(&app, ended)?;
+    }
+    clear_saved_credentials(app)?;
+    state.reauthentication.lock().await.take();
+    if remotely_signed_out {
+        Ok(())
+    } else {
+        Err("Signed out on this device. Pax could not confirm sign-out with the homeserver.".into())
+    }
+}
 
+async fn clear_local_session(state: &Arc<AppState>, app: &tauri::AppHandle) {
+    state.audio_recording.lock().await.take();
     state.stop_sync_task().await;
     state.direct_calls.lock().await.clear();
     state.matrix_voip.reset().await;
@@ -107,19 +219,213 @@ pub async fn logout(state: State<'_, Arc<AppState>>, app: tauri::AppHandle) -> R
     if let Ok(mut g) = state.voice_livekit_jwt_service_url.lock() {
         *g = None;
     }
+    if let Ok(mut delayed_leave) = state.delayed_leave_id.lock() {
+        delayed_leave.take();
+    }
+    if state.voice_room.lock().await.take().is_some() {
+        app.state::<crate::voice::VoiceManager>().disconnect().await;
+    }
     *state.client.lock().await = None;
     *state.session_store_dir.lock().await = None;
     state.avatars.reset();
     state.file_cache.clear().await;
-    crate::commands::unread::clear_unread_cache(state.inner()).await;
-    *state.sync_running.lock().await = false;
+    super::unread::clear_unread_cache(state).await;
 
-    if let Err(error) = crate::app_badge::set_app_notification_count(app, 0, false) {
+    if let Err(error) = crate::app_badge::set_notification_count(app, 0, false) {
         log::warn!("[badge] failed to clear badge at sign-out: {error}");
     }
-    // A crypto store may contain the only remaining copy of a room key.
-    // Preserve it when signing out.
-    Ok(())
+}
+
+fn log_refresh_failure(error: &HttpError) {
+    let HttpError::RefreshToken(RefreshTokenError::MatrixAuth(error)) = error else {
+        return;
+    };
+    if let Some(response) = error.as_client_api_error() {
+        log::warn!(
+            "Matrix access token refresh failed (HTTP {})",
+            response.status_code.as_u16()
+        );
+    } else {
+        log::warn!("Matrix access token refresh failed (no usable HTTP response)");
+    }
+}
+
+fn session_end(error: &HttpError) -> Option<SessionEnd> {
+    let (error, refreshing) = match error {
+        HttpError::RefreshToken(RefreshTokenError::MatrixAuth(error)) => (error.as_ref(), true),
+        _ => (error, false),
+    };
+    let response = error.as_client_api_error()?;
+    match (response.status_code.as_u16(), response.error_kind()) {
+        (401, Some(ErrorKind::UnknownToken { soft_logout: true })) => Some(SessionEnd::SoftLogout),
+        (401, Some(ErrorKind::UnknownToken { soft_logout: false })) => Some(SessionEnd::Revoked),
+        (401, Some(ErrorKind::UserLocked)) => Some(SessionEnd::AccountLocked),
+        (401, Some(_)) if refreshing => Some(SessionEnd::Revoked),
+        _ => None,
+    }
+}
+
+fn ended_credentials(
+    home: String,
+    session: &SavedSession,
+    store_dir: String,
+    mode: AccountMode,
+    reason: SessionEnd,
+) -> SavedCredentials {
+    SavedCredentials {
+        homeserver: home,
+        session: None,
+        sqlite_store_dir: Some(store_dir),
+        account_mode: mode,
+        pax_enrollment_pending: false,
+        reauthentication: Some(Reauthentication {
+            user_id: session.user_id.clone(),
+            device_id: session.device_id.clone(),
+            reason,
+        }),
+    }
+}
+
+fn remember_session_end(
+    app: &tauri::AppHandle,
+    ended: &SavedCredentials,
+    session: &SavedSession,
+) -> Result<bool, String> {
+    let path = credentials_path(app)?;
+    let _guard = CREDENTIALS_LOCK.lock().map_err(|e| e.to_string())?;
+    if read_credentials_at(&path)?.is_some_and(|saved| {
+        saved.homeserver.trim_end_matches('/') == ended.homeserver.trim_end_matches('/')
+            && saved
+                .session
+                .is_some_and(|s| s.user_id == session.user_id && s.device_id == session.device_id)
+    }) {
+        write_credentials(&path, ended)?;
+        return Ok(true);
+    }
+    Ok(false)
+}
+
+fn discard_revoked_device(app: &tauri::AppHandle, creds: &SavedCredentials) -> Result<(), String> {
+    let Some(ended) = creds
+        .reauthentication
+        .as_ref()
+        .filter(|ended| ended.reason == SessionEnd::Revoked)
+    else {
+        return Ok(());
+    };
+    let home = &creds.homeserver;
+    let user_id = &ended.user_id;
+    let device_id = &ended.device_id;
+    let enrollment = pax_auth::read_enrollment(app, home, user_id).and_then(|record| {
+        if let Some(mut record) = record.filter(|r| r.device_id.as_ref() == Some(device_id)) {
+            // The account's authentication mode is still pinned after its device is gone.
+            record.device_id = None;
+            pax_auth::save_enrollment(app, &record)
+        } else {
+            Ok(())
+        }
+    });
+    let conversion =
+        super::account_conversion::discard_device_binding(app, home, user_id, device_id);
+    let store = discard_session_store(
+        &app_data_dir(app)?,
+        creds.sqlite_store_dir.as_deref().unwrap_or("matrix_store"),
+    );
+    enrollment.and(conversion).and(store)
+}
+
+fn discard_session_store(base: &Path, store_dir: &str) -> Result<(), String> {
+    use std::path::Component::Normal;
+    let mut parts = Path::new(store_dir).components();
+    let safe = match (parts.next(), parts.next(), parts.next()) {
+        (Some(Normal(directory)), None, None) => directory == "matrix_store",
+        (Some(Normal(parent)), Some(Normal(_)), None) => parent == "matrix_sessions",
+        _ => false,
+    };
+    if !safe {
+        return Err("Invalid Matrix session store path".into());
+    }
+    let path = base.join(store_dir);
+    let canonical = match path.canonicalize() {
+        Ok(path) => path,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(error) => {
+            return Err(format!(
+                "Could not locate the Matrix session store: {error}"
+            ))
+        }
+    };
+    let expected = base
+        .canonicalize()
+        .map_err(|e| e.to_string())?
+        .join(store_dir);
+    if canonical != expected {
+        return Err("Invalid Matrix session store location".into());
+    }
+    std::fs::remove_dir_all(canonical)
+        .map_err(|e| format!("Could not discard the Matrix session store: {e}"))
+}
+
+pub(super) fn handle_sync_session_error(
+    error: &matrix_sdk::Error,
+    state: &Arc<AppState>,
+    app: &Arc<tauri::AppHandle>,
+    client: &Client,
+) -> bool {
+    let matrix_sdk::Error::Http(error) = error else {
+        return false;
+    };
+    log_refresh_failure(error);
+    let Some(reason) = session_end(error) else {
+        return false;
+    };
+    // Teardown joins the sync task, so it must run in a separate task.
+    let (state, app, client) = (Arc::clone(state), Arc::clone(app), client.clone());
+    tokio::spawn(async move {
+        let _operation = state.encryption.operation.lock().await;
+        #[cfg(target_os = "android")]
+        let _cold_store = crate::call_notifications::android::COLD_STORE.lock().await;
+        let active = state
+            .client
+            .lock()
+            .await
+            .as_ref()
+            .and_then(|current| current.session_meta().zip(client.session_meta()))
+            .is_some_and(|(current, ended)| std::ptr::eq(current, ended));
+        if !active {
+            return;
+        }
+        let (Ok(session), Some(store_dir)) = (
+            SavedSession::from_client(&client),
+            state.session_store_dir.lock().await.clone(),
+        ) else {
+            return;
+        };
+        let mode = *state.account_mode.lock().await;
+        let ended = ended_credentials(
+            client.homeserver().to_string(),
+            &session,
+            store_dir,
+            mode,
+            reason,
+        );
+        let remembered = match remember_session_end(&app, &ended, &session) {
+            Ok(remembered) => remembered,
+            Err(error) => {
+                log::error!("Could not clear invalidated Matrix credentials: {error}");
+                false
+            }
+        };
+        let details = ended.login_details(remembered);
+        *state.reauthentication.lock().await = Some(ended.clone());
+        drop(client);
+        clear_local_session(&state, &app).await;
+        if let Err(error) = discard_revoked_device(&app, &ended) {
+            log::error!("Failed to discard invalidated Matrix device: {error}");
+        }
+        let _ = app.emit("session-ended", details);
+    });
+    true
 }
 
 pub fn save_session_to_credentials(
@@ -131,17 +437,43 @@ pub fn save_session_to_credentials(
     pax_enrollment_pending: bool,
 ) -> Result<(), String> {
     let path = credentials_path(app)?;
-
     let creds = SavedCredentials {
         homeserver: homeserver.to_owned(),
         session: Some(session),
         sqlite_store_dir,
         account_mode,
         pax_enrollment_pending,
+        reauthentication: None,
     };
-    let json = serde_json::to_string_pretty(&creds)
+    let _guard = CREDENTIALS_LOCK.lock().map_err(|e| e.to_string())?;
+    write_credentials(&path, &creds)
+}
+
+pub(super) fn save_client_session(
+    app: &tauri::AppHandle,
+    client: &Client,
+    store_dir: &str,
+    account_mode: AccountMode,
+) -> Result<(), String> {
+    let path = credentials_path(app)?;
+    let _guard = CREDENTIALS_LOCK.lock().map_err(|e| e.to_string())?;
+    write_credentials(
+        &path,
+        &SavedCredentials {
+            homeserver: client.homeserver().to_string(),
+            session: Some(SavedSession::from_client(client)?),
+            sqlite_store_dir: Some(store_dir.to_owned()),
+            account_mode,
+            pax_enrollment_pending: false,
+            reauthentication: None,
+        },
+    )
+}
+
+fn write_credentials(path: &Path, creds: &SavedCredentials) -> Result<(), String> {
+    let json = serde_json::to_vec_pretty(creds)
         .map_err(|e| format!("Failed to serialize credentials: {e}"))?;
-    pax_auth::atomic_write(&path, json.as_bytes())
+    pax_auth::atomic_write(path, &json)
 }
 
 /// Persist the homeserver URL (no password). Session tokens are patched in
@@ -155,33 +487,79 @@ pub fn save_credentials(app: tauri::AppHandle, homeserver: String) -> Result<(),
         sqlite_store_dir: None,
         account_mode: AccountMode::Matrix,
         pax_enrollment_pending: false,
+        reauthentication: None,
     };
-    let json = serde_json::to_string_pretty(&creds)
-        .map_err(|e| format!("Failed to serialize credentials: {e}"))?;
-    std::fs::write(&path, json).map_err(|e| format!("Failed to write credentials: {e}"))?;
-    Ok(())
+    let _guard = CREDENTIALS_LOCK.lock().map_err(|e| e.to_string())?;
+    write_credentials(&path, &creds)
 }
 
 #[tauri::command]
-pub fn load_credentials(app: tauri::AppHandle) -> Result<Option<SavedCredentials>, String> {
-    let path = credentials_path(&app)?;
-    if !path.exists() {
-        return Ok(None);
+pub fn load_credentials(app: tauri::AppHandle) -> Result<Option<LoginDetails>, String> {
+    Ok(read_credentials(&app)?.map(|creds| creds.login_details(true)))
+}
+
+pub(super) fn read_credentials(app: &tauri::AppHandle) -> Result<Option<SavedCredentials>, String> {
+    read_credentials_at(&credentials_path(app)?)
+}
+
+pub(crate) fn read_credentials_at(path: &Path) -> Result<Option<SavedCredentials>, String> {
+    match std::fs::read(path) {
+        Ok(contents) => serde_json::from_slice(&contents)
+            .map(Some)
+            .map_err(|e| format!("Failed to parse credentials: {e}")),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
+        Err(e) => Err(format!("Failed to read credentials: {e}")),
     }
-    let contents =
-        std::fs::read_to_string(&path).map_err(|e| format!("Failed to read credentials: {e}"))?;
-    let creds: SavedCredentials =
-        serde_json::from_str(&contents).map_err(|e| format!("Failed to parse credentials: {e}"))?;
-    Ok(Some(creds))
 }
 
 #[tauri::command]
 pub fn clear_saved_credentials(app: tauri::AppHandle) -> Result<(), String> {
     let path = credentials_path(&app)?;
-    if path.exists() {
-        std::fs::remove_file(&path).map_err(|e| format!("Failed to remove credentials: {e}"))?;
+    let _guard = CREDENTIALS_LOCK.lock().map_err(|e| e.to_string())?;
+    match std::fs::remove_file(path) {
+        Ok(()) => Ok(()),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(e) => Err(format!("Failed to remove credentials: {e}")),
     }
-    Ok(())
+}
+
+pub(crate) fn persist_refreshed_tokens(
+    client: &Client,
+    path: std::path::PathBuf,
+    saved: &SavedSession,
+) -> Result<(), String> {
+    if saved.refresh_token.is_none() {
+        return Ok(());
+    }
+    let previous = Mutex::new(saved.access_token.clone());
+    client
+        .set_session_callbacks(
+            Box::new(|_| Err("Matrix sessions are restored explicitly".into())),
+            Box::new(move |client| {
+                log::info!("Matrix access token refreshed successfully");
+                let _guard = CREDENTIALS_LOCK.lock().map_err(|e| e.to_string())?;
+                let mut previous = previous.lock().map_err(|e| e.to_string())?;
+                let updated = SavedSession::from_client(&client)?;
+                // A request from a replaced client can still finish refreshing.
+                // Write only if the file still contains this client's previous token.
+                if let Some(mut creds) = read_credentials_at(&path)? {
+                    if creds.homeserver.trim_end_matches('/')
+                        == client.homeserver().as_str().trim_end_matches('/')
+                        && creds.session.as_ref().is_some_and(|saved| {
+                            saved.user_id == updated.user_id
+                                && saved.device_id == updated.device_id
+                                && saved.access_token == *previous
+                        })
+                    {
+                        creds.session = Some(updated.clone());
+                        write_credentials(&path, &creds)?;
+                    }
+                }
+                *previous = updated.access_token;
+                Ok(())
+            }),
+        )
+        .map_err(|e| format!("Could not set up session refresh: {e}"))
 }
 
 /* ------------------------------------------------------------------ */
@@ -236,7 +614,7 @@ async fn transfer_previous_room_keys(
                         user_id: matrix_sdk::ruma::UserId::parse(&session.user_id).map_err(|e| e.to_string())?,
                         device_id: session.device_id.clone().into(),
                     },
-                    tokens: SessionTokens { access_token: session.access_token.clone(), refresh_token: None },
+                    tokens: session.tokens(),
                 }).await.map_err(|e| format!("Could not restore your previous encryption keys. The original store has been kept: {}", fmt_error_chain(&e)))?;
                 Some(old)
             } else {
@@ -310,8 +688,14 @@ fn reusable_login_store(
     if creds.homeserver.trim_end_matches('/') != homeserver.trim_end_matches('/') {
         return None;
     }
-    let session = creds.session.as_ref()?;
-    let user_id = matrix_sdk::ruma::UserId::parse(&session.user_id).ok()?;
+    let (user, device) = match (&creds.reauthentication, &creds.session) {
+        (Some(reauthentication), _) if reauthentication.reason != SessionEnd::Revoked => {
+            (&reauthentication.user_id, &reauthentication.device_id)
+        }
+        (None, Some(session)) => (&session.user_id, &session.device_id),
+        _ => return None,
+    };
+    let user_id = matrix_sdk::ruma::UserId::parse(user).ok()?;
     let username = username.trim();
     if username != user_id.as_str() && username != user_id.localpart() {
         return None;
@@ -321,7 +705,7 @@ fn reusable_login_store(
             .sqlite_store_dir
             .clone()
             .unwrap_or_else(|| "matrix_store".into()),
-        session.device_id.clone(),
+        device.clone(),
     ))
 }
 
@@ -338,6 +722,7 @@ async fn build_client_for_mode(
         match Client::builder()
             .homeserver_url(homeserver)
             .sqlite_store(store_path, None)
+            .handle_refresh_tokens()
             .with_encryption_settings(EncryptionSettings {
                 // Pax must recover the existing identity before doing anything
                 // that could create or replace server-side encryption state.
@@ -401,7 +786,7 @@ pub(super) async fn request_password_session(
 ) -> Result<SavedSession, PasswordLoginError> {
     let mut body = serde_json::json!({
         "type": "m.login.password", "identifier": { "type": "m.id.user", "user": user },
-        "password": credential, "initial_device_display_name": "Pax", "refresh_token": false,
+        "password": credential, "initial_device_display_name": "Pax", "refresh_token": true,
     });
     if let Some(device) = device {
         body["device_id"] = device.into();
@@ -455,6 +840,10 @@ fn session_from_response(value: &serde_json::Value) -> Result<SavedSession, Stri
         user_id,
         device_id: field("device_id")?,
         access_token: field("access_token")?,
+        refresh_token: value["refresh_token"]
+            .as_str()
+            .filter(|token| !token.is_empty())
+            .map(str::to_owned),
     })
 }
 
@@ -468,7 +857,7 @@ pub(super) async fn submit_registration(
     token: &str,
 ) -> Result<SavedSession, String> {
     let url = format!("{}/_matrix/client/v3/register", home.trim_end_matches('/'));
-    let mut body = serde_json::json!({ "username": username, "password": credential, "initial_device_display_name": "Pax" });
+    let mut body = serde_json::json!({ "username": username, "password": credential, "initial_device_display_name": "Pax", "refresh_token": true });
     for _ in 0..4 {
         let response = http.post(&url).timeout(Duration::from_secs(30)).json(&body).send().await
             .map_err(|_| "Registration could not reach the homeserver. If the account was created, sign in with the same password to finish setup.")?;
@@ -558,22 +947,10 @@ pub(super) async fn restore_authenticated_client(
     mode: AccountMode,
 ) -> Result<Client, String> {
     let client = build_client_for_mode(home, &app_data_dir(app)?.join(rel), mode).await?;
-    client
-        .restore_session(MatrixSession {
-            meta: SessionMeta {
-                user_id: matrix_sdk::ruma::UserId::parse(&session.user_id)
-                    .map_err(|_| "Invalid account ID")?,
-                device_id: session.device_id.clone().into(),
-            },
-            tokens: SessionTokens {
-                access_token: session.access_token.clone(),
-                refresh_token: None,
-            },
-        })
-        .await
-        .map_err(|_| {
-            "Could not open the encryption store. The original files have been preserved."
-        })?;
+    persist_refreshed_tokens(&client, credentials_path(app)?, session)?;
+    restore_tokens(&client, session).await.map_err(|_| {
+        "Could not open the encryption store. The original files have been preserved."
+    })?;
     Ok(client)
 }
 
@@ -601,6 +978,7 @@ async fn install_session(
     *state.account_mode.lock().await = mode;
     *state.session_store_dir.lock().await = Some(store_dir);
     *state.client.lock().await = Some(client);
+    state.reauthentication.lock().await.take();
     state.notifications.start_session();
     state.voice_presence.start_session();
     state.attachments.start_session();
@@ -625,6 +1003,8 @@ pub async fn register(
     account_mode: Option<AccountMode>,
 ) -> Result<String, String> {
     let _operation = state.encryption.operation.lock().await;
+    #[cfg(target_os = "android")]
+    let _cold_store = crate::call_notifications::android::COLD_STORE.lock().await;
     let password = zeroize::Zeroizing::new(password);
     let mode = account_mode.unwrap_or(AccountMode::Pax);
     if username.is_empty() || password.is_empty() {
@@ -665,6 +1045,7 @@ pub async fn register(
             )
             .await;
         }
+        save_client_session(&app, &client, &rel, mode)?;
         return install_session(&state, client, mode, rel).await;
     }
     pax_auth::ensure_trusted(&homeserver, &state.auth_config)?;
@@ -730,7 +1111,7 @@ pub async fn register(
         pax_auth::complete_enrollment(&state.http_client, &client, &keys, true).await?;
         record.ready = true;
         pax_auth::save_enrollment(&app, &record)?;
-        save_session_to_credentials(&app, &homeserver, session, Some(rel.clone()), mode, false)?;
+        save_client_session(&app, &client, &rel, mode)?;
         Ok(client)
     }.await;
     let client = finish.map_err(|e| {
@@ -855,8 +1236,15 @@ pub async fn login(
     persist_session: bool,
 ) -> Result<String, String> {
     let _operation = state.encryption.operation.lock().await;
+    #[cfg(target_os = "android")]
+    let _cold_store = crate::call_notifications::android::COLD_STORE.lock().await;
     let password = zeroize::Zeroizing::new(password);
-    let previous_credentials = load_credentials(app.clone())?;
+    let previous_credentials = state
+        .reauthentication
+        .lock()
+        .await
+        .clone()
+        .or(read_credentials(&app)?);
     let previous_client = state.client.lock().await.clone();
     let reusable = previous_credentials
         .as_ref()
@@ -864,10 +1252,9 @@ pub async fn login(
     let user = if reusable.is_some() {
         previous_credentials
             .as_ref()
-            .and_then(|c| c.session.as_ref())
-            .unwrap()
-            .user_id
-            .clone()
+            .and_then(SavedCredentials::user_id)
+            .ok_or("Missing device account")?
+            .to_owned()
     } else {
         pax_auth::account_id(
             &state.http_client,
@@ -887,9 +1274,16 @@ pub async fn login(
         || previous_credentials
             .as_ref()
             .is_some_and(|c| c.account_mode == AccountMode::Pax && reusable.is_some());
+    let revoked = previous_credentials.as_ref().is_some_and(|creds| {
+        creds.homeserver.trim_end_matches('/') == homeserver.trim_end_matches('/')
+            && creds
+                .reauthentication
+                .as_ref()
+                .is_some_and(|ended| ended.reason == SessionEnd::Revoked && ended.user_id == user)
+    });
     let reusable = reusable
         .or_else(|| {
-            record.as_ref().and_then(|r| {
+            record.as_ref().filter(|_| !revoked).and_then(|r| {
                 r.device_id
                     .as_ref()
                     .map(|d| (r.store_dir.clone(), d.clone()))
@@ -974,7 +1368,7 @@ pub async fn login(
         }
     }
     if persist_session {
-        save_session_to_credentials(&app, &homeserver, session, Some(rel.clone()), mode, false)?;
+        save_client_session(&app, &client, &rel, mode)?;
     } else {
         clear_saved_credentials(app.clone())?;
     }
@@ -999,6 +1393,54 @@ async fn saved_session_mode(
     Ok(AccountMode::Matrix)
 }
 
+// Validate the session before the installed client's encryption tasks can use its store.
+async fn check_saved_session(
+    client: &Client,
+    saved: &SavedSession,
+) -> Result<Option<SessionEnd>, String> {
+    for attempt in 0..3 {
+        match timeout(Duration::from_secs(5), client.whoami()).await {
+            Ok(Ok(response)) => {
+                let same_user = response.user_id.as_str() == saved.user_id;
+                let same_device = response
+                    .device_id
+                    .is_none_or(|id| id.as_str() == saved.device_id);
+                return Ok((!same_user || !same_device).then_some(SessionEnd::Revoked));
+            }
+            Ok(Err(error)) => {
+                log_refresh_failure(&error);
+                if let Some(reason) = session_end(&error) {
+                    return Ok(Some(reason));
+                }
+            }
+            Err(_) => {}
+        }
+        if attempt < 2 {
+            tokio::time::sleep(Duration::from_millis(500 * (attempt + 1))).await;
+        }
+    }
+    Err("Pax could not verify the saved session. Check your connection and try again.".into())
+}
+
+async fn restore_tokens(client: &Client, saved: &SavedSession) -> Result<(), String> {
+    client
+        .restore_session(MatrixSession {
+            meta: SessionMeta {
+                user_id: matrix_sdk::ruma::UserId::parse(&saved.user_id)
+                    .map_err(|_| "Invalid saved Matrix user ID")?,
+                device_id: saved.device_id.clone().into(),
+            },
+            tokens: saved.tokens(),
+        })
+        .await
+        .map_err(|e| {
+            format!(
+                "Could not restore the saved Matrix session: {}",
+                fmt_error_chain(&e)
+            )
+        })
+}
+
 /// Resume a saved device session without a password request or an initial sync.
 #[tauri::command]
 pub async fn restore_session(
@@ -1008,128 +1450,82 @@ pub async fn restore_session(
     let _operation = state.encryption.operation.lock().await;
     #[cfg(target_os = "android")]
     let _cold_store = crate::call_notifications::android::COLD_STORE.lock().await;
-    let creds = load_credentials(app.clone())?.ok_or("No saved credentials")?;
-    let sd = creds.session.as_ref().ok_or("No saved session")?;
+    let creds = read_credentials(&app)?.ok_or("No saved credentials")?;
+    if state
+        .auth_config
+        .default_homeserver
+        .as_ref()
+        .is_some_and(|configured| {
+            creds.homeserver.trim_end_matches('/') != configured.trim_end_matches('/')
+        })
+    {
+        return Err("Saved session is for a different homeserver".into());
+    }
+    if let Some(ended) = creds.reauthentication.as_ref() {
+        if let Err(error) = discard_revoked_device(&app, &creds) {
+            log::error!("Failed to discard invalidated Matrix device: {error}");
+        }
+        return Err(ended.reason.message().into());
+    }
+    let saved = creds.session.as_ref().ok_or("No saved session")?;
+    let store_dir = creds.sqlite_store_dir.as_deref().unwrap_or("matrix_store");
+
+    let probe = Client::builder()
+        .homeserver_url(&creds.homeserver)
+        .handle_refresh_tokens()
+        .build()
+        .await
+        .map_err(|_| "Pax could not connect to the saved homeserver.")?;
+    persist_refreshed_tokens(&probe, credentials_path(&app)?, saved)?;
+    restore_tokens(&probe, saved)
+        .await
+        .map_err(|_| "Could not read the saved Matrix session.")?;
+    let reason = check_saved_session(&probe, saved).await?;
+    let session = SavedSession::from_client(&probe)?;
+    drop(probe);
+
+    if let Some(reason) = reason {
+        let ended = ended_credentials(
+            creds.homeserver.clone(),
+            &session,
+            store_dir.into(),
+            creds.account_mode,
+            reason,
+        );
+        *state.reauthentication.lock().await = Some(ended.clone());
+        if let Err(error) = remember_session_end(&app, &ended, &session) {
+            log::error!("Could not clear invalidated Matrix credentials: {error}");
+        }
+        if let Err(error) = discard_revoked_device(&app, &ended) {
+            log::error!("Failed to discard invalidated Matrix device: {error}");
+        }
+        return Err(reason.message().into());
+    }
     if creds.pax_enrollment_pending {
         return Err(PAX_SETUP_REQUIRED.into());
     }
-
-    // If a compile-time homeserver is configured, reject saved sessions that
-    // point at a different server — the baked-in value is the source of truth.
-    if let Some(configured) = &state.auth_config.default_homeserver {
-        if creds.homeserver.trim_end_matches('/') != configured.trim_end_matches('/') {
-            log::warn!(
-                "restore_session: saved homeserver ({}) differs from configured ({}), discarding stale session",
-                creds.homeserver, configured
-            );
-            return Err("Saved session is for a different homeserver".to_string());
-        }
-    }
-
-    let user_id = matrix_sdk::ruma::UserId::parse(&sd.user_id)
-        .map_err(|e| format!("Invalid user ID: {e}"))?;
-    if super::account_conversion::read_journal(&app, &creds.homeserver, user_id.as_str())?
-        .is_some_and(|j| !j.record.complete)
+    if super::account_conversion::read_journal(&app, &creds.homeserver, &session.user_id)?
+        .is_some_and(|journal| !journal.record.complete)
     {
         return Err(super::account_conversion::PENDING_MESSAGE.into());
     }
     let pinned = creds.account_mode == AccountMode::Pax
-        || pax_auth::read_enrollment(&app, &creds.homeserver, user_id.as_str())?
-            .is_some_and(|e| e.registered || e.ready);
+        || pax_auth::read_enrollment(&app, &creds.homeserver, &session.user_id)?
+            .is_some_and(|enrollment| enrollment.registered || enrollment.ready);
     let mode = saved_session_mode(
         &state.http_client,
         &creds.homeserver,
-        user_id.as_str(),
+        &session.user_id,
         &state.auth_config,
         pinned,
     )
     .await?;
 
-    // Determine the mode before opening the SDK store, where Matrix mode can
-    // automatically initialize encryption state.
-    let sp = sqlite_path_for_restore(&app, &creds)?;
-    if mode == AccountMode::Pax && !sp.exists() {
+    if mode == AccountMode::Pax && !sqlite_path_for_restore(&app, &creds)?.exists() {
         return Err(PAX_RECOVERY_REQUIRED.into());
     }
-    log::info!("restore_session: building {mode:?} client for {}", creds.homeserver);
-    let client = build_client_for_mode(&creds.homeserver, &sp, mode).await?;
-
-    log::info!("restore_session: restoring session...");
-    client
-        .restore_session(MatrixSession {
-            meta: SessionMeta {
-                user_id: user_id.clone(),
-                device_id: sd.device_id.clone().into(),
-            },
-            tokens: SessionTokens {
-                access_token: sd.access_token.clone(),
-                refresh_token: None,
-            },
-        })
-        .await
-        .map_err(|e| format!("Failed to restore session: {}", fmt_error_chain(&e)))?;
-
-    // Quick token validity check (lightweight /account/whoami call) with retries
-    {
-        let mut last_err = String::new();
-        let mut succeeded = false;
-        for attempt in 0u32..3 {
-            match tokio::time::timeout(Duration::from_secs(5), client.whoami()).await {
-                Ok(Ok(response)) => {
-                    if response.user_id != user_id {
-                        return Err("The saved session belongs to a different account.".into());
-                    }
-                    succeeded = true;
-                    break;
-                }
-                Ok(Err(e)) => {
-                    let err_str = format!("{e}");
-                    // Transient network errors (DNS, connection) — retry
-                    let is_transient = err_str.contains("dns")
-                        || err_str.contains("connect")
-                        || err_str.contains("sending request")
-                        || err_str.contains("lookup");
-                    if !is_transient {
-                        // Likely auth error (expired token, etc.) — fail immediately
-                        return Err(format!("Session expired: {e}"));
-                    }
-                    last_err = format!("Connection failed: {}", err_str);
-                    log::warn!(
-                        "whoami attempt {}/3 failed (transient): {}",
-                        attempt + 1,
-                        err_str
-                    );
-                    if attempt < 2 {
-                        tokio::time::sleep(Duration::from_millis(1000 * (attempt as u64 + 1)))
-                            .await;
-                    }
-                }
-                Err(_) => {
-                    last_err = "Token check timed out".to_string();
-                    log::warn!("whoami attempt {}/3 timed out", attempt + 1);
-                    if attempt < 2 {
-                        tokio::time::sleep(Duration::from_millis(1000 * (attempt as u64 + 1)))
-                            .await;
-                    }
-                }
-            }
-        }
-        if !succeeded {
-            return Err(format!("{} (retried 3 times)", last_err));
-        }
-    }
-
-    log::info!("restore_session: valid — user_id={}", user_id);
-    if mode != creds.account_mode {
-        save_session_to_credentials(
-            &app,
-            &creds.homeserver,
-            sd.clone(),
-            creds.sqlite_store_dir.clone(),
-            mode,
-            false,
-        )?;
-    }
+    let client =
+        restore_authenticated_client(&app, &creds.homeserver, &session, store_dir, mode).await?;
     if mode == AccountMode::Pax {
         client
             .encryption()
@@ -1139,25 +1535,16 @@ pub async fn restore_session(
             .encryption()
             .cross_signing_status()
             .await
-            .is_some_and(|s| s.is_complete())
+            .is_some_and(|status| status.is_complete())
             || !client.encryption().backups().are_enabled().await
         {
             return Err(PAX_RECOVERY_REQUIRED.into());
         }
     }
-    *state.account_mode.lock().await = mode;
-    *state.session_store_dir.lock().await = Some(creds.sqlite_store_dir.clone().unwrap_or_else(|| "matrix_store".into()));
-    state.notifications.reset();
-    state.voice_presence.reset();
-    state.attachments.reset().await;
-
-    state.avatars.reset();
-    *state.client.lock().await = Some(client);
-    state.notifications.start_session();
-    state.voice_presence.start_session();
-    state.attachments.start_session();
-    *state.sync_running.lock().await = false;
-    Ok(user_id.to_string())
+    if mode != creds.account_mode {
+        save_client_session(&app, &client, store_dir, mode)?;
+    }
+    install_session(&state, client, mode, store_dir.to_owned()).await
 }
 
 #[cfg(test)]
@@ -1173,6 +1560,201 @@ mod encryption_tests {
         fn drop(&mut self) {
             let _ = std::fs::remove_dir_all(&self.0);
         }
+    }
+
+    const WHOAMI: &str = "/_matrix/client/v3/account/whoami";
+    const REFRESH: &str = "/_matrix/client/v3/refresh";
+
+    fn old_saved_session() -> SavedSession {
+        serde_json::from_value(json!({
+            "user_id": USER, "device_id": "ORIGINAL", "access_token": "old-access"
+        }))
+        .unwrap()
+    }
+
+    async fn refresh_test_client(server: &Server, session: &SavedSession, path: &Path) -> Client {
+        let client = Client::builder()
+            .homeserver_url(&server.home)
+            .request_config(RequestConfig::default().disable_retry())
+            .handle_refresh_tokens()
+            .build()
+            .await
+            .unwrap();
+        persist_refreshed_tokens(&client, path.to_owned(), session).unwrap();
+        restore_tokens(&client, session).await.unwrap();
+        client
+    }
+
+    #[tokio::test]
+    async fn refresh_retries_authenticated_request_and_saves_rotated_tokens() {
+        let server = Server::start().await;
+        let directory = TestDir(std::env::temp_dir().join(uuid::Uuid::new_v4().to_string()));
+        std::fs::create_dir(&directory.0).unwrap();
+        let path = directory.0.join(CREDENTIALS_FILENAME);
+        let mut session = old_saved_session();
+        session.refresh_token = Some("refresh-1".into());
+        let creds = SavedCredentials {
+            homeserver: server.home.clone(),
+            session: Some(session.clone()),
+            sqlite_store_dir: Some("matrix_store".into()),
+            account_mode: AccountMode::Matrix,
+            pax_enrollment_pending: false,
+            reauthentication: None,
+        };
+        write_credentials(&path, &creds).unwrap();
+        {
+            let mut mock = server.state.lock().unwrap();
+            mock.expired_whoami_token = Some(session.access_token.clone());
+            mock.route_overrides.insert(
+                ("POST".into(), REFRESH.into()),
+                (
+                    200,
+                    json!({
+                        "access_token":"new-access", "refresh_token":"refresh-2"
+                    }),
+                ),
+            );
+        }
+        let client = refresh_test_client(&server, &session, &path).await;
+        assert_eq!(check_saved_session(&client, &session).await.unwrap(), None);
+        let stored = read_credentials_at(&path)
+            .unwrap()
+            .unwrap()
+            .session
+            .unwrap();
+        assert_eq!(stored.access_token, "new-access");
+        assert_eq!(stored.refresh_token.as_deref(), Some("refresh-2"));
+        assert_eq!(stored.device_id, session.device_id);
+        assert!(server
+            .state
+            .lock()
+            .unwrap()
+            .requests
+            .iter()
+            .any(|(_, path, body)| { path == REFRESH && body["refresh_token"] == "refresh-1" }));
+
+        std::fs::remove_file(&path).unwrap();
+        client.matrix_auth().refresh_access_token().await.unwrap();
+        assert!(read_credentials_at(&path).unwrap().is_none());
+    }
+
+    #[tokio::test]
+    async fn startup_distinguishes_soft_logout_revocation_and_refresh_failures() {
+        let server = Server::start().await;
+        let directory = TestDir(std::env::temp_dir().join(uuid::Uuid::new_v4().to_string()));
+        let path = directory.0.join(CREDENTIALS_FILENAME);
+        let mut session = old_saved_session();
+        let deny = |path: &str, status, body| {
+            let method = if path == WHOAMI { "GET" } else { "POST" };
+            server
+                .state
+                .lock()
+                .unwrap()
+                .route_overrides
+                .insert((method.into(), path.into()), (status, body));
+        };
+        deny(
+            WHOAMI,
+            401,
+            json!({"errcode":"M_UNKNOWN_TOKEN", "error":"Test response", "soft_logout":true}),
+        );
+        let legacy = refresh_test_client(&server, &session, &path).await;
+        assert!(session.refresh_token.is_none());
+        assert_eq!(
+            check_saved_session(&legacy, &session).await.unwrap(),
+            Some(SessionEnd::SoftLogout)
+        );
+        deny(
+            WHOAMI,
+            401,
+            json!({"errcode":"M_UNKNOWN_TOKEN", "error":"Test response"}),
+        );
+        assert_eq!(
+            check_saved_session(&legacy, &session).await.unwrap(),
+            Some(SessionEnd::Revoked)
+        );
+        deny(
+            WHOAMI,
+            401,
+            json!({"errcode":"M_USER_LOCKED", "error":"Test response", "soft_logout":true}),
+        );
+        assert_eq!(
+            check_saved_session(&legacy, &session).await.unwrap(),
+            Some(SessionEnd::AccountLocked)
+        );
+
+        session.refresh_token = Some("refresh-1".into());
+        let client = refresh_test_client(&server, &session, &path).await;
+        deny(
+            WHOAMI,
+            401,
+            json!({"errcode":"M_UNKNOWN_TOKEN", "error":"Test response", "soft_logout":true}),
+        );
+        deny(
+            REFRESH,
+            401,
+            json!({"errcode":"M_UNKNOWN_TOKEN", "error":"Test response"}),
+        );
+        assert_eq!(
+            check_saved_session(&client, &session).await.unwrap(),
+            Some(SessionEnd::Revoked)
+        );
+        deny(
+            REFRESH,
+            401,
+            json!({"errcode":"M_UNKNOWN_TOKEN", "error":"Test response", "soft_logout":true}),
+        );
+        assert_eq!(
+            check_saved_session(&client, &session).await.unwrap(),
+            Some(SessionEnd::SoftLogout)
+        );
+        deny(
+            REFRESH,
+            503,
+            json!({"errcode":"M_UNKNOWN", "error":"Test response"}),
+        );
+        assert!(check_saved_session(&client, &session).await.is_err());
+    }
+
+    #[test]
+    fn ended_session_reuses_device_only_for_reauthentication() {
+        let session = old_saved_session();
+        let home = "https://example.org";
+        for mode in [AccountMode::Pax, AccountMode::Matrix] {
+            for reason in [
+                SessionEnd::SoftLogout,
+                SessionEnd::Revoked,
+                SessionEnd::AccountLocked,
+            ] {
+                let record =
+                    ended_credentials(home.into(), &session, "matrix_store".into(), mode, reason);
+                let serialized = serde_json::to_vec(&record).unwrap();
+                let restored: SavedCredentials = serde_json::from_slice(&serialized).unwrap();
+                assert!(restored.session.is_none());
+                assert_eq!(restored.user_id(), Some(USER));
+                assert_eq!(
+                    reusable_login_store(&restored, home, "alice"),
+                    (reason != SessionEnd::Revoked)
+                        .then(|| { ("matrix_store".into(), session.device_id.clone()) })
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn discard_removes_only_the_selected_matrix_store() {
+        let directory = TestDir(std::env::temp_dir().join(uuid::Uuid::new_v4().to_string()));
+        let removed = directory.0.join("matrix_sessions/revoked");
+        let retained = directory.0.join("matrix_sessions/other");
+        std::fs::create_dir_all(&removed).unwrap();
+        std::fs::create_dir_all(&retained).unwrap();
+        assert!(
+            discard_session_store(&directory.0, "matrix_sessions/../matrix_sessions/other")
+                .is_err()
+        );
+        discard_session_store(&directory.0, "matrix_sessions/revoked").unwrap();
+        assert!(!removed.exists());
+        assert!(retained.exists());
     }
 
     #[tokio::test]
@@ -1228,10 +1810,12 @@ mod encryption_tests {
                 user_id: "@alice:example.org".into(),
                 device_id: "ORIGINAL".into(),
                 access_token: "expired".into(),
+                refresh_token: None,
             }),
             sqlite_store_dir: Some("matrix_sessions/pw_original".into()),
             account_mode: AccountMode::Matrix,
             pax_enrollment_pending: false,
+            reauthentication: None,
         };
         assert_eq!(
             reusable_login_store(&saved, "https://example.org/", "alice"),

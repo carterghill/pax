@@ -226,6 +226,7 @@ mod tests {
             user_id: USER.into(),
             device_id: "ONE".into(),
             access_token: "one".into(),
+            refresh_token: None,
         };
         let first = client(&server.home, &dir.0.join("first"), session.clone()).await;
         let second = client(

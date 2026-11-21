@@ -11,7 +11,7 @@ use jni::{
     JNIEnv,
 };
 use matrix_sdk::{
-    authentication::{matrix::MatrixSession, SessionTokens},
+    authentication::matrix::MatrixSession,
     ruma::{EventId, RoomId, UserId},
     Client, SessionMeta,
 };
@@ -20,7 +20,7 @@ use tokio::sync::Mutex;
 
 use crate::{
     commands::{
-        auth::{SavedCredentials, CREDENTIALS_FILENAME},
+        auth::{persist_refreshed_tokens, read_credentials_at, CREDENTIALS_FILENAME},
         direct_calls, matrix_voip,
     },
     voice_presence::now_ms,
@@ -48,8 +48,8 @@ fn runtime() -> Option<&'static tokio::runtime::Runtime> {
 }
 
 async fn saved_client(base: &Path) -> Option<Client> {
-    let credentials: SavedCredentials =
-        serde_json::from_slice(&std::fs::read(base.join(CREDENTIALS_FILENAME)).ok()?).ok()?;
+    let path = base.join(CREDENTIALS_FILENAME);
+    let credentials = read_credentials_at(&path).ok()??;
     if credentials.pax_enrollment_pending {
         return None;
     }
@@ -76,19 +76,18 @@ async fn saved_client(base: &Path) -> Option<Client> {
     let client = Client::builder()
         .homeserver_url(&credentials.homeserver)
         .sqlite_store(store, None)
+        .handle_refresh_tokens()
         .build()
         .await
         .ok()?;
+    persist_refreshed_tokens(&client, path, &session).ok()?;
     client
         .restore_session(MatrixSession {
             meta: SessionMeta {
                 user_id: UserId::parse(&session.user_id).ok()?,
-                device_id: session.device_id.into(),
+                device_id: session.device_id.clone().into(),
             },
-            tokens: SessionTokens {
-                access_token: session.access_token,
-                refresh_token: None,
-            },
+            tokens: session.tokens(),
         })
         .await
         .ok()?;

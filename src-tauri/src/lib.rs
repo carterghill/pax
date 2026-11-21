@@ -53,6 +53,7 @@ pub struct AppState {
     pub client: Mutex<Option<Client>>,
     pub account_mode: Mutex<commands::pax_auth::AccountMode>,
     pub session_store_dir: Mutex<Option<String>>,
+    pub(crate) reauthentication: Mutex<Option<commands::auth::SavedCredentials>>,
     pub encryption: commands::encryption::EncryptionService,
     pub(crate) ignored_users: Arc<commands::ignored_users::IgnoredUsers>,
     pub http_client: reqwest::Client,
@@ -329,6 +330,7 @@ pub fn run() {
         client: Mutex::new(None),
         account_mode: Mutex::new(commands::pax_auth::AccountMode::Matrix),
         session_store_dir: Mutex::new(None),
+        reauthentication: Mutex::new(None),
         http_client: reqwest::Client::builder()
             .tcp_keepalive(Duration::from_secs(30))
             .build()

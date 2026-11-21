@@ -277,6 +277,7 @@ mod tests {
                 user_id: USER.into(),
                 device_id: "TEST".into(),
                 access_token: "test".into(),
+                refresh_token: None,
             },
         )
         .await;

@@ -308,13 +308,12 @@ An advanced export may provide the actual Matrix credential and standard recover
 
 ### Local persistence
 
-- Preserve the SDK's crypto store across restarts, updates, reauthentication, and logout.
-- Reuse the original device identity and store when reauthenticating that device; do not copy device identity keys to a different computer.
-- Never delete an old store before its keys are safely preserved or transferred.
+- Preserve the SDK's crypto store across restarts, updates, token refreshes, and soft logout. Reauthenticate a soft-logged-out device using its original device ID and store.
+- Discard the device store and its login credentials on confirmed session revocation or explicit sign-out. Recovery on the next device uses the account's encrypted backup or an existing encrypted export.
 - Do not persist the memorable password, derivation master, unlocking key, or unencrypted envelope payload in browser storage, ordinary credentials JSON, setup journals, logs, analytics, or error messages.
 - Perform derivation and recovery-secret handling in the native backend where practical. Clear temporary secret buffers and UI password state when finished.
 - Use protected platform storage where persistence of additional secrets is necessary. Existing SDK/session storage hardening is separate work and must not be represented as already implemented by this specification.
-- Attempt to finish pending key uploads before sign-out; expose failure and preserve local data even when the user chooses to leave.
+- Check recovery and attempt to finish pending key uploads before sign-out. Report when remote sign-out could not be confirmed.
 
 ### Fallback: encrypted backups of available history
 
