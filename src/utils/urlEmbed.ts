@@ -73,7 +73,7 @@ export interface IframeEmbed {
       if (!videoId || !/^[\w-]{5,}$/.test(videoId)) return null;
   
       start = u.searchParams.get("t");
-      const params = new URLSearchParams({ autoplay: "0", rel: "0" });
+      const params = new URLSearchParams({ autoplay: "0", rel: "0", enablejsapi: "1" });
       if (start) params.set("start", start.replace(/s$/, ""));
   
       return {
