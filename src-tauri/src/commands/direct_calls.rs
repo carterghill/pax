@@ -81,6 +81,7 @@ impl SignalContent {
 pub(crate) struct DirectCallSignal {
     #[serde(flatten)]
     content: SignalContent,
+    event_id: OwnedEventId,
     room_id: String,
     peer_user_id: OwnedUserId,
     from_peer: bool,
@@ -106,7 +107,7 @@ struct CallUnsigned {
 
 pub(crate) type PendingDirectCalls = Mutex<VecDeque<DirectCallSignal>>;
 
-async fn direct_call_peer(room: &Room) -> Option<OwnedUserId> {
+pub(crate) async fn direct_call_peer(room: &Room) -> Option<OwnedUserId> {
     if room.state() != RoomState::Joined
         || room.is_space()
         || room.is_tombstoned()
@@ -124,6 +125,63 @@ async fn direct_call_peer(room: &Room) -> Option<OwnedUserId> {
     }
     let peer = members.iter().find(|member| member.user_id() != me)?;
     (*peer.membership() == MembershipState::Join).then(|| peer.user_id().to_owned())
+}
+
+#[cfg(target_os = "android")]
+pub(crate) async fn call_push_event(
+    room: &Room,
+    peer: &matrix_sdk::ruma::UserId,
+    event: &TimelineEvent,
+    now: u64,
+) -> Option<serde_json::Value> {
+    let call = parse_call_event(event.raw())?;
+    let ignored = serde_json::json!({ "kind": "ignore" });
+    if room.encryption_state().is_encrypted() && !matches!(event.kind, TimelineEventKind::Decrypted(_)) {
+        return Some(ignored);
+    }
+    let Some(expires_at) = call.signal_expiry(now) else { return Some(ignored) };
+    let from_peer = call.sender == peer;
+    let kind = match call.content.kind {
+        SignalKind::Ring if from_peer => "ring",
+        SignalKind::End | SignalKind::Answer | SignalKind::Connect
+            if from_peer || call.sender == room.own_user_id() => "ended",
+        _ => return Some(ignored),
+    };
+    let caller = room.get_member_no_sync(peer).await.ok().flatten()
+        .and_then(|member| member.display_name().map(str::to_owned))
+        .unwrap_or_else(|| peer.to_string());
+    Some(serde_json::json!({
+        "kind": kind,
+        "callId": call.content.call_id,
+        "caller": caller,
+        "roomId": room.room_id(),
+        "expiresAt": expires_at,
+    }))
+}
+
+#[cfg(target_os = "android")]
+pub(crate) async fn decline_pushed_call(
+    client: &Client,
+    room: &Room,
+    call_id: String,
+) -> bool {
+    let Some(device_id) = client.device_id() else { return false };
+    if direct_call_peer(room).await.is_none() || uuid::Uuid::parse_str(&call_id).is_err() {
+        return false;
+    }
+    let content = SignalContent {
+        kind: SignalKind::End,
+        call_id,
+        device_id: device_id.to_string(),
+        answer_device_id: None,
+        target_device_id: None,
+        request_id: None,
+        connection_lost: false,
+    };
+    match serde_json::to_value(content) {
+        Ok(payload) => room.send_raw(CALL_EVENT, payload).await.is_ok(),
+        Err(_) => false,
+    }
 }
 
 #[tauri::command]
@@ -296,9 +354,18 @@ pub(super) async fn receive_signals(
             {
                 continue;
             }
+            #[cfg(target_os = "ios")]
+            if matches!(call.content.kind, SignalKind::End)
+                || (call.sender == me && call.content.kind == SignalKind::Answer)
+                || (from_peer && call.content.kind == SignalKind::Connect
+                    && call.content.answer_device_id.as_deref() != Some(device.as_str()))
+            {
+                crate::call_notifications::close_ios_ringing_call(&call.content.call_id);
+            }
             incoming.push(DirectCallSignal {
                 for_this_device: call.content.answer_device_id.as_deref() == Some(device.as_str()),
                 content: call.content,
+                event_id: call.event_id,
                 room_id: room_id.to_string(),
                 peer_user_id: peer.clone(),
                 from_peer,

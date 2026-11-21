@@ -15,7 +15,7 @@ use crate::AppState;
 use super::fmt_error_chain;
 use super::pax_auth::{self, AccountMode, Descriptor, Enrollment};
 
-const CREDENTIALS_FILENAME: &str = "credentials.json";
+pub(crate) const CREDENTIALS_FILENAME: &str = "credentials.json";
 const PAX_SETUP_REQUIRED: &str = "Sign in with your password to finish encrypted account setup.";
 const PAX_RECOVERY_REQUIRED: &str = "Sign in with your Pax password to restore encrypted history.";
 
@@ -1002,6 +1002,8 @@ pub async fn restore_session(
     app: tauri::AppHandle,
 ) -> Result<String, String> {
     let _operation = state.encryption.operation.lock().await;
+    #[cfg(target_os = "android")]
+    let _cold_store = crate::call_notifications::android::COLD_STORE.lock().await;
     let creds = load_credentials(app.clone())?.ok_or("No saved credentials")?;
     let sd = creds.session.as_ref().ok_or("No saved session")?;
     if creds.pax_enrollment_pending {

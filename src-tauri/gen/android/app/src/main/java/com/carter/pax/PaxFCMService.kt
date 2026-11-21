@@ -11,6 +11,7 @@ import androidx.core.app.NotificationCompat
 import com.carter.pax.R
 import com.google.firebase.messaging.FirebaseMessagingService
 import com.google.firebase.messaging.RemoteMessage
+import org.json.JSONObject
 
 /**
  * Receives FCM data messages forwarded by Sygnal (Matrix push gateway).
@@ -75,6 +76,27 @@ class PaxFCMService : FirebaseMessagingService() {
             ?.trim()?.takeIf { it.isNotEmpty() }
         val roomId = data["room_id"] ?: ""
         val eventId = data["event_id"]?.trim()?.takeIf { it.isNotEmpty() } ?: ""
+        val type = data["type"]
+        val directCallEvent = type == "com.carter.pax.direct_call"
+        if ((directCallEvent || type == "m.room.encrypted") && roomId.isNotEmpty() && eventId.isNotEmpty()) {
+            val callEvent = runCatching {
+                PaxCallPush.resolve(applicationInfo.dataDir, roomId, eventId)?.let { JSONObject(it) }
+            }.getOrNull()
+            if (callEvent != null) {
+                when (callEvent.optString("kind")) {
+                    "ring" -> {
+                        PaxCallNotifications.parse(callEvent)?.let { PaxCallNotifications.show(this, it, eventId) }
+                        return
+                    }
+                    "ended" -> {
+                        PaxCallNotifications.parse(callEvent)?.let { PaxCallNotifications.close(this, it.id, true) }
+                        return
+                    }
+                    "ignore" -> return
+                }
+            }
+        }
+        if (directCallEvent || PaxCallNotifications.hasSeenRing(this, eventId)) return
 
         val preview = messagePreview(data)
         val roomLabel = roomContextLabel(roomName, roomAlias, senderName)
@@ -125,12 +147,13 @@ class PaxFCMService : FirebaseMessagingService() {
                 .setContentIntent(pendingIntent)
                 .build()
 
-        val id = notificationIdCounter++
+        val tag = eventId.takeIf { it.isNotEmpty() }
+        val id = if (tag == null) notificationIdCounter++ else 0
         try {
-            manager.notify(id, buildNotification(R.drawable.ic_stat_pax))
+            manager.notify(tag, id, buildNotification(R.drawable.ic_stat_pax))
         } catch (e: RuntimeException) {
             Log.w(TAG, "Posting notification with ic_stat_pax failed; using system fallback icon", e)
-            manager.notify(id, buildNotification(android.R.drawable.ic_dialog_info))
+            manager.notify(tag, id, buildNotification(android.R.drawable.ic_dialog_info))
         }
     }
 

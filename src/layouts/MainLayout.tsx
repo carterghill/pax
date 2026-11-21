@@ -13,6 +13,7 @@ import { usePresence } from "../hooks/usePresence";
 import { useVoiceParticipants } from "../hooks/useVoiceParticipants";
 import { useVoiceCall, type VoiceCallActions } from "../hooks/useVoiceCall";
 import { useDirectCall } from "../hooks/useDirectCall";
+import { useCallNotifications } from "../hooks/useCallNotifications";
 import { ROOM_RECOVERY_MS, VOICE_RECOVERY_REFRESH_MS, useVoiceRecovery } from "../hooks/useVoiceRecovery";
 import { useVoiceParticipantStates } from "../hooks/useVoiceParticipantStates";
 import { useAudioControls } from "../hooks/useAudioControls";
@@ -154,7 +155,8 @@ export default function MainLayout({
   const {
     call: directCall, error: directCallError, peerConnection: directCallPeerConnection,
     start: startDirectCall, answer: answerIncomingCall,
-    end: endDirectCall, clearError: clearDirectCallError, reconnect: reconnectDirectCall,
+    end: endDirectCall, endFromNotification: endDirectCallFromNotification,
+    clearError: clearDirectCallError, reconnect: reconnectDirectCall,
   } = useDirectCall(voiceCall, eligibleRecovery, voiceRecoveryReady, rememberVoice, forgetVoice);
   const audioControls = useAudioControls(voiceCall);
   // Unread state for every joined room, used by the sidebar to paint rooms in
@@ -805,11 +807,11 @@ export default function MainLayout({
     startDirectCall(roomId, peerUserId);
   }, [abandonVoiceChannel, startDirectCall]);
 
-  const answerDirectCall = useCallback(() => {
+  const answerDirectCall = useCallback((callId?: string) => {
     answerIncomingCall((roomId) => {
       abandonVoiceChannel();
       openDirectCallRoom(roomId);
-    });
+    }, callId);
   }, [abandonVoiceChannel, answerIncomingCall, openDirectCallRoom]);
 
   useEffect(() => {
@@ -1300,6 +1302,8 @@ export default function MainLayout({
 
   const directCallRoom = directCall && getRoom(directCall.roomId, true);
   const directCallName = directCallRoom ? effectiveDmTitle(directCallRoom) : directCall?.peerUserId ?? "";
+  useCallNotifications(directCall, directCallName, answerDirectCall, endDirectCallFromNotification,
+    !!voiceCall.connectedRoomId || voiceCall.isConnecting);
   const roomSidebarEl = (
     <>
       <RoomSidebar
@@ -1400,7 +1404,7 @@ export default function MainLayout({
       canMute={connectedVoiceRoomId === directCall.roomId}
       isReconnecting={voiceCall.isReconnecting && targetVoiceRoomId === directCall.roomId}
       showActions={!showCallPanel || voiceCall.isConnecting}
-      onAnswer={answerDirectCall}
+      onAnswer={() => answerDirectCall()}
       onEnd={endDirectCall}
       onToggleMic={voiceCall.toggleMic}
     />

@@ -16,6 +16,7 @@ val tauriProperties = Properties().apply {
 
 android {
     compileSdk = 36
+    ndkVersion = "28.2.13676358"
     namespace = "com.carter.pax"
     defaultConfig {
         manifestPlaceholders["usesCleartextTraffic"] = "false"
@@ -39,6 +40,10 @@ android {
         }
         getByName("release") {
             isMinifyEnabled = true
+            packaging {
+                // Compress the native library to keep the sideloadable APK small.
+                jniLibs.useLegacyPackaging = true
+            }
             proguardFiles(
                 *fileTree(".") { include("**/*.pro") }
                     .plus(getDefaultProguardFile("proguard-android-optimize.txt"))

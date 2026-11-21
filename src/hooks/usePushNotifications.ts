@@ -1,5 +1,5 @@
 /**
- * Push-notification registration for Android.
+ * Mobile push registration for Android FCM and the iOS PushKit gateway.
  *
  * ## How it works
  *
@@ -15,12 +15,12 @@
  * 3. On logout, the caller invokes `unregisterPush()` which removes the
  *    pusher so the server stops sending pushes to this device.
  *
- * On desktop builds, `push_gateway_configured` returns false and the
- * hook is a no-op.  No FCM token is ever injected on desktop.
+ * iOS reads its token directly from PushKit through the Rust command.
  */
 
 import { useEffect, useRef, useCallback } from "react";
 import { invoke } from "@tauri-apps/api/core";
+import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 
 declare global {
   interface Window {
@@ -48,16 +48,14 @@ export function usePushNotifications({
   const currentTokenRef = useRef<string | null>(null);
 
   const registerWithToken = useCallback(
-    async (token: string) => {
+    async (token: string, deviceDisplayName: string) => {
       if (!userId) return;
       if (token === registeredTokenRef.current) return;
 
       try {
-        // Build a human-readable device name.  "Pax (Android)" is fine;
-        // the homeserver stores it for the user's pusher list.
         await invoke("register_pusher", {
           pushKey: token,
-          deviceDisplayName: "Pax (Android)",
+          deviceDisplayName,
         });
         registeredTokenRef.current = token;
         currentTokenRef.current = token;
@@ -74,6 +72,7 @@ export function usePushNotifications({
 
     let cancelled = false;
     let pollTimer: ReturnType<typeof setTimeout> | null = null;
+    let unlisten: UnlistenFn | undefined;
 
     (async () => {
       try {
@@ -85,15 +84,35 @@ export function usePushNotifications({
 
       if (cancelled) return;
 
+      const android = (window as Window & { PaxAndroid?: { getFcmToken(): string } }).PaxAndroid;
+      if (!android) {
+        const readVoipToken = async () => {
+          const token = await invoke<string | null>("get_ios_voip_token");
+          if (!cancelled && token) await registerWithToken(token, "Pax (iPhone)");
+        };
+        try {
+          const stop = await listen("voip-token-changed", () => {
+            void readVoipToken().catch((error) => console.warn("[push] Could not read the new VoIP token:", error));
+          });
+          if (cancelled) stop();
+          else {
+            unlisten = stop;
+            await readVoipToken();
+          }
+        } catch (error) {
+          if (!cancelled) console.warn("[push] get_ios_voip_token failed:", error);
+        }
+        return;
+      }
+
       // Poll for the FCM token from the Rust side (reads file written by Kotlin).
       // The token file may not exist yet on first launch while Firebase fetches it.
       const pollForToken = async () => {
         if (cancelled) return;
         try {
-            const bridge = (window as any).PaxAndroid;
-            const token = bridge?.getFcmToken?.();
+            const token = android.getFcmToken();
             if (token && token.length > 0) {
-                registerWithToken(token);
+                void registerWithToken(token, "Pax (Android)");
                 return;
             }
         } catch (e) {
@@ -109,6 +128,7 @@ export function usePushNotifications({
     return () => {
       cancelled = true;
       if (pollTimer) clearTimeout(pollTimer);
+      unlisten?.();
       registeredTokenRef.current = null;
     };
   }, [userId, registerWithToken]);

@@ -27,11 +27,20 @@ use crate::AppState;
 /// Compile-time push gateway URL (e.g. `https://push.brandxtech.ca`).
 /// Set via `PAX_PUSH_GATEWAY_URL` in `.env` / shell environment.
 pub(crate) fn push_gateway_url() -> Option<&'static str> {
-    option_env!("PAX_PUSH_GATEWAY_URL")
+    #[cfg(target_os = "android")]
+    return option_env!("PAX_PUSH_GATEWAY_URL");
+    #[cfg(target_os = "ios")]
+    return option_env!("PAX_IOS_VOIP_PUSH_GATEWAY_URL");
+    #[cfg(not(any(target_os = "android", target_os = "ios")))]
+    return None;
 }
 
 /// The reverse-DNS app id registered in Sygnal's config.
-const APP_ID: &str = "com.carter.pax";
+const APP_ID: &str = if cfg!(target_os = "ios") {
+    "com.carter.pax.voip"
+} else {
+    "com.carter.pax"
+};
 
 /// Human-readable name shown in the homeserver's pusher list.
 const APP_DISPLAY_NAME: &str = "Pax";
@@ -48,7 +57,7 @@ pub async fn register_pusher(
     device_display_name: String,
 ) -> Result<(), String> {
     let gateway_url = push_gateway_url()
-        .ok_or("No push gateway URL configured (PAX_PUSH_GATEWAY_URL not set at build time)")?;
+        .ok_or("No push gateway URL configured for this platform")?;
 
     let ac = super::get_authed_client(&state).await?;
 
@@ -90,6 +99,29 @@ pub async fn register_pusher(
     }
 
     log::info!("[push] pusher registered successfully");
+
+    // Encrypted room events already use the homeserver's encrypted-message rules.
+    // Unencrypted Pax calls need a rule below room-level notification preferences.
+    let rule = "com.carter.pax.direct_call";
+    let rule_url = format!("{}/_matrix/client/v3/pushrules/global/underride/{rule}", ac.homeserver);
+    if let Ok(existing) = state.http_client.get(&rule_url).bearer_auth(&ac.access_token).send().await {
+        if existing.status() == reqwest::StatusCode::NOT_FOUND {
+            let result = super::push_rules::put_push_rule_raw(
+                &state,
+                "underride",
+                rule,
+                &serde_json::json!({
+                    "conditions": [{ "kind": "event_match", "key": "type", "pattern": rule }],
+                    "actions": ["notify", { "set_tweak": "sound", "value": "ring" }],
+                }),
+                None,
+                None,
+            ).await;
+            if let Err(error) = result {
+                log::warn!("Could not set up the push rule for unencrypted Pax calls: {error}");
+            }
+        }
+    }
     Ok(())
 }
 
@@ -192,4 +224,12 @@ pub async fn get_fcm_token(app: tauri::AppHandle) -> Result<Option<String>, Stri
 #[tauri::command]
 pub fn push_gateway_configured() -> bool {
     push_gateway_url().is_some()
+}
+
+#[tauri::command]
+pub fn get_ios_voip_token() -> Option<String> {
+    #[cfg(target_os = "ios")]
+    return crate::call_notifications::ios_voip_token();
+    #[cfg(not(target_os = "ios"))]
+    return None;
 }

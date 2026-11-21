@@ -1,4 +1,5 @@
 import { useEffect, type CSSProperties } from "react";
+import { isTauri } from "@tauri-apps/api/core";
 import { Mic, MicOff, Phone, PhoneOff, X } from "lucide-react";
 import Dialog from "./Dialog";
 import UserAvatar from "./UserAvatar";
@@ -27,6 +28,9 @@ export default function DirectCallControls({
   const incoming = call.phase === "incoming";
   useEffect(() => {
     if (!incoming) return;
+    const appleMobile = /iPhone|iPad|iPod/.test(navigator.userAgent)
+      || (navigator.userAgent.includes("Macintosh") && navigator.maxTouchPoints > 1);
+    if (isTauri() && (appleMobile || ("PaxAndroid" in window && !document.hasFocus()))) return;
     const ringtone = new Audio("/sounds/incoming-call.mp3");
     ringtone.loop = true;
     void ringtone.play().catch((reason) => console.warn("Could not play incoming ringtone:", reason));

@@ -11,6 +11,7 @@ import android.util.Log
 
 import android.webkit.JavascriptInterface
 import org.json.JSONObject
+import java.lang.ref.WeakReference
 
 class MainActivity : TauriActivity() {
   private var webViewRef: WebView? = null
@@ -20,13 +21,29 @@ class MainActivity : TauriActivity() {
   override fun onCreate(savedInstanceState: Bundle?) {
     enableEdgeToEdge()
     super.onCreate(savedInstanceState)
+    PaxCallNotifications.activity = WeakReference(this)
     handleNotificationIntent(intent)
+  }
+
+  override fun onDestroy() {
+    if (PaxCallNotifications.activity?.get() == this) PaxCallNotifications.activity = null
+    super.onDestroy()
   }
 
   override fun onNewIntent(intent: Intent) {
     super.onNewIntent(intent)
     setIntent(intent)
     handleNotificationIntent(intent)
+  }
+
+  override fun onWindowFocusChanged(hasFocus: Boolean) {
+    super.onWindowFocusChanged(hasFocus)
+    PaxCallNotifications.foreground = hasFocus
+  }
+
+  override fun onPause() {
+    PaxCallNotifications.foreground = false
+    super.onPause()
   }
 
   override fun onWebViewCreate(webView: WebView) {
@@ -72,6 +89,13 @@ class MainActivity : TauriActivity() {
 
   private fun handleNotificationIntent(intent: Intent?) {
     val i = intent ?: return
+    if (i.action == PaxCallNotifications.ANSWER || i.action == PaxCallNotifications.OPEN) {
+      val call = PaxCallNotifications.select(this, i) ?: return
+      if (i.action == PaxCallNotifications.ANSWER) {
+        PaxCallNotifications.queueAction(this, call, "answer")
+      }
+      return
+    }
     val roomId = i.getStringExtra("room_id")?.trim() ?: return
     if (roomId.isEmpty()) return
     val eventId = i.getStringExtra("event_id")?.trim()?.takeIf { it.isNotEmpty() }
@@ -81,6 +105,10 @@ class MainActivity : TauriActivity() {
     } else {
       pendingNotificationOpen = roomId to eventId
     }
+  }
+
+  internal fun dispatchCallNotificationAction() {
+    webViewRef?.evaluateJavascript("window.dispatchEvent(new Event('pax-call-notification-action'))", null)
   }
 
   /**
@@ -145,6 +173,22 @@ class MainActivity : TauriActivity() {
   }
 
   inner class PaxBridge {
+    @JavascriptInterface
+    fun showIncomingCall(id: String, roomId: String, caller: String, expiresAt: Long, eventId: String) {
+      PaxCallNotifications.show(this@MainActivity, PaxCallNotifications.Call(id, roomId, caller, expiresAt), eventId)
+    }
+
+    @JavascriptInterface
+    fun closeIncomingCall(id: String, ended: Boolean) {
+      PaxCallNotifications.close(this@MainActivity, id, ended)
+    }
+
+    @JavascriptInterface
+    fun takeCallNotificationAction(): String = PaxCallNotifications.takeAction(this@MainActivity)
+
+    @JavascriptInterface
+    fun setCallNotificationBusy(busy: Boolean) { PaxCallNotifications.busy = busy }
+
     @JavascriptInterface
     fun getFcmToken(): String {
         val prefs = getSharedPreferences(PaxFCMService.PREFS_NAME, Context.MODE_PRIVATE)

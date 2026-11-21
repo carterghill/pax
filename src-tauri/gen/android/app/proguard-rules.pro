@@ -19,3 +19,10 @@
 # If you keep the line number information, uncomment this to
 # hide the original source file name.
 #-renamesourcefileattribute SourceFile
+
+-keepclasseswithmembernames class com.carter.pax.PaxCallPush {
+    native <methods>;
+}
+-keepclassmembers class com.carter.pax.MainActivity$PaxBridge {
+    @android.webkit.JavascriptInterface <methods>;
+}

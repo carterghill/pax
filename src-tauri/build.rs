@@ -28,6 +28,25 @@ fn linux_cuda_toolkit_root() -> Option<PathBuf> {
 fn main() {
     tauri_build::build();
 
+    let target_os = std::env::var("CARGO_CFG_TARGET_OS").unwrap_or_default();
+    if matches!(target_os.as_str(), "macos" | "ios") {
+        let source = "src/call_notifications/apple.m";
+        println!("cargo:rerun-if-changed={source}");
+        cc::Build::new()
+            .file(source)
+            .flag("-fobjc-arc")
+            .flag("-fblocks")
+            .compile("pax_call_notifications");
+        println!("cargo:rustc-link-lib=framework=Foundation");
+        if target_os == "ios" {
+            println!("cargo:rustc-link-lib=framework=CallKit");
+            println!("cargo:rustc-link-lib=framework=PushKit");
+        } else {
+            println!("cargo:rustc-link-lib=framework=AppKit");
+            println!("cargo:rustc-link-lib=framework=UserNotifications");
+        }
+    }
+
     // Declare custom cfg flags so rustc doesn't warn about them.
     println!("cargo:rustc-check-cfg=cfg(has_nvenc)");
     println!("cargo:rustc-check-cfg=cfg(has_vaapi)");
@@ -59,6 +78,7 @@ fn main() {
         "PAX_REGISTRATION_TOKEN",
         "PAX_HIDE_SERVER_CONFIG",
         "PAX_PUSH_GATEWAY_URL",
+        "PAX_IOS_VOIP_PUSH_GATEWAY_URL",
     ];
 
     for var in vars {
@@ -79,7 +99,6 @@ fn main() {
     //   has_vaapi         — VA-API (Linux x86 only)
     //   has_videotoolbox  — Apple VideoToolbox (macOS / iOS)
 
-    let target_os = std::env::var("CARGO_CFG_TARGET_OS").unwrap_or_default();
     let target_arch = std::env::var("CARGO_CFG_TARGET_ARCH").unwrap_or_default();
 
     match target_os.as_str() {

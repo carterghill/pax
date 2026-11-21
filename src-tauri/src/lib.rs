@@ -3,6 +3,7 @@
 pub mod codec;
 mod avatars;
 mod attachments;
+mod call_notifications;
 mod file_cache;
 mod commands;
 mod idle;
@@ -336,6 +337,9 @@ pub fn run() {
         raw_unread_messages: Arc::new(Mutex::new(HashMap::new())),
     });
 
+    #[cfg(target_os = "android")]
+    call_notifications::android::set_app_state(&state);
+
     let app_builder = tauri::Builder::default()
         .on_window_event(|window, event| {
             #[cfg(not(desktop))]
@@ -409,6 +413,7 @@ pub fn run() {
     };
     app_builder
         .manage(state)
+        .manage(call_notifications::CallNotifications::default())
         .manage(voice::VoiceManager::new())
         .register_uri_scheme_protocol("paxvideo", |_app, request| {
             video_recv::handle_protocol_request(request)
@@ -513,6 +518,8 @@ pub fn run() {
             commands::voice_matrix::get_all_livekit_voice_snapshots,
             commands::direct_calls::send_direct_call_signal,
             commands::direct_calls::take_direct_call_signals,
+            call_notifications::sync_call_notification,
+            call_notifications::take_call_notification_action,
             commands::voice_matrix::voice_connect,
             commands::voice_matrix::voice_device_id,
             commands::voice_matrix::voice_find_previous_room,
@@ -624,6 +631,7 @@ pub fn run() {
             commands::push::register_pusher,
             commands::push::unregister_pusher,
             commands::push::push_gateway_configured,
+            commands::push::get_ios_voip_token,
             commands::push::get_fcm_token,
             commands::tray_indicator::set_tray_unread_indicator,
             commands::lifecycle::exit_app,
@@ -632,7 +640,13 @@ pub fn run() {
             commands::lifecycle::set_close_window_preference,
             commands::lifecycle::clear_close_window_preference,
         ])
-        .setup(setup::setup)
+        .setup(|app| {
+            #[cfg(target_os = "ios")]
+            call_notifications::initialize_ios(app.handle());
+            #[cfg(target_os = "macos")]
+            call_notifications::initialize_macos(app.handle());
+            setup::setup(app)
+        })
         .build(tauri::generate_context!())
         .expect("error while building tauri application")
         .run(|app, event| {

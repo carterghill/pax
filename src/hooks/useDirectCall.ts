@@ -14,6 +14,7 @@ interface CallId {
 }
 
 interface CallSignal extends CallId {
+  eventId: string;
   kind: SignalKind;
   deviceId: string;
   fromPeer: boolean;
@@ -26,6 +27,7 @@ interface CallSignal extends CallId {
 export interface DirectCall extends CallId {
   phase: "dialing" | "incoming" | "answering" | "connecting" | "active" | "interrupted" | "resuming";
   peerDeviceId?: string;
+  ringEventId?: string;
   established?: boolean;
   expiresAt: number;
 }
@@ -208,6 +210,7 @@ export function useDirectCall(
         roomId: signal.roomId,
         peerUserId: signal.peerUserId,
         peerDeviceId: signal.deviceId,
+        ringEventId: signal.eventId,
         phase: "incoming",
         expiresAt: signal.expiresAt,
       });
@@ -364,9 +367,10 @@ export function useDirectCall(
     });
   }, [finish, update]);
 
-  const answer = useCallback((onStarted?: (roomId: string) => void) => {
+  const answer = useCallback((onStarted?: (roomId: string) => void, expectedCallId?: string) => {
     const pending = current.current;
     if (pending?.phase !== "incoming" || pending.expiresAt <= Date.now() || voiceBusy.current) return;
+    if (expectedCallId && pending.callId !== expectedCallId) return;
     const answering = { ...pending, phase: "answering", expiresAt: Date.now() + ANSWER_MS } as const;
     update(answering);
     onStarted?.(answering.roomId);
@@ -377,9 +381,16 @@ export function useDirectCall(
     });
   }, [finish, update]);
 
+  const endFromNotification = useCallback((callId: string, notifyPeer: boolean, allowActive = false) => {
+    const pending = current.current;
+    if (pending?.callId !== callId) return;
+    if (pending.phase === "incoming" ? pending.expiresAt <= Date.now() : !allowActive) return;
+    void finish(notifyPeer);
+  }, [finish]);
+
   const clearError = useCallback(() => setError(null), []);
   const peerConnection: DirectCallPeerConnection = peer
     ? peer.connectionInterrupted && call?.established ? "interrupted" : "connected"
     : inCall && call.established ? "lost" : "connecting";
-  return { call, error, peerConnection, reconnect, start, answer, end, clearError };
+  return { call, error, peerConnection, reconnect, start, answer, end, endFromNotification, clearError };
 }
