@@ -41,6 +41,23 @@ function App() {
   const { palette, typography, spacing, resolvedColorScheme } = useTheme();
 
   useEffect(() => {
+    // File drops that aren't handled by a composer must never open the file in the webview.
+    function ignoreFileDrop(event: DragEvent) {
+      const transfer = event.dataTransfer;
+      if (!transfer?.types.includes("Files")) return;
+      event.preventDefault();
+      transfer.dropEffect = "none";
+    }
+
+    window.addEventListener("dragover", ignoreFileDrop);
+    window.addEventListener("drop", ignoreFileDrop);
+    return () => {
+      window.removeEventListener("dragover", ignoreFileDrop);
+      window.removeEventListener("drop", ignoreFileDrop);
+    };
+  }, []);
+
+  useEffect(() => {
     const root = document.getElementById("root");
     document.documentElement.style.backgroundColor = palette.bgPrimary;
     document.body.style.backgroundColor = palette.bgPrimary;

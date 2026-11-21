@@ -19,6 +19,7 @@ interface ComposerInputRowProps {
   pickerAnchorRef: RefObject<HTMLButtonElement | null>;
   pendingFile: PendingAttachment | null;
   draftDmPeerUserId?: string | null;
+  uploadDisabled: boolean;
   interactionLocked: boolean;
   plainText: string;
   hasComposerMedia: boolean;
@@ -55,6 +56,7 @@ export default function ComposerInputRow({
   pickerAnchorRef,
   pendingFile,
   draftDmPeerUserId = null,
+  uploadDisabled,
   interactionLocked,
   plainText,
   hasComposerMedia,
@@ -80,7 +82,6 @@ export default function ComposerInputRow({
   onSend,
   onHoverToolButton,
 }: ComposerInputRowProps) {
-  const uploadDisabled = !!pendingFile || !!draftDmPeerUserId || interactionLocked;
   const composerFontSize = emojiOnlyComposer
     ? typography.fontSizeBase * EMOJI_ONLY_DISPLAY_SCALE
     : typography.fontSizeBase;

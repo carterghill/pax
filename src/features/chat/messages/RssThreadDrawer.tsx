@@ -305,6 +305,7 @@ export default function RssThreadDrawer({
             roomId={roomId}
             roomName={roomName}
             thread={threadTarget}
+            allowWindowFileDrop
             onMessageSent={handleMessageSent}
             onSendError={setSendError}
             editingMessage={editingMessage}

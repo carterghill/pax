@@ -38,6 +38,7 @@ import ComposerFormattingToolbar from "../features/chat/composer/ComposerFormatt
 import ComposerMediaPickerPopover from "../features/chat/composer/ComposerMediaPickerPopover";
 import MentionAutocompleteMenu from "../features/chat/composer/MentionAutocompleteMenu";
 import ComposerInputRow from "../features/chat/composer/ComposerInputRow";
+import ComposerFileDrop from "../features/chat/composer/ComposerFileDrop";
 
 export type ComposerPermission = "loading" | "allowed" | "forbidden";
 export type { EditingMessageRef, MessageFileSendBridge };
@@ -48,6 +49,7 @@ interface MessageInputProps {
   onMessageSent: (reply?: SentThreadReply) => void;
   onSendError?: (error: string | null) => void;
   thread?: MessageThreadTarget;
+  allowWindowFileDrop?: boolean;
   /** When set, the next text send is a Matrix rich reply to this message. */
   replyDraft?: Message | null;
   onCancelReply?: () => void;
@@ -76,6 +78,7 @@ export default function MessageInput({
   onMessageSent,
   onSendError,
   thread,
+  allowWindowFileDrop = false,
   replyDraft = null,
   onCancelReply,
   editingMessage = null,
@@ -122,6 +125,7 @@ export default function MessageInput({
     handleFileSelected,
     clearPendingFile,
   } = useComposerFileUpload({ roomId, interactionLocked, fileSendBridge });
+  const uploadDisabled = !!pendingFile || !!draftDmPeerUserId || interactionLocked;
 
   const { clearTypingTimeout, handleComposerActivity, sendTyping } = useComposerTypingNotice({
     roomId,
@@ -432,6 +436,9 @@ export default function MessageInput({
 
   return (
     <>
+      {allowWindowFileDrop && roomId && (
+        <ComposerFileDrop onFile={uploadDisabled ? undefined : attachFile} />
+      )}
       <style>{`
         [data-pax-composer] strong, [data-pax-composer] b { font-weight: bold; }
         [data-pax-composer] em, [data-pax-composer] i { font-style: italic; }
@@ -517,6 +524,7 @@ export default function MessageInput({
           pickerAnchorRef={pickerAnchorRef}
           pendingFile={pendingFile}
           draftDmPeerUserId={draftDmPeerUserId}
+          uploadDisabled={uploadDisabled}
           interactionLocked={interactionLocked}
           plainText={plainText}
           hasComposerMedia={hasComposerMedia}

@@ -838,6 +838,7 @@ export default function ChatView({
               key={activeRoom.id}
               roomId={activeRoom.id}
               roomName={activeRoom.name}
+              allowWindowFileDrop={!activeThread}
               composerPermission={
                 activeRoom.upgradePending
                   ? "forbidden"
