@@ -5,6 +5,7 @@
 use std::sync::Arc;
 use std::time::Duration;
 
+use futures_util::future::BoxFuture;
 use matrix_sdk::media::{MediaFormat, MediaRequestParameters};
 use matrix_sdk::ruma::events::room::MediaSource;
 use matrix_sdk::ruma::MxcUri;
@@ -76,15 +77,23 @@ impl AvatarService {
         self.files.get_file(mxc?.as_str()).await
     }
 
-    pub async fn load(&self, client: &Client, mxc: &MxcUri) -> Result<String, String> {
-        self.fetch(mxc, async {
-            let request = MediaRequestParameters {
-                source: MediaSource::Plain(mxc.to_owned()),
-                format: MediaFormat::File,
-            };
-            client.media().get_media_content(&request, true).await
+    pub fn load<'a>(
+        &'a self,
+        client: &'a Client,
+        mxc: &'a MxcUri,
+    ) -> BoxFuture<'a, Result<String, String>> {
+        // Keep the Matrix media future out of the command's inline storage.
+        // Android's WebView dispatches commands on a small JNI thread stack.
+        Box::pin(async move {
+            self.fetch(mxc, async {
+                let request = MediaRequestParameters {
+                    source: MediaSource::Plain(mxc.to_owned()),
+                    format: MediaFormat::File,
+                };
+                client.media().get_media_content(&request, true).await
+            })
+            .await
         })
-        .await
     }
 
     async fn fetch(

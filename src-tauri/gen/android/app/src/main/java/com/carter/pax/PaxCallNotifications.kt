@@ -12,8 +12,8 @@ import android.net.Uri
 import android.os.Build
 import android.os.Handler
 import android.os.Looper
+import android.util.Log
 import androidx.core.app.NotificationCompat
-import androidx.core.app.Person
 import org.json.JSONObject
 import java.lang.ref.WeakReference
 import java.util.Locale
@@ -31,6 +31,7 @@ internal object PaxCallNotifications {
     const val ANSWER = "com.carter.pax.call.ANSWER"
     const val DECLINE = "com.carter.pax.call.DECLINE"
     private const val CHANNEL = "pax_calls"
+    private const val TAG = "PaxCalls"
     private const val ACTIVE = "incoming"
     private const val ACTION = "action"
     private const val FINISHED = "finished"
@@ -39,7 +40,6 @@ internal object PaxCallNotifications {
     private const val MAX_RING_MS = 30_000L
     private val main = Handler(Looper.getMainLooper())
 
-    @Volatile var foreground = false
     @Volatile var busy = false
     @Volatile var activity: WeakReference<MainActivity>? = null
 
@@ -50,6 +50,25 @@ internal object PaxCallNotifications {
 
     private fun prefs(context: Context) = context.getSharedPreferences("pax_calls", Context.MODE_PRIVATE)
     private fun manager(context: Context) = context.getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager
+
+    fun createChannel(context: Context) {
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.O) return
+        val channel = NotificationChannel(CHANNEL, "Incoming calls", NotificationManager.IMPORTANCE_HIGH)
+        channel.description = "Incoming Pax voice calls"
+        channel.setSound(
+            RingtoneManager.getDefaultUri(RingtoneManager.TYPE_RINGTONE),
+            AudioAttributes.Builder().setUsage(AudioAttributes.USAGE_NOTIFICATION_RINGTONE).build(),
+        )
+        manager(context).createNotificationChannel(channel)
+    }
+
+    fun canPost(context: Context): Boolean {
+        val notifications = manager(context)
+        if (!notifications.areNotificationsEnabled()) return false
+        return Build.VERSION.SDK_INT < Build.VERSION_CODES.O ||
+            (notifications.getNotificationChannel(CHANNEL)?.importance ?: NotificationManager.IMPORTANCE_NONE) >
+                NotificationManager.IMPORTANCE_NONE
+    }
     private fun validId(value: String): Boolean = runCatching {
         UUID.fromString(value).toString() == value.lowercase(Locale.ROOT)
     }.getOrDefault(false)
@@ -86,18 +105,15 @@ internal object PaxCallNotifications {
         if (discardExpired(context, now).has(call.id)) return
         val current = current(context)
         if (current != null && current.expiresAt > now && current.id != call.id) return
-        prefs(context).edit().putString(ACTIVE, call.json().toString()).apply()
-        if (foreground) return
 
-        val ringtone = RingtoneManager.getDefaultUri(RingtoneManager.TYPE_RINGTONE)
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
-            val channel = NotificationChannel(CHANNEL, "Incoming calls", NotificationManager.IMPORTANCE_HIGH)
-            channel.description = "Incoming Pax voice calls"
-            channel.setSound(ringtone, AudioAttributes.Builder().setUsage(AudioAttributes.USAGE_NOTIFICATION_RINGTONE).build())
-            manager(context).createNotificationChannel(channel)
+        createChannel(context)
+        if (!canPost(context)) {
+            Log.d(TAG, "Incoming call notification is disabled by Android notification settings")
+            return
         }
         val caller = call.caller.ifBlank { "Pax contact" }
-        val person = Person.Builder().setName(caller).setImportant(true).build()
+        // Firebase can post this directly. Android reserves CallStyle for notifications
+        // attached to a foreground service, user-initiated job, or full-screen intent.
         val notification = NotificationCompat.Builder(context, CHANNEL)
             .setSmallIcon(R.drawable.ic_stat_pax)
             .setContentTitle(caller)
@@ -105,14 +121,23 @@ internal object PaxCallNotifications {
             .setCategory(NotificationCompat.CATEGORY_CALL)
             .setVisibility(NotificationCompat.VISIBILITY_PRIVATE)
             .setPriority(NotificationCompat.PRIORITY_MAX)
-            .setSound(ringtone)
+            .setSound(RingtoneManager.getDefaultUri(RingtoneManager.TYPE_RINGTONE))
             .setOnlyAlertOnce(true)
             .setTimeoutAfter(duration)
             .setContentIntent(intent(context, call.id, OPEN))
-            .setStyle(NotificationCompat.CallStyle.forIncomingCall(person,
-                intent(context, call.id, DECLINE), intent(context, call.id, ANSWER)))
+            .addAction(android.R.drawable.ic_menu_close_clear_cancel, "Decline", intent(context, call.id, DECLINE))
+            .addAction(android.R.drawable.ic_menu_call, "Answer", intent(context, call.id, ANSWER))
             .build()
-        manager(context).notify(call.id, NOTIFICATION_ID, notification)
+        try {
+            manager(context).notify(call.id, NOTIFICATION_ID, notification)
+        } catch (error: IllegalArgumentException) {
+            Log.w(TAG, "Android rejected the incoming call notification", error)
+            return
+        } catch (error: SecurityException) {
+            Log.w(TAG, "Android blocked the incoming call notification", error)
+            return
+        }
+        prefs(context).edit().putString(ACTIVE, call.json().toString()).apply()
         val app = context.applicationContext
         main.postDelayed({ close(app, call.id, false) }, duration)
     }

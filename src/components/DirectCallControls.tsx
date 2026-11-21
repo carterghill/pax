@@ -30,11 +30,19 @@ export default function DirectCallControls({
     if (!incoming) return;
     const appleMobile = /iPhone|iPad|iPod/.test(navigator.userAgent)
       || (navigator.userAgent.includes("Macintosh") && navigator.maxTouchPoints > 1);
-    if (isTauri() && (appleMobile || ("PaxAndroid" in window && !document.hasFocus()))) return;
+    const android = (window as Window & {
+      PaxAndroid?: { canPostIncomingCalls?(): boolean };
+    }).PaxAndroid;
+    if (isTauri() && (appleMobile || android?.canPostIncomingCalls?.())) return;
     const ringtone = new Audio("/sounds/incoming-call.mp3");
     ringtone.loop = true;
     void ringtone.play().catch((reason) => console.warn("Could not play incoming ringtone:", reason));
-    return () => { ringtone.pause(); };
+    const stopRingtone = () => ringtone.pause();
+    if (android) window.addEventListener("pax-notification-permission-granted", stopRingtone);
+    return () => {
+      window.removeEventListener("pax-notification-permission-granted", stopRingtone);
+      stopRingtone();
+    };
   }, [incoming, call.callId]);
 
   const buttonStyle: CSSProperties = {

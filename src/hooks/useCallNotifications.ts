@@ -98,8 +98,11 @@ export function useCallNotifications(
         systemCallId.current = null;
       }
       if (phase === "incoming" && callId && roomId && expiresAt) {
+        const show = () => android.showIncomingCall(callId, roomId, caller, expiresAt, ringEventId ?? "");
         systemCallId.current = callId;
-        android.showIncomingCall(callId, roomId, caller, expiresAt, ringEventId ?? "");
+        show();
+        window.addEventListener("pax-notification-permission-granted", show);
+        return () => window.removeEventListener("pax-notification-permission-granted", show);
       }
       return;
     }

@@ -1,11 +1,15 @@
 package com.carter.pax
 
+import android.Manifest
 import android.content.Context
 import android.content.Intent
+import android.content.pm.PackageManager
+import android.os.Build
 import android.os.Bundle
 import android.webkit.WebView
 import androidx.activity.OnBackPressedCallback
 import androidx.activity.enableEdgeToEdge
+import androidx.activity.result.contract.ActivityResultContracts
 import com.google.firebase.messaging.FirebaseMessaging
 import android.util.Log
 
@@ -17,10 +21,16 @@ class MainActivity : TauriActivity() {
   private var webViewRef: WebView? = null
   /** Cold start: intent arrives before the WebView exists — flush after first page load. */
   private var pendingNotificationOpen: Pair<String, String?>? = null
+  private val notificationPermission = registerForActivityResult(ActivityResultContracts.RequestPermission()) { granted ->
+    if (granted && PaxCallNotifications.canPost(this)) {
+      webViewRef?.evaluateJavascript("window.dispatchEvent(new Event('pax-notification-permission-granted'))", null)
+    }
+  }
 
   override fun onCreate(savedInstanceState: Bundle?) {
     enableEdgeToEdge()
     super.onCreate(savedInstanceState)
+    PaxCallNotifications.createChannel(this)
     PaxCallNotifications.activity = WeakReference(this)
     handleNotificationIntent(intent)
   }
@@ -34,16 +44,6 @@ class MainActivity : TauriActivity() {
     super.onNewIntent(intent)
     setIntent(intent)
     handleNotificationIntent(intent)
-  }
-
-  override fun onWindowFocusChanged(hasFocus: Boolean) {
-    super.onWindowFocusChanged(hasFocus)
-    PaxCallNotifications.foreground = hasFocus
-  }
-
-  override fun onPause() {
-    PaxCallNotifications.foreground = false
-    super.onPause()
   }
 
   override fun onWebViewCreate(webView: WebView) {
@@ -173,6 +173,23 @@ class MainActivity : TauriActivity() {
   }
 
   inner class PaxBridge {
+    @JavascriptInterface
+    fun requestNotificationPermission() {
+      runOnUiThread {
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.TIRAMISU ||
+          checkSelfPermission(Manifest.permission.POST_NOTIFICATIONS) == PackageManager.PERMISSION_GRANTED
+        ) return@runOnUiThread
+        val prefs = getSharedPreferences(PaxFCMService.PREFS_NAME, Context.MODE_PRIVATE)
+        val requested = "notification_permission_requested"
+        if (prefs.getBoolean(requested, false)) return@runOnUiThread
+        prefs.edit().putBoolean(requested, true).apply()
+        notificationPermission.launch(Manifest.permission.POST_NOTIFICATIONS)
+      }
+    }
+
+    @JavascriptInterface
+    fun canPostIncomingCalls(): Boolean = PaxCallNotifications.canPost(this@MainActivity)
+
     @JavascriptInterface
     fun showIncomingCall(id: String, roomId: String, caller: String, expiresAt: Long, eventId: String) {
       PaxCallNotifications.show(this@MainActivity, PaxCallNotifications.Call(id, roomId, caller, expiresAt), eventId)

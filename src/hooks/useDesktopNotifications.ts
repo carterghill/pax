@@ -292,6 +292,9 @@ export function useDesktopNotifications({
     }
 
     (async () => {
+      // A signed-in Android app needs permission even when Firebase handles delivery.
+      const android = (window as Window & { PaxAndroid?: { requestNotificationPermission?(): void } }).PaxAndroid;
+      android?.requestNotificationPermission?.();
       try {
         if (await invoke<boolean>("push_gateway_configured")) return;
       } catch {
