@@ -11,6 +11,8 @@
 //! 1. `get_room_unread_state` — a bulk snapshot read used on mount (per room).
 //! 2. `send_room_read_receipt` — acknowledges a specific event, picking `Read` vs
 //!    `ReadPrivate` based on the caller's `public` flag (driven by a settings toggle).
+//! 3. `acknowledge_viewed_calls` — clears visible call notifications independently
+//!    of the room receipt.
 //!
 //! Live diffs are emitted from the sync loop via `emit_unread_snapshot_if_changed`
 //! (called from `commands::messages::start_sync` after each `sync_once`).  The
@@ -133,6 +135,10 @@ pub async fn get_room_unread_state(
 ) -> Result<RoomUnreadState, String> {
     let client = get_client(&state).await?;
     let room = resolve_room(&client, &room_id)?;
+    Ok(room_unread_snapshot(&state, &room).await)
+}
+
+async fn room_unread_snapshot(state: &AppState, room: &matrix_sdk::Room) -> RoomUnreadState {
     let raw = state
         .raw_unread_messages
         .lock()
@@ -146,10 +152,66 @@ pub async fn get_room_unread_state(
         .await
         .get(room.room_id())
         .cloned();
-    Ok(super::unavailable_messages::apply_pending(
-        state.unread_projection.snapshot(&room, raw).await,
+    super::unavailable_messages::apply_pending(
+        state.unread_projection.snapshot(room, raw).await,
         pending.as_ref(),
-    ))
+    )
+}
+
+pub(super) async fn acknowledge_calls(
+    state: &Arc<AppState>,
+    app: &AppHandle,
+    room: &matrix_sdk::Room,
+    call_ids: &[String],
+) {
+    state.unread_projection.acknowledge_calls(room, call_ids).await;
+    let (state, app, room) = (state.clone(), app.clone(), room.clone());
+    // Refresh in parallel so a slow timeline read cannot delay the decline signal.
+    tauri::async_runtime::spawn(async move {
+        let snapshot = room_unread_snapshot(&state, &room).await;
+        let room_client = room.client();
+        let client = state.client.lock().await;
+        if !client.as_ref().is_some_and(|current| {
+            current.user_id() == room_client.user_id()
+                && current.device_id() == room_client.device_id()
+                && current.homeserver() == room_client.homeserver()
+        }) {
+            return;
+        }
+        let mut cache = state.unread_cache.lock().await;
+        if cache.get(room.room_id()) != Some(&snapshot) {
+            cache.insert(room.room_id().to_owned(), snapshot.clone());
+            let _ = app.emit(
+                "room-unread-changed",
+                RoomUnreadChangedPayload {
+                    room_id: room.room_id().to_string(),
+                    state: snapshot,
+                },
+            );
+        }
+    });
+}
+
+#[tauri::command]
+pub async fn acknowledge_viewed_calls(
+    state: State<'_, Arc<AppState>>,
+    app: AppHandle,
+    room_id: String,
+    user_id: String,
+    call_ids: Vec<String>,
+) -> Result<(), String> {
+    let client = get_client(&state).await?;
+    if !client.user_id().is_some_and(|id| id.as_str() == user_id) {
+        return Err("The signed-in account changed.".into());
+    }
+    let room = resolve_room(&client, &room_id)?;
+    if call_ids.len() > 32 || call_ids.iter().any(|id| uuid::Uuid::parse_str(id).is_err()) {
+        return Err("Invalid call identifiers.".into());
+    }
+    if !call_ids.is_empty() {
+        acknowledge_calls(&state, &app, &room, &call_ids).await;
+    }
+    Ok(())
 }
 
 /// Bulk snapshot over every joined room.  Cheaper than N individual invokes on
@@ -271,7 +333,7 @@ pub async fn set_room_marked_unread(
 /// `room-unread-changed` for each room whose values moved.  Called from the
 /// `start_sync` loop after each `sync_once` returns.
 ///
-/// Rooms with feed-management traffic or answered calls use a cached view of
+/// Rooms with feed-management traffic or answered or declined calls use a cached view of
 /// the unread timeline to exclude those events from the SDK/server totals.
 pub async fn emit_unread_snapshot_if_changed(
     client: &Client,

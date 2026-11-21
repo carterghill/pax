@@ -3,6 +3,7 @@ import { invoke } from "@tauri-apps/api/core";
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 import type { DirectCall, DirectCallPeerConnection } from "./useDirectCall";
 import { getStoredAudioDevicePreferences, requestMicrophonePermission } from "./useVoiceAudioDevices";
+import { getCallDuration } from "../features/chat/messages/callHistory";
 
 const INVITE_LIFETIME = 90_000;
 const CONNECTION_TIMEOUT = 35_000;
@@ -112,11 +113,14 @@ export function useMatrixVoip(
   const [connection, setConnection] = useState<DirectCallPeerConnection>("connecting");
 
   const setPhase = useCallback((session: Session, phase: DirectCall["phase"], expiresAt = session.call.expiresAt) => {
-    session.call = { ...session.call, phase, expiresAt, established: session.call.established || phase === "active" };
+    session.call = {
+      ...session.call, phase, expiresAt, established: session.call.established || phase === "active",
+      connectedAt: session.call.connectedAt ?? (phase === "active" ? Date.now() : undefined),
+    };
     update(session.call);
   }, [update]);
 
-  const finish = useCallback((notifyPeer: boolean, reason = "user_hangup") => {
+  const finish = useCallback((notifyPeer: boolean, reason = "user_hangup", declined = false) => {
     const session = active.current;
     if (!session) return stopping.current ?? Promise.resolve();
     active.current = null;
@@ -124,11 +128,16 @@ export function useMatrixVoip(
     clearTimeout(session.iceTimer);
     update(null);
     const dismissing = session.fromInvite && session.call.phase === "incoming";
+    const durationMs = getCallDuration(session.call.connectedAt);
     if (notifyPeer && (session.fromInvite || session.publication)) {
       void (session.publication ?? Promise.resolve()).catch(() => {})
         .then(() => dismissing && session.version === 1
           ? signal(session, "m.call.reject")
-          : signal(session, "m.call.hangup", { reason }))
+          : signal(session, "m.call.hangup", {
+            reason,
+            "com.carter.pax.declined": declined || undefined,
+            "com.carter.pax.duration_ms": durationMs,
+          }))
         .catch((error) => console.warn("Could not end Matrix call:", error));
     }
     const closing = closeMedia(session).catch(console.warn).finally(() => {

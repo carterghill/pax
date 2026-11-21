@@ -96,20 +96,25 @@ export function useUnreadRooms(userId: string | null): UnreadRoomsApi {
     let cancelled = false;
     let unlistenChanged: UnlistenFn | null = null;
     let unlistenSyncReady: UnlistenFn | null = null;
+    let pendingSeed: Map<string, RoomUnreadState> | null = null;
 
     async function seed() {
+      const liveUpdates = new Map<string, RoomUnreadState>();
+      pendingSeed = liveUpdates;
       try {
         const all = await invoke<Record<string, RoomUnreadState>>(
           "get_all_unread_states"
         );
-        if (cancelled) return;
-        mapRef.current = new Map(Object.entries(all));
+        if (cancelled || pendingSeed !== liveUpdates) return;
+        mapRef.current = new Map([...Object.entries(all), ...liveUpdates]);
         setHasSnapshot(true);
         setVersion((v) => v + 1);
       } catch (e) {
         // Non-fatal: a future room-unread-changed event will populate entries
         // lazily.  Log so regressions don't hide.
         console.warn("[useUnreadRooms] seed failed:", e);
+      } finally {
+        if (pendingSeed === liveUpdates) pendingSeed = null;
       }
     }
 
@@ -119,6 +124,7 @@ export function useUnreadRooms(userId: string | null): UnreadRoomsApi {
         (event) => {
           if (cancelled) return;
           const { roomId, ...state } = event.payload;
+          pendingSeed?.set(roomId, state);
           mapRef.current.set(roomId, state);
           scheduleBump();
         }

@@ -612,6 +612,7 @@ pub fn run() {
             commands::unread::get_room_unread_state,
             commands::unread::get_all_unread_states,
             commands::unread::send_room_read_receipt,
+            commands::unread::acknowledge_viewed_calls,
             commands::unavailable_messages::get_unavailable_message_acknowledgement,
             commands::unavailable_messages::acknowledge_unavailable_messages,
             commands::unavailable_messages::clear_room_notification,

@@ -839,6 +839,7 @@ export default function ChatView({
             onJumpToRecent={jumpToRecent}
             roomId={activeRoom.id}
             userId={userId}
+            callPeerUserId={activeRoom.dmPeerUserId}
             redactionPolicy={redactionPolicy}
             onRequestEdit={handleRequestEdit}
             onRequestReply={handleRequestReply}

@@ -17,7 +17,10 @@ use tauri::{Emitter, State};
 use tokio::sync::Mutex;
 
 use crate::{
-    types::{DirectCallNotice, DirectCallSignalKind as SignalKind, MessageInfo},
+    types::{
+        DirectCallEndReason, DirectCallNotice, DirectCallNoticeDetails,
+        DirectCallSignalKind as SignalKind, MessageInfo, JS_MAX_SAFE_INTEGER,
+    },
     voice_presence::now_ms,
     AppState,
 };
@@ -41,6 +44,12 @@ struct SignalContent {
     request_id: Option<String>,
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     connection_lost: bool,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    declined: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    end_reason: Option<DirectCallEndReason>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    duration_ms: Option<u64>,
 }
 
 impl SignalKind {
@@ -61,6 +70,8 @@ impl SignalContent {
                 .as_ref()
                 .is_none_or(|id| !id.is_empty())
             && (self.kind == SignalKind::Connect) == self.answer_device_id.is_some()
+            && (!self.declined || (self.kind == SignalKind::End && !self.connection_lost))
+            && ((self.end_reason.is_none() && self.duration_ms.is_none()) || self.kind == SignalKind::End)
             && if self.kind.is_recovery() {
                 self.target_device_id
                     .as_ref()
@@ -100,6 +111,12 @@ struct CallEvent {
     state_key: Option<String>,
     #[serde(default)]
     unsigned: CallUnsigned,
+}
+
+impl CallEvent {
+    fn handled_by(&self, user_id: &matrix_sdk::ruma::UserId) -> bool {
+        self.sender == user_id && (self.content.kind == SignalKind::Answer || self.content.declined)
+    }
 }
 
 #[derive(Default, Deserialize)]
@@ -279,6 +296,9 @@ pub(crate) async fn decline_pushed_call(
         target_device_id: None,
         request_id: None,
         connection_lost: false,
+        declined: true,
+        end_reason: None,
+        duration_ms: None,
     };
     match serde_json::to_value(content) {
         Ok(payload) => room.send_raw(CALL_EVENT, payload).await.is_ok(),
@@ -289,6 +309,7 @@ pub(crate) async fn decline_pushed_call(
 #[tauri::command]
 pub(crate) async fn send_direct_call_signal(
     state: State<'_, Arc<AppState>>,
+    app: tauri::AppHandle,
     room_id: String,
     call_id: String,
     kind: SignalKind,
@@ -296,6 +317,9 @@ pub(crate) async fn send_direct_call_signal(
     target_device_id: Option<String>,
     request_id: Option<String>,
     connection_lost: Option<bool>,
+    declined: Option<bool>,
+    end_reason: Option<DirectCallEndReason>,
+    duration_ms: Option<u64>,
 ) -> Result<(), String> {
     let client = super::get_client(&state).await?;
     let room = super::resolve_room(&client, &room_id)?;
@@ -307,15 +331,21 @@ pub(crate) async fn send_direct_call_signal(
         target_device_id,
         request_id,
         connection_lost: connection_lost.unwrap_or_default(),
+        declined: declined.unwrap_or_default(),
+        end_reason,
+        duration_ms,
     };
     if !content.is_valid() {
         return Err("Invalid call signal.".into());
+    }
+    if content.declined {
+        super::unread::acknowledge_calls(&state, &app, &room, std::slice::from_ref(&content.call_id)).await;
     }
     if direct_call_peer(&room).await.is_none() {
         return Err("Both people must join the direct message before calling.".into());
     }
 
-    let payload = serde_json::to_value(content).map_err(|error| error.to_string())?;
+    let payload = serde_json::to_value(&content).map_err(|error| error.to_string())?;
     tokio::time::timeout(Duration::from_secs(12), async {
         room.send_raw(CALL_EVENT, payload).await
     })
@@ -373,6 +403,19 @@ pub(super) fn call_notice(
         direct_call_notice: Some(DirectCallNotice {
             call_id: call.content.call_id,
             kind: call.content.kind,
+            details: DirectCallNoticeDetails {
+                expires_at: (call.content.kind == SignalKind::Ring)
+                    .then(|| call.origin_server_ts.saturating_add(RING_MS)),
+                end_reason: if call.content.declined {
+                    Some(DirectCallEndReason::Declined)
+                } else if call.content.connection_lost {
+                    Some(DirectCallEndReason::Dropped)
+                } else {
+                    call.content.end_reason
+                },
+                duration_ms: call.content.duration_ms.filter(|duration| *duration <= JS_MAX_SAFE_INTEGER),
+                ..Default::default()
+            },
         }),
         event_id: call.event_id.to_string(),
         sender: call.sender.to_string(),
@@ -444,12 +487,12 @@ pub(super) async fn receive_signals(
             if from_peer {
                 state.matrix_voip.remember_livekit_peer(room_id, &peer).await;
             }
-            let answered_here = call.sender == me && call.content.kind == SignalKind::Answer;
-            // A past answer can still settle an unread ring on initial sync.
-            if answered_here || from_peer {
+            let handled_here = call.handled_by(me);
+            // A past response can still settle an unread ring on initial sync.
+            if handled_here || from_peer {
                 state
                     .unread_projection
-                    .note_call_event(room_id, &call.content.call_id, answered_here)
+                    .note_call_event(room_id, &call.content.call_id, handled_here)
                     .await;
             }
             let Some(expires_at) = expires_at else {
@@ -593,6 +636,20 @@ mod tests {
     }
 
     #[test]
+    fn only_our_explicit_decline_acknowledges_an_ended_call() {
+        let me = UserId::parse("@me:example.org").unwrap();
+        let peer = UserId::parse("@peer:example.org").unwrap();
+        let mut event = push_event("$end", 1000, "end", me.as_str(), "CALLEE");
+        assert!(!event.handled_by(&me));
+        event.content.declined = true;
+        assert!(event.content.is_valid());
+        assert!(event.handled_by(&me));
+        assert!(!event.handled_by(&peer));
+        event.content.connection_lost = true;
+        assert!(!event.content.is_valid());
+    }
+
+    #[test]
     fn either_push_for_an_unanswered_incoming_call_points_to_its_ring() {
         let peer = UserId::parse("@peer:example.org").unwrap();
         let me = UserId::parse("@me:example.org").unwrap();
@@ -663,7 +720,27 @@ mod tests {
         assert_eq!(notice.event_id, "$call");
         assert_eq!(notice.sender, "@peer:example.org");
         assert_eq!(notice.timestamp, 42);
-        assert!(notice.direct_call_notice.unwrap().kind == SignalKind::Ring);
+        let call = notice.direct_call_notice.unwrap();
+        assert!(call.kind == SignalKind::Ring);
+        assert_eq!(call.details.expires_at, Some(42 + RING_MS));
+    }
+
+    #[test]
+    fn history_keeps_explicit_outcomes_and_elapsed_duration() {
+        let end = event(80_000, "end", None);
+        let mut data: serde_json::Value = serde_json::from_str(end.raw().json().get()).unwrap();
+        data["content"]["durationMs"] = json!(65_000);
+        let raw = Raw::from_json_string(data.to_string()).unwrap();
+        let notice = call_notice(&raw, false, false).unwrap().direct_call_notice.unwrap();
+        assert_eq!(notice.details.duration_ms, Some(65_000));
+        assert!(notice.details.end_reason.is_none());
+
+        data["content"].as_object_mut().unwrap().remove("durationMs");
+        data["content"]["declined"] = json!(true);
+        let raw = Raw::from_json_string(data.to_string()).unwrap();
+        let notice = call_notice(&raw, false, false).unwrap().direct_call_notice.unwrap();
+        assert!(notice.details.end_reason == Some(DirectCallEndReason::Declined));
+        assert!(notice.details.duration_ms.is_none());
     }
 
     #[test]

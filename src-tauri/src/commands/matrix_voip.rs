@@ -21,7 +21,10 @@ use tauri::{AppHandle, Emitter, State};
 use tokio::sync::Mutex;
 
 use crate::{
-    types::{DirectCallNotice, DirectCallSignalKind, MessageInfo},
+    types::{
+        DirectCallEndReason, DirectCallNotice, DirectCallNoticeDetails, DirectCallSignalKind,
+        MessageInfo, JS_MAX_SAFE_INTEGER,
+    },
     voice::peer::{Candidate, Description, PeerMedia},
     voice_presence::now_ms,
     AppState,
@@ -30,6 +33,8 @@ use crate::{
 const KEEP_SIGNALS_MS: u64 = 150_000;
 const MAX_SIGNALS: usize = 256;
 const LIVEKIT_SUPPORT: &str = "com.carter.pax.direct_call";
+const DECLINED_CALL: &str = "com.carter.pax.declined";
+const CALL_DURATION: &str = "com.carter.pax.duration_ms";
 const VOIP_EVENTS: &[&str] = &[
     "m.call.invite",
     "m.call.answer",
@@ -91,6 +96,13 @@ pub(crate) struct Signal {
 }
 
 impl Signal {
+    fn handled_here(&self) -> bool {
+        !self.from_peer
+            && (matches!(self.kind.as_str(), "m.call.answer" | "m.call.reject")
+                || (self.kind == "m.call.hangup"
+                    && self.content[DECLINED_CALL].as_bool() == Some(true)))
+    }
+
     fn parse_raw(raw: &Raw<AnySyncTimelineEvent>, room: &Room, decrypted: bool) -> Option<Self> {
         let kind = raw.get_field::<&str>("type").ok().flatten()?;
         if !VOIP_EVENTS.contains(&kind) || (room.encryption_state().is_encrypted() && !decrypted) {
@@ -145,13 +157,55 @@ pub(super) fn call_notice(
     let kind = match signal.kind.as_str() {
         "m.call.invite" => DirectCallSignalKind::Ring,
         "m.call.answer" => DirectCallSignalKind::Answer,
+        "m.call.select_answer" if signal.content["selected_party_id"].as_str().is_some() => {
+            DirectCallSignalKind::Connect
+        }
         "m.call.hangup" | "m.call.reject" => DirectCallSignalKind::End,
         _ => return None,
+    };
+    let end_reason = if signal.kind == "m.call.reject"
+        || signal.content[DECLINED_CALL].as_bool() == Some(true)
+    {
+        Some(DirectCallEndReason::Declined)
+    } else {
+        match signal.content["reason"].as_str() {
+            Some("invite_timeout") => Some(DirectCallEndReason::Missed),
+            Some("ice_timeout") => Some(DirectCallEndReason::Dropped),
+            Some("ice_failed" | "user_media_failed" | "unknown_error" | "user_busy") => {
+                Some(DirectCallEndReason::Failed)
+            }
+            Some("user_hangup") | None
+                if signal.kind == "m.call.hangup"
+                    && signal.content["version"].as_u64() == Some(0) =>
+            {
+                Some(DirectCallEndReason::LegacyHangup)
+            }
+            _ => None,
+        }
     };
     Some(MessageInfo {
         direct_call_notice: Some(DirectCallNotice {
             call_id: signal.notification_id,
             kind,
+            details: DirectCallNoticeDetails {
+                invitee: signal.content["invitee"]
+                    .as_str()
+                    .and_then(|id| UserId::parse(id).ok())
+                    .map(|id| id.to_string()),
+                expires_at: (kind == DirectCallSignalKind::Ring).then_some(signal.expires_at),
+                end_reason: if kind == DirectCallSignalKind::End {
+                    end_reason
+                } else {
+                    None
+                },
+                duration_ms: signal.content[CALL_DURATION].as_u64().filter(|duration| {
+                    kind == DirectCallSignalKind::End && *duration <= JS_MAX_SAFE_INTEGER
+                }),
+                party_id: signal.content["party_id"].as_str().map(str::to_owned),
+                selected_party_id: signal.content["selected_party_id"]
+                    .as_str()
+                    .map(str::to_owned),
+            },
         }),
         event_id: signal.event_id,
         sender: signal.sender,
@@ -307,7 +361,7 @@ pub(crate) async fn decline_pushed_call(room: &Room, call_id: &str, ring_event_i
             .send_raw(
                 "m.call.hangup",
                 json!({
-                    "call_id": wire_id, "version": 0, "reason": "user_hangup",
+                    "call_id": wire_id, "version": 0, "reason": "user_hangup", DECLINED_CALL: true,
                 }),
             )
             .await
@@ -361,6 +415,17 @@ pub(super) async fn receive_signals(
                     .remember_livekit_peer(room_id, &peer)
                     .await;
             }
+            let handled_here = signal.handled_here();
+            if handled_here
+                || (signal.from_peer
+                    && signal.kind != "m.call.candidates"
+                    && signal.kind != "m.call.negotiate")
+            {
+                state
+                    .unread_projection
+                    .note_call_event(room_id, &signal.notification_id, handled_here)
+                    .await;
+            }
             if signal.expires_at <= now {
                 continue;
             }
@@ -383,16 +448,6 @@ pub(super) async fn receive_signals(
                         .any(|response| settles_invite(signal, response)))
             {
                 continue;
-            }
-            if signal.kind != "m.call.candidates" && signal.kind != "m.call.negotiate" {
-                state
-                    .unread_projection
-                    .note_call_event(
-                        room_id,
-                        &signal.notification_id,
-                        !signal.from_peer && signal.kind == "m.call.answer",
-                    )
-                    .await;
             }
             incoming.push(signal.clone());
         }
@@ -487,6 +542,7 @@ pub(crate) async fn prefer_livekit_call(
 #[tauri::command]
 pub(crate) async fn send_matrix_voip_signal(
     state: State<'_, Arc<AppState>>,
+    app: AppHandle,
     room_id: String,
     call_id: String,
     version: u8,
@@ -501,6 +557,13 @@ pub(crate) async fn send_matrix_voip_signal(
     let data = content
         .as_object_mut()
         .ok_or("Invalid Matrix call content.")?;
+    let declined = kind == "m.call.reject"
+        || (kind == "m.call.hangup"
+            && data.get(DECLINED_CALL).and_then(Value::as_bool) == Some(true));
+    if declined {
+        let id = notification_id(room.room_id().as_str(), &call_id);
+        super::unread::acknowledge_calls(&state, &app, &room, &[id]).await;
+    }
     if kind == "m.call.invite" {
         let peer = call_peer(&room)
             .await
@@ -641,4 +704,27 @@ pub(crate) async fn close_matrix_voip_media(
         current.take();
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_decline_acknowledges_the_call_only_for_the_user_who_declined() {
+        let mut signal: Signal = serde_json::from_value(json!({
+            "type": "m.call.reject", "event_id": "$rejected", "sender": "@me:example.org",
+            "origin_server_ts": 1000, "content": {"call_id": "call", "version": "1", "party_id": "CALLEE"},
+        })).unwrap();
+        assert!(signal.handled_here());
+        signal.from_peer = true;
+        assert!(!signal.handled_here());
+
+        signal.kind = "m.call.hangup".into();
+        signal.from_peer = false;
+        signal.content["version"] = json!(0);
+        assert!(!signal.handled_here());
+        signal.content[DECLINED_CALL] = json!(true);
+        assert!(signal.handled_here());
+    }
 }

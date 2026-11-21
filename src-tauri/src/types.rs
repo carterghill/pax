@@ -126,7 +126,38 @@ pub(crate) enum DirectCallSignalKind {
 pub struct DirectCallNotice {
     pub(crate) call_id: String,
     pub(crate) kind: DirectCallSignalKind,
+    #[serde(flatten)]
+    pub(crate) details: DirectCallNoticeDetails,
 }
+
+#[derive(Clone, Copy, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub(crate) enum DirectCallEndReason {
+    Declined,
+    Missed,
+    Failed,
+    Dropped,
+    LegacyHangup,
+}
+
+#[derive(Clone, Default, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct DirectCallNoticeDetails {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) invitee: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) expires_at: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) end_reason: Option<DirectCallEndReason>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) duration_ms: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) party_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) selected_party_id: Option<String>,
+}
+
+pub(crate) const JS_MAX_SAFE_INTEGER: u64 = (1 << 53) - 1;
 
 #[derive(Clone, Default, Serialize)]
 #[serde(rename_all = "camelCase")]

@@ -111,13 +111,14 @@ extern void pax_ios_voip_token(const char *token);
 
 - (void)provider:(CXProvider *)provider performEndCallAction:(CXEndCallAction *)action {
     if ([self.callID isEqual:action.callUUID]) {
+        BOOL incoming = !self.answering && !self.connected;
         self.lastEndedCall = action.callUUID;
         [self.answer fail];
         self.answer = nil;
         self.callID = nil;
         self.answering = NO;
         self.connected = NO;
-        pax_apple_call_action(action.callUUID.UUIDString.UTF8String, 4);
+        pax_apple_call_action(action.callUUID.UUIDString.UTF8String, incoming ? 2 : 4);
     }
     [action fulfill];
 }

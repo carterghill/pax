@@ -4,7 +4,7 @@ import { useCallback, useEffect, useRef, useState } from "react";
 export type VoiceRecovery = {
   roomId: string;
   expiresAt: number;
-  direct?: { callId: string; peerUserId: string; peerDeviceId: string };
+  direct?: { callId: string; peerUserId: string; peerDeviceId: string; connectedAt?: number };
 };
 
 export const VOICE_RECOVERY_REFRESH_MS = 10_000;

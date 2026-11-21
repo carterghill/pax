@@ -5,6 +5,7 @@ import type { VoiceCall } from "./useVoiceCall";
 import { VOICE_RECOVERY_REFRESH_MS, type VoiceRecovery } from "./useVoiceRecovery";
 import { isVoiceParticipantOnDevice } from "../utils/matrix";
 import { useMatrixVoip } from "./useMatrixVoip";
+import { getCallDuration } from "../features/chat/messages/callHistory";
 
 type SignalKind = "ring" | "answer" | "connect" | "end" | "resume" | "resumeAccepted" | "resumeRejected";
 
@@ -31,10 +32,12 @@ export interface DirectCall extends CallId {
   peerDeviceId?: string;
   ringEventId?: string;
   established?: boolean;
+  connectedAt?: number;
   expiresAt: number;
 }
 
 export type DirectCallPeerConnection = "connecting" | "connected" | "interrupted" | "lost";
+export type DirectCallEndAction = "decline" | "dismiss" | "end";
 
 const RING_MS = 30_000;
 const ANSWER_MS = 45_000;
@@ -47,6 +50,9 @@ function sendSignal(call: CallId, kind: SignalKind, options?: {
   targetDeviceId?: string;
   requestId?: string;
   connectionLost?: boolean;
+  declined?: boolean;
+  endReason?: "missed" | "failed";
+  durationMs?: number;
 }) {
   return invoke<void>("send_direct_call_signal", {
     roomId: call.roomId, callId: call.callId, kind, ...options,
@@ -88,10 +94,17 @@ export function useDirectCall(
     connection: matrixConnection, micEnabled: matrixMicEnabled, toggleMic: toggleMatrixMic,
   } = useMatrixVoip(current, voiceBusy, update, setError, recoveryReady);
 
-  const finish = useCallback((notifyPeer: boolean, connectionLost = false) => {
+  const finish = useCallback((notifyPeer: boolean, options: {
+    connectionLost?: boolean;
+    declined?: boolean;
+    endReason?: "missed" | "failed";
+  } = {}) => {
     const pending = current.current;
     if (!pending) return mediaStop.current ?? finishMatrix(false);
-    if (pending.transport === "matrix") return finishMatrix(notifyPeer, connectionLost ? "ice_failed" : undefined);
+    if (pending.transport === "matrix") {
+      const reason = options.connectionLost || options.endReason === "failed" ? "ice_failed" : undefined;
+      return finishMatrix(notifyPeer, reason, options.declined);
+    }
     update(null);
     forget(pending.roomId, pending.callId);
     outage.current = null;
@@ -99,8 +112,9 @@ export function useDirectCall(
 
     if (notifyPeer && pending.transport !== "selecting") {
       const ring = offer.current?.callId === pending.callId ? offer.current.sending : null;
+      const durationMs = getCallDuration(pending.connectedAt);
       // A quick cancel must follow the ring, even if the request is still in flight.
-      void (ring ?? Promise.resolve()).catch(() => {}).then(() => sendSignal(pending, "end", { connectionLost }))
+      void (ring ?? Promise.resolve()).catch(() => {}).then(() => sendSignal(pending, "end", { ...options, durationMs }))
         .catch((reason) => console.warn("Could not end direct call:", reason));
     }
 
@@ -113,6 +127,9 @@ export function useDirectCall(
   }, [disconnect, finishMatrix, forget, update]);
 
   const end = useCallback(() => finish(true), [finish]);
+  const decline = useCallback(() => {
+    if (current.current?.phase === "incoming") return finish(true, { declined: true });
+  }, [finish]);
 
   const connectMedia = useCallback(async (pending: DirectCall, answeringDevice?: string) => {
     const connecting = { ...pending, phase: "connecting" } as const;
@@ -121,7 +138,7 @@ export function useDirectCall(
     if (current.current !== connecting) return;
 
     if (!joined) {
-      void finish(true);
+      void finish(true, { endReason: "failed" });
       setError("Could not connect the voice call.");
       return;
     }
@@ -132,7 +149,7 @@ export function useDirectCall(
         await sendSignal(connecting, "connect", { answerDeviceId: answeringDevice });
       } catch (reason) {
         if (current.current === connecting) {
-          void finish(true);
+          void finish(true, { endReason: "failed" });
           setError(String(reason));
         }
         return;
@@ -303,7 +320,7 @@ export function useDirectCall(
         || (call.transport === "matrix" && call.phase === "dialing")) return;
     const timer = setTimeout(() => {
       if (current.current !== call) return;
-      void finish(call.phase === "dialing");
+      void finish(call.phase === "dialing", { endReason: "missed" });
       if (call.phase === "dialing") setError("No answer.");
       if (call.phase === "answering") setError("The call could not be answered in time.");
     }, Math.max(0, call.expiresAt - Date.now()));
@@ -323,11 +340,13 @@ export function useDirectCall(
     if (peerJoined) {
       outage.current = null;
       if (!call.established) {
-        update({ ...call, established: true });
+        update({ ...call, established: true, connectedAt: Date.now() });
         return;
       }
       if (!call.peerDeviceId) return;
-      const direct = { callId: call.callId, peerUserId: call.peerUserId, peerDeviceId: call.peerDeviceId };
+      const direct = {
+        callId: call.callId, peerUserId: call.peerUserId, peerDeviceId: call.peerDeviceId, connectedAt: call.connectedAt,
+      };
       const save = () => remember({
         roomId: call.roomId, direct, expiresAt: Date.now() + RECONNECT_MS + 2 * VOICE_RECOVERY_REFRESH_MS,
       });
@@ -341,13 +360,13 @@ export function useDirectCall(
       outage.current = { callId: call.callId, until };
       if (call.established && call.peerDeviceId) {
         remember({ roomId: call.roomId, expiresAt: until, direct: {
-          callId: call.callId, peerUserId: call.peerUserId, peerDeviceId: call.peerDeviceId,
+          callId: call.callId, peerUserId: call.peerUserId, peerDeviceId: call.peerDeviceId, connectedAt: call.connectedAt,
         } });
       }
     }
     const timer = setTimeout(() => {
       if (current.current !== call) return;
-      void finish(call.phase !== "interrupted", !!call.established);
+      void finish(call.phase !== "interrupted", { connectionLost: !!call.established, endReason: "failed" });
       setError(call.established ? "Call ended. Connection lost." : "Could not connect to the other person.");
     }, Math.max(0, outage.current.until - Date.now()));
     return () => clearTimeout(timer);
@@ -409,11 +428,11 @@ export function useDirectCall(
     });
   }, [answerMatrix, finish, update]);
 
-  const endFromNotification = useCallback((callId: string, notifyPeer: boolean, allowActive = false) => {
+  const endFromNotification = useCallback((callId: string, action: DirectCallEndAction) => {
     const pending = current.current;
     if (pending?.callId !== callId) return;
-    if (pending.phase === "incoming" ? pending.expiresAt <= Date.now() : !allowActive) return;
-    void finish(notifyPeer);
+    if (pending.phase === "incoming" ? pending.expiresAt <= Date.now() : action !== "end") return;
+    void finish(action !== "dismiss", { declined: action === "decline" });
   }, [finish]);
 
   const clearError = useCallback(() => setError(null), []);
@@ -421,7 +440,7 @@ export function useDirectCall(
     ? peer.connectionInterrupted && call?.established ? "interrupted" : "connected"
     : inCall && call.established ? "lost" : "connecting";
   return {
-    call, error, peerConnection, reconnect, start, answer, end, endFromNotification, clearError,
+    call, error, peerConnection, reconnect, start, answer, end, decline, endFromNotification, clearError,
     isMicEnabled: call?.transport === "matrix" ? matrixMicEnabled : voice.isMicEnabled,
     toggleMic: call?.transport === "matrix" ? toggleMatrixMic : voice.toggleMic,
   };

@@ -16,13 +16,14 @@ interface DirectCallControlsProps {
   isReconnecting: boolean;
   showActions?: boolean;
   onAnswer: () => void;
+  onDecline: () => void;
   onEnd: () => void;
   onToggleMic: () => void;
 }
 
 export default function DirectCallControls({
   call, name, avatarUrl, isMicEnabled, peerConnection, canMute, isReconnecting,
-  showActions = true, onAnswer, onEnd, onToggleMic,
+  showActions = true, onAnswer, onDecline, onEnd, onToggleMic,
 }: DirectCallControlsProps) {
   const { palette, spacing, typography } = useTheme();
   const incoming = call.phase === "incoming";
@@ -72,7 +73,7 @@ export default function DirectCallControls({
             <div style={{ fontSize: typography.fontSizeBase, fontWeight: typography.fontWeightBold }}>{name}</div>
           </div>
           <div style={{ display: "flex", gap: spacing.unit * 2, flexWrap: "wrap", justifyContent: "center" }}>
-            <button type="button" onClick={onEnd} style={endStyle}><PhoneOff size={17} aria-hidden="true" /> Decline</button>
+            <button type="button" onClick={onDecline} style={endStyle}><PhoneOff size={17} aria-hidden="true" /> Decline</button>
             <button type="button" onClick={onAnswer} style={{ ...buttonStyle, background: "#167343", color: "#fff" }}>
               <Phone size={17} aria-hidden="true" /> Answer
             </button>

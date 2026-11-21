@@ -22,7 +22,8 @@ import MediaViewerModal, {
 } from "./MediaViewerModal";
 import { fileNameFromImageUrl } from "../utils/directImageUrl";
 import { useReadReceiptSender } from "../hooks/useReadReceiptSender";
-import { projectCallHistory } from "../features/chat/messages/callHistory";
+import { useAcknowledgeVisibleCalls } from "../hooks/useAcknowledgeVisibleCalls";
+import { describeCall, formatCallDuration, projectCallHistory } from "../features/chat/messages/callHistory";
 import { timelinePaginationEdge } from "../features/chat/messages/timelinePagination";
 import MembershipNoticeRow from "../features/chat/messages/MembershipNoticeRow";
 import MessageRow from "../features/chat/messages/MessageRow";
@@ -78,6 +79,7 @@ interface MessageListProps {
   onJumpToRecent: () => void | Promise<void>;
   roomId: string;
   userId: string;
+  callPeerUserId?: string | null;
   redactionPolicy: RoomRedactionPolicy;
   onRequestEdit: (msg: Message) => void;
   /** Reply composer target (cleared on send or Escape in composer). */
@@ -144,6 +146,7 @@ const MessageList = forwardRef<MessageListHandle, MessageListProps>(function Mes
     onJumpToRecent,
     roomId,
     userId,
+    callPeerUserId,
     redactionPolicy,
     onRequestEdit,
     onRequestReply,
@@ -162,10 +165,17 @@ const MessageList = forwardRef<MessageListHandle, MessageListProps>(function Mes
 ) {
   const { palette, typography, spacing, resolvedColorScheme } = useTheme();
   const { userIds: ignoredUsers } = useIgnoredUsers();
-  const { messages, anchors, missedCalls, readThroughEventId } = useMemo(
-    () => projectCallHistory(timeline, latestEventId),
-    [timeline, latestEventId],
+  const [callHistoryTime, setCallHistoryTime] = useState(Date.now);
+  const { messages, anchors, callSummaries, nextCallExpiry, readThroughEventId } = useMemo(
+    () => projectCallHistory(timeline, latestEventId, Math.max(callHistoryTime, Date.now())),
+    [timeline, latestEventId, callHistoryTime],
   );
+  useEffect(() => {
+    if (nextCallExpiry === undefined) return;
+    const delay = Math.min(2_147_483_647, Math.max(1, nextCallExpiry - Date.now()));
+    const timer = setTimeout(() => setCallHistoryTime(Date.now()), delay);
+    return () => clearTimeout(timer);
+  }, [nextCallExpiry]);
   const pinnedSet = useMemo(
     () => new Set(pinnedEventIds),
     [pinnedEventIds],
@@ -529,6 +539,7 @@ const MessageList = forwardRef<MessageListHandle, MessageListProps>(function Mes
     },
     userId,
   );
+  useAcknowledgeVisibleCalls(scrollContainerRef, messages, roomId, userId, initialLoading);
 
   const COOLDOWN_MS = 500;
 
@@ -947,18 +958,26 @@ const MessageList = forwardRef<MessageListHandle, MessageListProps>(function Mes
             </Fragment>
           );
         }
-        if (msg.directCallNotice) {
-          const caller = <bdi>{msg.senderName?.trim() || resolveMemberLabel(msg.sender)}</bdi>;
-          const text = missedCalls.has(msg.eventId)
-            ? <>Missed voice call from {caller}</>
-            : msg.directCallNotice.kind === "ring"
-              ? <>{caller} started a voice call</>
-              : "Voice call";
+        const call = callSummaries.get(msg.eventId);
+        if (msg.directCallNotice && call) {
+          const outgoing = call.caller?.sender === userId;
+          const peer = outgoing ? call.callee : call.caller;
+          const peerId = outgoing ? call.invitee ?? peer?.sender ?? callPeerUserId : peer?.sender;
+          const peerName = peer?.senderName?.trim() || (peerId ? resolveMemberLabel(peerId) : undefined);
           return (
             <Fragment key={msg.eventId}>
               {crossedUpgrade && upgradeDivider}
-              <TimelineNoticeRow eventId={msg.eventId} timestamp={msg.timestamp} icon={<Phone size={14} aria-hidden="true" />}>
-                {text}
+              <TimelineNoticeRow
+                eventId={msg.eventId}
+                incomingCallId={msg.sender !== userId && !msg.historyRoomId ? msg.directCallNotice.callId : undefined}
+                timestamp={call.endedAt ?? msg.timestamp}
+                timeLabel={call.endedAt === undefined ? undefined : "Ended"}
+                icon={<Phone size={14} aria-hidden="true" />}
+              >
+                {describeCall(call, userId, peerName)}
+                {call.durationMs !== undefined && (
+                  <> · {call.estimatedDuration && "about "}{formatCallDuration(call.durationMs)}</>
+                )}
               </TimelineNoticeRow>
             </Fragment>
           );

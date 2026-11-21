@@ -84,6 +84,12 @@ export interface MembershipNotice {
 export interface DirectCallNotice {
   callId: string;
   kind: "ring" | "answer" | "connect" | "end";
+  invitee?: string;
+  expiresAt?: number;
+  endReason?: "declined" | "missed" | "failed" | "dropped" | "legacyHangup";
+  durationMs?: number;
+  partyId?: string;
+  selectedPartyId?: string;
 }
 
 export interface Message {

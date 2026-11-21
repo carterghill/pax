@@ -1,11 +1,11 @@
 import { useEffect, useRef } from "react";
 import { invoke, isTauri } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
-import type { DirectCall } from "./useDirectCall";
+import type { DirectCall, DirectCallEndAction } from "./useDirectCall";
 
 type CallNotificationAction = {
   callId: string;
-  action: "answer" | "decline" | "dismiss" | "end" | "open";
+  action: "answer" | "open" | DirectCallEndAction;
   expiresAt?: number;
 };
 
@@ -20,7 +20,7 @@ export function useCallNotifications(
   call: DirectCall | null,
   caller: string,
   onAnswer: (callId: string) => void,
-  onEnd: (callId: string, notifyPeer: boolean, allowActive?: boolean) => void,
+  onEnd: (callId: string, action: DirectCallEndAction) => void,
   voiceBusy: boolean,
 ) {
   const state = useRef({ call, onAnswer, onEnd });
@@ -41,7 +41,7 @@ export function useCallNotifications(
       }
       if (action.action === "answer") current.onAnswer(action.callId);
       if (action.action === "decline" || action.action === "dismiss" || action.action === "end") {
-        current.onEnd(action.callId, action.action !== "dismiss", action.action === "end");
+        current.onEnd(action.callId, action.action);
       }
     };
     if (android) {
@@ -86,7 +86,7 @@ export function useCallNotifications(
     const { onAnswer, onEnd } = state.current;
     if (queued.action === "answer") onAnswer(callId);
     if (queued.action === "decline" || queued.action === "dismiss" || queued.action === "end") {
-      onEnd(callId, queued.action !== "dismiss", queued.action === "end");
+      onEnd(callId, queued.action);
     }
   }, [callId]);
   useEffect(() => {

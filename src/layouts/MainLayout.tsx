@@ -156,7 +156,7 @@ export default function MainLayout({
   const {
     call: directCall, error: directCallError, peerConnection: directCallPeerConnection,
     start: startDirectCall, answer: answerIncomingCall,
-    end: endDirectCall, endFromNotification: endDirectCallFromNotification,
+    end: endDirectCall, decline: declineDirectCall, endFromNotification: endDirectCallFromNotification,
     clearError: clearDirectCallError, reconnect: reconnectDirectCall,
     isMicEnabled: isDirectCallMicEnabled, toggleMic: toggleDirectCallMic,
   } = useDirectCall(voiceCall, eligibleRecovery, voiceRecoveryReady, rememberVoice, forgetVoice);
@@ -1414,6 +1414,7 @@ export default function MainLayout({
       isReconnecting={voiceCall.isReconnecting && targetVoiceRoomId === directCall.roomId}
       showActions={!showCallPanel || voiceCall.isConnecting}
       onAnswer={() => answerDirectCall()}
+      onDecline={declineDirectCall}
       onEnd={endDirectCall}
       onToggleMic={toggleDirectCallMic}
     />

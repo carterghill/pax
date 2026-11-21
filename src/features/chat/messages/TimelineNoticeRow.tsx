@@ -6,18 +6,21 @@ const ONE_DAY_MS = 24 * 60 * 60 * 1000;
 
 interface TimelineNoticeRowProps {
   eventId: string;
+  incomingCallId?: string;
   timestamp: number;
+  timeLabel?: string;
   icon: ReactNode;
   children: ReactNode;
 }
 
-export default function TimelineNoticeRow({ eventId, timestamp, icon, children }: TimelineNoticeRowProps) {
+export default function TimelineNoticeRow({ eventId, incomingCallId, timestamp, timeLabel, icon, children }: TimelineNoticeRowProps) {
   const { palette, spacing, typography } = useTheme();
   const date = new Date(timestamp);
 
   return (
     <div
       data-message-event-id={eventId}
+      data-incoming-call-id={incomingCallId}
       style={{
         position: "relative",
         display: "flex",
@@ -45,9 +48,10 @@ export default function TimelineNoticeRow({ eventId, timestamp, icon, children }
       {Number.isFinite(date.getTime()) && (
         <time
           dateTime={date.toISOString()}
-          title={formatMessageTime(timestamp)}
+          title={[timeLabel, formatMessageTime(timestamp)].filter(Boolean).join(" ")}
           style={{ whiteSpace: "nowrap" }}
         >
+          {timeLabel && `${timeLabel} `}
           {Date.now() - timestamp > ONE_DAY_MS
             ? date.toLocaleDateString()
             : date.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}

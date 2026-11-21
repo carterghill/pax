@@ -1,9 +1,12 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { projectCallHistory, trimTimelineWindow } from "./callHistory.ts";
+import { describeCall, formatCallDuration, projectCallHistory, trimTimelineWindow } from "./callHistory.ts";
 
-function signal(kind, eventId = `$${kind}`, callId = "a-call") {
-  return { eventId, directCallNotice: { callId, kind } };
+const ME = "@me:example.org";
+const CARTER = "@carter:example.org";
+
+function signal(kind, eventId = `$${kind}`, callId = "a-call", details = {}, sender = CARTER, timestamp = 1_000) {
+  return { eventId, sender, timestamp, directCallNotice: { callId, kind, ...details } };
 }
 
 test("a call appears once and its later hang-up is covered by the read receipt", () => {
@@ -14,16 +17,16 @@ test("a call appears once and its later hang-up is covered by the read receipt",
   assert.deepEqual(history.messages, [ring, chat]);
   assert.equal(history.anchors.get("$end"), "$ring");
   assert.equal(history.readThroughEventId, "$end");
-  assert.equal(history.missedCalls.size, 0);
+  assert.equal(history.callSummaries.get("$ring").outcome, "completed");
 });
 
 test("a missed call stays at the ring while a newer message remains the read target", () => {
   const ring = signal("ring");
   const chat = { eventId: "$new-message" };
-  const history = projectCallHistory([ring, signal("end"), chat]);
+  const history = projectCallHistory([ring, signal("end", "$end", "a-call", { endReason: "missed" }), chat]);
 
   assert.deepEqual(history.messages, [ring, chat]);
-  assert.deepEqual([...history.missedCalls], ["$ring"]);
+  assert.equal(history.callSummaries.get("$ring").outcome, "missed");
   assert.equal(history.readThroughEventId, "$new-message");
 });
 
@@ -85,18 +88,89 @@ test("both window edges retain complete calls and cap visible rows", () => {
     const start = keep === "oldest" ? 0 : 5;
     assert.deepEqual(window, timeline.slice(start * 4, (start + 100) * 4));
     assert.equal(projectCallHistory(window).messages.length, 100);
-    assert.equal(projectCallHistory(window).missedCalls.size, 0);
+    assert.ok([...projectCallHistory(window).callSummaries.values()].every((call) => call.outcome === "completed"));
   }
 });
 
 test("trimming retains a kept call's outcome across intervening message rows", () => {
-  const timeline = [signal("ring"), { eventId: "$chat-1" }, { eventId: "$chat-2" }, signal("end")];
+  const end = signal("end", "$end", "a-call", { endReason: "missed" });
+  const timeline = [signal("ring"), { eventId: "$chat-1" }, { eventId: "$chat-2" }, end];
   const window = trimTimelineWindow(timeline, 2, "oldest");
   const history = projectCallHistory(window);
 
   assert.deepEqual(window, [timeline[0], timeline[1], timeline[3]]);
   assert.deepEqual(history.messages, [timeline[0], timeline[1]]);
-  assert.equal(history.missedCalls.has("$ring"), true);
+  assert.equal(history.callSummaries.get("$ring").outcome, "missed");
+});
+
+test("missed and declined calls say who called and who declined", () => {
+  const offer = signal("ring", "$ring", "id", { expiresAt: 31_000, invitee: ME });
+  const declined = signal("end", "$reject", "id", { endReason: "declined" }, ME, 3_000);
+  const timedOut = signal("end", "$timeout", "id", { endReason: "missed" }, CARTER, 31_000);
+  const incomingDecline = projectCallHistory([offer, declined]).callSummaries.get("$ring");
+  const incomingMiss = projectCallHistory([offer, timedOut]).callSummaries.get("$ring");
+  assert.equal(describeCall(incomingDecline, ME, "Carter"), "You declined Carter’s call");
+  assert.equal(describeCall(incomingDecline, CARTER, "Alex"), "Alex declined your call");
+  assert.equal(describeCall(incomingMiss, ME, "Carter"), "You missed a call from Carter");
+  assert.equal(describeCall(incomingMiss, CARTER, "Alex"), "Alex missed your call");
+});
+
+test("an expired offer reads as missed while ending it early reads as canceled", () => {
+  const ring = signal("ring", "$ring", "id", { expiresAt: 31_000 });
+  const pending = projectCallHistory([ring], null, 30_999);
+  assert.equal(pending.callSummaries.get("$ring").outcome, "placed");
+  assert.equal(pending.nextCallExpiry, 31_000);
+  const expired = projectCallHistory([ring], null, 31_000);
+  assert.equal(expired.callSummaries.get("$ring").outcome, "missed");
+  assert.equal(expired.nextCallExpiry, undefined);
+  const early = signal("end", "$end", "id", {}, CARTER, 3_000);
+  const canceled = projectCallHistory([ring, early]).callSummaries.get("$ring");
+  assert.equal(canceled.outcome, "canceled");
+  assert.equal(canceled.endedAt, 3_000);
+});
+
+test("the selected Matrix device decides between answering and declining", () => {
+  const ring = signal("ring", "$ring", "id", { invitee: ME });
+  const reject = signal("end", "$reject", "id", { endReason: "declined", partyId: "phone" }, ME, 2_000);
+  const answer = signal("answer", "$answer", "id", { partyId: "desktop" }, ME, 2_500);
+  const end = signal("end", "$end", "id", { durationMs: 62_400 }, CARTER, 68_000);
+  const selectDesktop = signal("connect", "$select", "id", { selectedPartyId: "desktop" }, CARTER, 2_900);
+  const completed = projectCallHistory([ring, reject, answer, selectDesktop, end]).callSummaries.get("$ring");
+  assert.equal(completed.outcome, "completed");
+  assert.equal(completed.durationMs, 62_400);
+  assert.equal(completed.estimatedDuration, false);
+  assert.equal(completed.endedAt, 68_000);
+  assert.equal(formatCallDuration(completed.durationMs), "1m 2s");
+
+  const selectPhone = signal("connect", "$select", "id", { selectedPartyId: "phone" }, CARTER, 2_900);
+  const declined = projectCallHistory([ring, answer, reject, selectPhone]).callSummaries.get("$ring");
+  assert.equal(declined.outcome, "declined");
+  assert.equal(declined.endedAt, 2_000);
+});
+
+test("older connected calls show an estimate and setup failures show no duration", () => {
+  const ring = signal("ring", "$ring", "id");
+  const answer = signal("answer", "$answer", "id", {}, ME, 2_000);
+  const connected = signal("connect", "$connect", "id", {}, CARTER, 3_000);
+  const end = signal("end", "$end", "id", {}, CARTER, 65_000);
+  const estimated = projectCallHistory([ring, answer, connected, end]).callSummaries.get("$ring");
+  assert.equal(estimated.durationMs, 62_000);
+  assert.equal(estimated.estimatedDuration, true);
+
+  const failure = signal("end", "$end", "id", { endReason: "failed" }, CARTER, 4_000);
+  const failed = projectCallHistory([ring, answer, failure]).callSummaries.get("$ring");
+  assert.equal(failed.outcome, "failed");
+  assert.equal(failed.durationMs, undefined);
+});
+
+test("a Matrix v0 hang-up declines an unanswered call, while an unmarked old Pax hang-up stays ambiguous", () => {
+  const ring = signal("ring", "$ring", "id");
+  const answer = signal("answer", "$answer", "id", {}, ME, 2_000);
+  const end = signal("end", "$end", "id", { endReason: "legacyHangup" }, ME, 4_000);
+  assert.equal(projectCallHistory([ring, end]).callSummaries.get("$ring").outcome, "declined");
+  assert.equal(projectCallHistory([ring, answer, end]).callSummaries.get("$ring").outcome, "completed");
+  const oldPaxEnd = signal("end", "$end", "id", {}, ME, 4_000);
+  assert.equal(projectCallHistory([ring, oldPaxEnd]).callSummaries.get("$ring").outcome, "ended");
 });
 
 test("text messages and predecessor calls each consume their own row", () => {
