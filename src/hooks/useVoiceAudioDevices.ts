@@ -67,3 +67,24 @@ export function storeOutputDeviceId(deviceId: string) {
     deviceId === SYSTEM_AUDIO_DEVICE_ID ? null : deviceId,
   );
 }
+export function requestMicrophonePermission(): Promise<void> {
+  const android = (window as Window & {
+    PaxAndroid?: { hasMicrophonePermission(): boolean; requestMicrophonePermission(): void };
+  }).PaxAndroid;
+  if (!android || android.hasMicrophonePermission()) return Promise.resolve();
+  return new Promise((resolve, reject) => {
+    const event = "pax-microphone-permission";
+    const timer = setTimeout(() => finish(false), 30_000);
+    function finish(granted: boolean) {
+      clearTimeout(timer);
+      window.removeEventListener(event, onResult);
+      if (granted) resolve();
+      else reject(new Error("Microphone access is needed for voice calls."));
+    }
+    function onResult(result: Event) {
+      finish((result as CustomEvent<boolean>).detail);
+    }
+    window.addEventListener(event, onResult);
+    android.requestMicrophonePermission();
+  });
+}

@@ -81,7 +81,7 @@ class PaxFCMService : FirebaseMessagingService() {
             return
         }
 
-        val directCallEvent = type == "com.carter.pax.direct_call"
+        val directCallEvent = type == "com.carter.pax.direct_call" || type?.startsWith("m.call.") == true
         if ((directCallEvent || type == "m.room.encrypted" || type == null) &&
             roomId.isNotEmpty() && eventId.isNotEmpty()
         ) {

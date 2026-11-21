@@ -158,6 +158,7 @@ export default function MainLayout({
     start: startDirectCall, answer: answerIncomingCall,
     end: endDirectCall, endFromNotification: endDirectCallFromNotification,
     clearError: clearDirectCallError, reconnect: reconnectDirectCall,
+    isMicEnabled: isDirectCallMicEnabled, toggleMic: toggleDirectCallMic,
   } = useDirectCall(voiceCall, eligibleRecovery, voiceRecoveryReady, rememberVoice, forgetVoice);
   const audioControls = useAudioControls(voiceCall);
   // Unread state for every joined room, used by the sidebar to paint rooms in
@@ -827,7 +828,7 @@ export default function MainLayout({
     if (!roomId) return;
     const room = getRoom(roomId, true);
     if (room?.membership === "joined" && !room.upgradePending && !room.replacementRoomId &&
-        (!directCall || room.dmPeerUserId === directCall.peerUserId)) return;
+        (!directCall || directCall.transport === "matrix" || room.dmPeerUserId === directCall.peerUserId)) return;
     forgetVoice(roomId);
     if (directCall) void endDirectCall();
     else void disconnectVoice(roomId);
@@ -1344,10 +1345,10 @@ export default function MainLayout({
           status: voiceCall.disconnectingFromRoomId ? "disconnecting"
             : directCall?.phase === "resuming" || voiceCall.isReconnecting ? "reconnecting"
             : voiceCall.isConnecting ? "connecting"
-            : connectedVoiceRoomId ? "connected" : "disconnected",
+            : connectedVoiceRoomId || directCall?.phase === "active" ? "connected" : "disconnected",
           detail: directCallPeerConnection === "lost" ? `${directCallName} lost connection`
             : directCallPeerConnection === "interrupted" ? `${directCallName}’s connection was interrupted` : undefined,
-          canReconnect: !!directCall?.established || !!targetVoiceRoomId || (!!eligibleRecovery && !eligibleRecovery.direct),
+          canReconnect: (!!directCall?.established && directCall.transport !== "matrix") || !!targetVoiceRoomId || (!!eligibleRecovery && !eligibleRecovery.direct),
           onReconnect: reconnectVoiceCall,
           onDisconnect: disconnectVoiceCall,
         } : undefined}
@@ -1407,14 +1408,14 @@ export default function MainLayout({
       call={directCall}
       name={directCallName}
       avatarUrl={directCallRoom?.avatarUrl}
-      isMicEnabled={voiceCall.isMicEnabled}
+      isMicEnabled={isDirectCallMicEnabled}
       peerConnection={directCallPeerConnection}
-      canMute={connectedVoiceRoomId === directCall.roomId}
+      canMute={directCall.transport === "matrix" || connectedVoiceRoomId === directCall.roomId}
       isReconnecting={voiceCall.isReconnecting && targetVoiceRoomId === directCall.roomId}
       showActions={!showCallPanel || voiceCall.isConnecting}
       onAnswer={() => answerDirectCall()}
       onEnd={endDirectCall}
-      onToggleMic={voiceCall.toggleMic}
+      onToggleMic={toggleDirectCallMic}
     />
   );
   const activeDmPeer = activeRoom?.dmPeerUserId;

@@ -29,6 +29,8 @@ use tauri::{AppHandle, Emitter};
 use tokio::sync::mpsc;
 use tokio::time::{interval_at, Instant as TokioInstant, MissedTickBehavior};
 
+pub(crate) mod peer;
+
 fn should_auto_rejoin(reason: livekit::DisconnectReason) -> bool {
     use livekit::DisconnectReason as Reason;
     !matches!(reason,
@@ -335,43 +337,15 @@ impl VoiceManager {
             let _ = room.close().await;
             return Err(format!("Failed to publish mic track: {error}"));
         }
-        // 4. Set up audio streams (GStreamer pulsesrc on Linux, cpal elsewhere)
-        // Create a channel for mic frames: capture callback → pump task
-        let (mic_frame_tx, mic_frame_rx) = mpsc::channel::<Vec<i16>>(10); // small bounded buffer
-        let noise_proc = Arc::new(Mutex::new(NoiseProcessor::new()));
-        noise_proc
-            .lock()
-            .set_enabled(audio_state.lock().noise_suppression_enabled);
-        let streams = (|| {
-            let input = setup_mic_input(
-                audio_state.clone(),
-                noise_proc.clone(),
-                mic_frame_tx,
-                input_device_id.as_deref(),
-            )
-            .map_err(|error| format!("Failed to open microphone: {error}"))?;
-            let output = setup_speaker_output(audio_state.clone(), output_device_id.as_deref())
-                .map_err(|error| format!("Failed to open speakers: {error}"))?;
-            input
-                .play()
-                .map_err(|error| format!("Mic stream error: {error}"))?;
-            output
-                .play()
-                .map_err(|error| format!("Speaker stream error: {error}"))?;
-            Ok((input, output))
-        })();
-        let (input_stream, output_stream) = match streams {
+        let (input_stream, output_stream, noise_proc) = match start_call_audio(
+            &audio_state, audio_source, input_device_id.as_deref(), output_device_id.as_deref(),
+        ) {
             Ok(streams) => streams,
             Err(error) => {
                 let _ = room.close().await;
                 return Err(error);
             }
         };
-        // 5. Start mic capture pump (receives frames from mic callback → LiveKit)
-        let mic_source = audio_source.clone();
-        tokio::spawn(async move {
-            mic_capture_pump(mic_source, mic_frame_rx).await;
-        });
         // 6. Start event loop
         let (shutdown_tx, shutdown_rx) = mpsc::channel::<()>(1);
         let reconnect_notify = Arc::new(tokio::sync::Notify::new());
@@ -903,7 +877,26 @@ fn merge_speaking_from_level(server_active: bool, level_smooth: f32, allow_level
 }
 
 // ─── Mic capture pump ───────────────────────────────────────────────────────
-/// Receives completed mic frames from the cpal callback channel and sends to LiveKit.
+fn start_call_audio(
+    audio_state: &Arc<Mutex<AudioState>>,
+    source: NativeAudioSource,
+    input_device_id: Option<&str>,
+    output_device_id: Option<&str>,
+) -> Result<(AudioStream, AudioStream, Arc<Mutex<NoiseProcessor>>), String> {
+    let (tx, rx) = mpsc::channel(10);
+    let noise_proc = Arc::new(Mutex::new(NoiseProcessor::new()));
+    noise_proc.lock().set_enabled(audio_state.lock().noise_suppression_enabled);
+    let input = setup_mic_input(audio_state.clone(), noise_proc.clone(), tx, input_device_id)
+        .map_err(|error| format!("Failed to open microphone: {error}"))?;
+    let output = setup_speaker_output(audio_state.clone(), output_device_id)
+        .map_err(|error| format!("Failed to open speakers: {error}"))?;
+    input.play().map_err(|error| format!("Mic stream error: {error}"))?;
+    output.play().map_err(|error| format!("Speaker stream error: {error}"))?;
+    tokio::spawn(mic_capture_pump(source, rx));
+    Ok((input, output, noise_proc))
+}
+
+/// Receives completed mic frames from the cpal callback channel and sends them to WebRTC.
 /// Zero latency added — frames arrive as soon as cpal has enough samples.
 async fn mic_capture_pump(source: NativeAudioSource, mut frame_rx: mpsc::Receiver<Vec<i16>>) {
     while let Some(samples) = frame_rx.recv().await {
@@ -922,7 +915,7 @@ async fn mic_capture_pump(source: NativeAudioSource, mut frame_rx: mpsc::Receive
 /// Receives audio from one remote track, applies volume, and writes into a per-track buffer.
 /// The speaker output callback sums all per-track buffers for the final mix.
 async fn handle_remote_audio(
-    audio_track: RemoteAudioTrack,
+    audio_track: libwebrtc::audio_track::RtcAudioTrack,
     identity: String,
     track_key: String,
     source_tag: String,
@@ -930,7 +923,7 @@ async fn handle_remote_audio(
     audio_state: Arc<Mutex<AudioState>>,
 ) {
     let mut stream = NativeAudioStream::new(
-        audio_track.rtc_track(),
+        audio_track,
         SAMPLE_RATE as i32,
         NUM_CHANNELS as i32,
     );
@@ -1040,7 +1033,7 @@ async fn run_event_loop(
                             let is_mic_track = source == TrackSource::Microphone;
                             tokio::spawn(async move {
                                 handle_remote_audio(
-                                    audio_track,
+                                    audio_track.rtc_track(),
                                     identity,
                                     track_key,
                                     source_tag,

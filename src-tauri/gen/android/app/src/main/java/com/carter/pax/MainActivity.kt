@@ -27,6 +27,12 @@ class MainActivity : TauriActivity() {
       webViewRef?.evaluateJavascript("window.dispatchEvent(new Event('pax-notification-permission-granted'))", null)
     }
   }
+  private val microphonePermission = registerForActivityResult(ActivityResultContracts.RequestPermission()) { granted ->
+    webViewRef?.evaluateJavascript(
+      "window.dispatchEvent(new CustomEvent('pax-microphone-permission',{detail:$granted}))",
+      null,
+    )
+  }
 
   override fun onCreate(savedInstanceState: Bundle?) {
     enableEdgeToEdge()
@@ -199,8 +205,17 @@ class MainActivity : TauriActivity() {
     fun canPostIncomingCalls(): Boolean = PaxCallNotifications.canPost(this@MainActivity)
 
     @JavascriptInterface
-    fun showIncomingCall(id: String, roomId: String, caller: String, expiresAt: Long, eventId: String) {
-      PaxCallNotifications.show(this@MainActivity, PaxCallNotifications.Call(id, roomId, caller, expiresAt), eventId)
+    fun hasMicrophonePermission(): Boolean =
+      checkSelfPermission(Manifest.permission.RECORD_AUDIO) == PackageManager.PERMISSION_GRANTED
+
+    @JavascriptInterface
+    fun requestMicrophonePermission() {
+      runOnUiThread { microphonePermission.launch(Manifest.permission.RECORD_AUDIO) }
+    }
+
+    @JavascriptInterface
+    fun showIncomingCall(id: String, roomId: String, caller: String, expiresAt: Long, eventId: String, matrixVoip: Boolean) {
+      PaxCallNotifications.show(this@MainActivity, PaxCallNotifications.Call(id, roomId, caller, expiresAt, matrixVoip), eventId)
     }
 
     @JavascriptInterface

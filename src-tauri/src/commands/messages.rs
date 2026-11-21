@@ -495,7 +495,7 @@ pub async fn get_messages(
                 event.raw(),
                 encrypted_room,
                 event.kind.encryption_info().is_some(),
-            ) {
+            ).or_else(|| super::matrix_voip::call_notice(event.raw(), &room, event.kind.encryption_info().is_some())) {
                 if let Some(call) = &notice.direct_call_notice {
                     visible_calls.insert(call.call_id.clone());
                 }
@@ -998,7 +998,7 @@ async fn build_message_infos_from_timeline_events(
             event.raw(),
             encrypted_room,
             event.kind.encryption_info().is_some(),
-        ) {
+        ).or_else(|| super::matrix_voip::call_notice(event.raw(), room, event.kind.encryption_info().is_some())) {
             other_entries.push((position, notice));
             continue;
         }
@@ -1914,7 +1914,7 @@ pub async fn start_sync(
                             room.encryption_state().is_encrypted(),
                             encryption_info.is_some(),
                         ),
-                        _ => None,
+                        _ => super::matrix_voip::call_notice(&event, &room, encryption_info.is_some()),
                     };
                     let Some(message) = message else {
                         return;
@@ -2457,6 +2457,8 @@ pub async fn start_sync(
                 .chain(response.rooms.left.keys())).await;
 
             super::direct_calls::receive_signals(&reconcile_state_arc, &client, &app, &response)
+                .await;
+            super::matrix_voip::receive_signals(&reconcile_state_arc, &client, &app, &response)
                 .await;
 
             let sync_elapsed = sync_t0.elapsed();

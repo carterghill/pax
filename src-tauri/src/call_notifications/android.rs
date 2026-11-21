@@ -21,7 +21,7 @@ use tokio::sync::Mutex;
 use crate::{
     commands::{
         auth::{SavedCredentials, CREDENTIALS_FILENAME},
-        direct_calls,
+        direct_calls, matrix_voip,
     },
     voice_presence::now_ms,
     AppState,
@@ -108,6 +108,14 @@ async fn inspect_event(base: PathBuf, room_id: String, event_id: String) -> Opti
     let _store = COLD_STORE.lock().await;
     let client = push_client(&base).await?;
     let room = client.get_room(&room_id)?;
+    let context = room
+        .event_with_context(&event_id, true, 24u32.into(), None)
+        .await
+        .ok()?;
+    let event = context.event.as_ref()?;
+    if let Some(outcome) = matrix_voip::call_push_event(&room, event, &context.events_before, &context.events_after).await {
+        return Some(outcome);
+    }
     let peer = direct_calls::direct_call_peer(&room).await?;
     let ignored = if let Some(state) = APP.get().and_then(Weak::upgrade) {
         state.ignored_users.users(&client).await.contains(&peer)
@@ -117,14 +125,10 @@ async fn inspect_event(base: PathBuf, room_id: String, event_id: String) -> Opti
     if ignored {
         return Some(serde_json::json!({ "kind": "ignore" }));
     }
-    let context = room
-        .event_with_context(&event_id, true, 24u32.into(), None)
-        .await
-        .ok()?;
     direct_calls::call_push_event(
         &room,
         &peer,
-        context.event.as_ref()?,
+        event,
         &context.events_before,
         &context.events_after,
         now_ms(),
@@ -168,17 +172,23 @@ pub extern "system" fn Java_com_carter_pax_PaxCallPush_decline(
     base: JString<'_>,
     room_id: JString<'_>,
     call_id: JString<'_>,
+    matrix_ring_event_id: JString<'_>,
 ) -> jboolean {
     let run = || -> Option<bool> {
         let base = PathBuf::from(String::from(env.get_string(&base).ok()?));
         let room_id = RoomId::parse(String::from(env.get_string(&room_id).ok()?)).ok()?;
         let call_id: String = env.get_string(&call_id).ok()?.into();
+        let matrix_ring_event_id: String = env.get_string(&matrix_ring_event_id).ok()?.into();
         runtime()?.block_on(async {
             tokio::time::timeout(Duration::from_secs(6), async {
                 let _store = COLD_STORE.lock().await;
                 let client = push_client(&base).await?;
                 let room = client.get_room(&room_id)?;
-                Some(direct_calls::decline_pushed_call(&client, &room, call_id).await)
+                Some(if matrix_ring_event_id.is_empty() {
+                    direct_calls::decline_pushed_call(&client, &room, call_id).await
+                } else {
+                    matrix_voip::decline_pushed_call(&room, &call_id, &matrix_ring_event_id).await
+                })
             })
             .await
             .ok()

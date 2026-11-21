@@ -24,7 +24,7 @@ internal object PaxCallPush {
     init { System.loadLibrary("pax_lib") }
 
     external fun resolve(dataDir: String, roomId: String, eventId: String): String?
-    external fun decline(dataDir: String, roomId: String, callId: String): Boolean
+    external fun decline(dataDir: String, roomId: String, callId: String, matrixRingEventId: String): Boolean
 }
 
 internal object PaxCallNotifications {
@@ -38,15 +38,18 @@ internal object PaxCallNotifications {
     private const val FINISHED = "finished"
     private const val RING_EVENT = "ring_event"
     private const val NOTIFICATION_ID = 1
-    private const val MAX_RING_MS = 30_000L
+    private const val MAX_RING_MS = 150_000L
     private val main = Handler(Looper.getMainLooper())
 
     @Volatile var busy = false
     @Volatile var activity: WeakReference<MainActivity>? = null
 
-    data class Call(val id: String, val roomId: String, val caller: String, val expiresAt: Long) {
+    data class Call(
+        val id: String, val roomId: String, val caller: String, val expiresAt: Long,
+        val matrixVoip: Boolean = false, val ringEventId: String = "",
+    ) {
         fun json() = JSONObject().put("callId", id).put("roomId", roomId)
-            .put("expiresAt", expiresAt)
+            .put("expiresAt", expiresAt).put("matrixVoip", matrixVoip).put("ringEventId", ringEventId)
     }
 
     private fun prefs(context: Context) = context.getSharedPreferences("pax_calls", Context.MODE_PRIVATE)
@@ -78,7 +81,8 @@ internal object PaxCallNotifications {
         val id = value.optString("callId")
         val room = value.optString("roomId")
         if (!validId(id) || room.isBlank()) return null
-        return Call(id, room, value.optString("caller"), value.optLong("expiresAt"))
+        return Call(id, room, value.optString("caller"), value.optLong("expiresAt"),
+            value.optBoolean("matrixVoip"), value.optString("ringEventId"))
     }
 
     private fun current(context: Context): Call? = prefs(context).getString(ACTIVE, null)?.let {
@@ -144,7 +148,8 @@ internal object PaxCallNotifications {
             Log.w(TAG, "Android blocked the incoming call notification", error)
             return
         }
-        prefs(context).edit().putString(ACTIVE, call.json().toString()).apply()
+        val saved = if (eventId.isNullOrBlank()) call else call.copy(ringEventId = eventId)
+        prefs(context).edit().putString(ACTIVE, saved.json().toString()).apply()
         val app = context.applicationContext
         main.postDelayed({ close(app, call.id, false) }, duration)
     }
@@ -208,7 +213,10 @@ class PaxCallActionReceiver : BroadcastReceiver() {
         val pending = goAsync()
         Thread {
             try {
-                val declined = runCatching { PaxCallPush.decline(context.applicationInfo.dataDir, call.roomId, call.id) }
+                val declined = runCatching {
+                    PaxCallPush.decline(context.applicationInfo.dataDir, call.roomId, call.id,
+                        if (call.matrixVoip) call.ringEventId else "")
+                }
                     .getOrDefault(false)
                 PaxCallNotifications.queueAction(context, call, if (declined) "dismiss" else "decline")
             } finally {

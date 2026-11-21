@@ -4,6 +4,7 @@ import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 import type { VoiceCall } from "./useVoiceCall";
 import { VOICE_RECOVERY_REFRESH_MS, type VoiceRecovery } from "./useVoiceRecovery";
 import { isVoiceParticipantOnDevice } from "../utils/matrix";
+import { useMatrixVoip } from "./useMatrixVoip";
 
 type SignalKind = "ring" | "answer" | "connect" | "end" | "resume" | "resumeAccepted" | "resumeRejected";
 
@@ -25,6 +26,7 @@ interface CallSignal extends CallId {
 }
 
 export interface DirectCall extends CallId {
+  transport?: "matrix" | "selecting";
   phase: "dialing" | "incoming" | "answering" | "connecting" | "active" | "interrupted" | "resuming";
   peerDeviceId?: string;
   ringEventId?: string;
@@ -81,15 +83,21 @@ export function useDirectCall(
     setCall(next);
   }, []);
 
+  const {
+    finish: finishMatrix, start: startMatrix, answer: answerMatrix,
+    connection: matrixConnection, micEnabled: matrixMicEnabled, toggleMic: toggleMatrixMic,
+  } = useMatrixVoip(current, voiceBusy, update, setError, recoveryReady);
+
   const finish = useCallback((notifyPeer: boolean, connectionLost = false) => {
     const pending = current.current;
-    if (!pending) return mediaStop.current ?? Promise.resolve();
+    if (!pending) return mediaStop.current ?? finishMatrix(false);
+    if (pending.transport === "matrix") return finishMatrix(notifyPeer, connectionLost ? "ice_failed" : undefined);
     update(null);
     forget(pending.roomId, pending.callId);
     outage.current = null;
     resumeRequest.current?.resolve(null);
 
-    if (notifyPeer) {
+    if (notifyPeer && pending.transport !== "selecting") {
       const ring = offer.current?.callId === pending.callId ? offer.current.sending : null;
       // A quick cancel must follow the ring, even if the request is still in flight.
       void (ring ?? Promise.resolve()).catch(() => {}).then(() => sendSignal(pending, "end", { connectionLost }))
@@ -102,7 +110,7 @@ export function useDirectCall(
       return stopping;
     }
     return Promise.resolve();
-  }, [disconnect, forget, update]);
+  }, [disconnect, finishMatrix, forget, update]);
 
   const end = useCallback(() => finish(true), [finish]);
 
@@ -151,7 +159,7 @@ export function useDirectCall(
 
   const reconnect = useCallback(async (onStarted?: (roomId: string) => void) => {
     const pending = current.current;
-    if (!pending?.established || connections.current.busy || pending.phase === "resuming" ||
+    if (!pending?.established || pending.transport === "matrix" || connections.current.busy || pending.phase === "resuming" ||
         !pending.peerDeviceId || connections.current.roomId !== null) return;
     if (outage.current && outage.current.until <= Date.now()) return;
     const resuming = { ...pending, phase: "resuming" } as const;
@@ -180,6 +188,7 @@ export function useDirectCall(
   const receive = useCallback((signal: CallSignal) => {
     if (signal.expiresAt <= Date.now()) return;
     const pending = current.current;
+    if (pending?.transport === "matrix") return;
     const matches = pending?.callId === signal.callId && pending.roomId === signal.roomId &&
       pending.peerUserId === signal.peerUserId && pending.peerDeviceId === signal.deviceId;
     if (signal.kind === "resume") {
@@ -290,7 +299,8 @@ export function useDirectCall(
   }, [receive, recoveryReady]);
 
   useEffect(() => {
-    if (!call || call.established || call.phase === "connecting" || call.phase === "active") return;
+    if (!call || call.established || call.phase === "connecting" || call.phase === "active"
+        || (call.transport === "matrix" && call.phase === "dialing")) return;
     const timer = setTimeout(() => {
       if (current.current !== call) return;
       void finish(call.phase === "dialing");
@@ -300,7 +310,8 @@ export function useDirectCall(
     return () => clearTimeout(timer);
   }, [call, finish]);
 
-  const inCall = call?.phase === "active" && voice.connectedRoomId === call.roomId && !voice.isConnecting;
+  const inCall = call?.transport !== "matrix" && call?.phase === "active"
+    && voice.connectedRoomId === call.roomId && !voice.isConnecting;
   const peer = inCall ? voice.remoteParticipants.find(({ identity }) =>
       isVoiceParticipantOnDevice(identity, call.peerUserId, call.peerDeviceId),
     ) : undefined;
@@ -308,7 +319,7 @@ export function useDirectCall(
   // the reconnect window while our own connection is healthy.
   const peerJoined = peer !== undefined;
   useEffect(() => {
-    if (!call || (!call.established && call.phase !== "active")) return;
+    if (!call || call.transport === "matrix" || (!call.established && call.phase !== "active")) return;
     if (peerJoined) {
       outage.current = null;
       if (!call.established) {
@@ -343,7 +354,7 @@ export function useDirectCall(
   }, [call, finish, peerJoined, remember, update, voice.isConnecting]);
 
   useEffect(() => {
-    if (call && voice.endedRoomId === call.roomId) {
+    if (call && call.transport !== "matrix" && voice.endedRoomId === call.roomId) {
       void finish(true);
       setError("The voice session ended on this device.");
     }
@@ -353,24 +364,41 @@ export function useDirectCall(
     if (current.current || voiceBusy.current || mediaStop.current) return;
     const pending: DirectCall = {
       roomId, peerUserId, callId: crypto.randomUUID(), phase: "dialing", expiresAt: Date.now() + RING_MS,
+      transport: "selecting",
     };
     setError(null);
     update(pending);
-    const sending = sendSignal(pending, "ring");
-    offer.current = { callId: pending.callId, sending };
-    void sending.catch((reason) => {
+    void (async () => {
+      const useLiveKit = await invoke<boolean>("prefer_livekit_call", { roomId, peerUserId }).catch(() => false);
       if (current.current !== pending) return;
-      void finish(true);
-      setError(String(reason));
-    }).finally(() => {
-      if (offer.current?.sending === sending) offer.current = null;
-    });
-  }, [finish, update]);
+      if (!useLiveKit) {
+        startMatrix({ ...pending, transport: "matrix" });
+        return;
+      }
+      const ringing = { ...pending, expiresAt: Date.now() + RING_MS, transport: undefined };
+      update(ringing);
+      const sending = sendSignal(ringing, "ring");
+      offer.current = { callId: ringing.callId, sending };
+      try {
+        await sending;
+      } catch (reason) {
+        if (current.current !== ringing) return;
+        void finish(true);
+        setError(String(reason));
+      } finally {
+        if (offer.current?.sending === sending) offer.current = null;
+      }
+    })();
+  }, [finish, startMatrix, update]);
 
   const answer = useCallback((onStarted?: (roomId: string) => void, expectedCallId?: string) => {
     const pending = current.current;
     if (pending?.phase !== "incoming" || pending.expiresAt <= Date.now() || voiceBusy.current) return;
     if (expectedCallId && pending.callId !== expectedCallId) return;
+    if (pending.transport === "matrix") {
+      answerMatrix(onStarted);
+      return;
+    }
     const answering = { ...pending, phase: "answering", expiresAt: Date.now() + ANSWER_MS } as const;
     update(answering);
     onStarted?.(answering.roomId);
@@ -379,7 +407,7 @@ export function useDirectCall(
       void finish(true);
       setError(String(reason));
     });
-  }, [finish, update]);
+  }, [answerMatrix, finish, update]);
 
   const endFromNotification = useCallback((callId: string, notifyPeer: boolean, allowActive = false) => {
     const pending = current.current;
@@ -389,8 +417,12 @@ export function useDirectCall(
   }, [finish]);
 
   const clearError = useCallback(() => setError(null), []);
-  const peerConnection: DirectCallPeerConnection = peer
+  const peerConnection: DirectCallPeerConnection = call?.transport === "matrix" ? matrixConnection : peer
     ? peer.connectionInterrupted && call?.established ? "interrupted" : "connected"
     : inCall && call.established ? "lost" : "connecting";
-  return { call, error, peerConnection, reconnect, start, answer, end, endFromNotification, clearError };
+  return {
+    call, error, peerConnection, reconnect, start, answer, end, endFromNotification, clearError,
+    isMicEnabled: call?.transport === "matrix" ? matrixMicEnabled : voice.isMicEnabled,
+    toggleMic: call?.transport === "matrix" ? toggleMatrixMic : voice.toggleMic,
+  };
 }

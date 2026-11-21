@@ -6,6 +6,7 @@ import { getStoredVolume } from "./useUserVolume";
 import {
   AudioDeviceList,
   getStoredAudioDevicePreferences,
+  requestMicrophonePermission,
 } from "./useVoiceAudioDevices";
 
 /**
@@ -173,6 +174,8 @@ export function useVoiceCall(isVoiceChannel: (roomId: string) => boolean) {
     const attemptId = crypto.randomUUID();
     transportAttempt.current = attemptId;
     try {
+      await requestMicrophonePermission();
+      if (revision.current !== attempt) return false;
       await invoke("voice_connect", { roomId, attemptId, inputDeviceId, outputDeviceId, replaceOtherSessions });
       return revision.current === attempt && targetRoomIdRef.current === roomId;
     } catch (error) {

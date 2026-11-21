@@ -98,6 +98,7 @@ pub async fn logout(state: State<'_, Arc<AppState>>, app: tauri::AppHandle) -> R
 
     state.stop_sync_task().await;
     state.direct_calls.lock().await.clear();
+    state.matrix_voip.reset().await;
     state.notifications.reset();
     state.voice_presence.reset();
     state.attachments.reset().await;
@@ -541,6 +542,7 @@ pub(super) async fn submit_registration(
 async fn stop_previous_session(state: &AppState) {
     state.stop_sync_task().await;
     state.direct_calls.lock().await.clear();
+    state.matrix_voip.reset().await;
     state.notifications.reset();
     state.voice_presence.reset();
     state.attachments.reset().await;

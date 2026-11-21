@@ -161,6 +161,7 @@ async fn scan_unread(
             }
             let answered_call = !answered_calls.is_empty()
                 && direct_calls::call_id_for_event(&event, encrypted)
+                    .or_else(|| super::matrix_voip::call_notice_id(&event, room))
                     .is_some_and(|id| answered_calls.contains(&id));
             if answered_call {
                 scan.contains_answered_call = true;

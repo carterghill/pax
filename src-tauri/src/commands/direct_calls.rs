@@ -441,6 +441,9 @@ pub(super) async fn receive_signals(
                 continue;
             }
             let from_peer = call.sender == peer;
+            if from_peer {
+                state.matrix_voip.remember_livekit_peer(room_id, &peer).await;
+            }
             let answered_here = call.sender == me && call.content.kind == SignalKind::Answer;
             // A past answer can still settle an unread ring on initial sync.
             if answered_here || from_peer {

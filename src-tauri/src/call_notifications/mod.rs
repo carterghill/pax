@@ -145,7 +145,7 @@ pub(crate) async fn sync_call_notification(
         let remaining = call
             .expires_at
             .saturating_sub(crate::voice_presence::now_ms())
-            .min(30_000);
+            .min(150_000);
         if remaining == 0 {
             return Ok(());
         }

@@ -10,7 +10,7 @@ type CallNotificationAction = {
 };
 
 type AndroidCallNotifications = {
-  showIncomingCall(callId: string, roomId: string, caller: string, expiresAt: number, eventId: string): void;
+  showIncomingCall(callId: string, roomId: string, caller: string, expiresAt: number, eventId: string, matrixVoip: boolean): void;
   closeIncomingCall(callId: string, ended: boolean): void;
   takeCallNotificationAction(): string;
   setCallNotificationBusy(busy: boolean): void;
@@ -76,6 +76,7 @@ export function useCallNotifications(
   const roomId = call?.roomId;
   const expiresAt = call?.expiresAt;
   const ringEventId = call?.ringEventId;
+  const matrixVoip = call?.transport === "matrix";
   const busy = voiceBusy || (!!phase && phase !== "incoming");
   useEffect(() => {
     const queued = queuedAction.current;
@@ -98,7 +99,7 @@ export function useCallNotifications(
         systemCallId.current = null;
       }
       if (phase === "incoming" && callId && roomId && expiresAt) {
-        const show = () => android.showIncomingCall(callId, roomId, caller, expiresAt, ringEventId ?? "");
+        const show = () => android.showIncomingCall(callId, roomId, caller, expiresAt, ringEventId ?? "", matrixVoip);
         systemCallId.current = callId;
         show();
         window.addEventListener("pax-notification-permission-granted", show);
@@ -114,7 +115,7 @@ export function useCallNotifications(
     commands.current = commands.current
       .then(() => invoke<void>("sync_call_notification", { call: payload, busy }))
       .catch((error) => console.warn("Could not update the call notification:", error));
-  }, [android, busy, callId, caller, expiresAt, phase, ringEventId, roomId]);
+  }, [android, busy, callId, caller, expiresAt, matrixVoip, phase, ringEventId, roomId]);
 
   useEffect(() => () => {
     if (!isTauri()) return;

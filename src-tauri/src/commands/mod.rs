@@ -8,6 +8,7 @@ pub mod embed;
 pub mod encryption;
 pub mod history_backup;
 pub mod lifecycle;
+pub mod matrix_voip;
 #[cfg(target_os = "linux")]
 pub mod media_compat;
 pub mod media_files;

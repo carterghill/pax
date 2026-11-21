@@ -239,6 +239,18 @@ async fn fetch_livekit_jwt(
     Ok(VoiceJoinResult { jwt, livekit_url })
 }
 
+/// Check that the configured focus can admit this device without joining the room.
+pub(super) async fn probe_livekit_call(room: &Room, http: &reqwest::Client) -> bool {
+    let client = room.client();
+    let (Some(user), Some(device)) = (client.user_id(), client.device_id()) else { return false };
+    let Ok(focus) = discover_livekit_service_url(room, http, client.homeserver().as_str(), false).await
+        else { return false };
+    let request = matrix_sdk::ruma::api::client::account::request_openid_token::v3::Request::new(user.to_owned());
+    let Ok(token) = client.send(request).await else { return false };
+    fetch_livekit_jwt(http, &focus.url, room.room_id().as_str(), user, device,
+        token.access_token.as_str(), token.expires_in.as_secs()).await.is_ok()
+}
+
 /// JWT service URL for membership PUT during heartbeat / recovery: prefer the validated session URL.
 async fn livekit_jwt_service_url_for_refresh(
     client: &Client,
