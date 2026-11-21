@@ -3,6 +3,8 @@ import { listen } from "@tauri-apps/api/event";
 import { getMessages, getMessagesAroundEvent } from "../features/chat/api";
 import type { Message } from "../types/matrix";
 import type { MessageRedactedPayload } from "./useMessages";
+import { useIgnoredUsers } from "../context/IgnoredUsersContext";
+import { projectMessages } from "../features/chat/messages/ignoredUsers";
 
 type HistoryPage = {
   messages: Message[];
@@ -17,6 +19,7 @@ export function useRoomUpgradeHistory(
   roomId: string | null,
   predecessorIds: string[] = NO_ROOMS,
 ) {
+  const { userIds: ignoredUsers, revision: ignoreListRevision } = useIgnoredUsers();
   const [history, setHistory] = useState<{
     roomId: string | null;
     pages: Record<string, HistoryPage>;
@@ -113,5 +116,5 @@ export function useRoomUpgradeHistory(
   }, [load, predecessorIds]);
 
   const messages = predecessorIds.slice().reverse().flatMap((id) => pages[id]?.messages ?? []);
-  return { messages, hasOlder: !!nextRoom, loadOlder, loadAround, loading, error };
+  return { messages: projectMessages(messages, ignoredUsers, ignoreListRevision), hasOlder: !!nextRoom, loadOlder, loadAround, loading, error };
 }

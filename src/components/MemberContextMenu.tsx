@@ -1,13 +1,16 @@
-import { useEffect, useRef } from "react";
-import { Ban, Copy, MessageSquare, User, UserMinus } from "lucide-react";
+import { useEffect, useLayoutEffect, useRef, useState } from "react";
+import { createPortal } from "react-dom";
+import { Ban, Copy, MessageSquare, User, UserMinus, VolumeX } from "lucide-react";
 import { useTheme } from "../theme/ThemeContext";
 import { useOverlayObstruction } from "../hooks/useOverlayObstruction";
+import { useIgnoredUsers } from "../context/IgnoredUsersContext";
 
 interface MemberContextMenuProps {
   x: number;
   y: number;
   displayName: string;
   userId: string;
+  currentUserId: string;
   onClose: () => void;
   onProfile: () => void;
   onSendMessage?: () => void;
@@ -22,6 +25,7 @@ export default function MemberContextMenu({
   y,
   displayName,
   userId,
+  currentUserId,
   onClose,
   onProfile,
   onSendMessage,
@@ -30,8 +34,25 @@ export default function MemberContextMenu({
   onBan,
 }: MemberContextMenuProps) {
   const { palette, spacing, typography } = useTheme();
+  const { userIds, setIgnored } = useIgnoredUsers();
+  const isIgnored = userIds.has(userId);
+  const [saving, setSaving] = useState(false);
+  const [error, setError] = useState<string | null>(null);
   const menuRef = useRef<HTMLDivElement>(null);
   useOverlayObstruction(menuRef);
+
+  async function toggleIgnored() {
+    setSaving(true);
+    setError(null);
+    try {
+      await setIgnored(userId, !isIgnored);
+      onClose();
+    } catch (cause) {
+      setError(String(cause));
+    } finally {
+      setSaving(false);
+    }
+  }
 
   useEffect(() => {
     function handleClick(e: MouseEvent) {
@@ -53,19 +74,15 @@ export default function MemberContextMenu({
     };
   }, [onClose]);
 
-  useEffect(() => {
-    if (!menuRef.current) return;
-    const rect = menuRef.current.getBoundingClientRect();
+  useLayoutEffect(() => {
     const el = menuRef.current;
-    if (rect.right > window.innerWidth) {
-      el.style.left = `${window.innerWidth - rect.width - 8}px`;
-    }
-    if (rect.bottom > window.innerHeight) {
-      el.style.top = `${window.innerHeight - rect.height - 8}px`;
-    }
-  }, [x, y]);
+    if (!el) return;
+    const { width, height } = el.getBoundingClientRect();
+    el.style.left = `${Math.max(8, Math.min(x, window.innerWidth - width - 8))}px`;
+    el.style.top = `${Math.max(8, Math.min(y, window.innerHeight - height - 8))}px`;
+  }, [x, y, error, moderation, isIgnored]);
 
-  return (
+  return createPortal(
     <div
       ref={menuRef}
       style={{
@@ -80,7 +97,7 @@ export default function MemberContextMenu({
         minWidth: 160,
         boxShadow: "0 4px 16px rgba(0,0,0,0.35)",
       }}
-      onContextMenu={(e) => e.preventDefault()}
+      onContextMenu={(e) => { e.preventDefault(); e.stopPropagation(); }}
     >
       <div
         style={{
@@ -162,6 +179,45 @@ export default function MemberContextMenu({
           <MessageSquare size={14} color={palette.textSecondary} />
           Send message
         </button>
+      )}
+
+      {userId !== currentUserId && (
+        <>
+          <button
+            type="button"
+            disabled={saving}
+            onClick={() => void toggleIgnored()}
+            style={{
+              display: "flex",
+              alignItems: "center",
+              gap: spacing.unit * 2,
+              width: "100%",
+              padding: `${spacing.unit * 1.5}px ${spacing.unit * 2}px`,
+              border: "none",
+              borderRadius: 4,
+              backgroundColor: "transparent",
+              color: palette.textPrimary,
+              fontSize: typography.fontSizeSmall,
+              cursor: saving ? "wait" : "pointer",
+              textAlign: "left",
+            }}
+            onMouseEnter={(e) => { e.currentTarget.style.backgroundColor = palette.bgActive; }}
+            onMouseLeave={(e) => { e.currentTarget.style.backgroundColor = "transparent"; }}
+          >
+            <VolumeX size={14} color={palette.textSecondary} />
+            {isIgnored ? "Unignore user" : "Ignore user"}
+          </button>
+          {error && (
+            <div role="alert" style={{
+              maxWidth: 240,
+              padding: spacing.unit * 2,
+              color: palette.textSecondary,
+              fontSize: typography.fontSizeSmall,
+            }}>
+              {isIgnored ? "Couldn’t unignore user." : "Couldn’t ignore user."} {error}
+            </div>
+          )}
+        </>
       )}
 
       {moderation && (moderation.canKick || moderation.canBan) && (
@@ -272,6 +328,7 @@ export default function MemberContextMenu({
         <Copy size={14} color={palette.textSecondary} />
         Copy user ID
       </button>
-    </div>
+    </div>,
+    document.body,
   );
 }

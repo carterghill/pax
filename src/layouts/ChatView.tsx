@@ -13,6 +13,7 @@ import MessageList, { type MessageListHandle } from "../components/MessageList";
 import PinnedMessagesMenu from "../components/PinnedMessagesMenu";
 import MessageInput, { type EditingMessageRef, type MessageFileSendBridge } from "../components/MessageInput";
 import UserMenu from "../components/UserMenu";
+import RoomMemberContextMenu, { type MemberMenuTarget } from "../components/RoomMemberContextMenu";
 import UserProfileDialog from "../components/UserProfileDialog";
 import RoomDownloadsButton from "../components/RoomDownloadsButton";
 import RoomHeaderTitle from "../components/RoomHeaderTitle";
@@ -29,6 +30,7 @@ import UnavailableMessagesNotice from "../components/UnavailableMessagesNotice";
 import EncryptionSettingsPanel from "../components/EncryptionSettingsPanel";
 import Dialog from "../components/Dialog";
 import { useEncryption } from "../context/EncryptionContext";
+import { useIgnoredUsers } from "../context/IgnoredUsersContext";
 import RssThreadDrawer from "../features/chat/messages/RssThreadDrawer";
 import type { RssArticleCandidate } from "../features/chat/messages/rssArticle";
 import { rssThreadReplyCount, type RssThread } from "../features/chat/messages/rssThreads";
@@ -186,6 +188,7 @@ export default function ChatView({
 }: ChatViewProps) {
   const isDraft = draftDm != null;
   const activeRoom = room ?? null;
+  const { userIds: ignoredUsers } = useIgnoredUsers();
   const draftPeerProfile = useMatrixUserProfile(isDraft && draftDm ? draftDm.peerUserId : null);
 
   const {
@@ -273,11 +276,34 @@ export default function ChatView({
     isDraft ? null : activeRoom!.id,
   );
   const { palette, typography, spacing } = useTheme();
-  const [typingNames, setTypingNames] = useState<string[]>([]);
+  const [typing, setTyping] = useState<TypingPayload | null>(null);
+  const typingNames = typing?.roomId === activeRoom?.id
+    ? typing?.displayNames.filter((_, i) => typing.userIds[i] !== userId && !ignoredUsers.has(typing.userIds[i])) ?? []
+    : [];
   const [localTyping, setLocalTyping] = useState(false);
   const [showUsers, setShowUsers] = useState(!isMobile);
   const [editingMessage, setEditingMessage] = useState<EditingMessageRef | null>(null);
   const [replyDraft, setReplyDraft] = useState<Message | null>(null);
+  const [memberMenu, setMemberMenu] = useState<(MemberMenuTarget & { roomId: string }) | null>(null);
+  const openMemberMenu = useCallback((event: React.MouseEvent, targetId: string, displayName: string) => {
+    if (!activeRoom) return;
+    event.preventDefault();
+    event.stopPropagation();
+    const rect = event.currentTarget.getBoundingClientRect();
+    setMemberMenu({
+      roomId: activeRoom.id,
+      x: event.clientX || rect.left,
+      y: event.clientY || rect.bottom,
+      userId: targetId,
+      displayName,
+    });
+  }, [activeRoom?.id]);
+  const openSenderMenu = useCallback((event: React.MouseEvent, message: Message) => {
+    openMemberMenu(event, message.sender, message.senderName ?? message.sender);
+  }, [openMemberMenu]);
+  const closeMemberMenu = useCallback(() => {
+    setMemberMenu((current) => current === memberMenu ? null : current);
+  }, [memberMenu]);
   const [selectedThread, setSelectedThread] = useState<{
     roomId: string;
     thread: RssThread;
@@ -285,10 +311,12 @@ export default function ChatView({
   } | null>(null);
   const [threadCounts, setThreadCounts] = useState<{
     roomId: string;
+    ignoredUsers: ReadonlySet<string>;
     counts: Map<string, number>;
   } | null>(null);
   const activeThread = selectedThread && selectedThread.roomId === rssRoomId
     && selectedThread.thread.root.sender === rssProvider?.botUserId
+    && !ignoredUsers.has(selectedThread.thread.root.sender)
     ? {
       ...selectedThread.thread,
       root: rssThreads.articles.get(selectedThread.thread.root.eventId)?.root ?? selectedThread.thread.root,
@@ -301,13 +329,14 @@ export default function ChatView({
   const updateThreadCount = useCallback((eventId: string, count: number) => {
     if (!rssRoomId) return;
     setThreadCounts((previous) => {
-      const counts = previous?.roomId === rssRoomId ? previous.counts : undefined;
+      const counts = previous?.roomId === rssRoomId && previous.ignoredUsers === ignoredUsers
+        ? previous.counts : undefined;
       if (counts?.get(eventId) === count) return previous;
-      return { roomId: rssRoomId, counts: new Map(counts).set(eventId, count) };
+      return { roomId: rssRoomId, ignoredUsers, counts: new Map(counts).set(eventId, count) };
     });
-  }, [rssRoomId]);
+  }, [rssRoomId, ignoredUsers]);
   const replyCounts = useMemo(() => {
-    if (threadCounts?.roomId !== rssRoomId) return undefined;
+    if (threadCounts?.roomId !== rssRoomId || threadCounts.ignoredUsers !== ignoredUsers) return undefined;
     const counts = new Map<string, number>();
     for (const [id, count] of threadCounts.counts) {
       const thread = rssThreads.articles.get(id);
@@ -315,7 +344,7 @@ export default function ChatView({
       counts.set(id, activeThread?.root.eventId === id ? count : Math.max(count, loadedCount));
     }
     return counts;
-  }, [activeThread?.root.eventId, rssRoomId, rssThreads, threadCounts]);
+  }, [activeThread?.root.eventId, rssRoomId, rssThreads, threadCounts, ignoredUsers]);
   const [pinnedMenuOpen, setPinnedMenuOpen] = useState(false);
   const [messageSenderProfileUserId, setMessageSenderProfileUserId] = useState<string | null>(null);
   const [recoveryOpen, setRecoveryOpen] = useState(false);
@@ -348,13 +377,10 @@ export default function ChatView({
   useEffect(() => {
     if (isDraft || !activeRoom) return;
     const unlisten = listen<TypingPayload>("typing", (event) => {
-      const { roomId, displayNames, userIds } = event.payload;
-      if (roomId !== activeRoom.id) return;
-      const filtered = displayNames.filter((_, i) => userIds[i] !== userId);
-      setTypingNames(filtered);
+      if (event.payload.roomId === activeRoom.id) setTyping(event.payload);
     });
 
-    setTypingNames([]);
+    setTyping(null);
     setLocalTyping(false);
 
     return () => {
@@ -372,7 +398,12 @@ export default function ChatView({
 
   useEffect(() => {
     setMessageSenderProfileUserId(null);
+    setMemberMenu(null);
   }, [activeRoom?.id, isDraft]);
+
+  useEffect(() => {
+    setReplyDraft((current) => current && ignoredUsers.has(current.sender) ? null : current);
+  }, [ignoredUsers]);
 
   const handleRequestEdit = useCallback((msg: Message) => {
     setReplyDraft(null);
@@ -820,6 +851,7 @@ export default function ChatView({
             pinnedEventIds={pinnedEventIds}
             onPinnedStateChanged={handlePinnedStateChanged}
             onOpenSenderProfile={setMessageSenderProfileUserId}
+            onSenderContextMenu={openSenderMenu}
           />
 
           <div
@@ -849,7 +881,7 @@ export default function ChatView({
                     : "forbidden"
               }
               onMessageSent={refresh}
-              replyDraft={replyDraft}
+              replyDraft={replyDraft && !ignoredUsers.has(replyDraft.sender) ? replyDraft : null}
               onCancelReply={clearReplyDraft}
               editingMessage={editingMessage}
               onCancelEdit={handleCancelEdit}
@@ -880,6 +912,7 @@ export default function ChatView({
               onClose={closeThread}
               onCountChange={updateThreadCount}
               onOpenSenderProfile={setMessageSenderProfileUserId}
+              onSenderContextMenu={openSenderMenu}
               onRoomMessagesMutated={refresh}
               jumpEventId={selectedThread?.jumpEventId}
             />
@@ -899,11 +932,9 @@ export default function ChatView({
             <UserMenu
               width={userMenuWidth}
               roomId={activeRoom.id}
-              roomName={activeRoom.name}
               userId={userId}
-              moderationSpaceTreeRoomIds={moderationSpaceTreeRoomIds}
-              moderationSpaceName={moderationSpaceName}
-              onStartDirectMessage={onStartDirectMessage}
+              onMemberContextMenu={openMemberMenu}
+              onOpenProfile={setMessageSenderProfileUserId}
             />
             <div
               onMouseDown={userMenuResize.onMouseDown}
@@ -937,11 +968,9 @@ export default function ChatView({
           <UserMenu
             width={userMenuPanelWidth}
             roomId={activeRoom.id}
-            roomName={activeRoom.name}
             userId={userId}
-            moderationSpaceTreeRoomIds={moderationSpaceTreeRoomIds}
-            moderationSpaceName={moderationSpaceName}
-            onStartDirectMessage={onStartDirectMessage}
+            onMemberContextMenu={openMemberMenu}
+            onOpenProfile={setMessageSenderProfileUserId}
           />
         </SideDrawer>
       )}
@@ -962,8 +991,21 @@ export default function ChatView({
           currentUserId={userId}
           onClose={() => setMessageSenderProfileUserId(null)}
           onStartDirectMessage={onStartDirectMessage}
+          onOpenActions={isMobile ? openMemberMenu : undefined}
         />
       )}
+      <RoomMemberContextMenu
+        key={activeRoom.id}
+        target={memberMenu?.roomId === activeRoom.id ? memberMenu : null}
+        roomId={activeRoom.id}
+        roomName={activeRoom.name}
+        currentUserId={userId}
+        moderationSpaceTreeRoomIds={moderationSpaceTreeRoomIds}
+        moderationSpaceName={moderationSpaceName}
+        onClose={closeMemberMenu}
+        onOpenProfile={setMessageSenderProfileUserId}
+        onStartDirectMessage={onStartDirectMessage}
+      />
     </div>
   );
 }

@@ -13,6 +13,8 @@ import {
 } from "../../../hooks/useMessages";
 import { useTheme } from "../../../theme/ThemeContext";
 import type { Message, RoomRedactionPolicy } from "../../../types/matrix";
+import { useIgnoredUsers } from "../../../context/IgnoredUsersContext";
+import { projectMessages } from "./ignoredUsers";
 import { getRssThreadReplies } from "../api";
 import type { SentThreadReply } from "../composer/useComposerSubmit";
 import { mergeThreadReplies, rssThreadReplyCount, type RssThread } from "./rssThreads";
@@ -32,6 +34,7 @@ interface RssThreadDrawerProps {
   onClose: () => void;
   onCountChange: (eventId: string, count: number) => void;
   onOpenSenderProfile: (userId: string) => void;
+  onSenderContextMenu: (event: React.MouseEvent, message: Message) => void;
   onRoomMessagesMutated: () => void;
   jumpEventId?: string;
 }
@@ -50,10 +53,12 @@ export default function RssThreadDrawer({
   onClose,
   onCountChange,
   onOpenSenderProfile,
+  onSenderContextMenu,
   onRoomMessagesMutated,
   jumpEventId,
 }: RssThreadDrawerProps) {
   const { palette, spacing, typography } = useTheme();
+  const { userIds: ignoredUsers, revision: ignoreListRevision } = useIgnoredUsers();
   const titleId = useId();
   const listRef = useRef<MessageListHandle>(null);
   const highlightedReply = useRef<string | null>(null);
@@ -147,8 +152,8 @@ export default function RssThreadDrawer({
     for (const reaction of reactions) {
       if (!windowIds.has(reaction.targetEventId)) next = applyReactionDelta(next, reaction, userId, null);
     }
-    return next;
-  }, [edits, fetched, live, reactions, removed, userId, windowReplies]);
+    return projectMessages(next, ignoredUsers, ignoreListRevision);
+  }, [edits, fetched, ignoredUsers, ignoreListRevision, live, reactions, removed, userId, windowReplies]);
 
   const sentReplies = replies.filter((reply) => !reply.eventId.startsWith("local:"));
   const replyCount = nextPage === null ? sentReplies.length : rssThreadReplyCount(thread.root, sentReplies);
@@ -285,6 +290,7 @@ export default function RssThreadDrawer({
           onMessageRemoved={removeReply}
           onLocalReactionFromChip={() => {}}
           onOpenSenderProfile={onOpenSenderProfile}
+          onSenderContextMenu={onSenderContextMenu}
         />
 
         <div style={{

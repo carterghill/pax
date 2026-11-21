@@ -106,6 +106,7 @@ export interface Message {
     count: number;
     latestEventId: string | null;
     latestTimestamp: number | null;
+    ignoreListRevision?: number;
   };
   /** Aggregated m.reaction keys for this event (from server / sync). */
   reactions?: MessageReaction[];
@@ -173,6 +174,7 @@ export interface RoomPinPermission {
 
 export interface PinnedMessagePreview {
   eventId: string;
+  senderUserId: string | null;
   sender: string;
   preview: string;
 }

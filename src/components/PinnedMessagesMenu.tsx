@@ -1,9 +1,10 @@
-import { useCallback, useEffect, useLayoutEffect, useRef, useState } from "react";
+import { useEffect, useLayoutEffect, useRef, useState } from "react";
 import { createPortal } from "react-dom";
 import { Pin } from "lucide-react";
 import { useTheme } from "../theme/ThemeContext";
 import { getPinnedMessagePreviews } from "../features/chat/api";
 import type { PinnedMessagePreview } from "../types/matrix";
+import { useIgnoredUsers } from "../context/IgnoredUsersContext";
 
 const MENU_Z = 10_000;
 
@@ -21,27 +22,26 @@ export default function PinnedMessagesMenu({
   onSelectEventId,
 }: PinnedMessagesMenuProps) {
   const { palette, typography, spacing, resolvedColorScheme } = useTheme();
+  const { userIds: ignoredUsers } = useIgnoredUsers();
   const anchorRef = useRef<HTMLButtonElement>(null);
   const [pos, setPos] = useState<{ top: number; right: number } | null>(null);
   const [loading, setLoading] = useState(false);
-  const [items, setItems] = useState<PinnedMessagePreview[]>([]);
-
-  const load = useCallback(async () => {
-    setLoading(true);
-    try {
-      const rows = await getPinnedMessagePreviews(roomId);
-      setItems(rows);
-    } catch {
-      setItems([]);
-    } finally {
-      setLoading(false);
-    }
-  }, [roomId]);
+  const [previews, setPreviews] = useState<PinnedMessagePreview[]>([]);
+  const items = previews.filter((item) => !item.senderUserId || !ignoredUsers.has(item.senderUserId));
 
   useEffect(() => {
     if (!open) return;
-    void load();
-  }, [open, load]);
+    let cancelled = false;
+    setLoading(true);
+    void getPinnedMessagePreviews(roomId).then((rows) => {
+      if (!cancelled) setPreviews(rows);
+    }, () => {
+      if (!cancelled) setPreviews([]);
+    }).finally(() => {
+      if (!cancelled) setLoading(false);
+    });
+    return () => { cancelled = true; };
+  }, [roomId, open, ignoredUsers]);
 
   useLayoutEffect(() => {
     if (!open) {

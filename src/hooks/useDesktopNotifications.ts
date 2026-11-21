@@ -1,5 +1,6 @@
 import { useEffect, useRef } from "react";
 import { invoke } from "@tauri-apps/api/core";
+import { useIgnoredUsers } from "../context/IgnoredUsersContext";
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 import { useSound } from "react-sounds";
 import type { Message, Room } from "../types/matrix";
@@ -147,6 +148,9 @@ export function useDesktopNotifications({
   activeRoomId,
   getRoom,
 }: DesktopNotificationsOptions): void {
+  const { userIds: ignoredUsers } = useIgnoredUsers();
+  const ignoredUsersRef = useRef(ignoredUsers);
+  ignoredUsersRef.current = ignoredUsers;
   // `useSound().play()` resumes Howler's AudioContext before playing;
   // standalone `playSound()` does not, so the first inbound notifications
   // (before / without a matching user gesture) can be silent while voice
@@ -234,7 +238,7 @@ export function useDesktopNotifications({
       const { roomId, message, mentionsMe, roomPing, isDm } = payload;
 
       // Own message — ignore.
-      if (message.sender === userIdRef.current) return;
+      if (message.sender === userIdRef.current || ignoredUsersRef.current.has(message.sender)) return;
 
       // Active-room + focused: user can see it, don't interrupt.
       if (
@@ -262,6 +266,7 @@ export function useDesktopNotifications({
         if (!permissionGranted) return;
       }
 
+      if (cancelled || ignoredUsersRef.current.has(message.sender)) return;
       const room = getRoomRef.current(roomId);
       const title = formatTitle(room, message.senderName || "");
       // Attach a payload that can be fished out by the click handler.

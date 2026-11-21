@@ -79,6 +79,7 @@ export interface MessageRowProps {
   } | null;
   onReplyThreadClick: (eventId: string) => void;
   onOpenSenderProfile?: (senderUserId: string) => void;
+  onSenderContextMenu?: (event: React.MouseEvent, message: Message) => void;
   /** Resolve a user MXID to a display name (for mention pills). */
   resolveMemberLabel?: (userId: string) => string;
 }
@@ -115,6 +116,7 @@ const MessageRow = memo(function MessageRow({
   replyThread,
   onReplyThreadClick,
   onOpenSenderProfile,
+  onSenderContextMenu,
   resolveMemberLabel,
 }: MessageRowProps) {
   const { rowRef, preview } = useRssArticlePreview(rssArticle);
@@ -167,7 +169,10 @@ const MessageRow = memo(function MessageRow({
     >
       {/* Avatar column */}
       {!article && (
-        <div style={{ width: 40, flexShrink: 0 }}>
+        <div
+          style={{ width: 40, flexShrink: 0 }}
+          onContextMenu={showHeader && onSenderContextMenu ? (event) => onSenderContextMenu(event, msg) : undefined}
+        >
           {showHeader &&
             (onOpenSenderProfile ? (
               <button
@@ -218,6 +223,7 @@ const MessageRow = memo(function MessageRow({
                 type="button"
                 title="View profile"
                 onClick={() => onOpenSenderProfile(msg.sender)}
+                onContextMenu={onSenderContextMenu ? (event) => onSenderContextMenu(event, msg) : undefined}
                 style={{
                   margin: 0,
                   padding: 0,
@@ -235,6 +241,7 @@ const MessageRow = memo(function MessageRow({
               </button>
             ) : (
               <span
+                onContextMenu={onSenderContextMenu ? (event) => onSenderContextMenu(event, msg) : undefined}
                 style={{
                   fontWeight: typography.fontWeightMedium,
                   color: palette.textHeading,

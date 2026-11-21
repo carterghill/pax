@@ -144,7 +144,7 @@ export default function MainLayout({
     return applyStoredSpaceOrder(alphaSorted, storedSpaceOrder);
   }, [spaces, joinedSpaceIdSet, storedSpaceOrder]);
 
-  const { manualStatus, setManualStatus, effectivePresence, statusMessage, setStatusMessage } = usePresence();
+  const { manualStatus, setManualStatus, effectivePresence, statusMessage, setStatusMessage } = usePresence(userId);
   const voiceCall = useVoiceCall((roomId) => getRoom(roomId, true)?.roomType === VOICE_ROOM_TYPE);
   const { record: voiceRecovery, ready: voiceRecoveryReady, remember: rememberVoice, forget: forgetVoice } =
     useVoiceRecovery(userId);

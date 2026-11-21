@@ -9,7 +9,7 @@
 //! matrix-sdk 0.16 exposes some push-rule helpers via `client.account()` but
 //! falls short for our needs (updating `enabled` in isolation, preserving
 //! unknown fields on round-trip, PUTing arbitrary actions).  We go direct via
-//! `state.http_client` — same pattern as `commands::presence::sync_presence`.
+//! `state.http_client`.
 //!
 //! Higher-level concepts — notification *levels* like "All", "UserMentions",
 //! etc. — are not in this module.  Those live in

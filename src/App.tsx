@@ -4,6 +4,7 @@ import { invoke } from "@tauri-apps/api/core";
 import MainLayout from "./layouts/MainLayout";
 import { UserAvatarStoreProvider } from "./context/UserAvatarStore";
 import { NotificationSettingsProvider } from "./context/NotificationSettingsContext";
+import { IgnoredUsersProvider } from "./context/IgnoredUsersContext";
 import { VoicePresenceProvider } from "./context/VoicePresenceContext";
 import { RoomMemberStoreProvider } from "./context/RoomMemberStore";
 import { RoomDownloadsProvider } from "./context/RoomDownloadsContext";
@@ -455,11 +456,13 @@ function App() {
             <VoicePresenceProvider>
               <RoomMemberStoreProvider>
                 <RoomDownloadsProvider>
-                  <AuthedApp
-                    userId={userId}
-                    onSignOut={handleSignOut}
-                    loadingStyles={authStyles}
-                  />
+                  <IgnoredUsersProvider userId={userId}>
+                    <AuthedApp
+                      userId={userId}
+                      onSignOut={handleSignOut}
+                      loadingStyles={authStyles}
+                    />
+                  </IgnoredUsersProvider>
                 </RoomDownloadsProvider>
               </RoomMemberStoreProvider>
             </VoicePresenceProvider>

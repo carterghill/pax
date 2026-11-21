@@ -71,18 +71,14 @@ pub async fn get_room_members(
     .map_err(|_| "Room member lookup timed out".to_string())?
     .map_err(|e| format!("Failed to get members: {}", fmt_error_chain(&e)))?;
 
-    let presence_map = state.presence_map.lock().await.clone();
-    let status_msg_snapshot = state.status_msg_map.lock().await.clone();
     let mut result = Vec::with_capacity(members.len());
     for member in members {
         let user_id = member.user_id().to_string();
+        let (presence, status_msg) = state.presence.get(&user_id);
         result.push(RoomMemberInfo {
             avatar_url: state.avatars.cached(member.avatar_url()).await,
-            presence: presence_map
-                .get(&user_id)
-                .cloned()
-                .unwrap_or_else(|| "offline".into()),
-            status_msg: status_msg_snapshot.get(&user_id).cloned(),
+            presence,
+            status_msg,
             display_name: member.display_name().map(str::to_owned),
             user_id,
         });
@@ -104,8 +100,6 @@ pub async fn get_room_management_members(
         .await
         .map_err(|e| format!("Failed to get members: {}", fmt_error_chain(&e)))?;
 
-    let presence_map = state.presence_map.lock().await.clone();
-    let status_msg_snapshot = state.status_msg_map.lock().await.clone();
     let avatar_snapshot = state.file_cache.snapshot().await;
 
     let my_id = ac.client.user_id().ok_or("Not logged in")?;
@@ -118,6 +112,7 @@ pub async fn get_room_management_members(
         .iter()
         .map(|member| {
             let user_id = member.user_id().to_string();
+            let (presence, status_msg) = state.presence.get(&user_id);
             let avatar_url = member
                 .avatar_url()
                 .and_then(|mxc| avatar_snapshot.get(&mxc.to_string()).cloned());
@@ -140,11 +135,8 @@ pub async fn get_room_management_members(
                 user_id: user_id.clone(),
                 display_name: member.display_name().map(|n| n.to_string()),
                 avatar_url,
-                presence: presence_map
-                    .get(&user_id)
-                    .cloned()
-                    .unwrap_or_else(|| "offline".to_string()),
-                status_msg: status_msg_snapshot.get(&user_id).cloned(),
+                presence,
+                status_msg,
                 role: room_member_role_label(member),
                 can_kick,
                 can_ban,
@@ -232,20 +224,7 @@ pub async fn get_room_member_profile(
         None => None,
     };
 
-    let presence = state
-        .presence_map
-        .lock()
-        .await
-        .get(&member_user_id)
-        .cloned()
-        .unwrap_or_else(|| "offline".to_string());
-
-    let status_msg = state
-        .status_msg_map
-        .lock()
-        .await
-        .get(&member_user_id)
-        .cloned();
+    let (presence, status_msg) = state.presence.get(&member_user_id);
 
     let role = room_member_role_label(&member);
 

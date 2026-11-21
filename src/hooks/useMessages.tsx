@@ -1,7 +1,9 @@
-import { useEffect, useLayoutEffect, useState, useCallback, useRef } from "react";
+import { useEffect, useLayoutEffect, useState, useCallback, useMemo, useRef } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { useUserAvatarStoreOptional } from "../context/UserAvatarStore";
+import { useIgnoredUsers } from "../context/IgnoredUsersContext";
+import { projectMessages } from "../features/chat/messages/ignoredUsers";
 import { isTimelineNotice } from "../features/chat/messages/messageListUtils";
 import { projectCallHistory, trimTimelineWindow } from "../features/chat/messages/callHistory";
 import { Message, MessageBatch } from "../types/matrix";
@@ -397,6 +399,8 @@ export function clearMessageCache() {
 /* ------------------------------------------------------------------ */
 
 export function useMessages(roomId: string | null, currentUserId: string | null = null) {
+  const { userIds: ignoredUsers, revision: ignoreListRevision } = useIgnoredUsers();
+  const previousIgnoredUsers = useRef(ignoredUsers);
   // Feed the global user-avatar store from every message batch we fetch so
   // sidebars/members/headers can resolve sender avatars without a separate
   // round-trip. Clearing is delegated to the store's own event listeners
@@ -836,6 +840,14 @@ export function useMessages(roomId: string | null, currentUserId: string | null 
     }
   }, [roomId, commit]);
 
+  useEffect(() => {
+    const previous = previousIgnoredUsers.current;
+    previousIgnoredUsers.current = ignoredUsers;
+    const unignored = [...previous].some((id) => !ignoredUsers.has(id));
+    if (unignored) roomMessagesCache.clear();
+    if ((unignored || ignoredUsers.size > previous.size) && isAtLatestRef.current) void refresh();
+  }, [ignoredUsers, refresh]);
+
   // Restoring keys must also retry the timeline: undecryptable events may have
   // been omitted from an earlier fetch and cached as an empty room.
   useEffect(() => {
@@ -1104,9 +1116,13 @@ export function useMessages(roomId: string | null, currentUserId: string | null 
 
   const hasOlder = olderToken !== null;
   const showJumpToRecent = !isAtLatest || pendingRecentCount > 0;
+  const visibleMessages = useMemo(
+    () => projectMessages(messages, ignoredUsers, ignoreListRevision),
+    [messages, ignoredUsers, ignoreListRevision],
+  );
 
   return {
-    messages,
+    messages: visibleMessages,
     latestEventId: latestCursor.roomId === roomId ? latestCursor.eventId : null,
     loadOlder,
     loadNewer,

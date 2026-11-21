@@ -110,7 +110,6 @@ pub async fn logout(state: State<'_, Arc<AppState>>, app: tauri::AppHandle) -> R
     state.avatars.reset();
     state.file_cache.clear().await;
     crate::commands::unread::clear_unread_cache(state.inner()).await;
-    state.presence_map.lock().await.clear();
     *state.sync_running.lock().await = false;
 
     if let Err(error) = crate::app_badge::set_app_notification_count(app, 0, false) {

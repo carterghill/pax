@@ -1,6 +1,6 @@
 import { useEffect, useState, useCallback, useMemo } from "react";
 import { invoke } from "@tauri-apps/api/core";
-import { X, Loader2, MessageCircle, Copy, Shield, Crown, User, Calendar, Hash } from "lucide-react";
+import { X, Loader2, MessageCircle, Copy, Shield, Crown, User, Calendar, Hash, MoreHorizontal } from "lucide-react";
 import { useTheme } from "../theme/ThemeContext";
 import { paletteDialogOuterBorderStyle } from "../theme/paletteBorder";
 import Dialog from "./Dialog";
@@ -75,6 +75,7 @@ interface UserProfileDialogProps {
   onClose: () => void;
   /** Opens DM with this member (Element-style: room created on first send). Hidden for own profile. */
   onStartDirectMessage?: (peerUserId: string, displayNameHint: string) => void;
+  onOpenActions?: (event: React.MouseEvent, userId: string, displayName: string) => void;
 }
 
 function sameMatrixUser(a: string, b: string): boolean {
@@ -87,6 +88,7 @@ export default function UserProfileDialog({
   currentUserId,
   onClose,
   onStartDirectMessage,
+  onOpenActions,
 }: UserProfileDialogProps) {
   const { palette, typography, spacing, resolvedColorScheme } = useTheme();
   const { effectivePresence, statusMessage } = usePresenceContext();
@@ -218,6 +220,33 @@ export default function UserProfileDialog({
           >
             <X size={18} strokeWidth={2.25} />
           </button>
+          {!isSelf && onOpenActions && (
+            <button
+              type="button"
+              aria-label="User actions"
+              onClick={(event) => {
+                onOpenActions(event, userId, displayName ?? userId);
+                onClose();
+              }}
+              style={{
+                position: "absolute",
+                top: 10,
+                right: 52,
+                width: 34,
+                height: 34,
+                borderRadius: "50%",
+                border: "none",
+                backgroundColor: "rgba(0,0,0,0.45)",
+                color: "#fff",
+                display: "grid",
+                placeItems: "center",
+                zIndex: 2,
+                cursor: "pointer",
+              }}
+            >
+              <MoreHorizontal size={18} />
+            </button>
+          )}
           <div
             style={{
               position: "absolute",

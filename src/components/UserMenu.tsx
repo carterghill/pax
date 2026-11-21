@@ -4,26 +4,19 @@ import { listen } from "@tauri-apps/api/event";
 import { Check, X, Loader2 } from "lucide-react";
 import { useTheme } from "../theme/ThemeContext";
 import { useRoomMembers } from "../hooks/useRoomMembers";
+import { useIgnoredUsers } from "../context/IgnoredUsersContext";
 import type { RoomMembersChangedPayload } from "../types/matrix";
-import type { MemberModerationPermissions, RoomMember } from "../types/matrix";
+import type { RoomMember } from "../types/matrix";
 import { usePresenceContext } from "../hooks/PresenceContext";
 import { resolvePresenceWithDnd, parseStatusMsg, composeStatusMsg } from "../utils/statusMessage";
-import MemberContextMenu from "./MemberContextMenu";
-import UserProfileDialog from "./UserProfileDialog";
-import ModerationScopeDialog from "./ModerationScopeDialog";
 import UserAvatar from "./UserAvatar";
 
 interface UserMenuProps {
   width: number;
   roomId: string;
-  /** Display name of the room whose member list this is (for moderation dialog). */
-  roomName: string;
   userId: string;
-  /** When set, dialog can kick/ban across the whole space tree (space + rooms). */
-  moderationSpaceTreeRoomIds?: string[] | null;
-  moderationSpaceName?: string | null;
-  /** Open DM composer (room is created on first send, Element-style). */
-  onStartDirectMessage: (peerUserId: string, displayNameHint: string) => void;
+  onMemberContextMenu: MemberRowProps["onContextMenu"];
+  onOpenProfile: MemberRowProps["onOpenProfile"];
 }
 
 interface KnockMember {
@@ -164,30 +157,18 @@ function computeWindow(
 export default function UserMenu({
   width,
   roomId,
-  roomName,
   userId,
-  moderationSpaceTreeRoomIds = null,
-  moderationSpaceName = null,
-  onStartDirectMessage,
+  onMemberContextMenu,
+  onOpenProfile,
 }: UserMenuProps) {
   const { palette, typography, spacing } = useTheme();
   const { members, loading } = useRoomMembers(roomId);
+  const { userIds: ignoredUserIds } = useIgnoredUsers();
   const { effectivePresence, statusMessage: localStatusMessage, manualStatus } = usePresenceContext();
 
   // ── Knock requests state ──
   const [knockData, setKnockData] = useState<KnockMembersResponse | null>(null);
   const [actionInProgress, setActionInProgress] = useState<string | null>(null);
-  const [memberContextMenu, setMemberContextMenu] = useState<{
-    x: number; y: number; userId: string; displayName: string;
-  } | null>(null);
-  const [memberModeration, setMemberModeration] = useState<MemberModerationPermissions | null>(null);
-  const [moderationDialog, setModerationDialog] = useState<{
-    kind: "kick" | "ban";
-    targetUserId: string;
-    displayName: string;
-  } | null>(null);
-  const [moderationBusy, setModerationBusy] = useState(false);
-  const [profileUserId, setProfileUserId] = useState<string | null>(null);
   const activeRoomRef = useRef(roomId);
   activeRoomRef.current = roomId;
 
@@ -255,38 +236,8 @@ export default function UserMenu({
 
   useEffect(() => {
     setKnockData(null);
-    setMemberContextMenu(null);
-    setMemberModeration(null);
-    setProfileUserId(null);
     fetchKnocks();
   }, [roomId, fetchKnocks]);
-
-  useEffect(() => {
-    if (!memberContextMenu) {
-      setMemberModeration(null);
-      return;
-    }
-    const uid = memberContextMenu.userId;
-    if (uid.trim().toLowerCase() === userId.trim().toLowerCase()) {
-      setMemberModeration({ canKick: false, canBan: false });
-      return;
-    }
-    let cancelled = false;
-    setMemberModeration(null);
-    void invoke<MemberModerationPermissions>("get_member_moderation_permissions", {
-      roomId,
-      memberUserId: uid,
-    })
-      .then((p) => {
-        if (!cancelled) setMemberModeration(p);
-      })
-      .catch(() => {
-        if (!cancelled) setMemberModeration({ canKick: false, canBan: false });
-      });
-    return () => {
-      cancelled = true;
-    };
-  }, [memberContextMenu, roomId, userId]);
 
   useEffect(() => {
     const unlisten = listen<RoomMembersChangedPayload>("room-members-changed", (event) => {
@@ -317,73 +268,6 @@ export default function UserMenu({
     finally { setActionInProgress(null); }
   }, [roomId]);
 
-  const handleMemberContextMenu = useCallback(
-    (e: React.MouseEvent, uid: string, displayName: string) => {
-      setMemberContextMenu({ x: e.clientX, y: e.clientY, userId: uid, displayName });
-    }, []
-  );
-
-  const handleOpenMemberProfile = useCallback((uid: string) => {
-    setProfileUserId(uid);
-  }, []);
-
-  const handleStartDirectMessageFromMenu = useCallback(() => {
-    if (!memberContextMenu) return;
-    const peerId = memberContextMenu.userId;
-    const hint = memberContextMenu.displayName;
-    setMemberContextMenu(null);
-    onStartDirectMessage(peerId, hint);
-  }, [memberContextMenu, onStartDirectMessage]);
-
-  const handleKickFromMenu = useCallback(() => {
-    if (!memberContextMenu) return;
-    setModerationDialog({
-      kind: "kick",
-      targetUserId: memberContextMenu.userId,
-      displayName: memberContextMenu.displayName,
-    });
-    setMemberContextMenu(null);
-  }, [memberContextMenu]);
-
-  const handleBanFromMenu = useCallback(() => {
-    if (!memberContextMenu) return;
-    setModerationDialog({
-      kind: "ban",
-      targetUserId: memberContextMenu.userId,
-      displayName: memberContextMenu.displayName,
-    });
-    setMemberContextMenu(null);
-  }, [memberContextMenu]);
-
-  const runModeration = useCallback(
-    async (scope: "space" | "room") => {
-      if (!moderationDialog) return;
-      const { kind, targetUserId } = moderationDialog;
-      const roomIds =
-        scope === "space" && moderationSpaceTreeRoomIds && moderationSpaceTreeRoomIds.length > 0
-          ? moderationSpaceTreeRoomIds
-          : [roomId];
-      setModerationBusy(true);
-      try {
-        for (const rid of roomIds) {
-          try {
-            if (kind === "kick") {
-              await invoke("kick_user", { roomId: rid, userId: targetUserId, reason: null });
-            } else {
-              await invoke("ban_user", { roomId: rid, userId: targetUserId, reason: null });
-            }
-          } catch (e) {
-            console.error(`Moderation failed for room ${rid}:`, e);
-          }
-        }
-      } finally {
-        setModerationBusy(false);
-        setModerationDialog(null);
-      }
-    },
-    [moderationDialog, moderationSpaceTreeRoomIds, roomId],
-  );
-
   // Override current user's presence and statusMsg locally
   const displayMembers = useMemo(
     () => members.map((m) => (m.userId === userId ? {
@@ -397,9 +281,11 @@ export default function UserMenu({
   // ── Build flat virtual row list with offsets ──
   const { rows, offsets, totalHeight } = useMemo(() => {
     const resolveP = (m: RoomMember) => resolvePresenceWithDnd(m.presence, m.statusMsg);
-    const online = displayMembers.filter((m) => { const p = resolveP(m); return p === "online" || p === "dnd"; });
-    const unavailable = displayMembers.filter((m) => resolveP(m) === "unavailable");
-    const offline = displayMembers.filter((m) => resolveP(m) === "offline");
+    const ignored = displayMembers.filter((m) => ignoredUserIds.has(m.userId));
+    const unignored = displayMembers.filter((m) => !ignoredUserIds.has(m.userId));
+    const online = unignored.filter((m) => { const p = resolveP(m); return p === "online" || p === "dnd"; });
+    const unavailable = unignored.filter((m) => resolveP(m) === "unavailable");
+    const offline = unignored.filter((m) => resolveP(m) === "offline");
 
     const groups: { sectionKey: string; label: string; members: RoomMember[] }[] = [
       { sectionKey: "online", label: `Online — ${online.length}`, members: online },
@@ -407,6 +293,9 @@ export default function UserMenu({
         ? [{ sectionKey: "away", label: `Away — ${unavailable.length}`, members: unavailable }]
         : []),
       { sectionKey: "offline", label: `Offline — ${offline.length}`, members: offline },
+      ...(ignored.length > 0
+        ? [{ sectionKey: "ignored", label: `Ignored — ${ignored.length}`, members: ignored }]
+        : []),
     ];
 
     const r: VRow[] = [];
@@ -427,7 +316,7 @@ export default function UserMenu({
     offsetsRef.current = o;
 
     return { rows: r, offsets: o, totalHeight: h };
-  }, [displayMembers]);
+  }, [displayMembers, ignoredUserIds]);
 
   // Recompute visible window when rows change
   useEffect(() => {
@@ -472,11 +361,12 @@ export default function UserMenu({
                   key={knock.userId}
                   role="button"
                   tabIndex={0}
-                  onClick={() => setProfileUserId(knock.userId)}
+                  onClick={() => onOpenProfile(knock.userId)}
+                  onContextMenu={(event) => onMemberContextMenu(event, knock.userId, knock.displayName ?? knock.userId)}
                   onKeyDown={(e) => {
                     if (e.key === "Enter" || e.key === " ") {
                       e.preventDefault();
-                      setProfileUserId(knock.userId);
+                      onOpenProfile(knock.userId);
                     }
                   }}
                   style={{
@@ -589,8 +479,8 @@ export default function UserMenu({
                   <MemberRow
                     member={row.member}
                     avatarUrl={resolvedAvatar}
-                    onContextMenu={handleMemberContextMenu}
-                    onOpenProfile={handleOpenMemberProfile}
+                    onContextMenu={onMemberContextMenu}
+                    onOpenProfile={onOpenProfile}
                   />
                 </div>
               );
@@ -599,51 +489,6 @@ export default function UserMenu({
         )}
       </div>
 
-      {memberContextMenu && (
-        <MemberContextMenu
-          x={memberContextMenu.x} y={memberContextMenu.y}
-          displayName={memberContextMenu.displayName} userId={memberContextMenu.userId}
-          onClose={() => setMemberContextMenu(null)}
-          onProfile={() => {
-            const id = memberContextMenu.userId;
-            setMemberContextMenu(null);
-            setProfileUserId(id);
-          }}
-          onSendMessage={
-            memberContextMenu.userId.trim().toLowerCase() !== userId.trim().toLowerCase()
-              ? handleStartDirectMessageFromMenu
-              : undefined
-          }
-          moderation={memberModeration ?? undefined}
-          onKick={memberModeration?.canKick ? handleKickFromMenu : undefined}
-          onBan={memberModeration?.canBan ? handleBanFromMenu : undefined}
-        />
-      )}
-      {moderationDialog && (
-        <ModerationScopeDialog
-          kind={moderationDialog.kind}
-          targetDisplayName={moderationDialog.displayName}
-          currentRoomName={roomName}
-          showSpaceScope={!!moderationSpaceTreeRoomIds?.length}
-          spaceName={moderationSpaceName}
-          busy={moderationBusy}
-          onSpaceScope={() => void runModeration("space")}
-          onRoomOnly={() => void runModeration("room")}
-          onCancel={() => {
-            if (moderationBusy) return;
-            setModerationDialog(null);
-          }}
-        />
-      )}
-      {profileUserId && (
-        <UserProfileDialog
-          roomId={roomId}
-          userId={profileUserId}
-          currentUserId={userId}
-          onClose={() => setProfileUserId(null)}
-          onStartDirectMessage={onStartDirectMessage}
-        />
-      )}
     </>
   );
 }

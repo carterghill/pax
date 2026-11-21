@@ -79,6 +79,8 @@ pub struct MessageThreadSummary {
     pub count: u64,
     pub latest_event_id: Option<String>,
     pub latest_timestamp: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub ignore_list_revision: Option<u64>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
@@ -422,6 +424,7 @@ pub struct RoomPinPermission {
 #[serde(rename_all = "camelCase")]
 pub struct PinnedMessagePreview {
     pub event_id: String,
+    pub sender_user_id: Option<String>,
     pub sender: String,
     pub preview: String,
 }

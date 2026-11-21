@@ -405,6 +405,7 @@ pub(super) async fn receive_signals(
         return;
     };
     let now = now_ms();
+    let ignored = state.ignored_users.users(client).await;
     let mut incoming = Vec::new();
     for (room_id, update) in &response.rooms.joined {
         let call_events: Vec<_> = update
@@ -413,6 +414,9 @@ pub(super) async fn receive_signals(
             .iter()
             .filter_map(|event| {
                 let call = parse_call_event(event.raw())?;
+                if ignored.contains(&call.sender) {
+                    return None;
+                }
                 let expires_at = call.signal_expiry(now);
                 Some((
                     call,

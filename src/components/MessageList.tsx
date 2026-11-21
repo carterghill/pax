@@ -26,6 +26,7 @@ import { projectCallHistory } from "../features/chat/messages/callHistory";
 import { timelinePaginationEdge } from "../features/chat/messages/timelinePagination";
 import MembershipNoticeRow from "../features/chat/messages/MembershipNoticeRow";
 import MessageRow from "../features/chat/messages/MessageRow";
+import { useIgnoredUsers } from "../context/IgnoredUsersContext";
 import TimelineNoticeRow from "../features/chat/messages/TimelineNoticeRow";
 import { rssArticleCandidate, type RssArticleCandidate } from "../features/chat/messages/rssArticle";
 import { rssThreadReplyCount } from "../features/chat/messages/rssThreads";
@@ -98,6 +99,7 @@ interface MessageListProps {
   onPinnedStateChanged?: () => void;
   /** Opens the room member profile for the message sender (avatar + name). */
   onOpenSenderProfile?: (senderUserId: string) => void;
+  onSenderContextMenu?: (event: React.MouseEvent, message: Message) => void;
 }
 
 /* ------------------------------------------------------------------ */
@@ -154,10 +156,12 @@ const MessageList = forwardRef<MessageListHandle, MessageListProps>(function Mes
     pinnedEventIds = [],
     onPinnedStateChanged,
     onOpenSenderProfile,
+    onSenderContextMenu,
   },
   ref,
 ) {
   const { palette, typography, spacing, resolvedColorScheme } = useTheme();
+  const { userIds: ignoredUsers } = useIgnoredUsers();
   const { messages, anchors, missedCalls, readThroughEventId } = useMemo(
     () => projectCallHistory(timeline, latestEventId),
     [timeline, latestEventId],
@@ -227,15 +231,21 @@ const MessageList = forwardRef<MessageListHandle, MessageListProps>(function Mes
   });
 
   /* ---- UI state ---- */
-  const [mediaViewer, setMediaViewer] = useState<MediaViewerOpenPayload | null>(
+  const [mediaViewer, setMediaViewer] = useState<(MediaViewerOpenPayload & { senderId: string }) | null>(
     null,
   );
+  const visibleMedia = mediaViewer && !ignoredUsers.has(mediaViewer.senderId) ? mediaViewer : null;
   const reactionTooltipAnchorRef = useRef<HTMLElement | null>(null);
   const [reactionTooltip, setReactionTooltip] = useState<{
     left: number;
     top: number;
     lines: string[];
   } | null>(null);
+
+  useEffect(() => {
+    setMediaViewer((current) => current && ignoredUsers.has(current.senderId) ? null : current);
+    setReactionTooltip(null);
+  }, [ignoredUsers]);
 
   const syncReactionTooltipPosition = useCallback(() => {
     const el = reactionTooltipAnchorRef.current;
@@ -274,20 +284,16 @@ const MessageList = forwardRef<MessageListHandle, MessageListProps>(function Mes
 
   /* ---- Stable callbacks ---- */
   const openDirectImage = useCallback(
-    (url: string, title: string) => {
+    (url: string, title: string, senderId: string) => {
       setMediaViewer({
         kind: "image",
         directUrl: url,
         fileName: title || fileNameFromImageUrl(url),
         mimeType: /\.gif([?#]|$)/i.test(url) ? "image/gif" : null,
         roomId,
+        senderId,
       });
     },
-    [roomId],
-  );
-
-  const openMediaViewer = useCallback(
-    (p: MediaViewerOpenPayload) => setMediaViewer({ ...p, roomId }),
     [roomId],
   );
 
@@ -989,10 +995,10 @@ const MessageList = forwardRef<MessageListHandle, MessageListProps>(function Mes
               onRequestReply={() => onRequestReply(msg)}
               onOpenMenu={handleOpenMenu}
               onToggleReactionPicker={handleToggleReactionPicker}
-              onOpenMediaViewer={msg.historyRoomId
-                ? (payload) => setMediaViewer({ ...payload, roomId: msg.historyRoomId })
-                : openMediaViewer}
-              onOpenDirectImage={openDirectImage}
+              onOpenMediaViewer={(payload) => setMediaViewer({
+                ...payload, roomId: msg.historyRoomId ?? roomId, senderId: msg.sender,
+              })}
+              onOpenDirectImage={(url, title) => openDirectImage(url, title, msg.sender)}
               menuAnchorRef={menu.anchorRef}
               reactionPickerAnchorRef={reactionPicker.anchorRef}
               onReactionChipClick={(key, reactedByMe) => {
@@ -1009,6 +1015,7 @@ const MessageList = forwardRef<MessageListHandle, MessageListProps>(function Mes
               replyThread={replyDrawer ? null : getReplyThreadPreview(msg, messageByEventId)}
               onReplyThreadClick={(id) => onReplyPreviewClick(id, msg.historyRoomId)}
               onOpenSenderProfile={onOpenSenderProfile}
+              onSenderContextMenu={onSenderContextMenu}
               resolveMemberLabel={resolveMemberLabel}
             />
           </Fragment>
@@ -1219,9 +1226,9 @@ const MessageList = forwardRef<MessageListHandle, MessageListProps>(function Mes
 
       {/* Media viewer */}
       <MediaViewerModal
-        open={mediaViewer != null}
+        open={visibleMedia != null}
         onClose={() => setMediaViewer(null)}
-        payload={mediaViewer}
+        payload={visibleMedia}
       />
     </div>
   );

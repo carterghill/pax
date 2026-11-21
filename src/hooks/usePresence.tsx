@@ -32,16 +32,14 @@ function statusToDisplay(status: ManualStatus, systemIdle: boolean): string {
 // ~30 s SYNC_ONLINE_TIMEOUT.
 const HEARTBEAT_MS = 20_000;
 
-export function usePresence() {
+export function usePresence(userId: string) {
   const [manualStatus, setManualStatus] = useState<ManualStatus>("auto");
   const [systemIdle, setSystemIdle]     = useState(false);
-  const [syncReady, setSyncReady]       = useState(false);
   const [statusMessage, setStatusMessage] = useState("");
 
   // What was last sent to the server (for dedup on state changes).
   const lastSent = useRef({ presence: "", statusMsg: "" });
   const idleStarted = useRef(false);
-  const presenceFetched = useRef(false);
 
   // ── Helpers ──
 
@@ -54,10 +52,11 @@ export function usePresence() {
     invoke("set_presence", {
       presence,
       statusMsg: statusMsg || null,
+      expectedUserId: userId,
     }).catch((e) =>
       console.error("Failed to set presence:", e)
     );
-  }, []);
+  }, [userId]);
 
   // Bypass dedup — used by the heartbeat to re-PUT the same value.
   const heartbeat = useCallback(() => {
@@ -66,9 +65,10 @@ export function usePresence() {
       invoke("set_presence", {
         presence,
         statusMsg: statusMsg || null,
+        expectedUserId: userId,
       }).catch(() => {});
     }
-  }, []);
+  }, [userId]);
 
   // ── One-time setup ──
 
@@ -87,49 +87,47 @@ export function usePresence() {
     return () => { ul.then((fn) => fn()); };
   }, []);
 
-  // Flip syncReady once the first sync response has been processed.
+  // Subscribe before reading readiness so a first sync completed before
+  // MainLayout mounted still starts presence.
   useEffect(() => {
-    const ul = listen("sync-ready", () => setSyncReady(true));
-    return () => { ul.then((fn) => fn()); };
-  }, []);
+    let cancelled = false;
+    let receivedEvent = false;
+    const syncPresence = () => {
+      if (cancelled) return;
+      void invoke("sync_presence", { expectedUserId: userId }).catch((e) =>
+        console.error("Failed to sync presence:", e)
+      );
+    };
+    const unlisten = listen("sync-ready", () => {
+      receivedEvent = true;
+      syncPresence();
+    });
+    void unlisten.catch(() => {}).then(async () => {
+      if (cancelled || receivedEvent) return;
+      if (await invoke<boolean>("is_sync_ready") && !receivedEvent) syncPresence();
+    }).catch((e) => console.error("Failed to check sync readiness:", e));
+    return () => {
+      cancelled = true;
+      void unlisten.then((stop) => stop(), () => {});
+    };
+  }, [userId]);
 
   // ── Core presence logic ──
 
-  // Whenever the desired presence OR status message changes AND sync is ready, PUT it.
+  // Publishing our status only needs the signed-in session. The first sync
+  // can still be catching up or waiting on a connection.
   useEffect(() => {
-    if (!syncReady) return;
     const composed = composeStatusMsg(manualStatus === "dnd", statusMessage);
     sendPresence(statusToPresence(manualStatus, systemIdle), composed);
-  }, [manualStatus, systemIdle, syncReady, statusMessage, sendPresence]);
+  }, [manualStatus, systemIdle, statusMessage, sendPresence]);
 
   // Heartbeat: re-PUT periodically.  For "online" this is a redundant safety
   // net (the sync loop handles it); for manual statuses it's the primary
   // keep-alive since the sync uses set_presence=Offline for those.
   useEffect(() => {
-    if (!syncReady) return;
     const id = setInterval(heartbeat, HEARTBEAT_MS);
     return () => clearInterval(id);
-  }, [syncReady, heartbeat]);
-
-  // After first sync, bulk-fetch current presence for all room members.
-  // Covers the gap where restore_session resumes from a stored since-token
-  // and incremental syncs don't include users whose status hasn't changed.
-  useEffect(() => {
-    if (!syncReady || presenceFetched.current) return;
-    presenceFetched.current = true;
-    invoke("sync_presence").catch((e) =>
-      console.error("Failed to sync presence:", e)
-    );
-  }, [syncReady]);
-
-  // On unmount (tab close / navigation away from MainLayout), try to go
-  // offline.  Note: on full logout, auth.rs sends offline before clearing
-  // the client, so this is just a safety net for abnormal teardown.
-  useEffect(() => {
-    return () => {
-      invoke("set_presence", { presence: "offline", statusMsg: null }).catch(() => {});
-    };
-  }, []);
+  }, [heartbeat]);
 
   // ── Public state ──
 

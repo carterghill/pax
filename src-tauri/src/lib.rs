@@ -54,9 +54,9 @@ pub struct AppState {
     pub account_mode: Mutex<commands::pax_auth::AccountMode>,
     pub session_store_dir: Mutex<Option<String>>,
     pub encryption: commands::encryption::EncryptionService,
+    pub(crate) ignored_users: Arc<commands::ignored_users::IgnoredUsers>,
     pub http_client: reqwest::Client,
-    pub presence_map: Arc<Mutex<HashMap<String, String>>>,
-    pub status_msg_map: Arc<Mutex<HashMap<String, String>>>,
+    pub(crate) presence: Arc<commands::presence::PresenceCache>,
     pub file_cache: Arc<file_cache::FileCache>,
     pub avatars: Arc<avatars::AvatarService>,
     pub attachments: Arc<attachments::AttachmentCache>,
@@ -64,6 +64,7 @@ pub struct AppState {
     pub voice_presence: voice_presence::VoicePresenceService,
     direct_calls: commands::direct_calls::PendingDirectCalls,
     pub sync_running: Arc<Mutex<bool>>,
+    sync_ready: AtomicBool,
     /// Background `sync_with_callback` task — must be aborted before deleting the SQLite store
     /// or replacing `client`, otherwise the DB stays locked (especially on Windows).
     pub sync_join: Mutex<Option<JoinHandle<()>>>,
@@ -138,7 +139,11 @@ impl AppState {
             h.abort();
             let _ = h.await;
         }
-        *self.sync_running.lock().await = false;
+        let mut sync_running = self.sync_running.lock().await;
+        self.sync_ready.store(false, Ordering::Release);
+        self.presence.clear();
+        self.ignored_users.reset();
+        *sync_running = false;
     }
 }
 
@@ -304,6 +309,7 @@ pub fn run() {
     let file_cache = Arc::new(file_cache::FileCache::new());
     let state = Arc::new(AppState {
         encryption: commands::encryption::EncryptionService::default(),
+        ignored_users: Arc::default(),
         client: Mutex::new(None),
         account_mode: Mutex::new(commands::pax_auth::AccountMode::Matrix),
         session_store_dir: Mutex::new(None),
@@ -311,8 +317,7 @@ pub fn run() {
             .tcp_keepalive(Duration::from_secs(30))
             .build()
             .unwrap_or_else(|_| reqwest::Client::new()),
-        presence_map: Arc::new(Mutex::new(HashMap::new())),
-        status_msg_map: Arc::new(Mutex::new(HashMap::new())),
+        presence: Arc::default(),
         avatars: Arc::new(avatars::AvatarService::new(file_cache.clone())),
         attachments: Arc::new(attachments::AttachmentCache::new(attachments::RETAINED_BYTES)),
         notifications: commands::reconciler::NotificationService::default(),
@@ -320,6 +325,7 @@ pub fn run() {
         direct_calls: Default::default(),
         file_cache,
         sync_running: Arc::new(Mutex::new(false)),
+        sync_ready: AtomicBool::new(false),
         sync_join: Mutex::new(None),
         room_upgrade_operation: Mutex::new(()),
         voice_room: Mutex::new(None),
@@ -493,6 +499,8 @@ pub fn run() {
             commands::room_discovery::resolve_room_alias,
             commands::room_discovery::get_room_parent_spaces,
             commands::messages::get_messages,
+            commands::ignored_users::get_ignored_users,
+            commands::ignored_users::set_user_ignored,
             commands::media_files::get_matrix_image_path,
             commands::media_files::release_matrix_media,
             commands::media_files::clear_media_cache,
@@ -565,6 +573,7 @@ pub fn run() {
             commands::media_files::send_file_message,
             commands::media_files::upload_and_send_file,
             commands::presence::set_presence,
+            commands::presence::is_sync_ready,
             commands::presence::sync_presence,
             commands::presence::start_idle_monitor,
             commands::overlay::overlay_is_supported,

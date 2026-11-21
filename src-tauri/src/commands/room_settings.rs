@@ -219,8 +219,7 @@ pub async fn get_space_info(
                         if let Some((dname, dav, pid, pres, smsg)) = dm_one_to_one_peer_summary(
                             &r,
                             &avatars,
-                            &state.presence_map,
-                            &state.status_msg_map,
+                            &state.presence,
                         )
                         .await
                         {

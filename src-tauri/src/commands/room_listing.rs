@@ -4,10 +4,10 @@ use std::sync::Arc;
 use futures_util::stream::{self, StreamExt};
 use matrix_sdk::RoomMemberships;
 use tauri::State;
-use tokio::sync::Mutex;
 
 use crate::types::{RoomInfo, SpaceChildOrder};
 use crate::AppState;
+use super::presence::PresenceCache;
 
 use crate::room_relationships::{
     index_parent_spaces, load_space_children, ParentSpaces, SpaceChildMeta,
@@ -29,8 +29,7 @@ async fn build_room_info(
     room: &matrix_sdk::Room,
     parents: &ParentSpaces,
     avatars: &Arc<crate::avatars::AvatarService>,
-    presence_map: &Arc<Mutex<HashMap<String, String>>>,
-    status_msg_map: &Arc<Mutex<HashMap<String, String>>>,
+    presence: &PresenceCache,
     membership: &str,
 ) -> RoomInfo {
     let room_id_str = room.room_id().to_string();
@@ -84,7 +83,7 @@ async fn build_room_info(
     let mut dm_peer_status_msg: Option<String> = None;
 
     if let Some((dname, dav, pid, pres, smsg)) =
-        dm_one_to_one_peer_summary(room, avatars, presence_map, status_msg_map).await
+        dm_one_to_one_peer_summary(room, avatars, presence).await
     {
         name = dname;
         avatar_url = dav;
@@ -121,8 +120,7 @@ async fn build_room_info(
 pub(super) async fn dm_one_to_one_peer_summary(
     room: &matrix_sdk::Room,
     avatars: &Arc<crate::avatars::AvatarService>,
-    presence_map: &Arc<Mutex<HashMap<String, String>>>,
-    status_msg_map: &Arc<Mutex<HashMap<String, String>>>,
+    presence: &PresenceCache,
 ) -> Option<(String, Option<String>, String, String, Option<String>)> {
     if room.is_space() {
         return None;
@@ -149,13 +147,7 @@ pub(super) async fn dm_one_to_one_peer_summary(
         .map(|s| s.to_string())
         .unwrap_or_else(|| peer_id.clone());
     let avatar = avatars.cached(m.avatar_url()).await;
-    let presence = presence_map
-        .lock()
-        .await
-        .get(&peer_id)
-        .cloned()
-        .unwrap_or_else(|| "offline".to_string());
-    let status_msg = status_msg_map.lock().await.get(&peer_id).cloned();
+    let (presence, status_msg) = presence.get(&peer_id);
     Some((display, avatar, peer_id, presence, status_msg))
 }
 
@@ -165,9 +157,9 @@ pub async fn get_rooms(state: State<'_, Arc<AppState>>) -> Result<Vec<RoomInfo>,
 
     let joined_rooms = client.joined_rooms();
     let invited_rooms = client.invited_rooms();
+    let ignored = state.ignored_users.users(&client).await;
     let avatars = state.avatars.clone();
-    let presence_map = state.presence_map.clone();
-    let status_msg_map_rooms = state.status_msg_map.clone();
+    let presence = state.presence.clone();
 
     let space_rooms: Vec<matrix_sdk::Room> = joined_rooms
         .iter()
@@ -276,10 +268,9 @@ pub async fn get_rooms(state: State<'_, Arc<AppState>>) -> Result<Vec<RoomInfo>,
         stream::iter(joined_rooms.into_iter().enumerate().map(|(idx, room)| {
             let sc = parent_spaces.clone();
             let ac = avatars.clone();
-            let pm = presence_map.clone();
-            let sm = status_msg_map_rooms.clone();
+            let presence = presence.clone();
             async move {
-                let info = build_room_info(&room, &sc, &ac, &pm, &sm, "joined").await;
+                let info = build_room_info(&room, &sc, &ac, &presence, "joined").await;
                 (idx, info)
             }
         }))
@@ -293,16 +284,23 @@ pub async fn get_rooms(state: State<'_, Arc<AppState>>) -> Result<Vec<RoomInfo>,
     // Invited rooms (same pattern).
     let mut invited_parts: Vec<(usize, RoomInfo)> =
         stream::iter(invited_rooms.into_iter().enumerate().map(|(idx, room)| {
+            let ignored = ignored.clone();
             let sc = parent_spaces.clone();
             let ac = avatars.clone();
-            let pm = presence_map.clone();
-            let sm = status_msg_map_rooms.clone();
+            let presence = presence.clone();
             async move {
-                let info = build_room_info(&room, &sc, &ac, &pm, &sm, "invited").await;
-                (idx, info)
+                if !ignored.is_empty()
+                    && room.get_member_no_sync(room.own_user_id()).await.ok().flatten()
+                        .is_some_and(|invitee| ignored.contains(invitee.event().sender()))
+                {
+                    return None;
+                }
+                let info = build_room_info(&room, &sc, &ac, &presence, "invited").await;
+                Some((idx, info))
             }
         }))
         .buffer_unordered(GET_ROOMS_INFO_CONCURRENCY)
+        .filter_map(std::future::ready)
         .collect()
         .await;
 

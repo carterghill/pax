@@ -102,6 +102,7 @@ impl MessageThreadTarget {
 pub(super) fn thread_summary_from_bundle(bundle: &BundledThread) -> MessageThreadSummary {
     MessageThreadSummary {
         count: bundle.count.into(),
+        ignore_list_revision: None,
         latest_event_id: bundle.latest_event.get_field("event_id").ok().flatten(),
         latest_timestamp: bundle
             .latest_event

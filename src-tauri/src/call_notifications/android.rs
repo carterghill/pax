@@ -109,6 +109,14 @@ async fn inspect_event(base: PathBuf, room_id: String, event_id: String) -> Opti
     let client = push_client(&base).await?;
     let room = client.get_room(&room_id)?;
     let peer = direct_calls::direct_call_peer(&room).await?;
+    let ignored = if let Some(state) = APP.get().and_then(Weak::upgrade) {
+        state.ignored_users.users(&client).await.contains(&peer)
+    } else {
+        client.is_user_ignored(&peer).await
+    };
+    if ignored {
+        return Some(serde_json::json!({ "kind": "ignore" }));
+    }
     let context = room
         .event_with_context(&event_id, true, 24u32.into(), None)
         .await

@@ -3,6 +3,7 @@ import { listen } from "@tauri-apps/api/event";
 import { getRoomMessage } from "../api";
 import type { Message, RssProvider } from "../../../types/matrix";
 import type { RoomFeedSubscription } from "../../rss/api";
+import { useIgnoredUsers } from "../../../context/IgnoredUsersContext";
 import { rssArticleCandidate } from "./rssArticle";
 import { partitionRssTimeline, type RssThread } from "./rssThreads";
 
@@ -14,7 +15,8 @@ export function useRssThreads(
   messages: Message[],
   subscriptions?: readonly RoomFeedSubscription[],
 ) {
-  const key = roomId && provider ? JSON.stringify([roomId, provider.botUserId]) : null;
+  const { userIds: ignoredUsers, revision } = useIgnoredUsers();
+  const key = roomId && provider ? JSON.stringify([roomId, provider.botUserId, revision]) : null;
   const [loaded, setLoaded] = useState<{ key: string; messages: Map<string, Message | null> } | null>(null);
   const extraMessages = loaded?.key === key ? loaded.messages : empty;
 
@@ -69,7 +71,7 @@ export function useRssThreads(
       return { articles, ...partitionRssTimeline(messages, articles) };
     }
     const add = (root: Message) => {
-      const article = rssArticleCandidate(root, provider, subscriptions);
+      const article = ignoredUsers.has(root.sender) ? null : rssArticleCandidate(root, provider, subscriptions);
       if (article) {
         articles.set(root.eventId, { root, article });
       } else {
@@ -81,5 +83,5 @@ export function useRssThreads(
     }
     for (const message of messages) add(message);
     return { articles, ...partitionRssTimeline(messages, articles, extraMessages) };
-  }, [extraMessages, key, messages, provider, subscriptions]);
+  }, [extraMessages, ignoredUsers, key, messages, provider, subscriptions]);
 }

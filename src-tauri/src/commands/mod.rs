@@ -14,6 +14,7 @@ pub mod media_files;
 pub mod media_protocol;
 pub mod members;
 pub mod message_display;
+pub mod ignored_users;
 pub mod messages;
 pub mod notification_levels;
 pub mod notifications;

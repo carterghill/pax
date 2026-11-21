@@ -1,5 +1,5 @@
 use std::collections::{HashMap, HashSet};
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
 
 use matrix_sdk::deserialized_responses::{EncryptionInfo, TimelineEvent};
@@ -9,6 +9,8 @@ use matrix_sdk::room::IncludeRelations;
 use matrix_sdk::room::MessagesOptions;
 use matrix_sdk::room::RelationsOptions;
 use matrix_sdk::ruma::events::direct::DirectEventContent;
+use matrix_sdk::ruma::events::ignored_user_list::IgnoredUserListEvent;
+use matrix_sdk::ruma::events::presence::PresenceEvent;
 use matrix_sdk::ruma::events::reaction::ReactionEventContent;
 use matrix_sdk::ruma::events::relation::Annotation;
 use matrix_sdk::ruma::events::room::member::MembershipState;
@@ -51,6 +53,7 @@ use crate::types::{
 };
 use crate::AppState;
 
+use super::ignored_users::{hides_event, IgnoredUserIds};
 use super::message_display::{
     extract_message_display, membership_notice,
     reply_to_from_message_relation, thread_root_from_message_relation, thread_summary_from_bundle,
@@ -231,6 +234,7 @@ enum ReactionFoldOp {
 fn aggregate_reactions_from_timeline(
     events: &[TimelineEvent],
     my_user_id: Option<&UserId>,
+    ignored_users: &IgnoredUserIds,
 ) -> HashMap<String, Vec<MessageReactionSummary>> {
     let mut ops: Vec<ReactionFoldOp> = Vec::new();
     for ev in events {
@@ -241,6 +245,9 @@ fn aggregate_reactions_from_timeline(
         match raw {
             AnySyncTimelineEvent::MessageLike(AnySyncMessageLikeEvent::Reaction(r)) => {
                 if let SyncMessageLikeEvent::Original(o) = r {
+                    if ignored_users.contains(&o.sender) {
+                        continue;
+                    }
                     let ts: u64 = o.origin_server_ts.0.into();
                     let target = o.content.relates_to.event_id.to_string();
                     let key = o.content.relates_to.key.clone();
@@ -373,6 +380,7 @@ pub async fn get_messages(
 
     let client = get_client(&state).await?;
     let room = resolve_room(&client, &room_id)?;
+    let (ignore_list_revision, ignored) = state.ignored_users.snapshot(&client).await;
 
     let avatars = state.avatars.clone();
     let encrypted_room = room.encryption_state().is_encrypted();
@@ -464,21 +472,17 @@ pub async fn get_messages(
         //
         // Stop only when:
         //   * the server returns no `end` token at all (true start of room), or
-        //   * the server didn't advance `end` past what we just sent (defensive:
-        //     some homeservers echo the token when there is no more), or
-        //   * the chunk was completely empty (no events at all — treat as end,
-        //     otherwise an endlessly-repeating `end` token could spin us).
-        let chunk_len = chunk.len();
+        //   * the server didn't advance `end` past what we just sent.
+        // An empty page can still advance when the server filters events.
         let end_advanced = pagination_end.as_deref() != current_from.as_deref();
-        prev_batch = if chunk_len == 0 || !end_advanced {
-            None
-        } else {
-            pagination_end
-        };
+        prev_batch = pagination_end.filter(|_| end_advanced);
 
         for event in chunk {
             let position = timeline_event_count_total;
             timeline_event_count_total += 1;
+            if hides_event(&ignored, event.raw()) {
+                continue;
+            }
             if let Some(message) = unavailable_message(event.raw().json()) {
                 let sender = UserId::parse(&message.sender).expect("validated sender");
                 if seen_senders.insert(message.sender.clone()) {
@@ -555,7 +559,11 @@ pub async fn get_messages(
                         .relations
                         .thread
                         .as_deref()
-                        .map(thread_summary_from_bundle),
+                        .map(|bundle| {
+                            let mut summary = thread_summary_from_bundle(bundle);
+                            summary.ignore_list_revision = Some(ignore_list_revision);
+                            summary
+                        }),
                 });
             }
         }
@@ -582,7 +590,8 @@ pub async fn get_messages(
         current_from = prev_batch.clone();
     }
 
-    let reaction_map = aggregate_reactions_from_timeline(&events_for_reactions, client.user_id());
+    let reaction_map =
+        aggregate_reactions_from_timeline(&events_for_reactions, client.user_id(), &ignored);
 
     // Second pass: resolve display name + avatar once per unique sender
     let mut sender_meta: HashMap<String, (Option<String>, Option<String>)> = HashMap::new();
@@ -944,6 +953,7 @@ async fn build_message_infos_from_timeline_events(
     room: &Room,
     timeline_events: Vec<TimelineEvent>,
     avatars: &std::sync::Arc<crate::avatars::AvatarService>,
+    ignored: &IgnoredUserIds,
 ) -> Result<Vec<MessageInfo>, String> {
     struct RawMsg {
         position: usize,
@@ -966,13 +976,16 @@ async fn build_message_infos_from_timeline_events(
     let client = room.client();
     let me = client.user_id();
     let encrypted_room = room.encryption_state().is_encrypted();
-    let reaction_map = aggregate_reactions_from_timeline(&timeline_events, me);
+    let reaction_map = aggregate_reactions_from_timeline(&timeline_events, me, ignored);
     let mut rss = super::rss::activity::Filter::for_room(room).await;
     if let Some(filter) = &mut rss {
         filter.remember_commands(&timeline_events);
     }
 
     for (position, event) in timeline_events.into_iter().enumerate() {
+        if hides_event(ignored, event.raw()) {
+            continue;
+        }
         if let Some(message) = unavailable_message(event.raw().json()) {
             let sender = UserId::parse(&message.sender).expect("validated sender");
             if seen_senders.insert(message.sender.clone()) {
@@ -1150,6 +1163,7 @@ pub async fn get_pinned_message_previews(
     let client = get_client(&state).await?;
     let room = resolve_room(&client, &room_id)?;
     let ids = current_pinned_event_ids(&room).await?;
+    let ignored = state.ignored_users.users(&client).await;
     let mut rss = super::rss::activity::Filter::for_room(&room).await;
 
     let mut out = Vec::new();
@@ -1163,6 +1177,7 @@ pub async fn get_pinned_message_previews(
             Err(_) => {
                 out.push(PinnedMessagePreview {
                     event_id: id.to_string(),
+                    sender_user_id: None,
                     sender: String::new(),
                     preview: "Could not load message".to_string(),
                 });
@@ -1170,11 +1185,15 @@ pub async fn get_pinned_message_previews(
             }
         };
 
+        if hides_event(&ignored, ev.raw()) {
+            continue;
+        }
         let raw: AnySyncTimelineEvent = match ev.kind.raw().deserialize() {
             Ok(r) => r,
             Err(_) => {
                 out.push(PinnedMessagePreview {
                     event_id: id.to_string(),
+                    sender_user_id: None,
                     sender: String::new(),
                     preview: "Unsupported event".to_string(),
                 });
@@ -1230,6 +1249,7 @@ pub async fn get_pinned_message_previews(
 
         out.push(PinnedMessagePreview {
             event_id: id.to_string(),
+            sender_user_id: (!sender.is_empty()).then_some(sender),
             sender: display_sender,
             preview,
         });
@@ -1297,13 +1317,18 @@ pub async fn get_messages_around_event(
         .map_err(|e| format!("Failed to load message context: {}", fmt_error_chain(&e)))?;
 
     let mut ordered: Vec<TimelineEvent> = response.events_before.into_iter().rev().collect();
+    let ignored = state.ignored_users.users(&client).await;
     if let Some(ev) = response.event {
+        if hides_event(&ignored, ev.raw()) {
+            return Err("This message was sent by an ignored user.".into());
+        }
         ordered.push(ev);
     }
     ordered.extend(response.events_after);
 
     let avatars = state.avatars.clone();
-    let mut messages = build_message_infos_from_timeline_events(&room, ordered, &avatars).await?;
+    let mut messages =
+        build_message_infos_from_timeline_events(&room, ordered, &avatars, &ignored).await?;
     messages.reverse();
 
     Ok(MessageBatch {
@@ -1326,8 +1351,10 @@ pub async fn get_room_message(
         .load_or_fetch_event(&id, None)
         .await
         .map_err(|e| format!("Failed to load message: {}", fmt_error_chain(&e)))?;
+    let ignored = state.ignored_users.users(&client).await;
     let messages =
-        build_message_infos_from_timeline_events(&room, vec![event], &state.avatars).await?;
+        build_message_infos_from_timeline_events(&room, vec![event], &state.avatars, &ignored)
+            .await?;
     Ok(messages.into_iter().next())
 }
 
@@ -1378,8 +1405,9 @@ pub async fn get_rss_thread_replies(
             id.is_some_and(|id| ids.insert(id))
         })
         .collect();
+    let ignored = state.ignored_users.users(&client).await;
     let mut messages =
-        build_message_infos_from_timeline_events(&room, events, &state.avatars).await?;
+        build_message_infos_from_timeline_events(&room, events, &state.avatars, &ignored).await?;
     messages.sort_by_key(|message| message.timestamp);
     let mut reply_ids = HashSet::from([event_id.clone()]);
     messages.retain(|message| {
@@ -1637,19 +1665,62 @@ pub async fn start_sync(
 
     state.encryption.start(&client, app.clone()).await;
 
+    {
+        let app = app.clone();
+        let presence = state.presence.clone();
+        let self_id = client.user_id().map(ToOwned::to_owned);
+        client.add_event_handler(move |event: PresenceEvent| {
+            let app = app.clone();
+            let presence = presence.clone();
+            let is_self = self_id.as_ref() == Some(&event.sender);
+            async move {
+                if !is_self {
+                    presence.publish(&app, PresencePayload {
+                        user_id: event.sender.to_string(),
+                        presence: super::presence::presence_label(&event.content.presence).into(),
+                        status_msg: event.content.status_msg.filter(|msg| !msg.is_empty()),
+                    });
+                }
+            }
+        });
+    }
+
+    let ignored_users = state.ignored_users.clone();
+    let sync_ignore_revision = Arc::new(AtomicU64::new(ignored_users.revision()));
+    {
+        let ignored_users = ignored_users.clone();
+        let revision = sync_ignore_revision.clone();
+        let app = app.clone();
+        client.add_event_handler(move |ev: IgnoredUserListEvent, client: matrix_sdk::Client| {
+            let ignored_users = ignored_users.clone();
+            let revision = revision.load(Ordering::Relaxed);
+            let app = app.clone();
+            async move {
+                if let Err(error) = ignored_users.apply_sync(&app, &client, revision, ev.content).await {
+                    log::warn!("Could not reconcile the Matrix ignore list: {error}");
+                }
+            }
+        });
+    }
+
     // Handler for incoming room messages
     let app_handle = app.clone();
     let avatars = state.avatars.clone();
     let raw_unread_for_msg = state.raw_unread_messages.clone();
     let pending_reads_for_msg = state.pending_unavailable_reads.clone();
     let self_user_id_for_msg = client.user_id().map(|u| u.to_owned());
+    let ignored_for_msg = ignored_users.clone();
     client.add_event_handler(move |ev: OriginalSyncRoomMessageEvent, room: Room| {
         let app = app_handle.clone();
         let avatars = avatars.clone();
         let raw_unread = raw_unread_for_msg.clone();
         let pending_reads = pending_reads_for_msg.clone();
         let self_uid = self_user_id_for_msg.clone();
+        let ignored = ignored_for_msg.clone();
         async move {
+            if ignored.users(&room.client()).await.contains(&ev.sender) {
+                return;
+            }
             if super::rss::activity::hides_live_message(&room, &ev).await {
                 if reply_to_from_message_relation(&ev.content.relates_to).is_some() {
                     let _ = app.emit(super::rss::RSS_FEED_CHANGED, room.room_id().as_str());
@@ -1816,14 +1887,20 @@ pub async fn start_sync(
     {
         let app = app.clone();
         let pending = state.pending_unavailable_reads.clone();
+        let ignored = ignored_users.clone();
         client.add_event_handler(
             move |event: Raw<AnySyncTimelineEvent>,
                   room: Room,
                   encryption_info: Option<EncryptionInfo>| {
                 let app = app.clone();
                 let pending = pending.clone();
+                let ignored = ignored.clone();
                 async move {
                     if room.is_space() {
+                        return;
+                    }
+                    let users = ignored.users(&room.client()).await;
+                    if hides_event(&users, &event) {
                         return;
                     }
                     let message = match event.get_field::<&str>("type").ok().flatten() {
@@ -1866,6 +1943,7 @@ pub async fn start_sync(
         let pending = state.pending_unavailable_reads.clone();
         let raw = state.raw_unread_messages.clone();
         let avatars = state.avatars.clone();
+        let ignored = ignored_users.clone();
         client.add_event_handler(
             move |ev: matrix_sdk::ruma::events::room::encrypted::OriginalSyncRoomEncryptedEvent,
                   raw_event: matrix_sdk::event_handler::RawEvent,
@@ -1874,7 +1952,11 @@ pub async fn start_sync(
                 let pending = pending.clone();
                 let raw = raw.clone();
                 let avatars = avatars.clone();
+                let ignored = ignored.clone();
                 async move {
+                    if ignored.users(&room.client()).await.contains(&ev.sender) {
+                        return;
+                    }
                     let Some(mut message) = unavailable_message(&raw_event.0) else {
                         return;
                     };
@@ -1910,10 +1992,15 @@ pub async fn start_sync(
 
     // Incoming emoji reactions (m.reaction) — keep message rows in sync.
     let app_handle = app.clone();
+    let ignored_for_reactions = ignored_users.clone();
     client.add_event_handler(
         move |ev: OriginalSyncMessageLikeEvent<ReactionEventContent>, room: Room| {
             let app = app_handle.clone();
+            let ignored = ignored_for_reactions.clone();
             async move {
+                if ignored.users(&room.client()).await.contains(&ev.sender) {
+                    return;
+                }
                 if ev.content.relates_to.key == "✅"
                     && super::rss::activity::hides_live_confirmation(
                         &room,
@@ -2026,15 +2113,21 @@ pub async fn start_sync(
 
     // Handler for typing notifications
     let app_handle = app.clone();
+    let ignored_for_typing = ignored_users.clone();
     client.add_event_handler(move |ev: SyncTypingEvent, room: Room| {
         let app = app_handle.clone();
+        let ignored = ignored_for_typing.clone();
         async move {
             let room_id = room.room_id().to_string();
+            let ignored = ignored.users(&room.client()).await;
 
             let mut user_ids = Vec::new();
             let mut display_names = Vec::new();
 
             for uid in &ev.content.user_ids {
+                if ignored.contains(uid) {
+                    continue;
+                }
                 user_ids.push(uid.to_string());
                 let name = match room.get_member_no_sync(uid).await {
                     Ok(Some(member)) => member
@@ -2297,8 +2390,6 @@ pub async fn start_sync(
     }
 
     // Clone shared state needed inside the sync loop.
-    let presence_map = state.presence_map.clone();
-    let status_msg_map = state.status_msg_map.clone();
     let desired_presence = state.desired_presence.clone();
     let unread_cache = state.unread_cache.clone();
     let unread_projection = state.unread_projection.clone();
@@ -2306,7 +2397,6 @@ pub async fn start_sync(
     let pending_unavailable_reads = state.pending_unavailable_reads.clone();
     let reconcile_state_arc = state_arc.clone();
     let reconcile_gate_for_loop = reconcile_gate.clone();
-    let self_user_id = client.user_id().map(|u| u.to_string()).unwrap_or_default();
 
     // Spawn the continuous sync loop in the background.
     // Uses sync_once in a manual loop so we can read `desired_presence` on each
@@ -2337,9 +2427,13 @@ pub async fn start_sync(
             };
 
             // The SDK tracks the `since` token internally between sync_once calls.
-            let settings =
+            let mut settings =
                 matrix_sdk::config::SyncSettings::default().set_presence(set_presence_value);
+            if !first_sync_done {
+                settings = settings.timeout(std::time::Duration::ZERO);
+            }
 
+            sync_ignore_revision.store(ignored_users.revision(), Ordering::Relaxed);
             let response = match client.sync_once(settings).await {
                 Ok(r) => r,
                 Err(e) => {
@@ -2376,6 +2470,7 @@ pub async fn start_sync(
 
             if !first_sync_done {
                 first_sync_done = true;
+                reconcile_state_arc.sync_ready.store(true, Ordering::Release);
                 let _ = app.emit("sync-ready", ());
 
                 reconcile_gate_for_loop.store(true, Ordering::Release);
@@ -2409,49 +2504,6 @@ pub async fn start_sync(
                         &reconcile_state_arc,
                         &app,
                         &value,
-                    );
-                }
-            }
-
-            // Extract presence updates from the sync response.
-            // Skip our own user — we manage self-presence explicitly
-            // via set_presence PUTs + heartbeat, and sync echoes for
-            // self are racey/stale, causing the local display to flicker.
-            for raw_event in &response.presence {
-                if let Ok(ev) = raw_event.deserialize() {
-                    let user_id = ev.sender.to_string();
-                    if user_id == self_user_id {
-                        continue;
-                    }
-
-                    let presence_str = match ev.content.presence {
-                        matrix_sdk::ruma::presence::PresenceState::Online => "online",
-                        matrix_sdk::ruma::presence::PresenceState::Unavailable => "unavailable",
-                        _ => "offline",
-                    };
-
-                    presence_map
-                        .lock()
-                        .await
-                        .insert(user_id.clone(), presence_str.to_string());
-
-                    let status_msg_val = ev.content.status_msg.filter(|s| !s.is_empty());
-                    {
-                        let mut sm = status_msg_map.lock().await;
-                        if let Some(ref msg) = status_msg_val {
-                            sm.insert(user_id.clone(), msg.clone());
-                        } else {
-                            sm.remove(&user_id);
-                        }
-                    }
-
-                    let _ = app.emit(
-                        "presence",
-                        PresencePayload {
-                            user_id,
-                            presence: presence_str.to_string(),
-                            status_msg: status_msg_val,
-                        },
                     );
                 }
             }
