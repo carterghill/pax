@@ -15,6 +15,7 @@ import android.util.Log
 
 import android.webkit.JavascriptInterface
 import org.json.JSONObject
+import org.webrtc.ContextUtils
 import java.lang.ref.WeakReference
 
 class MainActivity : TauriActivity() {
@@ -35,6 +36,7 @@ class MainActivity : TauriActivity() {
   }
 
   override fun onCreate(savedInstanceState: Bundle?) {
+    ContextUtils.initialize(applicationContext)
     enableEdgeToEdge()
     super.onCreate(savedInstanceState)
     PaxCallNotifications.createChannel(this)

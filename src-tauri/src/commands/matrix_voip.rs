@@ -449,6 +449,9 @@ pub(super) async fn receive_signals(
             {
                 continue;
             }
+            if signal.from_peer {
+                log::info!("Matrix call received {}", signal.kind);
+            }
             incoming.push(signal.clone());
         }
     }
@@ -603,6 +606,7 @@ pub(crate) async fn send_matrix_voip_signal(
     .await
     .map_err(|_| "Sending the Matrix call signal timed out.".to_string())?
     .map_err(|error| format!("Could not send Matrix call signal: {error}"))?;
+    log::info!("Matrix call sent {kind}");
     Ok(())
 }
 
@@ -623,22 +627,33 @@ pub(crate) async fn open_matrix_voip_media(
     if current.is_some() {
         return Err("A Matrix call is already using audio.".into());
     }
-    let turn = tokio::time::timeout(
+    let ice_servers = match tokio::time::timeout(
         Duration::from_secs(4),
         client.send(get_turn_server_info::v3::Request::new()),
     )
     .await
-    .ok()
-    .and_then(Result::ok);
-    let ice_servers = turn
-        .filter(|turn| !turn.uris.is_empty())
-        .map(|turn| libwebrtc::peer_connection_factory::IceServer {
-            urls: turn.uris,
-            username: turn.username,
-            password: turn.password,
-        })
-        .into_iter()
-        .collect();
+    {
+        Ok(Ok(turn)) if !turn.uris.is_empty() => {
+            log::info!("Matrix call received {} ICE server URLs", turn.uris.len());
+            vec![libwebrtc::peer_connection_factory::IceServer {
+                urls: turn.uris,
+                username: turn.username,
+                password: turn.password,
+            }]
+        }
+        Ok(Ok(_)) => {
+            log::info!("Matrix homeserver did not provide any ICE servers");
+            vec![]
+        }
+        Ok(Err(_)) => {
+            log::warn!("Matrix homeserver ICE server request failed");
+            vec![]
+        }
+        Err(_) => {
+            log::warn!("Matrix homeserver ICE server request timed out");
+            vec![]
+        }
+    };
     let media = PeerMedia::open(&app, call_id, room_id, ice_servers)?;
     let local = media.setup(offer).await?;
     *current = Some(media);

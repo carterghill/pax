@@ -107,6 +107,16 @@ open class RustPlugin : Plugin<Project> {
 
                     buildTask.dependsOn(targetBuildTask)
 
+                    // Package the Java bindings from the same WebRTC build as the native library.
+                    val cargoTarget = if (rustcTarget == "armv7") "armv7-linux-androideabi" else "$rustcTarget-linux-android"
+                    val webRtcJar = files(file("${config.rootDirRel}/target/$cargoTarget/$profile/libwebrtc.jar"))
+                        .builtBy(targetBuildTask)
+                    dependencies.add("$gradleFlavor${profileCapitalized}Implementation", webRtcJar)
+                    if (index == 0) {
+                        // The Java classes are shared by all ABIs in the universal APK.
+                        dependencies.add("universal${profileCapitalized}Implementation", webRtcJar)
+                    }
+
                     val mergeTask =
                         tasks.findByName(
                             "merge${variantPrefix}${profileCapitalized}JniLibFolders",

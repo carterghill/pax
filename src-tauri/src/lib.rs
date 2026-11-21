@@ -237,6 +237,20 @@ fn install_panic_hook() {
     }));
 }
 
+#[cfg(target_os = "android")]
+#[no_mangle]
+unsafe extern "system" fn JNI_OnLoad(
+    vm: *mut jni::sys::JavaVM,
+    _reserved: *mut std::ffi::c_void,
+) -> jni::sys::jint {
+    // Android calls this once with the VM and the app's class loader available.
+    let Ok(vm) = (unsafe { jni::JavaVM::from_raw(vm) }) else {
+        return jni::sys::JNI_ERR;
+    };
+    libwebrtc::android::initialize_android(&vm);
+    jni::sys::JNI_VERSION_1_6
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     // On KDE Plasma running a native Wayland session, force GTK/GDK to use

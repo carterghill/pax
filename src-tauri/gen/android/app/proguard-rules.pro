@@ -26,3 +26,7 @@
 -keepclassmembers class com.carter.pax.MainActivity$PaxBridge {
     @android.webkit.JavascriptInterface <methods>;
 }
+
+# Native WebRTC looks up these classes and members by name.
+-keep class org.webrtc.** { *; }
+-keep class org.jni_zero.JniInit { *; }

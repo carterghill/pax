@@ -29,6 +29,19 @@ fn main() {
     tauri_build::build();
 
     let target_os = std::env::var("CARGO_CFG_TARGET_OS").unwrap_or_default();
+    if target_os == "android" {
+        for var in ["ANDROID_NDK_HOME", "NDK_HOME", "LK_CUSTOM_WEBRTC", "LK_DEBUG_WEBRTC"] {
+            println!("cargo:rerun-if-env-changed={var}");
+        }
+        if std::env::var_os("ANDROID_NDK_HOME").is_none() {
+            if let Some(ndk) = std::env::var_os("NDK_HOME") {
+                std::env::set_var("ANDROID_NDK_HOME", ndk);
+            }
+        }
+        // The WebRTC dependency's linker flags don't propagate to the app library.
+        webrtc_sys_build::configure_jni_symbols().expect("configure Android WebRTC JNI exports");
+    }
+
     if matches!(target_os.as_str(), "macos" | "ios") {
         let source = "src/call_notifications/apple.m";
         println!("cargo:rerun-if-changed={source}");

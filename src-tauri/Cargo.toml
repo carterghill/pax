@@ -18,6 +18,7 @@ crate-type = ["staticlib", "cdylib", "rlib"]
 tauri-build = { version = "2", features = [] }
 dotenvy = "0.15"
 cc = "1"
+webrtc-sys-build = "0.3.13"
 
 [dependencies]
 tauri = { version = "2", features = ["protocol-asset", "tray-icon", "image-png"] }
@@ -48,8 +49,6 @@ reqwest-middleware = { version = "0.4", default-features = false, features = [
 reqwest-retry = "0.7"
 urlencoding = "2"
 jsonwebtoken = "9"
-# LiveKit native voice (replaces browser-based livekit-client JS SDK)
-livekit = { version = "0.7", features = ["rustls-tls-native-roots"] }
 # Disable the default glib-main-loop feature since Tauri/GTK already runs one
 libwebrtc = { version = "0.3", default-features = false }
 cpal = "0.15"
@@ -104,7 +103,12 @@ gstreamer-app = "0.24"
 gstreamer-video = "0.24"
 gstreamer-pbutils = "0.24"
 
+[target.'cfg(not(target_os = "android"))'.dependencies]
+livekit = { version = "0.7", features = ["rustls-tls-native-roots"] }
+
 [target.'cfg(target_os = "android")'.dependencies]
+# Use the bundled public CA roots for LiveKit's Rust WebSocket client on Android.
+livekit = { version = "0.7", features = ["rustls-tls-webpki-roots"] }
 jni = "0.21"
 
 [patch.crates-io]

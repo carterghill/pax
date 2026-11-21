@@ -77,6 +77,7 @@ impl PeerMedia {
         let app_status = app.clone();
         let status_id = peer.id.clone();
         pc.on_connection_state_change(Some(Box::new(move |status| {
+            log::info!("Matrix WebRTC connection is {status:?}");
             let status = match status {
                 PeerConnectionState::Connected => "connected",
                 PeerConnectionState::Disconnected => "disconnected",
@@ -94,18 +95,24 @@ impl PeerMedia {
         let app_ice = app.clone();
         let ice_id = peer.id.clone();
         pc.on_ice_candidate(Some(Box::new(move |candidate| {
+            let candidate = Candidate::from(candidate);
+            log::info!("Matrix WebRTC gathered a {} ICE candidate", candidate.kind());
             let _ = app_ice.emit(
                 "matrix-voip-ice",
                 PeerCandidate {
                     call_id: &ice_id,
-                    candidate: Candidate::from(candidate),
+                    candidate,
                 },
             );
+        })));
+        pc.on_ice_candidate_error(Some(Box::new(|error| {
+            log::warn!("Matrix WebRTC ICE server reported code {}", error.error_code);
         })));
         let app_gathering = app.clone();
         let gathering_id = peer.id.clone();
         pc.on_ice_gathering_state_change(Some(Box::new(move |status| {
             if status == IceGatheringState::Complete {
+                log::info!("Matrix WebRTC finished gathering ICE candidates");
                 let _ = app_gathering.emit(
                     "matrix-voip-ice",
                     PeerCandidate {
@@ -257,6 +264,7 @@ impl PeerMedia {
             if candidate.candidate.is_empty() {
                 continue;
             }
+            let kind = candidate.kind();
             let coordinates = {
                 let mids = self.remote_mids.lock();
                 match (candidate.mid, candidate.line) {
@@ -273,10 +281,17 @@ impl PeerMedia {
                 }
             };
             let Some((mid, line)) = coordinates else {
+                log::warn!("Matrix WebRTC ignored a remote ICE candidate with no media section");
                 continue;
             };
             if let Ok(ice) = IceCandidate::parse(&mid, line, &candidate.candidate) {
-                let _ = self.pc.add_ice_candidate(ice).await;
+                if self.pc.add_ice_candidate(ice).await.is_ok() {
+                    log::info!("Matrix WebRTC applied a remote {kind} ICE candidate");
+                } else {
+                    log::warn!("Matrix WebRTC could not apply a remote ICE candidate");
+                }
+            } else {
+                log::warn!("Matrix WebRTC could not parse a remote ICE candidate");
             }
         }
     }
@@ -298,6 +313,18 @@ impl PeerMedia {
     }
 }
 
+impl Candidate {
+    fn kind(&self) -> &'static str {
+        match self.candidate.split_whitespace().nth(7) {
+            Some("host") => "host",
+            Some("srflx") => "server-reflexive",
+            Some("prflx") => "peer-reflexive",
+            Some("relay") => "relay",
+            _ => "unknown",
+        }
+    }
+}
+
 impl From<IceCandidate> for Candidate {
     fn from(candidate: IceCandidate) -> Self {
         let line = candidate.sdp_mline_index();
@@ -315,6 +342,7 @@ impl Drop for PeerMedia {
         self.streams.take();
         self.pc.on_connection_state_change(None);
         self.pc.on_ice_candidate(None);
+        self.pc.on_ice_candidate_error(None);
         self.pc.on_ice_gathering_state_change(None);
         self.pc.on_track(None);
         self.pc.close();
