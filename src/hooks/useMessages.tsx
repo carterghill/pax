@@ -3,6 +3,7 @@ import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { useUserAvatarStoreOptional } from "../context/UserAvatarStore";
 import { isTimelineNotice } from "../features/chat/messages/messageListUtils";
+import { projectCallHistory, trimTimelineWindow } from "../features/chat/messages/callHistory";
 import { Message, MessageBatch } from "../types/matrix";
 
 /* ------------------------------------------------------------------ */
@@ -58,7 +59,7 @@ export interface RoomMessageReactionPayload {
 /*  Constants                                                          */
 /* ------------------------------------------------------------------ */
 
-/** Absolute maximum messages held in JS memory for the active room. */
+/** Maximum visible rows in the active room; call signals share one row. */
 const WINDOW_SIZE = 100;
 
 /** Messages fetched per backward-pagination request. */
@@ -135,7 +136,7 @@ function trySaveRoomMessagesCache(
   if (!snapshot.isAtLatest || snapshot.hasLoadedOlder) return;
   const trimmed = snapshot.messages.filter((m) => !m.eventId.startsWith("local:"));
   if (trimmed.length === 0) return;
-  if (trimmed.length > INITIAL_LOAD_SIZE) return;
+  if (projectCallHistory(trimmed).messages.length > INITIAL_LOAD_SIZE) return;
   putRoomMessagesSnapshot(roomId, {
     messages: trimmed,
     olderToken: snapshot.olderToken,
@@ -480,7 +481,7 @@ export function useMessages(roomId: string | null, currentUserId: string | null 
         }
       }
       return {
-        messages: [...byId.values()].sort((a, b) => a.timestamp - b.timestamp).slice(-WINDOW_SIZE),
+        messages: trimTimelineWindow([...byId.values()].sort((a, b) => a.timestamp - b.timestamp), WINDOW_SIZE, "latest"),
         prevBatch: batch.prevBatch,
         latestEventId,
       };
@@ -629,9 +630,7 @@ export function useMessages(roomId: string | null, currentUserId: string | null 
         ) {
           next.sort((a, b) => a.timestamp - b.timestamp);
         }
-        if (next.length > WINDOW_SIZE) {
-          next = next.slice(next.length - WINDOW_SIZE);
-        }
+        next = trimTimelineWindow(next, WINDOW_SIZE, "latest");
       }
       primeAvatarsFromMessagesRef.current([message]);
       messagesRef.current = next;
@@ -736,8 +735,9 @@ export function useMessages(roomId: string | null, currentUserId: string | null 
       combined.sort((a, b) => a.timestamp - b.timestamp);
 
       let nextAtLatest = isAtLatestRef.current;
-      if (combined.length > WINDOW_SIZE) {
-        combined = combined.slice(0, WINDOW_SIZE);
+      const window = trimTimelineWindow(combined, WINDOW_SIZE, "oldest");
+      if (window.length < combined.length) {
+        combined = window;
         nextAtLatest = false;
       }
 
@@ -827,9 +827,7 @@ export function useMessages(roomId: string | null, currentUserId: string | null 
         return true;
       });
 
-      if (combined.length > WINDOW_SIZE) {
-        combined = combined.slice(combined.length - WINDOW_SIZE);
-      }
+      combined = trimTimelineWindow(combined, WINDOW_SIZE, "latest");
 
       commit(combined, batch.prevBatch, true);
       primeAvatarsFromMessagesRef.current(combined);
@@ -867,7 +865,7 @@ export function useMessages(roomId: string | null, currentUserId: string | null 
             || (message.timestamp >= snapshot[0].timestamp && message.timestamp <= snapshot[snapshot.length - 1].timestamp));
           const byId = new Map(messagesRef.current.map((message) => [message.eventId, message]));
           for (const message of recovered) byId.set(message.eventId, message);
-          const combined = [...byId.values()].sort((a, b) => a.timestamp - b.timestamp).slice(-WINDOW_SIZE);
+          const combined = trimTimelineWindow([...byId.values()].sort((a, b) => a.timestamp - b.timestamp), WINDOW_SIZE, "latest");
           commit(combined, snapshot.length === 0 ? batch.prevBatch : olderTokenRef.current, atLatest);
           primeAvatarsFromMessagesRef.current(recovered);
         } catch (error) {
@@ -904,10 +902,11 @@ export function useMessages(roomId: string | null, currentUserId: string | null 
       if (next.length >= 2 && next[next.length - 2].timestamp > msg.timestamp) {
         next = next.slice().sort((a, b) => a.timestamp - b.timestamp);
       }
-      if (next.length > WINDOW_SIZE) {
-        const dropped = next.slice(0, next.length - WINDOW_SIZE);
-        dropped.forEach(revokeLocalPreviewIfNeeded);
-        next = next.slice(next.length - WINDOW_SIZE);
+      const window = trimTimelineWindow(next, WINDOW_SIZE, "latest");
+      if (window !== next) {
+        const retained = new Set(window.map((message) => message.eventId));
+        next.filter((message) => !retained.has(message.eventId)).forEach(revokeLocalPreviewIfNeeded);
+        next = window;
       }
       messagesRef.current = next;
       return next;

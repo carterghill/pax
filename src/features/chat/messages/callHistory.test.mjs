@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { projectCallHistory } from "./callHistory.ts";
+import { projectCallHistory, trimTimelineWindow } from "./callHistory.ts";
 
 function signal(kind, eventId = `$${kind}`, callId = "a-call") {
   return { eventId, directCallNotice: { callId, kind } };
@@ -54,4 +54,59 @@ test("predecessor calls stay distinct and cannot send a receipt in the current r
 
   assert.deepEqual(history.messages, [predecessorRing, currentRing]);
   assert.equal(projectCallHistory([predecessorRing]).readThroughEventId, null);
+});
+
+function calls(count) {
+  return Array.from({ length: count }, (_, i) =>
+    ["ring", "answer", "connect", "end"].map((kind) => signal(kind, `$${i}-${kind}`, `call-${i}`)),
+  ).flat();
+}
+
+test("loading older call history does not evict the latest page at 100 raw signals", () => {
+  const older = calls(20);
+  const recent = calls(20).map((message) => ({
+    ...message,
+    eventId: `${message.eventId}-recent`,
+    directCallNotice: { ...message.directCallNotice, callId: `${message.directCallNotice.callId}-recent` },
+  }));
+  const combined = [...older, ...recent];
+  const window = trimTimelineWindow(combined, 100, "oldest");
+
+  assert.equal(window, combined, "no eviction means the hook stays at the latest page");
+  assert.equal(window.length, 160);
+  assert.equal(projectCallHistory(window).messages.length, 40);
+  assert.equal(projectCallHistory(window).readThroughEventId, recent.at(-1).eventId);
+});
+
+test("both window edges retain complete calls and cap visible rows", () => {
+  const timeline = calls(105);
+  for (const keep of ["oldest", "latest"]) {
+    const window = trimTimelineWindow(timeline, 100, keep);
+    const start = keep === "oldest" ? 0 : 5;
+    assert.deepEqual(window, timeline.slice(start * 4, (start + 100) * 4));
+    assert.equal(projectCallHistory(window).messages.length, 100);
+    assert.equal(projectCallHistory(window).missedCalls.size, 0);
+  }
+});
+
+test("trimming retains a kept call's outcome across intervening message rows", () => {
+  const timeline = [signal("ring"), { eventId: "$chat-1" }, { eventId: "$chat-2" }, signal("end")];
+  const window = trimTimelineWindow(timeline, 2, "oldest");
+  const history = projectCallHistory(window);
+
+  assert.deepEqual(window, [timeline[0], timeline[1], timeline[3]]);
+  assert.deepEqual(history.messages, [timeline[0], timeline[1]]);
+  assert.equal(history.missedCalls.has("$ring"), true);
+});
+
+test("text messages and predecessor calls each consume their own row", () => {
+  const previous = { ...signal("ring", "$previous"), historyRoomId: "!previous:example.org" };
+  const current = signal("ring");
+  const chat = { eventId: "$chat" };
+  const timeline = [previous, current, chat, signal("end")];
+
+  assert.deepEqual(trimTimelineWindow(timeline, 2, "latest"), [current, chat, timeline[3]]);
+  assert.deepEqual(trimTimelineWindow(timeline, 2, "oldest"), [previous, current, timeline[3]]);
+  assert.deepEqual(trimTimelineWindow([previous, current, chat], 2, "latest"), [current, chat]);
+  assert.deepEqual(trimTimelineWindow([previous, current, chat], 2, "oldest"), [previous, current]);
 });

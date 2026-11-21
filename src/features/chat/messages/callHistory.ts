@@ -58,3 +58,17 @@ export function projectCallHistory(timeline: Message[], latestEventId?: string |
     readThroughEventId: readThrough?.historyRoomId ? null : readThrough?.eventId ?? null,
   };
 }
+
+/** Bound visible rows while retaining every signal needed to render each call. */
+export function trimTimelineWindow(
+  timeline: Message[],
+  maxRows: number,
+  keep: "oldest" | "latest",
+): Message[] {
+  const { messages, anchors } = projectCallHistory(timeline);
+  if (messages.length <= maxRows) return timeline;
+
+  const rows = keep === "oldest" ? messages.slice(0, maxRows) : messages.slice(-maxRows);
+  const retained = new Set(rows.map((message) => message.eventId));
+  return timeline.filter((message) => retained.has(anchors.get(message.eventId) ?? message.eventId));
+}

@@ -23,6 +23,7 @@ import MediaViewerModal, {
 import { fileNameFromImageUrl } from "../utils/directImageUrl";
 import { useReadReceiptSender } from "../hooks/useReadReceiptSender";
 import { projectCallHistory } from "../features/chat/messages/callHistory";
+import { timelinePaginationEdge } from "../features/chat/messages/timelinePagination";
 import MembershipNoticeRow from "../features/chat/messages/MembershipNoticeRow";
 import MessageRow from "../features/chat/messages/MessageRow";
 import TimelineNoticeRow from "../features/chat/messages/TimelineNoticeRow";
@@ -437,6 +438,7 @@ const MessageList = forwardRef<MessageListHandle, MessageListProps>(function Mes
   /* ================================================================ */
 
   const anchorRef = useRef<{ id: string; viewportTop: number } | null>(null);
+  const previousScrollTopRef = useRef(0);
 
   useLayoutEffect(() => {
     const el = scrollContainerRef.current;
@@ -474,6 +476,8 @@ const MessageList = forwardRef<MessageListHandle, MessageListProps>(function Mes
     } else {
       anchorRef.current = null;
     }
+    // Layout adjustments after a prepend are not a scroll toward newer history.
+    previousScrollTopRef.current = el.scrollTop;
   }, [messages, initialLoading]);
 
   // Clear the anchor when switching rooms so the new room's first render
@@ -520,8 +524,14 @@ const MessageList = forwardRef<MessageListHandle, MessageListProps>(function Mes
     userId,
   );
 
-  const TRIGGER_THRESHOLD = 400;
   const COOLDOWN_MS = 500;
+
+  const loadOlderPreservingPosition = useCallback(() => {
+    cancelScrollAnimation();
+    shouldAutoScrollRef.current = false;
+    setAtBottom(false);
+    onLoadOlderRef.current();
+  }, [cancelScrollAnimation]);
 
   const tryTriggerLoadOlder = useCallback(() => {
     const el = scrollContainerRef.current;
@@ -529,7 +539,7 @@ const MessageList = forwardRef<MessageListHandle, MessageListProps>(function Mes
     if (loadCooldownRef.current) return;
     if (loadingOlderRef.current) return;
     if (!hasOlderRef.current) return;
-    if (el.scrollTop >= TRIGGER_THRESHOLD) return;
+    if (timelinePaginationEdge(el) !== "older") return;
 
     console.log("[MessageList] → triggering loadOlder", {
       scrollTop: Math.round(el.scrollTop),
@@ -538,8 +548,8 @@ const MessageList = forwardRef<MessageListHandle, MessageListProps>(function Mes
     setTimeout(() => {
       loadCooldownRef.current = false;
     }, COOLDOWN_MS);
-    onLoadOlderRef.current();
-  }, []);
+    loadOlderPreservingPosition();
+  }, [loadOlderPreservingPosition]);
 
   const tryTriggerLoadNewer = useCallback(() => {
     const el = scrollContainerRef.current;
@@ -547,12 +557,10 @@ const MessageList = forwardRef<MessageListHandle, MessageListProps>(function Mes
     if (loadCooldownRef.current) return;
     if (loadingOlderRef.current) return;
     if (isAtLatestRef.current) return;
-    const distFromBottom =
-      el.scrollHeight - el.scrollTop - el.clientHeight;
-    if (distFromBottom >= TRIGGER_THRESHOLD) return;
+    if (timelinePaginationEdge(el) !== "newer") return;
 
     console.log("[MessageList] → triggering loadNewer", {
-      distFromBottom: Math.round(distFromBottom),
+      distFromBottom: Math.round(el.scrollHeight - el.scrollTop - el.clientHeight),
     });
     loadCooldownRef.current = true;
     setTimeout(() => {
@@ -569,6 +577,8 @@ const MessageList = forwardRef<MessageListHandle, MessageListProps>(function Mes
       if (!el) return;
 
       const scrollTop = el.scrollTop;
+      const scrollingDown = scrollTop > previousScrollTopRef.current;
+      previousScrollTopRef.current = scrollTop;
       // Keep the prepend-preservation anchor fresh. Without this, the stored
       // viewportTop reflects whatever scroll position we were at the last
       // time `messages` changed (often the bottom, right after initial load)
@@ -610,7 +620,7 @@ const MessageList = forwardRef<MessageListHandle, MessageListProps>(function Mes
       });
 
       tryTriggerLoadOlder();
-      tryTriggerLoadNewer();
+      if (scrollingDown) tryTriggerLoadNewer();
     });
   }, [tryTriggerLoadOlder, tryTriggerLoadNewer, scrollAnimationRef]);
 
@@ -635,7 +645,7 @@ const MessageList = forwardRef<MessageListHandle, MessageListProps>(function Mes
   }, []);
 
   /* ================================================================ */
-  /*  Re-check triggers on load completion                             */
+  /*  Continue older pagination on load completion                     */
   /*                                                                   */
   /*  If user is still at scrollTop=0 after the load (either because   */
   /*  overflow-anchor didn't push them away, or because they're        */
@@ -647,15 +657,15 @@ const MessageList = forwardRef<MessageListHandle, MessageListProps>(function Mes
     const wasLoading = wasLoadingOlderRef.current;
     wasLoadingOlderRef.current = loadingOlder;
     if (wasLoading && !loadingOlder) {
-      console.log("[MessageList] load completed, re-checking triggers");
+      console.log("[MessageList] load completed, re-checking older history");
       // Defer one frame so overflow-anchor / measurement adjustments
       // land before we read scrollTop.
-      requestAnimationFrame(() => {
+      const frame = requestAnimationFrame(() => {
         tryTriggerLoadOlder();
-        tryTriggerLoadNewer();
       });
+      return () => cancelAnimationFrame(frame);
     }
-  }, [loadingOlder, tryTriggerLoadOlder, tryTriggerLoadNewer]);
+  }, [loadingOlder, tryTriggerLoadOlder]);
 
   /* ================================================================ */
   /*  Container resize: keep at bottom when shrinking                  */
@@ -883,7 +893,7 @@ const MessageList = forwardRef<MessageListHandle, MessageListProps>(function Mes
           ? loadingOlder
             ? "Loading older messages..."
             : replyDrawer || rssProvider || hasUpgradeHistory || messages.some(isTimelineNotice) ? (
-              <button type="button" onClick={onLoadOlder} style={{
+              <button type="button" onClick={loadOlderPreservingPosition} style={{
                 color: palette.textSecondary,
                 background: "none",
                 border: 0,
