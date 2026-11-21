@@ -39,6 +39,15 @@ fn main() {
             .compile("pax_call_notifications");
         println!("cargo:rustc-link-lib=framework=Foundation");
         if target_os == "ios" {
+            let source = "src/app_badge/ios.m";
+            println!("cargo:rerun-if-changed={source}");
+            cc::Build::new()
+                .file(source)
+                .flag("-fobjc-arc")
+                .flag("-fblocks")
+                .compile("pax_ios_badge");
+            println!("cargo:rustc-link-lib=framework=UIKit");
+            println!("cargo:rustc-link-lib=framework=UserNotifications");
             println!("cargo:rustc-link-lib=framework=CallKit");
             println!("cargo:rustc-link-lib=framework=PushKit");
         } else {
@@ -79,6 +88,7 @@ fn main() {
         "PAX_HIDE_SERVER_CONFIG",
         "PAX_PUSH_GATEWAY_URL",
         "PAX_IOS_VOIP_PUSH_GATEWAY_URL",
+        "PAX_IOS_BADGE_PUSH_GATEWAY_URL",
     ];
 
     for var in vars {

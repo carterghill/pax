@@ -152,6 +152,7 @@ function mergeFetchedRoomsPreserveNames(
 }
 
 export type RoomsForLayout = {
+  rooms: Room[];
   spaces: Room[];
   roomsBySpace: (spaceId: string | null) => Room[];
   getRoom: (roomId: string, includeHistory?: boolean) => Room | null;

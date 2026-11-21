@@ -35,6 +35,7 @@ import {
   pendingDmRoomId,
 } from "../utils/matrix";
 import { collectRoomIdsInSpaceTree } from "../utils/spaceModeration";
+import { setAppNotificationCount } from "../utils/appBadge";
 import { sortBySpaceChildOrder } from "../utils/spaceChildOrdering";
 import { useLivekitVoiceSnapshots } from "../hooks/useLivekitVoiceSnapshots";
 import { useMatrixUserProfile } from "../hooks/useMatrixUserProfile";
@@ -117,7 +118,7 @@ interface MainLayoutProps {
 export default function MainLayout({
   userId,
   onSignOut,
-  rooms: { spaces, roomsBySpace, getRoom, fetchRooms, upsertOptimisticRoom },
+  rooms: { rooms, spaces, roomsBySpace, getRoom, fetchRooms, upsertOptimisticRoom },
 }: MainLayoutProps) {
   const joinedSpaceIdSet = useMemo(() => {
     const ids = new Set<string>();
@@ -164,7 +165,7 @@ export default function MainLayout({
   // MainLayout so one subscription serves both the sidebar today and future
   // consumers (e.g. a window-title unread badge) without duplicating listeners.
   const roomUnread = useUnreadRooms(userId);
-  const { isUnread } = roomUnread;
+  const { hasSnapshot, isUnread, notificationCount } = roomUnread;
 
   // Badges use the same resolved levels as desktop notifications and server
   // rule maintenance, including direct-parent inheritance and link removal.
@@ -179,26 +180,24 @@ export default function MainLayout({
   // tree edges (direct children), `spaces` is the flat list of joined spaces.
   const {
     isSpaceUnread,
-    isSpaceNotified,
     isHomeUnread,
-    isHomeNotified,
     effectiveMentionCount,
     effectiveSpaceMentionCount,
     effectiveHomeMentionCount,
   } = useSpaceUnreadRollup(spaces, roomsBySpace, roomUnread, isRoomEffectivelyMuted);
 
-  // Tray icon: behaviour from notification settings (default: red = notify-worthy, blue = other unread).
-  useEffect(() => {
+  const { dot, count } = useMemo(() => {
     const hasUnread =
       isHomeUnread() ||
       topLevelSpaces.some(
         (s) => s.membership === "joined" && isSpaceUnread(s.id),
       );
-    const hasNotify =
-      isHomeNotified() ||
-      topLevelSpaces.some(
-        (s) => s.membership === "joined" && isSpaceNotified(s.id),
-      );
+    const count = rooms.reduce(
+      (sum, room) => room.membership === "joined" && !room.isSpace
+        ? sum + notificationCount(room.id)
+        : sum,
+      0,
+    );
     const mode: TrayUnreadIndicatorMode =
       notificationSettings.trayUnreadIndicator ?? "split";
     let dot: "none" | "red" | "blue" = "none";
@@ -207,26 +206,35 @@ export default function MainLayout({
         if (hasUnread) dot = "red";
         break;
       case "split":
-        if (hasNotify) dot = "red";
+        if (count > 0) dot = "red";
         else if (hasUnread) dot = "blue";
         break;
       case "notifyOnly":
-        if (hasNotify) dot = "red";
+        if (count > 0) dot = "red";
         break;
       case "never":
         break;
     }
-    void invoke("set_tray_unread_indicator", { dot }).catch(() => {
-      /* web / early startup */
-    });
+    return { dot, count };
   }, [
     isHomeUnread,
-    isHomeNotified,
     isSpaceUnread,
-    isSpaceNotified,
+    notificationCount,
+    rooms,
     topLevelSpaces,
     notificationSettings.trayUnreadIndicator,
   ]);
+
+  useEffect(() => {
+    void invoke("set_tray_unread_indicator", { dot }).catch(() => {
+      /* web / early startup */
+    });
+  }, [dot]);
+
+  const showOnDesktop = dot === "red";
+  useEffect(() => {
+    if (hasSnapshot) setAppNotificationCount(count, showOnDesktop);
+  }, [count, hasSnapshot, showOnDesktop]);
 
   useEffect(() => {
     return () => {

@@ -113,9 +113,11 @@ pub async fn logout(state: State<'_, Arc<AppState>>, app: tauri::AppHandle) -> R
     state.presence_map.lock().await.clear();
     *state.sync_running.lock().await = false;
 
+    if let Err(error) = crate::app_badge::set_app_notification_count(app, 0, false) {
+        log::warn!("[badge] failed to clear badge at sign-out: {error}");
+    }
     // A crypto store may contain the only remaining copy of a room key.
-    // Signing out must not delete it as if it were an ordinary message cache.
-    let _ = app;
+    // Preserve it when signing out.
     Ok(())
 }
 

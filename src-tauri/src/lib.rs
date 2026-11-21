@@ -3,6 +3,7 @@
 pub mod codec;
 mod avatars;
 mod attachments;
+mod app_badge;
 mod call_notifications;
 mod file_cache;
 mod commands;
@@ -632,8 +633,10 @@ pub fn run() {
             commands::push::unregister_pusher,
             commands::push::push_gateway_configured,
             commands::push::get_ios_voip_token,
+            commands::push::get_ios_badge_token,
             commands::push::get_fcm_token,
             commands::tray_indicator::set_tray_unread_indicator,
+            app_badge::set_app_notification_count,
             commands::lifecycle::exit_app,
             commands::lifecycle::hide_main_window,
             commands::lifecycle::get_close_window_preference,

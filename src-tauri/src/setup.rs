@@ -36,6 +36,8 @@ pub fn setup(app: &mut tauri::App) -> Result<(), Box<dyn std::error::Error>> {
     let main_window = app
         .get_webview_window("main")
         .expect("main window not found");
+    #[cfg(target_os = "windows")]
+    crate::app_badge::windows::initialize(&main_window);
     #[cfg(desktop)]
     {
         let icon = tauri::include_image!("icons/128x128.png");

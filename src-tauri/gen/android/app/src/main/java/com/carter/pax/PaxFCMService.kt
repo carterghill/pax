@@ -1,11 +1,9 @@
 package com.carter.pax
 
-import android.app.NotificationChannel
 import android.app.NotificationManager
 import android.app.PendingIntent
 import android.content.Context
 import android.content.Intent
-import android.os.Build
 import android.util.Log
 import androidx.core.app.NotificationCompat
 import com.carter.pax.R
@@ -31,7 +29,6 @@ class PaxFCMService : FirebaseMessagingService() {
     companion object {
         private const val TAG = "PaxFCM"
         private const val MAX_PREVIEW_LEN = 500
-        const val CHANNEL_ID = "pax_messages"
         const val PREFS_NAME = "pax_push"
         const val PREF_FCM_TOKEN = "fcm_token"
         private var notificationIdCounter = 0
@@ -39,7 +36,7 @@ class PaxFCMService : FirebaseMessagingService() {
 
     override fun onCreate() {
         super.onCreate()
-        createNotificationChannel()
+        PaxNotificationBadge.createChannels(this)
     }
 
     /**
@@ -68,7 +65,7 @@ class PaxFCMService : FirebaseMessagingService() {
     override fun onMessageReceived(message: RemoteMessage) {
         super.onMessageReceived(message)
         val data = message.data
-        if (data.isEmpty()) return
+        if (data.isEmpty() || !PaxNotificationBadge.sessionActive(this)) return
 
         val roomName = data["room_name"]?.trim()?.takeIf { it.isNotEmpty() }
         val roomAlias = data["room_alias"]?.trim()?.takeIf { it.isNotEmpty() }
@@ -77,7 +74,12 @@ class PaxFCMService : FirebaseMessagingService() {
         val roomId = data["room_id"] ?: ""
         val eventId = data["event_id"]?.trim()?.takeIf { it.isNotEmpty() } ?: ""
         val type = data["type"]
-        if (eventId.isEmpty() && type == null && ("unread" in data || "missed_calls" in data)) return
+        val unreadCount = data["unread"]?.toLongOrNull()?.takeIf { it >= 0 }
+            ?.coerceAtMost(Int.MAX_VALUE.toLong())?.toInt()
+        if (eventId.isEmpty() && type.isNullOrBlank() && ("unread" in data || "missed_calls" in data)) {
+            unreadCount?.let { PaxNotificationBadge.sync(this, it) }
+            return
+        }
 
         val directCallEvent = type == "com.carter.pax.direct_call"
         if ((directCallEvent || type == "m.room.encrypted" || type == null) &&
@@ -108,6 +110,7 @@ class PaxFCMService : FirebaseMessagingService() {
                             ringEventId,
                             getString(R.string.pax_missed_call),
                             call.caller,
+                            unreadCount,
                             missedCallId = call.id,
                         )
                         return
@@ -142,7 +145,7 @@ class PaxFCMService : FirebaseMessagingService() {
             }
         }
 
-        postNotification(roomId, eventId, title, body)
+        postNotification(roomId, eventId, title, body, unreadCount)
     }
 
     private fun postNotification(
@@ -150,6 +153,7 @@ class PaxFCMService : FirebaseMessagingService() {
         eventId: String,
         title: String,
         body: String,
+        unreadCount: Int?,
         missedCallId: String? = null,
     ) {
         // Tap opens the app (MainActivity is singleTask, so it'll reuse the existing instance).
@@ -165,9 +169,11 @@ class PaxFCMService : FirebaseMessagingService() {
         )
 
         val manager = getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager
+        val tag = missedCallId?.let { "missed:$it" } ?: eventId.takeIf { it.isNotEmpty() }
+        PaxNotificationBadge.onMessage(this, unreadCount, tag)
 
         fun buildNotification(smallIcon: Int) =
-            NotificationCompat.Builder(this, CHANNEL_ID)
+            NotificationCompat.Builder(this, PaxNotificationBadge.ALERTS)
                 .setSmallIcon(smallIcon)
                 .setContentTitle(title)
                 .setContentText(body)
@@ -183,27 +189,12 @@ class PaxFCMService : FirebaseMessagingService() {
                 }
                 .build()
 
-        val tag = missedCallId?.let { "missed:$it" } ?: eventId.takeIf { it.isNotEmpty() }
         val id = if (tag == null) notificationIdCounter++ else 0
         try {
             manager.notify(tag, id, buildNotification(R.drawable.ic_stat_pax))
         } catch (e: RuntimeException) {
             Log.w(TAG, "Posting notification with ic_stat_pax failed; using system fallback icon", e)
             manager.notify(tag, id, buildNotification(android.R.drawable.ic_dialog_info))
-        }
-    }
-
-    private fun createNotificationChannel() {
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
-            val channel = NotificationChannel(
-                CHANNEL_ID,
-                "Messages",
-                NotificationManager.IMPORTANCE_HIGH
-            ).apply {
-                description = "Matrix message notifications"
-            }
-            val manager = getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager
-            manager.createNotificationChannel(channel)
         }
     }
 

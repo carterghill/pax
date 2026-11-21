@@ -1,4 +1,4 @@
-//! Android push-notification plumbing: Matrix pusher registration.
+//! Matrix pusher registration for FCM, iOS VoIP, and iOS badges.
 //!
 //! The flow is:
 //!   1. Kotlin `MainActivity` fetches the FCM device token and injects it
@@ -42,10 +42,19 @@ const APP_ID: &str = if cfg!(target_os = "ios") {
     "com.carter.pax"
 };
 
+const IOS_BADGE_APP_ID: &str = "com.carter.pax.badge";
+
+fn badge_gateway_url() -> Option<&'static str> {
+    #[cfg(target_os = "ios")]
+    return option_env!("PAX_IOS_BADGE_PUSH_GATEWAY_URL");
+    #[cfg(not(target_os = "ios"))]
+    return None;
+}
+
 /// Human-readable name shown in the homeserver's pusher list.
 const APP_DISPLAY_NAME: &str = "Pax";
 
-/// Register an FCM push token as a Matrix pusher on the user's homeserver.
+/// Register a mobile push token as a Matrix pusher on the user's homeserver.
 ///
 /// Called by the frontend after login / session restore / token refresh.
 /// Safe to call multiple times with the same token — the homeserver
@@ -55,9 +64,15 @@ pub async fn register_pusher(
     state: State<'_, Arc<AppState>>,
     push_key: String,
     device_display_name: String,
+    badge_only: Option<bool>,
 ) -> Result<(), String> {
-    let gateway_url = push_gateway_url()
-        .ok_or("No push gateway URL configured for this platform")?;
+    let badge_only = badge_only.unwrap_or(false);
+    let (app_id, gateway_url) = if badge_only {
+        (IOS_BADGE_APP_ID, badge_gateway_url())
+    } else {
+        (APP_ID, push_gateway_url())
+    };
+    let gateway_url = gateway_url.ok_or("No push gateway URL configured for this platform")?;
 
     let ac = super::get_authed_client(&state).await?;
 
@@ -66,15 +81,18 @@ pub async fn register_pusher(
         ac.homeserver
     );
 
-    // Omit `format` / skip `event_id_only` so the homeserver sends the full
-    // push-gateway notification (sender, room_name, content, …). Sygnal maps
-    // those fields into the FCM data payload for PaxFCMService.
+    // Android previews and the existing VoIP gateway use the full payload.
+    // The badge gateway needs only the event ID and notification count.
+    let mut data = serde_json::json!({
+        "url": format!("{}/_matrix/push/v1/notify", gateway_url.trim_end_matches('/'))
+    });
+    if badge_only {
+        data["format"] = serde_json::json!("event_id_only");
+    }
     let body = serde_json::json!({
         "app_display_name": APP_DISPLAY_NAME,
-        "app_id": APP_ID,
-        "data": {
-            "url": format!("{}/_matrix/push/v1/notify", gateway_url.trim_end_matches('/'))
-        },
+        "app_id": app_id,
+        "data": data,
         "device_display_name": device_display_name,
         "kind": "http",
         "lang": "en",
@@ -99,6 +117,9 @@ pub async fn register_pusher(
     }
 
     log::info!("[push] pusher registered successfully");
+    if badge_only {
+        return Ok(());
+    }
 
     // Encrypted room events already use the homeserver's encrypted-message rules.
     // Unencrypted Pax calls need a rule below room-level notification preferences.
@@ -125,7 +146,7 @@ pub async fn register_pusher(
     Ok(())
 }
 
-/// Remove the FCM pusher from the homeserver.
+/// Remove a mobile pusher from the homeserver.
 ///
 /// Called on logout so the server stops sending pushes to a device
 /// the user has signed out of.  `kind: null` tells the server to
@@ -134,6 +155,7 @@ pub async fn register_pusher(
 pub async fn unregister_pusher(
     state: State<'_, Arc<AppState>>,
     push_key: String,
+    badge_only: Option<bool>,
 ) -> Result<(), String> {
     let ac = super::get_authed_client(&state).await?;
 
@@ -143,7 +165,7 @@ pub async fn unregister_pusher(
     );
 
     let body = serde_json::json!({
-        "app_id": APP_ID,
+        "app_id": if badge_only.unwrap_or(false) { IOS_BADGE_APP_ID } else { APP_ID },
         "kind": null,
         "pushkey": push_key
     });
@@ -222,8 +244,22 @@ pub async fn get_fcm_token(app: tauri::AppHandle) -> Result<Option<String>, Stri
 /// Returns whether push notifications are configured for this build.
 /// The frontend uses this to decide whether to attempt registration.
 #[tauri::command]
-pub fn push_gateway_configured() -> bool {
-    push_gateway_url().is_some()
+pub fn push_gateway_configured(badge_only: Option<bool>) -> bool {
+    if badge_only.unwrap_or(false) {
+        badge_gateway_url().is_some()
+    } else {
+        push_gateway_url().is_some()
+    }
+}
+
+#[tauri::command]
+pub fn get_ios_badge_token(app: tauri::AppHandle) -> Option<String> {
+    #[cfg(target_os = "ios")]
+    if badge_gateway_url().is_some() {
+        return crate::app_badge::ios::push_token(app);
+    }
+    let _ = app;
+    None
 }
 
 #[tauri::command]

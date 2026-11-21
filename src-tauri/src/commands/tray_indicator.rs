@@ -1,5 +1,6 @@
-//! System tray unread indicator (desktop): composite a small dot onto the tray icon.
+//! Desktop unread indicator for the system tray icon.
 
+#[cfg(desktop)]
 use std::sync::OnceLock;
 
 use serde::Deserialize;
@@ -94,7 +95,7 @@ fn set_tray_unread_indicator_impl(app: AppHandle, dot: TrayIndicatorDot) -> Resu
     Ok(())
 }
 
-/// Updates tray icon + tooltip: no dot, red (notifications), or blue (unread only).
+/// Updates the tray icon and tooltip.
 #[tauri::command]
 pub fn set_tray_unread_indicator(app: AppHandle, dot: TrayIndicatorDot) -> Result<(), String> {
     #[cfg(not(desktop))]

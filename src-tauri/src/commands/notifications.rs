@@ -61,6 +61,10 @@ pub async fn notify_send(
     icon_path: Option<String>,
 ) -> Result<(), String> {
     let mut builder = app.notification().builder().title(&title).body(&body);
+    #[cfg(target_os = "android")]
+    {
+        builder = builder.channel_id("pax_message_alerts");
+    }
     if let Some(path) = icon_path.as_ref() {
         builder = builder.icon(path);
     }

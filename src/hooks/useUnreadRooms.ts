@@ -34,6 +34,7 @@ interface RoomUnreadChangedPayload extends RoomUnreadState {
 }
 
 export interface UnreadRoomsApi {
+  hasSnapshot: boolean;
   /**
    * True when the room has unread messages OR has been explicitly marked unread.
    * Uses `messages` (not `notifications`) so a chatty-but-unmuted room still
@@ -70,19 +71,22 @@ export interface UnreadRoomsApi {
  */
 export function useUnreadRooms(userId: string | null): UnreadRoomsApi {
   const mapRef = useRef<Map<string, RoomUnreadState>>(new Map());
+  const [hasSnapshot, setHasSnapshot] = useState(false);
   const [version, setVersion] = useState(0);
-  const bumpRafRef = useRef<number | null>(null);
+  const bumpTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   /** Coalesce bursts (e.g. initial seed over dozens of rooms) into one render. */
   const scheduleBump = useCallback(() => {
-    if (bumpRafRef.current !== null) return;
-    bumpRafRef.current = requestAnimationFrame(() => {
-      bumpRafRef.current = null;
+    // App icon badges still need updates when the window is hidden.
+    if (bumpTimerRef.current !== null) return;
+    bumpTimerRef.current = setTimeout(() => {
+      bumpTimerRef.current = null;
       setVersion((v) => v + 1);
-    });
+    }, 0);
   }, []);
 
   useEffect(() => {
+    setHasSnapshot(false);
     if (!userId) {
       mapRef.current.clear();
       scheduleBump();
@@ -100,7 +104,8 @@ export function useUnreadRooms(userId: string | null): UnreadRoomsApi {
         );
         if (cancelled) return;
         mapRef.current = new Map(Object.entries(all));
-        scheduleBump();
+        setHasSnapshot(true);
+        setVersion((v) => v + 1);
       } catch (e) {
         // Non-fatal: a future room-unread-changed event will populate entries
         // lazily.  Log so regressions don't hide.
@@ -136,9 +141,9 @@ export function useUnreadRooms(userId: string | null): UnreadRoomsApi {
       cancelled = true;
       unlistenChanged?.();
       unlistenSyncReady?.();
-      if (bumpRafRef.current !== null) {
-        cancelAnimationFrame(bumpRafRef.current);
-        bumpRafRef.current = null;
+      if (bumpTimerRef.current !== null) {
+        clearTimeout(bumpTimerRef.current);
+        bumpTimerRef.current = null;
       }
     };
   }, [userId, scheduleBump]);
@@ -178,7 +183,7 @@ export function useUnreadRooms(userId: string | null): UnreadRoomsApi {
     [version]
   );
 
-  return { isUnread, notificationCount, mentionCount, messageCount };
+  return { hasSnapshot, isUnread, notificationCount, mentionCount, messageCount };
 }
 
 /** Hint type for callers that want to store the latest snapshot outside React. */
@@ -202,15 +207,11 @@ export interface RoomForRollup {
 export interface SpaceUnreadRollupApi {
   /** True when the space (or any descendant space/room) has unread activity. */
   isSpaceUnread: (spaceId: string) => boolean;
-  /** True when any descendant room has notification-worthy unread (`notifications` > 0). */
-  isSpaceNotified: (spaceId: string) => boolean;
   /** Sum of raw mentions across descendant rooms.  Use `effectiveSpaceMentionCount`
    *  for the sidebar badge — it also counts unread DM messages. */
   spaceMentionCount: (spaceId: string) => number;
   /** True when any room outside every joined space has unread activity (Home indicator). */
   isHomeUnread: () => boolean;
-  /** Home rollup for notification-worthy unread. */
-  isHomeNotified: () => boolean;
   /** Sum of raw mentions across rooms outside every joined space. */
   homeMentionCount: () => number;
   /**
@@ -267,7 +268,7 @@ export function useSpaceUnreadRollup(
    */
   isRoomEffectivelyMuted: (roomId: string) => boolean,
 ): SpaceUnreadRollupApi {
-  const { isUnread, notificationCount, mentionCount, messageCount } = roomUnread;
+  const { isUnread, mentionCount, messageCount } = roomUnread;
 
   const joinedSpaceIdSet = useMemo(() => {
     const s = new Set<string>();
@@ -310,26 +311,6 @@ export function useSpaceUnreadRollup(
       return walk(spaceId);
     },
     [roomsBySpace, isUnread],
-  );
-
-  const isSpaceNotified = useCallback(
-    (spaceId: string): boolean => {
-      const visited = new Set<string>();
-      const walk = (sid: string): boolean => {
-        if (visited.has(sid)) return false;
-        visited.add(sid);
-        for (const child of roomsBySpace(sid)) {
-          if (child.isSpace) {
-            if (walk(child.id)) return true;
-          } else {
-            if (notificationCount(child.id) > 0) return true;
-          }
-        }
-        return false;
-      };
-      return walk(spaceId);
-    },
-    [roomsBySpace, notificationCount],
   );
 
   /**
@@ -434,11 +415,6 @@ export function useSpaceUnreadRollup(
     return false;
   }, [homeRoomIds, isUnread]);
 
-  const isHomeNotified = useCallback(() => {
-    for (const id of homeRoomIds) if (notificationCount(id) > 0) return true;
-    return false;
-  }, [homeRoomIds, notificationCount]);
-
   const homeMentionCount = useCallback(() => {
     let total = 0;
     for (const id of homeRoomIds) total += mentionCount(id);
@@ -453,10 +429,8 @@ export function useSpaceUnreadRollup(
 
   return {
     isSpaceUnread,
-    isSpaceNotified,
     spaceMentionCount,
     isHomeUnread,
-    isHomeNotified,
     homeMentionCount,
     effectiveMentionCount,
     effectiveSpaceMentionCount,

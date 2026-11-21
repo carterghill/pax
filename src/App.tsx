@@ -12,6 +12,7 @@ import { useRooms } from "./hooks/useRooms";
 import { clearMessageCache } from "./hooks/useMessages";
 import { clearPersistedSpaceHomeCache } from "./utils/spaceHomeCache";
 import { clearPersistedRoomsList } from "./utils/roomsCache";
+import { setAndroidBadgeSessionActive } from "./utils/appBadge";
 import { useExternalLinkInterceptor } from "./hooks/useExternalLinks";
 import { listen } from "@tauri-apps/api/event";
 import QuitConfirmDialog from "./components/QuitConfirmDialog";
@@ -345,6 +346,7 @@ function App() {
   }
 
   async function handleSignOut() {
+    setAndroidBadgeSessionActive(false);
     try {
       await invoke("logout");
       await invoke("clear_saved_credentials");
@@ -676,6 +678,7 @@ function AuthedApp({
   loadingStyles: LoadingStyles;
 }) {
   const {
+    rooms,
     spaces,
     roomsBySpace,
     getRoom,
@@ -684,7 +687,11 @@ function AuthedApp({
     initialLoadComplete,
   } = useRooms(userId);
 
-  // Register FCM push token with the homeserver (Android only; no-op on desktop).
+  useEffect(() => {
+    setAndroidBadgeSessionActive(true);
+  }, [userId]);
+
+  // Register mobile push tokens with the homeserver.
   const { unregisterPush } = usePushNotifications({ userId });
   const [signOutRequested, setSignOutRequested] = useState(false);
 
@@ -710,7 +717,7 @@ function AuthedApp({
     <MainLayout
       userId={userId}
       onSignOut={() => setSignOutRequested(true)}
-      rooms={{ spaces, roomsBySpace, getRoom, fetchRooms, upsertOptimisticRoom }}
+      rooms={{ rooms, spaces, roomsBySpace, getRoom, fetchRooms, upsertOptimisticRoom }}
     />
     {signOutRequested && <EncryptionSignOut onCancel={() => setSignOutRequested(false)} onSignOut={handleSignOut} />}
     </>

@@ -1,150 +1,104 @@
-/**
- * Mobile push registration for Android FCM and the iOS PushKit gateway.
- *
- * ## How it works
- *
- * 1. On Android, `MainActivity.kt` fetches the FCM device token from
- *    Firebase and injects it into the WebView as `window.__paxFcmToken`,
- *    then dispatches a `pax-fcm-token` CustomEvent.
- *
- * 2. This hook listens for that event (and polls once on mount in case
- *    the token arrived before React hydrated).  When a token is available
- *    and the user is logged in, it calls the Rust `register_pusher`
- *    command to POST `/_matrix/client/v3/pushers/set` on the homeserver.
- *
- * 3. On logout, the caller invokes `unregisterPush()` which removes the
- *    pusher so the server stops sending pushes to this device.
- *
- * iOS reads its token directly from PushKit through the Rust command.
- */
-
 import { useEffect, useRef, useCallback } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 
-declare global {
-  interface Window {
-    /** Injected by MainActivity.kt on Android after fetching the FCM token. */
-    __paxFcmToken?: string;
-  }
+interface PushRegistration {
+  token: string;
+  badgeOnly: boolean;
+  done: Promise<boolean>;
 }
 
-interface PushNotificationsOptions {
-  /** Current user's MXID.  Null = not logged in → skip registration. */
-  userId: string | null;
-}
-
-interface PushNotificationsReturn {
-  /** Call on logout to remove the pusher from the homeserver. */
-  unregisterPush: () => Promise<void>;
-}
-
-export function usePushNotifications({
-  userId,
-}: PushNotificationsOptions): PushNotificationsReturn {
-  // Track the last-registered token so we don't re-register the same one.
-  const registeredTokenRef = useRef<string | null>(null);
-  // Track the token across renders so unregister can use it.
-  const currentTokenRef = useRef<string | null>(null);
-
-  const registerWithToken = useCallback(
-    async (token: string, deviceDisplayName: string) => {
-      if (!userId) return;
-      if (token === registeredTokenRef.current) return;
-
-      try {
-        await invoke("register_pusher", {
-          pushKey: token,
-          deviceDisplayName,
-        });
-        registeredTokenRef.current = token;
-        currentTokenRef.current = token;
-        console.log("[push] pusher registered with homeserver");
-      } catch (e) {
-        console.warn("[push] register_pusher failed:", e);
-      }
-    },
-    [userId],
-  );
+export function usePushNotifications({ userId }: { userId: string | null }) {
+  const registrations = useRef(new Map<string, PushRegistration>());
+  const signingOut = useRef(false);
 
   useEffect(() => {
     if (!userId) return;
 
     let cancelled = false;
-    let pollTimer: ReturnType<typeof setTimeout> | null = null;
-    let unlisten: UnlistenFn | undefined;
+    let pollTimer: ReturnType<typeof setTimeout> | undefined;
+    const listeners: UnlistenFn[] = [];
 
-    (async () => {
-      try {
-        const configured = await invoke<boolean>("push_gateway_configured");
-        if (!configured) return;
-      } catch {
+    function register(token: string, deviceDisplayName: string, badgeOnly = false) {
+      if (cancelled || signingOut.current) return;
+      const key = `${badgeOnly}:${token}`;
+      const pending = registrations.current;
+      if (pending.has(key)) return;
+      const done = invoke("register_pusher", { pushKey: token, deviceDisplayName, badgeOnly })
+        .then(() => true)
+        .catch((error) => {
+          pending.delete(key);
+          console.warn("[push] register_pusher failed:", error);
+          return false;
+        });
+      pending.set(key, { token, badgeOnly, done });
+    }
+
+    async function watchAppleToken(
+      event: string,
+      command: string,
+      deviceName: string,
+      badgeOnly: boolean,
+    ) {
+      if (!(await invoke<boolean>("push_gateway_configured", { badgeOnly })) || cancelled) return;
+      const readToken = async () => {
+        const token = await invoke<string | null>(command);
+        if (token) register(token, deviceName, badgeOnly);
+      };
+      const unlisten = await listen(event, () => {
+        void readToken().catch((error) => console.warn("[push] Could not read iOS token:", error));
+      });
+      if (cancelled) {
+        unlisten();
         return;
       }
+      listeners.push(unlisten);
+      await readToken();
+    }
 
-      if (cancelled) return;
-
+    async function start() {
       const android = (window as Window & { PaxAndroid?: { getFcmToken(): string } }).PaxAndroid;
       if (!android) {
-        const readVoipToken = async () => {
-          const token = await invoke<string | null>("get_ios_voip_token");
-          if (!cancelled && token) await registerWithToken(token, "Pax (iPhone)");
-        };
-        try {
-          const stop = await listen("voip-token-changed", () => {
-            void readVoipToken().catch((error) => console.warn("[push] Could not read the new VoIP token:", error));
-          });
-          if (cancelled) stop();
-          else {
-            unlisten = stop;
-            await readVoipToken();
-          }
-        } catch (error) {
-          if (!cancelled) console.warn("[push] get_ios_voip_token failed:", error);
-        }
+        await Promise.all([
+          watchAppleToken("voip-token-changed", "get_ios_voip_token", "Pax (iPhone)", false),
+          watchAppleToken("badge-token-changed", "get_ios_badge_token", "Pax (iPhone badges)", true),
+        ]);
         return;
       }
+      if (!(await invoke<boolean>("push_gateway_configured")) || cancelled) return;
 
-      // Poll for the FCM token from the Rust side (reads file written by Kotlin).
-      // The token file may not exist yet on first launch while Firebase fetches it.
-      const pollForToken = async () => {
+      function pollForToken() {
         if (cancelled) return;
-        try {
-            const token = android.getFcmToken();
-            if (token && token.length > 0) {
-                void registerWithToken(token, "Pax (Android)");
-                return;
-            }
-        } catch (e) {
-            console.warn("[push] getFcmToken failed:", e);
-        }
-        if (!cancelled) {
-            pollTimer = setTimeout(pollForToken, 2000);
-        }
-      };
+        const token = android?.getFcmToken();
+        if (token) register(token, "Pax (Android)");
+        else pollTimer = setTimeout(pollForToken, 2000);
+      }
       pollForToken();
-    })();
+    }
+
+    void start().catch((error) => {
+      if (!cancelled) console.warn("[push] Could not initialize push registration:", error);
+    });
 
     return () => {
       cancelled = true;
-      if (pollTimer) clearTimeout(pollTimer);
-      unlisten?.();
-      registeredTokenRef.current = null;
+      clearTimeout(pollTimer);
+      listeners.forEach((unlisten) => unlisten());
     };
-  }, [userId, registerWithToken]);
+  }, [userId]);
 
   const unregisterPush = useCallback(async () => {
-    const token = currentTokenRef.current;
-    if (!token) return;
-    try {
-      await invoke("unregister_pusher", { pushKey: token });
-      console.log("[push] pusher unregistered");
-    } catch (e) {
-      // Non-fatal — we're logging out anyway.
-      console.warn("[push] unregister_pusher failed:", e);
-    }
-    registeredTokenRef.current = null;
-    currentTokenRef.current = null;
+    signingOut.current = true;
+    const pending = registrations.current;
+    await Promise.all(Array.from(pending.values(), async ({ token, badgeOnly, done }) => {
+      if (!(await done)) return;
+      try {
+        await invoke("unregister_pusher", { pushKey: token, badgeOnly });
+      } catch (error) {
+        console.warn("[push] unregister_pusher failed:", error);
+      }
+    }));
+    pending.clear();
   }, []);
 
   return { unregisterPush };
