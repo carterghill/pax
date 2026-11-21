@@ -1,11 +1,11 @@
 import { useEffect, useId, useLayoutEffect, useRef, useState } from "react";
 import { createPortal } from "react-dom";
-import { FilePlus, Mic, Paperclip } from "lucide-react";
+import { Camera, FilePlus, Mic, Paperclip } from "lucide-react";
 import { MODAL_LAYER_Z } from "../../../components/ModalLayer";
 import { useTheme } from "../../../theme/ThemeContext";
 
 export default function ComposerAttachmentMenu({
-  disabled, disabledReason, canRecord, buttonSize, buttonRadius, iconSize, onAttach, onRecord,
+  disabled, disabledReason, canRecord, buttonSize, buttonRadius, iconSize, onAttach, onRecord, onCamera,
 }: {
   disabled: boolean;
   disabledReason?: string;
@@ -15,6 +15,7 @@ export default function ComposerAttachmentMenu({
   iconSize: number;
   onAttach: () => void;
   onRecord: () => void;
+  onCamera?: () => void;
 }) {
   const { palette, typography, spacing } = useTheme();
   const trigger = useRef<HTMLButtonElement>(null);
@@ -64,7 +65,8 @@ export default function ComposerAttachmentMenu({
 
   const actions = [
     { label: "Attach a file", Icon: FilePlus, run: onAttach, disabled: false },
-    { label: "Record audio message", Icon: Mic, run: onRecord, disabled: !canRecord },
+    { label: "Audio message", Icon: Mic, run: onRecord, disabled: !canRecord },
+    { label: "Camera", Icon: Camera, run: onCamera, disabled: !onCamera },
   ];
   function closeAndFocus() {
     setOpen(false);
@@ -129,7 +131,7 @@ export default function ComposerAttachmentMenu({
               role="menuitem"
               tabIndex={-1}
               disabled={actionDisabled}
-              onClick={() => { closeAndFocus(); run(); }}
+              onClick={() => { closeAndFocus(); run?.(); }}
               onPointerEnter={(event) => {
                 if (!actionDisabled && event.pointerType === "mouse") event.currentTarget.focus();
               }}

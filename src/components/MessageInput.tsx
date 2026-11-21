@@ -41,6 +41,7 @@ import ComposerInputRow from "../features/chat/composer/ComposerInputRow";
 import ComposerFileDrop from "../features/chat/composer/ComposerFileDrop";
 import ComposerAudioRecordingBar from "../features/chat/composer/ComposerAudioRecordingBar";
 import { useComposerAudioRecording } from "../features/chat/composer/useComposerAudioRecording";
+import ComposerCameraDialog from "../features/chat/composer/ComposerCameraDialog";
 
 export type ComposerPermission = "loading" | "allowed" | "forbidden";
 export type { EditingMessageRef, MessageFileSendBridge };
@@ -73,6 +74,11 @@ interface MessageInputProps {
 
 /** Below `MODAL_LAYER_Z` so emoji/GIF popovers stay under full-screen modals. */
 const COMPOSER_POPOVER_Z = MODAL_LAYER_Z - 1000;
+
+function usesNativeCameraPicker() {
+  return /Android|iPhone|iPad|iPod/.test(navigator.userAgent)
+    || (navigator.userAgent.includes("Macintosh") && navigator.maxTouchPoints > 1);
+}
 
 export default function MessageInput({
   roomId,
@@ -136,7 +142,21 @@ export default function MessageInput({
     onRecorded: attachRecording,
   });
   const recordingActive = audioRecording.phase != null;
+  const cameraPickerRef = useRef<HTMLInputElement>(null);
+  const [cameraSession, setCameraSession] = useState<{ scope: string; photo: File | null } | null>(null);
+  const nativeCamera = usesNativeCameraPicker();
+  const cameraEnabled = recordingEnabled && !recordingActive && !pendingFile && !sending;
+  const cameraActive = cameraEnabled && cameraSession?.scope === composerScope;
   const uploadDisabled = !!pendingFile || !!draftDmPeerUserId || interactionLocked || recordingActive;
+
+  useEffect(() => {
+    if (!cameraActive) setCameraSession(null);
+  }, [cameraActive]);
+
+  function openCamera() {
+    if (nativeCamera) cameraPickerRef.current?.click();
+    else setCameraSession({ scope: composerScope, photo: null });
+  }
 
   const { clearTypingTimeout, handleComposerActivity, sendTyping } = useComposerTypingNotice({
     roomId,
@@ -265,7 +285,7 @@ export default function MessageInput({
       e.preventDefault();
       const image = getClipboardImageFile(e.clipboardData);
       if (image) {
-        if (!draftDmPeerUserId && !editingMessage && !recordingActive) void attachFile(image);
+        if (!draftDmPeerUserId && !editingMessage && !recordingActive && !cameraActive) void attachFile(image);
         return;
       }
       const text = e.clipboardData.getData("text/plain");
@@ -279,7 +299,7 @@ export default function MessageInput({
       }
       refreshComposerDomState();
     },
-    [attachFile, composerImgStyle, draftDmPeerUserId, editingMessage, interactionLocked, recordingActive, refreshComposerDomState, syncHeight],
+    [attachFile, cameraActive, composerImgStyle, draftDmPeerUserId, editingMessage, interactionLocked, recordingActive, refreshComposerDomState, syncHeight],
   );
 
   // ─── Edit message loading ─────────────────────────────────────────────────
@@ -318,7 +338,7 @@ export default function MessageInput({
 
   const { handleSend } = useComposerSubmit({
     roomId,
-    interactionLocked: interactionLocked || recordingActive,
+    interactionLocked: interactionLocked || recordingActive || cameraActive,
     sending,
     setSending,
     editorRef,
@@ -429,6 +449,7 @@ export default function MessageInput({
   const canSend =
     !interactionLocked &&
     !recordingActive &&
+    !cameraActive &&
     (plainText.trim().length > 0 || hasComposerMedia || !!pendingFile) &&
     !sending &&
     pendingFile?.phase !== "error";
@@ -449,7 +470,33 @@ export default function MessageInput({
   return (
     <>
       {allowWindowFileDrop && roomId && (
-        <ComposerFileDrop onFile={uploadDisabled ? undefined : attachFile} />
+        <ComposerFileDrop onFile={uploadDisabled || cameraActive ? undefined : attachFile} />
+      )}
+      {nativeCamera && (
+        <input
+          key={composerScope}
+          ref={cameraPickerRef}
+          type="file"
+          accept="image/*"
+          capture="environment"
+          hidden
+          onChange={(event) => {
+            const photo = event.currentTarget.files?.[0];
+            event.currentTarget.value = "";
+            if (photo && cameraEnabled) setCameraSession({ scope: composerScope, photo });
+          }}
+        />
+      )}
+      {cameraActive && (
+        <ComposerCameraDialog
+          nativePhoto={cameraSession.photo}
+          onRetryNative={nativeCamera ? openCamera : undefined}
+          onClose={() => setCameraSession(null)}
+          onAccept={(photo) => {
+            void attachFile(photo);
+            setCameraSession(null);
+          }}
+        />
       )}
       <style>{`
         [data-pax-composer] strong, [data-pax-composer] b { font-weight: bold; }
@@ -557,6 +604,7 @@ export default function MessageInput({
           inputToolIconSize={inputToolIconSize}
           onFileSelected={handleFileSelected}
           onRecordAudio={() => void audioRecording.start()}
+          onCamera={cameraEnabled ? openCamera : undefined}
           onEditorInput={handleEditorInput}
           onEditorKeyDown={handleKeyDown}
           onEditorPaste={handleEditorPaste}

@@ -22,6 +22,8 @@
 	<string>0.1.0</string>
 	<key>LSRequiresIPhoneOS</key>
 	<true/>
+	<key>NSCameraUsageDescription</key>
+	<string>Pax uses your camera to take photos to attach to messages.</string>
 	<key>NSMicrophoneUsageDescription</key>
 	<string>Pax uses your microphone for voice calls and audio messages.</string>
 	<key>UIBackgroundModes</key>

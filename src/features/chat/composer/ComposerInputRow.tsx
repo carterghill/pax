@@ -40,6 +40,7 @@ interface ComposerInputRowProps {
   inputToolIconSize: number;
   onFileSelected: (event: ChangeEvent<HTMLInputElement>) => void;
   onRecordAudio: () => void;
+  onCamera?: () => void;
   onEditorInput: (event: FormEvent<HTMLDivElement>) => void;
   onEditorKeyDown: (event: KeyboardEvent<HTMLDivElement>) => void;
   onEditorPaste: (event: ClipboardEvent<HTMLDivElement>) => void;
@@ -79,6 +80,7 @@ export default function ComposerInputRow({
   inputToolIconSize,
   onFileSelected,
   onRecordAudio,
+  onCamera,
   onEditorInput,
   onEditorKeyDown,
   onEditorPaste,
@@ -124,6 +126,7 @@ export default function ComposerInputRow({
         iconSize={inputToolIconSize}
         onAttach={() => fileInputRef.current?.click()}
         onRecord={onRecordAudio}
+        onCamera={onCamera}
       />
 
       <div
