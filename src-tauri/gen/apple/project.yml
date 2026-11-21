@@ -43,7 +43,7 @@ targets:
         LSRequiresIPhoneOS: true
         UILaunchStoryboardName: LaunchScreen
         UIRequiredDeviceCapabilities: [arm64, metal]
-        NSMicrophoneUsageDescription: Pax uses your microphone to let people hear you in voice calls.
+        NSMicrophoneUsageDescription: Pax uses your microphone for voice calls and audio messages.
         UIBackgroundModes: [audio, voip]
         UISupportedInterfaceOrientations:
           - UIInterfaceOrientationPortrait
@@ -82,6 +82,7 @@ targets:
     dependencies:
       - framework: libapp.a
         embed: false
+      - sdk: AVFoundation.framework
       - sdk: CallKit.framework
       - sdk: CoreGraphics.framework
       - sdk: Metal.framework

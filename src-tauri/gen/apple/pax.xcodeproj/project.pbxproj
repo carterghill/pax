@@ -7,6 +7,7 @@
 	objects = {
 
 /* Begin PBXBuildFile section */
+		19547687E12AD71CB03EA724 /* AVFoundation.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = 49C5226F24B98131DD47602A /* AVFoundation.framework */; };
 		1C890D5E1D5A686402942F1B /* CallKit.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = C1A2C29FD65A4F1C6C9B053A /* CallKit.framework */; };
 		26B3974AC3C5BFA286E07BAA /* assets in Resources */ = {isa = PBXBuildFile; fileRef = 1CD347117DB5F81771AC26B6 /* assets */; };
 		29FFC5CF096A0FAC9026D976 /* PushKit.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = 60541A1D712C0B8E35CF5C13 /* PushKit.framework */; };
@@ -52,6 +53,7 @@
 		475EAD26791E5EB74D9EFD74 /* rss.rs */ = {isa = PBXFileReference; path = rss.rs; sourceTree = "<group>"; };
 		48E50B22B62E065C3D7D355F /* unread_projection.rs */ = {isa = PBXFileReference; path = unread_projection.rs; sourceTree = "<group>"; };
 		4965975E6ED69683731C9A5D /* history_backup_tests.rs */ = {isa = PBXFileReference; path = history_backup_tests.rs; sourceTree = "<group>"; };
+		49C5226F24B98131DD47602A /* AVFoundation.framework */ = {isa = PBXFileReference; lastKnownFileType = wrapper.framework; name = AVFoundation.framework; path = System/Library/Frameworks/AVFoundation.framework; sourceTree = SDKROOT; };
 		4A91683A83BCABF7482E280F /* file_cache.rs */ = {isa = PBXFileReference; path = file_cache.rs; sourceTree = "<group>"; };
 		4D354FC68D38BF3E2EF66410 /* Security.framework */ = {isa = PBXFileReference; lastKnownFileType = wrapper.framework; name = Security.framework; path = System/Library/Frameworks/Security.framework; sourceTree = SDKROOT; };
 		530A56258553F27E31C2BB68 /* room_creation.rs */ = {isa = PBXFileReference; path = room_creation.rs; sourceTree = "<group>"; };
@@ -127,6 +129,7 @@
 			buildActionMask = 2147483647;
 			files = (
 				D057DF0BDC888E40AB80941D /* libapp.a in Frameworks */,
+				19547687E12AD71CB03EA724 /* AVFoundation.framework in Frameworks */,
 				1C890D5E1D5A686402942F1B /* CallKit.framework in Frameworks */,
 				E59C176050A446969D143DC6 /* CoreGraphics.framework in Frameworks */,
 				3D1C1F6CBBD3EF357C0B4EA8 /* Metal.framework in Frameworks */,
@@ -244,6 +247,7 @@
 		C0DA62A1E2E45EE6E7236178 /* Frameworks */ = {
 			isa = PBXGroup;
 			children = (
+				49C5226F24B98131DD47602A /* AVFoundation.framework */,
 				C1A2C29FD65A4F1C6C9B053A /* CallKit.framework */,
 				7ACB24DFCC63F51BAF706540 /* CoreGraphics.framework */,
 				79FC0E4AF6128D52789029E4 /* libapp.a */,

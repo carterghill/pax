@@ -159,9 +159,9 @@ export function useComposerSubmit({
         const uploaded = snapshot.contentUri ? null : await prepared;
         let contentUri = snapshot.contentUri ?? uploaded?.[0];
         let byteSize = snapshot.byteSize ?? uploaded?.[1];
+        let encryptedFile = snapshot.encryptedFile ?? uploaded?.[2];
         if (!contentUri) {
-          const ok = await stagingByteLenMatchesFile(snapshot.uploadId, snapshot.sourceFile.size);
-          if (!ok) {
+          if (snapshot.sourceFile && !await stagingByteLenMatchesFile(snapshot.uploadId, snapshot.sourceFile.size)) {
             await streamFileToStaging(snapshot.sourceFile, snapshot.uploadId, (f) => {
               bridge.patchMessage(localEventId, {
                 localFileUpload: {
@@ -181,8 +181,7 @@ export function useComposerSubmit({
             fileName: snapshot.name,
             mimeType: snapshot.mimeType,
           });
-          contentUri = res[0];
-          byteSize = res[1];
+          [contentUri, byteSize, encryptedFile] = res;
         }
 
         bridge.patchMessage(localEventId, {
@@ -192,6 +191,7 @@ export function useComposerSubmit({
         const serverEventId = await sendFileMessage({
           roomId,
           contentUri,
+          encryptedFile,
           fileName: snapshot.name,
           mimeType: snapshot.mimeType,
           fileSize: byteSize ?? null,
@@ -201,6 +201,7 @@ export function useComposerSubmit({
           blurhash: snapshot.blurhash,
           imageWidth: snapshot.imageWidth,
           imageHeight: snapshot.imageHeight,
+          audioDurationMs: snapshot.audioDurationMs,
           thread,
         });
 
@@ -287,7 +288,7 @@ export function useComposerSubmit({
             phase: optimPhase,
             progress: Math.min(1, snap.progress01),
           },
-          localImagePreviewObjectUrl: snap.previewUrl,
+          localImagePreviewObjectUrl: snap.mimeType.startsWith("image/") ? snap.previewUrl : null,
           threadRootId: thread?.rootEventId,
         });
 

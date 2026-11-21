@@ -39,6 +39,8 @@ import ComposerMediaPickerPopover from "../features/chat/composer/ComposerMediaP
 import MentionAutocompleteMenu from "../features/chat/composer/MentionAutocompleteMenu";
 import ComposerInputRow from "../features/chat/composer/ComposerInputRow";
 import ComposerFileDrop from "../features/chat/composer/ComposerFileDrop";
+import ComposerAudioRecordingBar from "../features/chat/composer/ComposerAudioRecordingBar";
+import { useComposerAudioRecording } from "../features/chat/composer/useComposerAudioRecording";
 
 export type ComposerPermission = "loading" | "allowed" | "forbidden";
 export type { EditingMessageRef, MessageFileSendBridge };
@@ -114,6 +116,7 @@ export default function MessageInput({
   const editorRef = useRef<HTMLDivElement>(null);
   const rootRef = useRef<HTMLDivElement>(null);
   const { palette, typography, spacing, resolvedColorScheme } = useTheme();
+  const composerScope = JSON.stringify([selfUserId, roomId, thread?.rootEventId]);
 
   const {
     fileInputRef,
@@ -122,10 +125,18 @@ export default function MessageInput({
     preparationRef,
     setPendingFile,
     attachFile,
+    attachRecording,
     handleFileSelected,
     clearPendingFile,
-  } = useComposerFileUpload({ roomId, interactionLocked, fileSendBridge });
-  const uploadDisabled = !!pendingFile || !!draftDmPeerUserId || interactionLocked;
+  } = useComposerFileUpload({ roomId, scope: composerScope, interactionLocked, fileSendBridge });
+  const recordingEnabled = !!roomId && !!fileSendBridge && !draftDmPeerUserId && !interactionLocked && !editingMessage;
+  const audioRecording = useComposerAudioRecording({
+    scope: composerScope,
+    enabled: recordingEnabled,
+    onRecorded: attachRecording,
+  });
+  const recordingActive = audioRecording.phase != null;
+  const uploadDisabled = !!pendingFile || !!draftDmPeerUserId || interactionLocked || recordingActive;
 
   const { clearTypingTimeout, handleComposerActivity, sendTyping } = useComposerTypingNotice({
     roomId,
@@ -254,7 +265,7 @@ export default function MessageInput({
       e.preventDefault();
       const image = getClipboardImageFile(e.clipboardData);
       if (image) {
-        if (!draftDmPeerUserId && !editingMessage) void attachFile(image);
+        if (!draftDmPeerUserId && !editingMessage && !recordingActive) void attachFile(image);
         return;
       }
       const text = e.clipboardData.getData("text/plain");
@@ -268,7 +279,7 @@ export default function MessageInput({
       }
       refreshComposerDomState();
     },
-    [attachFile, composerImgStyle, draftDmPeerUserId, editingMessage, interactionLocked, refreshComposerDomState, syncHeight],
+    [attachFile, composerImgStyle, draftDmPeerUserId, editingMessage, interactionLocked, recordingActive, refreshComposerDomState, syncHeight],
   );
 
   // ─── Edit message loading ─────────────────────────────────────────────────
@@ -307,7 +318,7 @@ export default function MessageInput({
 
   const { handleSend } = useComposerSubmit({
     roomId,
-    interactionLocked,
+    interactionLocked: interactionLocked || recordingActive,
     sending,
     setSending,
     editorRef,
@@ -417,6 +428,7 @@ export default function MessageInput({
   };
   const canSend =
     !interactionLocked &&
+    !recordingActive &&
     (plainText.trim().length > 0 || hasComposerMedia || !!pendingFile) &&
     !sending &&
     pendingFile?.phase !== "error";
@@ -518,6 +530,7 @@ export default function MessageInput({
           onCancelReply={onCancelReply}
           onClearPendingFile={clearPendingFile}
         />
+        <ComposerAudioRecordingBar {...audioRecording} />
         <ComposerInputRow
           fileInputRef={fileInputRef}
           editorRef={editorRef}
@@ -525,6 +538,7 @@ export default function MessageInput({
           pendingFile={pendingFile}
           draftDmPeerUserId={draftDmPeerUserId}
           uploadDisabled={uploadDisabled}
+          canRecordAudio={recordingEnabled}
           interactionLocked={interactionLocked}
           plainText={plainText}
           hasComposerMedia={hasComposerMedia}
@@ -542,6 +556,7 @@ export default function MessageInput({
           inputToolBtnRadius={inputToolBtnRadius}
           inputToolIconSize={inputToolIconSize}
           onFileSelected={handleFileSelected}
+          onRecordAudio={() => void audioRecording.start()}
           onEditorInput={handleEditorInput}
           onEditorKeyDown={handleKeyDown}
           onEditorPaste={handleEditorPaste}

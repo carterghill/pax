@@ -46,6 +46,14 @@ fn main() {
                 .flag("-fobjc-arc")
                 .flag("-fblocks")
                 .compile("pax_ios_badge");
+            let source = "src/voice/recording_ios.m";
+            println!("cargo:rerun-if-changed={source}");
+            cc::Build::new()
+                .file(source)
+                .flag("-fobjc-arc")
+                .flag("-fblocks")
+                .compile("pax_recording_ios");
+            println!("cargo:rustc-link-lib=framework=AVFoundation");
             println!("cargo:rustc-link-lib=framework=UIKit");
             println!("cargo:rustc-link-lib=framework=UserNotifications");
             println!("cargo:rustc-link-lib=framework=CallKit");

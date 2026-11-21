@@ -79,7 +79,7 @@ export function requestMicrophonePermission(): Promise<void> {
       clearTimeout(timer);
       window.removeEventListener(event, onResult);
       if (granted) resolve();
-      else reject(new Error("Microphone access is needed for voice calls."));
+      else reject(new Error("Microphone access is required."));
     }
     function onResult(result: Event) {
       finish((result as CustomEvent<boolean>).detail);

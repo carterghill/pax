@@ -132,7 +132,7 @@ export default function ComposerContextBar({
                   gap: spacing.unit * 1.5,
                 }}
               >
-                {pendingFile.previewUrl ? (
+                {pendingFile.previewUrl && pendingFile.audioDurationMs == null ? (
                   <img
                     src={pendingFile.previewUrl}
                     alt=""
@@ -181,7 +181,7 @@ export default function ComposerContextBar({
                   flexShrink: 0,
                 }}
               >
-                {pendingFile.phase !== "error" ? (
+                {pendingFile.phase !== "error" && pendingFile.audioDurationMs == null ? (
                   <CircularUploadRing
                     progress={pendingFile.progress01}
                     size={30}
@@ -229,6 +229,15 @@ export default function ComposerContextBar({
                 </button>
               </div>
             </div>
+            {pendingFile.audioDurationMs != null && pendingFile.previewUrl && (
+              <audio
+                src={pendingFile.previewUrl}
+                controls
+                preload="metadata"
+                aria-label="Preview voice message"
+                style={{ width: 300, maxWidth: "100%" }}
+              />
+            )}
             {pendingFile.phase === "error" && pendingFile.errorMessage ? (
               <div
                 style={{

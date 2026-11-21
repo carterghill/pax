@@ -330,10 +330,25 @@ pub(super) fn extract_message_display(
                 ..Default::default()
             }
         }
-        MessageType::Audio(_) => MessageDisplayExtract {
-            body: "[Audio]".to_string(),
-            ..Default::default()
-        },
+        MessageType::Audio(audio) => {
+            let request = MediaRequestParameters {
+                source: audio.source.clone(),
+                format: MediaFormat::File,
+            };
+            let mime = audio
+                .info
+                .as_deref()
+                .and_then(|info| info.mimetype.as_deref())
+                .filter(|mime| mime.starts_with("audio/"))
+                .unwrap_or("audio/*");
+            MessageDisplayExtract {
+                body: apply_reply_strip(audio.caption().unwrap_or_default()),
+                file_media_request: serde_json::to_value(request).ok(),
+                file_mime: Some(mime.to_owned()),
+                file_display_name: Some(audio.filename().to_owned()),
+                ..Default::default()
+            }
+        }
         _ => {
             let stripped = apply_reply_strip(content.body());
             let (body, unsupported_matrix_msgtype) =
@@ -352,6 +367,7 @@ pub(super) fn extract_message_display(
         MessageType::Image(image) => image.formatted_caption(),
         MessageType::Video(video) => video.formatted_caption(),
         MessageType::File(file) => file.formatted_caption(),
+        MessageType::Audio(audio) => audio.formatted_caption(),
         _ => None,
     };
     out.formatted_body = formatted
@@ -390,7 +406,47 @@ pub(super) fn mime_to_file_ext(mime: &str) -> &'static str {
         "video/mp4" => "mp4",
         "video/webm" => "webm",
         "video/quicktime" => "mov",
+        "audio/wav" => "wav",
+        "audio/ogg" => "ogg",
+        "audio/flac" => "flac",
+        "audio/mpeg" => "mp3",
+        "audio/aac" => "aac",
+        "audio/mp4" => "m4a",
         "application/pdf" => "pdf",
         _ => "bin",
     }
+}
+
+#[cfg(test)]
+#[test]
+fn audio_message_display_separates_the_media_filename_and_captions() {
+    use matrix_sdk::ruma::events::room::MediaSource;
+
+    let mut event = serde_json::json!({
+        "msgtype": "m.audio",
+        "url": "mxc://example.org/clip",
+        "body": "Listen to this",
+        "filename": "clip.ogg",
+        "format": "org.matrix.custom.html",
+        "formatted_body": "Listen to <strong>this</strong>"
+    });
+    let content = serde_json::from_value(event.clone()).unwrap();
+    let display = extract_message_display(&content);
+    let request: MediaRequestParameters =
+        serde_json::from_value(display.file_media_request.unwrap()).unwrap();
+    assert!(matches!(request.source, MediaSource::Plain(uri) if uri.as_str() == "mxc://example.org/clip"));
+    assert!(matches!(request.format, MediaFormat::File));
+    assert_eq!(display.file_display_name.as_deref(), Some("clip.ogg"));
+    assert_eq!(display.file_mime.as_deref(), Some("audio/*"));
+    assert_eq!(display.body, "Listen to this");
+    assert_eq!(
+        display.formatted_body.as_deref(),
+        Some("Listen to <strong>this</strong>")
+    );
+
+    event["body"] = serde_json::json!("clip.ogg");
+    let content = serde_json::from_value(event).unwrap();
+    let display = extract_message_display(&content);
+    assert!(display.body.is_empty());
+    assert!(display.formatted_body.is_none());
 }

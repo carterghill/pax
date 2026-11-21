@@ -70,6 +70,7 @@ export interface UploadRoomFileRequest {
 export interface SendFileMessageRequest extends MessageFormatting {
   roomId: string;
   contentUri: string;
+  encryptedFile?: MatrixEncryptedFile | null;
   fileName: string;
   mimeType: string;
   fileSize?: number | null;
@@ -77,6 +78,7 @@ export interface SendFileMessageRequest extends MessageFormatting {
   blurhash?: string | null;
   imageWidth?: number | null;
   imageHeight?: number | null;
+  audioDurationMs?: number | null;
   thread?: MessageThreadTarget | null;
 }
 
@@ -88,7 +90,8 @@ export interface UploadAndSendFileRequest {
   caption?: string | null;
 }
 
-export type UploadRoomFileResult = [contentUri: string, byteSize: number];
+export type MatrixEncryptedFile = { url: string; key: object; iv: string; hashes: object; v: string };
+export type UploadRoomFileResult = [contentUri: string, byteSize: number, encryptedFile: MatrixEncryptedFile | null];
 
 function invokeArgs<T extends object>(request: T): Record<string, unknown> {
   return { ...request } as Record<string, unknown>;
@@ -226,6 +229,7 @@ export function sendFileMessage(request: SendFileMessageRequest): Promise<string
   return invoke<string>("send_file_message", {
     roomId: request.roomId,
     contentUri: request.contentUri,
+    encryptedFile: request.encryptedFile ?? null,
     fileName: request.fileName,
     mimeType: request.mimeType,
     fileSize: request.fileSize ?? null,
@@ -235,6 +239,7 @@ export function sendFileMessage(request: SendFileMessageRequest): Promise<string
     blurhash: request.blurhash ?? null,
     imageWidth: request.imageWidth ?? null,
     imageHeight: request.imageHeight ?? null,
+    audioDurationMs: request.audioDurationMs ?? null,
     thread: request.thread ?? null,
   });
 }

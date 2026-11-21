@@ -127,14 +127,34 @@ pub(crate) fn sniff_image_mime(bytes: &[u8]) -> &'static str {
     "application/octet-stream"
 }
 
-/// Guess image or common video container MIME from magic bytes.
+/// Guess common media MIME types from magic bytes.
 pub(crate) fn sniff_media_mime(bytes: &[u8]) -> &'static str {
     let img = sniff_image_mime(bytes);
     if img != "application/octet-stream" {
         return img;
     }
+    if bytes.starts_with(b"RIFF") && bytes.get(8..12) == Some(b"WAVE") {
+        return "audio/wav";
+    }
+    if bytes.starts_with(b"OggS") {
+        return "audio/ogg";
+    }
+    if bytes.starts_with(b"fLaC") {
+        return "audio/flac";
+    }
+    if bytes.len() >= 2 && bytes[0] == 0xff && bytes[1] & 0xf6 == 0xf0 {
+        return "audio/aac";
+    }
+    if bytes.starts_with(b"ID3")
+        || (bytes.len() >= 2 && bytes[0] == 0xff && bytes[1] & 0xe6 > 0xe0)
+    {
+        return "audio/mpeg";
+    }
     // ISO BMFF (MP4 / MOV / similar): size (4) + "ftyp" at offset 4
     if bytes.len() >= 12 && &bytes[4..8] == b"ftyp" {
+        if &bytes[8..12] == b"M4A " {
+            return "audio/mp4";
+        }
         return "video/mp4";
     }
     // EBML (WebM / Matroska)

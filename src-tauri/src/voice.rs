@@ -30,6 +30,7 @@ use tokio::sync::mpsc;
 use tokio::time::{interval_at, Instant as TokioInstant, MissedTickBehavior};
 
 pub(crate) mod peer;
+pub(crate) mod recording;
 
 fn should_auto_rejoin(reason: livekit::DisconnectReason) -> bool {
     use livekit::DisconnectReason as Reason;

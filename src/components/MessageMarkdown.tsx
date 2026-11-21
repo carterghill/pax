@@ -48,6 +48,7 @@ interface MessageMarkdownProps {
   /** When set, https image/GIF links (inline previews) open in the app media viewer instead of the browser. */
   onOpenDirectImage?: (url: string, title: string) => void;
   formattedBody?: string;
+  preferFormattedBody?: boolean;
   mentionedUserIds?: string[];
   mentionsRoom?: boolean;
   selfUserId?: string;
@@ -139,6 +140,7 @@ export default memo(function MessageMarkdown({
   edited = false,
   onOpenDirectImage,
   formattedBody,
+  preferFormattedBody,
   mentionedUserIds,
   mentionsRoom,
   selfUserId,
@@ -174,10 +176,12 @@ export default memo(function MessageMarkdown({
   }, [palette.accent, selfUserId, mentionSet, onMentionClick]);
 
   const messagePlugins = useMemo(() => [() => (tree: Root) => {
-    const formattedFallback = formattedBody && mentionSet.size > 0
-      ? mergeFormattedMentions(tree, {
-          type: "root",
-          children: matrixHtmlToHast(parseMatrixMessageHtml(formattedBody)),
+    const formatted = formattedBody && (preferFormattedBody || mentionSet.size > 0)
+      ? matrixHtmlToHast(parseMatrixMessageHtml(formattedBody))
+      : undefined;
+    const formattedFallback = formatted?.length
+      ? preferFormattedBody ? formatted : mergeFormattedMentions(tree, {
+          type: "root", children: formatted,
         }, mentionSet, edited ? EDITED_LABEL : undefined)
       : undefined;
     if (formattedFallback) {
@@ -235,7 +239,7 @@ export default memo(function MessageMarkdown({
       }
     }
     markMentions(tree);
-  }], [edited, formattedBody, legacyMentions, mentionSet, mentionsRoom]);
+  }], [edited, formattedBody, preferFormattedBody, legacyMentions, mentionSet, mentionsRoom]);
 
   const markdownSource = useMemo(() => {
     if (!edited) return children;

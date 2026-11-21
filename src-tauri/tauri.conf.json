@@ -38,6 +38,9 @@
       "icons/icon.icns",
       "icons/icon.ico"
     ],
+    "macOS": {
+      "entitlements": "Entitlements.plist"
+    },
     "linux": {
       "deb": {
         "depends": [

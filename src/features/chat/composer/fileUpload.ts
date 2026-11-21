@@ -4,6 +4,7 @@ import {
   roomFileStagingByteLen,
   roomFileStagingReset,
   type UploadRoomFileResult,
+  type MatrixEncryptedFile,
 } from "../api";
 
 export const UPLOAD_STAGING_END = 0.15;
@@ -13,13 +14,15 @@ export type PendingAttachment = {
   uploadId: string;
   name: string;
   mimeType: string;
-  sourceFile: File;
+  sourceFile: File | null;
   contentUri: string | null;
+  encryptedFile?: MatrixEncryptedFile | null;
   byteSize: number | null;
   previewUrl: string | null;
   blurhash: string | null;
   imageWidth: number | null;
   imageHeight: number | null;
+  audioDurationMs?: number;
   phase: "reading" | "uploading" | "ready" | "error";
   progress01: number;
   errorMessage?: string;

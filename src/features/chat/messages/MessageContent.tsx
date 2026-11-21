@@ -5,6 +5,7 @@ import type { MediaViewerOpenPayload } from "../../../components/MediaViewerModa
 import MessageMarkdown from "../../../components/MessageMarkdown";
 import MessageMatrixImage from "../../../components/MessageMatrixImage";
 import MessageMatrixVideo from "../../../components/MessageMatrixVideo";
+import MessageMatrixAudio from "../../../components/MessageMatrixAudio";
 import MessageFileAttachment from "../../../components/MessageFileAttachment";
 import CircularUploadRing from "../../../components/CircularUploadRing";
 import { inferMediaViewerKind } from "../../../utils/mediaViewer";
@@ -249,6 +250,12 @@ export default function MessageContent({
 
   return (
     <>
+      {msg.fileMediaRequest != null && msg.fileMime?.startsWith("audio/") && (
+        <MessageMatrixAudio
+          request={msg.fileMediaRequest}
+          fileName={msg.fileDisplayName ?? "Audio attachment"}
+        />
+      )}
       {mediaElement}
       {showCaption && (
         <MessageMarkdown
@@ -257,6 +264,7 @@ export default function MessageContent({
           mentionedUserIds={msg.mentionedUserIds}
           mentionsRoom={msg.mentionsRoom}
           formattedBody={msg.formattedBody}
+          preferFormattedBody={mediaElement != null}
           selfUserId={selfUserId}
           resolveMemberLabel={resolveMemberLabel}
           onMentionClick={onOpenSenderProfile}

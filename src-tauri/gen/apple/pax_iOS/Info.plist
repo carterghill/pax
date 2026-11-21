@@ -23,7 +23,7 @@
 	<key>LSRequiresIPhoneOS</key>
 	<true/>
 	<key>NSMicrophoneUsageDescription</key>
-	<string>Pax uses your microphone to let people hear you in voice calls.</string>
+	<string>Pax uses your microphone for voice calls and audio messages.</string>
 	<key>UIBackgroundModes</key>
 	<array>
 		<string>audio</string>

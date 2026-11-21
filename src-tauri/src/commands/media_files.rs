@@ -12,7 +12,7 @@ use tokio_util::io::ReaderStream;
 
 use matrix_sdk::media::{MediaFormat, MediaRequestParameters};
 use matrix_sdk::ruma::events::room::message::{FormattedBody, RoomMessageEventContent};
-use matrix_sdk::ruma::events::room::MediaSource;
+use matrix_sdk::ruma::events::room::{EncryptedFile, MediaSource};
 use matrix_sdk::ruma::UInt;
 use matrix_sdk::Client;
 use reqwest::header::{HeaderValue, CONTENT_LENGTH};
@@ -135,7 +135,7 @@ pub struct RoomFileUploadProgressEvent {
 }
 
 fn build_file_room_message(
-    mxc_uri: matrix_sdk::ruma::OwnedMxcUri,
+    source: MediaSource,
     file_name: String,
     content_type: mime::Mime,
     file_size: Option<UInt>,
@@ -144,10 +144,10 @@ fn build_file_room_message(
     blurhash: Option<String>,
     image_width: Option<u32>,
     image_height: Option<u32>,
+    audio_duration_ms: Option<u64>,
     thread: Option<MessageThreadTarget>,
 ) -> RoomMessageEventContent {
     use matrix_sdk::ruma::events::room::message::MessageType;
-    use matrix_sdk::ruma::events::room::MediaSource;
 
     let body_text = caption
         .as_deref()
@@ -168,7 +168,7 @@ fn build_file_room_message(
         info.width = image_width.and_then(|n| UInt::try_from(u64::from(n)).ok());
         info.height = image_height.and_then(|n| UInt::try_from(u64::from(n)).ok());
 
-        let mut img = ImageMessageEventContent::new(body_text, MediaSource::Plain(mxc_uri));
+        let mut img = ImageMessageEventContent::new(body_text, source);
         img.info = Some(Box::new(info));
         if has_caption {
             img.filename = Some(file_name);
@@ -178,7 +178,7 @@ fn build_file_room_message(
     } else if content_type.type_() == mime::VIDEO {
         use matrix_sdk::ruma::events::room::message::VideoMessageEventContent;
 
-        let mut vid = VideoMessageEventContent::new(body_text, MediaSource::Plain(mxc_uri));
+        let mut vid = VideoMessageEventContent::new(body_text, source);
         let mut info = vid.info.take().unwrap_or_default();
         info.mimetype = Some(content_type.to_string());
         info.size = file_size;
@@ -191,10 +191,11 @@ fn build_file_room_message(
     } else if content_type.type_() == mime::AUDIO {
         use matrix_sdk::ruma::events::room::message::AudioMessageEventContent;
 
-        let mut aud = AudioMessageEventContent::new(body_text, MediaSource::Plain(mxc_uri));
+        let mut aud = AudioMessageEventContent::new(body_text, source);
         let mut info = aud.info.take().unwrap_or_default();
         info.mimetype = Some(content_type.to_string());
         info.size = file_size;
+        info.duration = audio_duration_ms.map(Duration::from_millis);
         aud.info = Some(info);
         if has_caption {
             aud.filename = Some(file_name);
@@ -204,7 +205,7 @@ fn build_file_room_message(
     } else {
         use matrix_sdk::ruma::events::room::message::FileMessageEventContent;
 
-        let mut file_msg = FileMessageEventContent::new(body_text, MediaSource::Plain(mxc_uri));
+        let mut file_msg = FileMessageEventContent::new(body_text, source);
         let mut info = file_msg.info.take().unwrap_or_default();
         info.mimetype = Some(content_type.to_string());
         info.size = file_size;
@@ -230,7 +231,7 @@ fn rss_thread_attachment_keeps_its_media_and_thread_relationship() {
     }))
     .unwrap();
     let content = build_file_room_message(
-        "mxc://example.org/photo".into(),
+        MediaSource::Plain("mxc://example.org/photo".into()),
         "photo.png".into(),
         mime::IMAGE_PNG,
         Some(UInt::from(128u32)),
@@ -239,6 +240,7 @@ fn rss_thread_attachment_keeps_its_media_and_thread_relationship() {
         None,
         Some(32),
         Some(24),
+        None,
         Some(thread),
     );
     let json = serde_json::to_value(content).unwrap();
@@ -248,6 +250,55 @@ fn rss_thread_attachment_keeps_its_media_and_thread_relationship() {
     assert_eq!(json["m.relates_to"]["rel_type"], "m.thread");
     assert_eq!(json["m.relates_to"]["event_id"], "$article");
     assert_eq!(json["m.relates_to"]["m.in_reply_to"]["event_id"], "$last");
+}
+
+#[cfg(test)]
+#[test]
+fn audio_message_serializes_duration_caption_and_encrypted_source() {
+    use matrix_sdk::ruma::events::room::{message::MessageType, MediaSource};
+
+    let file = serde_json::from_value(serde_json::json!({
+        "url": "mxc://example.org/recording",
+        "key": { "kty": "oct", "key_ops": ["encrypt", "decrypt"], "alg": "A256CTR", "k": "AA", "ext": true },
+        "iv": "AA",
+        "hashes": { "sha256": "AA" },
+        "v": "v2"
+    }))
+    .unwrap();
+    let content = build_file_room_message(
+        MediaSource::Encrypted(Box::new(file)),
+        "Voice message.wav".into(),
+        "audio/wav".parse().unwrap(),
+        Some(UInt::from(288_044u32)),
+        Some("Listen to this".into()),
+        Some("Listen to <em>this</em>".into()),
+        None,
+        None,
+        None,
+        Some(3000),
+        None,
+    );
+    assert!(matches!(
+        &content.msgtype,
+        MessageType::Audio(audio) if matches!(audio.source, MediaSource::Encrypted(_))
+    ));
+    let json = serde_json::to_value(&content).unwrap();
+    assert_eq!(json["msgtype"], "m.audio");
+    assert_eq!(json["body"], "Listen to this");
+    assert_eq!(json["filename"], "Voice message.wav");
+    assert_eq!(json["formatted_body"], "Listen to <em>this</em>");
+    assert_eq!(
+        json["info"],
+        serde_json::json!({ "duration": 3000, "size": 288044, "mimetype": "audio/wav" })
+    );
+    assert_eq!(json["file"]["url"], "mxc://example.org/recording");
+    assert!(json.get("url").is_none());
+
+    let display = super::message_display::extract_message_display(&content);
+    let request: MediaRequestParameters =
+        serde_json::from_value(display.file_media_request.unwrap()).unwrap();
+    assert!(matches!(request.source, MediaSource::Encrypted(_)));
+    assert_eq!(display.body, "Listen to this");
 }
 
 fn validate_upload_id(upload_id: &str) -> Result<(), String> {
@@ -263,7 +314,7 @@ fn validate_upload_id(upload_id: &str) -> Result<(), String> {
     Ok(())
 }
 
-fn room_file_staging_path(upload_id: &str) -> PathBuf {
+pub(crate) fn room_file_staging_path(upload_id: &str) -> PathBuf {
     super::temp_dir().join(format!("pax_upload_staging_{upload_id}.bin"))
 }
 
@@ -368,6 +419,8 @@ pub async fn get_matrix_max_upload_bytes(
     Ok(matrix_reported_max_upload_bytes(&client).await)
 }
 
+type RoomFileUpload = (String, u64, Option<EncryptedFile>);
+
 async fn upload_room_file_from_staging_path(
     app: &AppHandle,
     state: &Arc<AppState>,
@@ -376,7 +429,7 @@ async fn upload_room_file_from_staging_path(
     file_name: &str,
     mime_type: &str,
     staging_path: &std::path::Path,
-) -> Result<(String, u64), String> {
+) -> Result<RoomFileUpload, String> {
     let ac = get_authed_client(state).await?;
 
     let meta = tokio::fs::metadata(staging_path)
@@ -408,6 +461,37 @@ async fn upload_room_file_from_staging_path(
     );
 
     let content_type: mime::Mime = mime_type.parse().unwrap_or(mime::APPLICATION_OCTET_STREAM);
+
+    if content_type.type_() == mime::AUDIO {
+        let room = resolve_room(&ac.client, room_id)?;
+        let encryption = room
+            .latest_encryption_state()
+            .await
+            .map_err(|e| fmt_error_chain(&e))?;
+        if encryption.is_encrypted() {
+            let mut reader = std::fs::File::open(staging_path)
+                .map_err(|e| format!("Open audio for upload: {e}"))?;
+            let upload = ac.client.upload_encrypted_file(&mut reader);
+            let mut progress = upload.subscribe_to_send_progress();
+            let mut upload = std::pin::pin!(std::future::IntoFuture::into_future(upload));
+            let encrypted_file = loop {
+                tokio::select! {
+                    result = &mut upload => {
+                        break result.map_err(|e| format!("Encrypted audio upload failed: {}", fmt_error_chain(&e)))?;
+                    }
+                    Some(value) = progress.next() => {
+                        let _ = app.emit("room-file-upload-progress", RoomFileUploadProgressEvent {
+                            upload_id: upload_id.to_owned(),
+                            room_id: room_id.to_owned(),
+                            sent: value.current as u64,
+                            total,
+                        });
+                    }
+                }
+            };
+            return Ok((encrypted_file.url.to_string(), total, Some(encrypted_file)));
+        }
+    }
 
     log::info!(
         "[Pax Upload] file={} mime={} size={} (stream from disk)",
@@ -480,7 +564,7 @@ async fn upload_room_file_from_staging_path(
     let content_length = HeaderValue::from_str(&total.to_string())
         .map_err(|e| format!("Invalid Content-Length: {e}"))?;
 
-    let upload_outcome: Result<(String, u64), String> = async {
+    let upload_outcome: Result<RoomFileUpload, String> = async {
         let resp = state
             .http_client
             .post(&upload_url)
@@ -512,7 +596,7 @@ async fn upload_room_file_from_staging_path(
 
         log::info!("[Pax Upload] uploaded → {}", upload_result.content_uri);
 
-        Ok((upload_result.content_uri, total))
+        Ok((upload_result.content_uri, total, None))
     }
     .await;
 
@@ -543,7 +627,7 @@ async fn upload_room_file_staged_impl(
     upload_id: &str,
     file_name: &str,
     mime_type: &str,
-) -> Result<(String, u64), String> {
+) -> Result<RoomFileUpload, String> {
     validate_upload_id(upload_id)?;
     let path = room_file_staging_path(upload_id);
     if !path.exists() {
@@ -561,6 +645,7 @@ async fn send_file_message_impl(
     state: &Arc<AppState>,
     room_id: &str,
     content_uri: &str,
+    encrypted_file: Option<EncryptedFile>,
     file_name: &str,
     mime_type: &str,
     file_size_bytes: Option<u64>,
@@ -570,19 +655,33 @@ async fn send_file_message_impl(
     blurhash: Option<&str>,
     image_width: Option<u32>,
     image_height: Option<u32>,
+    audio_duration_ms: Option<u64>,
     thread: Option<MessageThreadTarget>,
 ) -> Result<String, String> {
     let client = get_client(state).await?;
     let room = resolve_room(&client, room_id)?;
 
-    let mxc_uri = matrix_sdk::ruma::OwnedMxcUri::from(content_uri);
-
     let content_type: mime::Mime = mime_type.parse().unwrap_or(mime::APPLICATION_OCTET_STREAM);
+    let source = match encrypted_file {
+        Some(file) => MediaSource::Encrypted(Box::new(file)),
+        None => {
+            if content_type.type_() == mime::AUDIO
+                && room
+                    .latest_encryption_state()
+                    .await
+                    .map_err(|e| fmt_error_chain(&e))?
+                    .is_encrypted()
+            {
+                return Err("Audio in this room must be uploaded with encryption.".into());
+            }
+            MediaSource::Plain(content_uri.into())
+        }
+    };
 
     let file_size = file_size_bytes.and_then(|n| UInt::try_from(n).ok());
 
     let content = build_file_room_message(
-        mxc_uri,
+        source,
         file_name.to_string(),
         content_type,
         file_size,
@@ -591,6 +690,7 @@ async fn send_file_message_impl(
         blurhash.map(|s| s.to_string()),
         image_width,
         image_height,
+        audio_duration_ms,
         thread,
     )
     .add_mentions(mentions.unwrap_or_default().into_matrix(&room).await);
@@ -604,7 +704,7 @@ async fn send_file_message_impl(
 }
 
 /// Upload only (emits `room-file-upload-progress`). Reads bytes from the on-disk staging file
-/// built with `room_file_staging_reset` + `room_file_staging_append_b64`. Returns `(content_uri, byte_size)`.
+/// built with `room_file_staging_reset` + `room_file_staging_append_b64`.
 #[tauri::command]
 pub async fn upload_room_file(
     app: AppHandle,
@@ -613,7 +713,7 @@ pub async fn upload_room_file(
     upload_id: String,
     file_name: String,
     mime_type: String,
-) -> Result<(String, u64), String> {
+) -> Result<RoomFileUpload, String> {
     upload_room_file_staged_impl(&app, &state, &room_id, &upload_id, &file_name, &mime_type).await
 }
 
@@ -623,6 +723,7 @@ pub async fn send_file_message(
     state: State<'_, Arc<AppState>>,
     room_id: String,
     content_uri: String,
+    encrypted_file: Option<EncryptedFile>,
     file_name: String,
     mime_type: String,
     file_size: Option<u64>,
@@ -632,12 +733,14 @@ pub async fn send_file_message(
     blurhash: Option<String>,
     image_width: Option<u32>,
     image_height: Option<u32>,
+    audio_duration_ms: Option<u64>,
     thread: Option<MessageThreadTarget>,
 ) -> Result<String, String> {
     send_file_message_impl(
         &state,
         &room_id,
         &content_uri,
+        encrypted_file,
         &file_name,
         &mime_type,
         file_size,
@@ -647,6 +750,7 @@ pub async fn send_file_message(
         blurhash.as_deref(),
         image_width,
         image_height,
+        audio_duration_ms,
         thread,
     )
     .await
@@ -683,7 +787,7 @@ pub async fn upload_and_send_file(
     .await
     .map_err(|e| format!("staging join: {e}"))??;
 
-    let (content_uri, byte_size) =
+    let (content_uri, byte_size, encrypted_file) =
         upload_room_file_staged_impl(&app, &state, &room_id, &upload_id, &file_name, &mime_type)
             .await?;
 
@@ -691,10 +795,12 @@ pub async fn upload_and_send_file(
         &state,
         &room_id,
         &content_uri,
+        encrypted_file,
         &file_name,
         &mime_type,
         Some(byte_size),
         caption.as_deref(),
+        None,
         None,
         None,
         None,

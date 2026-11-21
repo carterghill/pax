@@ -6,11 +6,12 @@ import type {
   MouseEvent,
   RefObject,
 } from "react";
-import { Paperclip, Send, Smile } from "lucide-react";
+import { Send, Smile } from "lucide-react";
 import type { ThemePalette, ThemeSpacing, ThemeTypography } from "../../../theme/types";
 import { EMOJI_ONLY_DISPLAY_SCALE } from "../../../utils/emojifyTwemoji";
 import type { EditingMessageRef } from "../../../components/MessageInput";
 import { ComposerFormattingToggle } from "./ComposerFormattingToolbar";
+import ComposerAttachmentMenu from "./ComposerAttachmentMenu";
 import type { PendingAttachment } from "./fileUpload";
 
 interface ComposerInputRowProps {
@@ -20,6 +21,7 @@ interface ComposerInputRowProps {
   pendingFile: PendingAttachment | null;
   draftDmPeerUserId?: string | null;
   uploadDisabled: boolean;
+  canRecordAudio: boolean;
   interactionLocked: boolean;
   plainText: string;
   hasComposerMedia: boolean;
@@ -37,6 +39,7 @@ interface ComposerInputRowProps {
   inputToolBtnRadius: number;
   inputToolIconSize: number;
   onFileSelected: (event: ChangeEvent<HTMLInputElement>) => void;
+  onRecordAudio: () => void;
   onEditorInput: (event: FormEvent<HTMLDivElement>) => void;
   onEditorKeyDown: (event: KeyboardEvent<HTMLDivElement>) => void;
   onEditorPaste: (event: ClipboardEvent<HTMLDivElement>) => void;
@@ -57,6 +60,7 @@ export default function ComposerInputRow({
   pendingFile,
   draftDmPeerUserId = null,
   uploadDisabled,
+  canRecordAudio,
   interactionLocked,
   plainText,
   hasComposerMedia,
@@ -74,6 +78,7 @@ export default function ComposerInputRow({
   inputToolBtnRadius,
   inputToolIconSize,
   onFileSelected,
+  onRecordAudio,
   onEditorInput,
   onEditorKeyDown,
   onEditorPaste,
@@ -104,55 +109,22 @@ export default function ComposerInputRow({
         style={{ display: "none" }}
         onChange={onFileSelected}
       />
-      <button
-        type="button"
-        title={
+      <ComposerAttachmentMenu
+        disabledReason={
           draftDmPeerUserId
             ? "Send a message first to create the conversation"
             : pendingFile
               ? "File attached"
-              : "Upload file"
-        }
-        aria-label={
-          draftDmPeerUserId
-            ? "Upload disabled until conversation exists"
-            : pendingFile
-              ? "File attached"
-              : "Upload file"
+              : undefined
         }
         disabled={uploadDisabled}
-        onMouseDown={(e) => e.preventDefault()}
-        onClick={() => fileInputRef.current?.click()}
-        style={{
-          flexShrink: 0,
-          display: "flex",
-          alignItems: "center",
-          justifyContent: "center",
-          width: inputToolBtnSize,
-          height: inputToolBtnSize,
-          padding: 0,
-          marginLeft: spacing.unit * 2,
-          marginRight: 0,
-          border: "none",
-          borderRadius: inputToolBtnRadius,
-          backgroundColor: "transparent",
-          color: palette.textSecondary,
-          cursor: uploadDisabled ? "default" : "pointer",
-          opacity: uploadDisabled ? 0.35 : 1,
-        }}
-        onMouseEnter={(e) => {
-          if (uploadDisabled) return;
-          e.currentTarget.style.backgroundColor = palette.bgHover;
-          e.currentTarget.style.color = palette.textPrimary;
-        }}
-        onMouseLeave={(e) => {
-          if (uploadDisabled) return;
-          e.currentTarget.style.backgroundColor = "transparent";
-          e.currentTarget.style.color = palette.textSecondary;
-        }}
-      >
-        <Paperclip size={inputToolIconSize} strokeWidth={2} />
-      </button>
+        canRecord={canRecordAudio}
+        buttonSize={inputToolBtnSize}
+        buttonRadius={inputToolBtnRadius}
+        iconSize={inputToolIconSize}
+        onAttach={() => fileInputRef.current?.click()}
+        onRecord={onRecordAudio}
+      />
 
       <div
         style={{

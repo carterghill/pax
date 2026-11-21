@@ -64,6 +64,7 @@ pub struct AppState {
     pub voice_presence: voice_presence::VoicePresenceService,
     direct_calls: commands::direct_calls::PendingDirectCalls,
     matrix_voip: commands::matrix_voip::MatrixVoip,
+    audio_recording: Mutex<Option<voice::recording::AudioRecording>>,
     pub sync_running: Arc<Mutex<bool>>,
     sync_ready: AtomicBool,
     /// Background `sync_with_callback` task — must be aborted before deleting the SQLite store
@@ -325,6 +326,7 @@ pub fn run() {
         voice_presence: voice_presence::VoicePresenceService::default(),
         direct_calls: Default::default(),
         matrix_voip: Default::default(),
+        audio_recording: Default::default(),
         file_cache,
         sync_running: Arc::new(Mutex::new(false)),
         sync_ready: AtomicBool::new(false),
@@ -440,6 +442,9 @@ pub fn run() {
             });
         })
         .invoke_handler(tauri::generate_handler![
+            voice::recording::start_audio_recording,
+            voice::recording::stop_audio_recording,
+            voice::recording::cancel_audio_recording,
             commands::auth::logout,
             commands::auth::get_access_token,
             commands::auth::save_credentials,

@@ -60,6 +60,7 @@ pub async fn get_access_token(state: State<'_, Arc<AppState>>) -> Result<String,
 #[tauri::command]
 pub async fn logout(state: State<'_, Arc<AppState>>, app: tauri::AppHandle) -> Result<(), String> {
     let _operation = state.encryption.operation.lock().await;
+    state.audio_recording.lock().await.take();
     // Give pending keys a chance to reach backup before stopping the SDK. The
     // databases remain on disk even if the network is unavailable.
     if let Some(client) = state.client.lock().await.as_ref() {

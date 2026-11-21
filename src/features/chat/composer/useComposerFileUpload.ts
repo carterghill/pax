@@ -1,5 +1,6 @@
 import { useState, useRef, useEffect, useCallback } from "react";
 import { listen } from "@tauri-apps/api/event";
+import { convertFileSrc } from "@tauri-apps/api/core";
 import {
   getMatrixMaxUploadBytes,
   roomFileStagingRemove,
@@ -16,15 +17,18 @@ import {
 } from "./fileUpload";
 import type { MessageFileSendBridge } from "./useComposerSubmit";
 import { formatInvokeErr } from "../formatInvokeErr";
+import type { RecordedAudio } from "./useComposerAudioRecording";
 
 type UseComposerFileUploadArgs = {
   roomId: string;
+  scope: string;
   interactionLocked: boolean;
   fileSendBridge: MessageFileSendBridge | null;
 };
 
 export function useComposerFileUpload({
   roomId,
+  scope,
   interactionLocked,
   fileSendBridge,
 }: UseComposerFileUploadArgs) {
@@ -46,9 +50,16 @@ export function useComposerFileUpload({
       preparationRef.current.controller.abort();
       preparationRef.current = null;
     }
-    if (pending?.previewUrl) URL.revokeObjectURL(pending.previewUrl);
+    if (pending?.audioDurationMs != null) {
+      void roomFileStagingRemove(pending.uploadId).catch(() => {});
+    } else if (pending?.previewUrl) {
+      URL.revokeObjectURL(pending.previewUrl);
+    }
   }, []);
-  useEffect(() => releasePendingFile, [releasePendingFile]);
+  useEffect(() => {
+    setPendingFile(null);
+    return releasePendingFile;
+  }, [scope, releasePendingFile]);
 
   useEffect(() => {
     if (!roomId) return;
@@ -84,6 +95,7 @@ export function useComposerFileUpload({
   const prepareAttachment = useCallback(
     async (attachment: PendingAttachment, signal: AbortSignal) => {
       const { uploadId, sourceFile, name, mimeType } = attachment;
+      if (!sourceFile) return null;
       try {
         await streamFileToStaging(sourceFile, uploadId, (f) => {
           const prog = f * UPLOAD_STAGING_END;
@@ -106,9 +118,9 @@ export function useComposerFileUpload({
           mimeType,
         });
         if (signal.aborted) return null;
-        const [contentUri, byteSize] = uploaded;
+        const [contentUri, byteSize, encryptedFile] = uploaded;
         setPendingFile((p) => p?.uploadId === uploadId
-          ? { ...p, contentUri, byteSize, phase: "ready", progress01: 1 }
+          ? { ...p, contentUri, byteSize, encryptedFile, phase: "ready", progress01: 1 }
           : p);
         return uploaded;
       } catch (e) {
@@ -213,6 +225,28 @@ export function useComposerFileUpload({
     [interactionLocked, prepareAttachment, roomId],
   );
 
+  const attachRecording = useCallback((audio: RecordedAudio) => {
+    if (interactionLocked || !roomId || pendingFileRef.current || selectingFileRef.current) return false;
+    const attachment: PendingAttachment = {
+      uploadId: audio.uploadId,
+      name: "Voice message.wav",
+      mimeType: "audio/wav",
+      sourceFile: null,
+      contentUri: null,
+      byteSize: audio.byteSize,
+      previewUrl: convertFileSrc(audio.path),
+      blurhash: null,
+      imageWidth: null,
+      imageHeight: null,
+      audioDurationMs: audio.durationMs,
+      phase: "ready",
+      progress01: 1,
+    };
+    pendingFileRef.current = attachment;
+    setPendingFile(attachment);
+    return true;
+  }, [interactionLocked, roomId]);
+
   const handleFileSelected = useCallback(
     (e: React.ChangeEvent<HTMLInputElement>) => {
       const file = e.target.files?.[0];
@@ -234,6 +268,7 @@ export function useComposerFileUpload({
     preparationRef,
     setPendingFile,
     attachFile,
+    attachRecording,
     handleFileSelected,
     clearPendingFile,
   };
