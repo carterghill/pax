@@ -38,6 +38,12 @@ export function formatMessageTime(timestamp: number): string {
 /*  MessageRow                                                         */
 /* ------------------------------------------------------------------ */
 
+export const MESSAGE_HEADER_MARGIN_UNITS = 3;
+
+export function messageRowVerticalPadding(showHeader: boolean, spacingUnit: number): number {
+  return showHeader ? spacingUnit : spacingUnit / 2;
+}
+
 export interface MessageRowProps {
   msg: Message;
   selfUserId: string;
@@ -125,6 +131,7 @@ const MessageRow = memo(function MessageRow({
     ? () => onOpenRssThread(msg, { ...article, headline: preview?.article.title || article.headline })
     : undefined;
   const menuBtn = spacingUnit * 7;
+  const verticalPadding = messageRowVerticalPadding(showHeader, spacingUnit);
   const rowActive = isMenuOpen || isReactionPickerOpen;
   const groupShadow =
     resolvedColorScheme === "light"
@@ -143,22 +150,10 @@ const MessageRow = memo(function MessageRow({
       className="pax-message-row"
       style={{
         position: "relative",
-        ...(showHeader
-          ? {
-              paddingTop: spacingUnit,
-              paddingRight: spacingUnit * 2,
-              paddingBottom: spacingUnit,
-              paddingLeft: spacingUnit * 4,
-            }
-          : {
-              paddingTop: spacingUnit / 2,
-              paddingRight: spacingUnit * 2,
-              paddingBottom: spacingUnit / 2,
-              paddingLeft: spacingUnit * 4,
-            }),
+        padding: `${verticalPadding}px ${spacingUnit * 2}px ${verticalPadding}px ${spacingUnit * 4}px`,
         display: "flex",
         gap: spacingUnit * 3,
-        marginTop: showHeader ? spacingUnit * 3 : 0,
+        marginTop: showHeader ? spacingUnit * MESSAGE_HEADER_MARGIN_UNITS : 0,
         borderTopLeftRadius: 0,
         borderBottomLeftRadius: 0,
         borderTopRightRadius: spacingUnit * 1.5,

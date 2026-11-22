@@ -26,7 +26,10 @@ import { useAcknowledgeVisibleCalls } from "../hooks/useAcknowledgeVisibleCalls"
 import { describeCall, formatCallDuration, projectCallHistory } from "../features/chat/messages/callHistory";
 import { timelinePaginationEdge } from "../features/chat/messages/timelinePagination";
 import MembershipNoticeRow from "../features/chat/messages/MembershipNoticeRow";
-import MessageRow from "../features/chat/messages/MessageRow";
+import MessageRow, {
+  MESSAGE_HEADER_MARGIN_UNITS,
+  messageRowVerticalPadding,
+} from "../features/chat/messages/MessageRow";
 import { useIgnoredUsers } from "../context/IgnoredUsersContext";
 import TimelineNoticeRow from "../features/chat/messages/TimelineNoticeRow";
 import { rssArticleCandidate, type RssArticleCandidate } from "../features/chat/messages/rssArticle";
@@ -794,6 +797,15 @@ const MessageList = forwardRef<MessageListHandle, MessageListProps>(function Mes
   const showRecentNotice = showJumpToRecent || (!atBottom && hasUnreadMessages);
   const jumpToRecentLabel = hasUnreadMessages ? "New messages" : "Jump to recent";
 
+  const showsHeader = (index: number) => {
+    const message = messages[index];
+    const previous = messages[index - 1] ?? null;
+    const crossedUpgrade = previous?.historyRoomId && previous.historyRoomId !== message.historyRoomId;
+    return Boolean(crossedUpgrade || (!message.historyRoomId && rssArticles[index]) || rssArticles[index - 1])
+      || shouldShowHeader(message, previous);
+  };
+  let membershipOffset = 0;
+
   /* ================================================================ */
   /*  Render: initial loading                                          */
   /* ================================================================ */
@@ -945,12 +957,30 @@ const MessageList = forwardRef<MessageListHandle, MessageListProps>(function Mes
         const crossedUpgrade = prevMsg?.historyRoomId && prevMsg.historyRoomId !== msg.historyRoomId;
         const notice = msg.membershipNotice;
         if (notice) {
+          if (!prevMsg?.membershipNotice) {
+            membershipOffset = 0;
+            if (prevMsg && !isTimelineNotice(prevMsg) && prevMsg.historyRoomId === msg.historyRoomId) {
+              let next = i + 1;
+              while (messages[next]?.membershipNotice && messages[next].historyRoomId === msg.historyRoomId) {
+                next += 1;
+              }
+              const following = messages[next];
+              if (following && !isTimelineNotice(following) && following.historyRoomId === msg.historyRoomId) {
+                // Shift the whole notice run within the existing gap. The new
+                // message group contributes its header margin and row padding.
+                const above = messageRowVerticalPadding(showsHeader(i - 1), spacing.unit);
+                const below = spacing.unit * MESSAGE_HEADER_MARGIN_UNITS + messageRowVerticalPadding(true, spacing.unit);
+                membershipOffset = (below - above) / 2;
+              }
+            }
+          }
           return (
             <Fragment key={msg.eventId}>
               {crossedUpgrade && upgradeDivider}
               <MembershipNoticeRow
                 eventId={msg.eventId}
                 timestamp={msg.timestamp}
+                verticalOffset={membershipOffset}
                 notice={notice}
                 actorLabel={msg.senderName?.trim() || resolveMemberLabel(msg.sender)}
                 targetLabel={notice.targetName?.trim() || resolveMemberLabel(notice.targetUserId)}
@@ -984,7 +1014,7 @@ const MessageList = forwardRef<MessageListHandle, MessageListProps>(function Mes
         }
         const isHistorical = !!msg.historyRoomId;
         const article = isHistorical ? null : rssArticles[i] ?? null;
-        const showHeader = Boolean(crossedUpgrade || article || rssArticles[i - 1]) || shouldShowHeader(msg, prevMsg);
+        const showHeader = showsHeader(i);
         const canEdit = !isHistorical && messageAllowsEdit(msg, userId);
         const canDelete = !isHistorical && messageAllowsDelete(msg, userId, redactionPolicy);
         const showReplyButton =

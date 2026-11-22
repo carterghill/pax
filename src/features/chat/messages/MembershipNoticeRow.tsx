@@ -5,6 +5,7 @@ import TimelineNoticeRow from "./TimelineNoticeRow";
 interface MembershipNoticeRowProps {
   eventId: string;
   timestamp: number;
+  verticalOffset: number;
   notice: MembershipNotice;
   actorLabel: string;
   targetLabel: string;
@@ -13,6 +14,7 @@ interface MembershipNoticeRowProps {
 export default function MembershipNoticeRow({
   eventId,
   timestamp,
+  verticalOffset,
   notice,
   actorLabel,
   targetLabel,
@@ -39,6 +41,7 @@ export default function MembershipNoticeRow({
     <TimelineNoticeRow
       eventId={eventId}
       timestamp={timestamp}
+      verticalOffset={verticalOffset}
       icon={<UsersRound size={14} aria-hidden="true" />}
     >
       {text}{reason && <> (<bdi>{reason}</bdi>)</>}

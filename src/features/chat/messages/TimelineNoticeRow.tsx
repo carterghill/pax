@@ -9,11 +9,12 @@ interface TimelineNoticeRowProps {
   incomingCallId?: string;
   timestamp: number;
   timeLabel?: string;
+  verticalOffset?: number;
   icon: ReactNode;
   children: ReactNode;
 }
 
-export default function TimelineNoticeRow({ eventId, incomingCallId, timestamp, timeLabel, icon, children }: TimelineNoticeRowProps) {
+export default function TimelineNoticeRow({ eventId, incomingCallId, timestamp, timeLabel, verticalOffset, icon, children }: TimelineNoticeRowProps) {
   const { palette, spacing, typography } = useTheme();
   const date = new Date(timestamp);
 
@@ -23,6 +24,7 @@ export default function TimelineNoticeRow({ eventId, incomingCallId, timestamp, 
       data-incoming-call-id={incomingCallId}
       style={{
         position: "relative",
+        top: verticalOffset,
         display: "flex",
         alignItems: "baseline",
         gap: spacing.unit * 3,
