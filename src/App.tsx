@@ -17,7 +17,7 @@ import { getAndroidPushKey, setAndroidBadgeSessionActive } from "./utils/appBadg
 import { useExternalLinkInterceptor } from "./hooks/useExternalLinks";
 import { listen } from "@tauri-apps/api/event";
 import QuitConfirmDialog from "./components/QuitConfirmDialog";
-import { homeserverUrlToHostname, sanitizeSignupUsernameInput } from "./utils/matrix";
+import { homeserverUrlToHostname, localpartFromUserId, sanitizeSignupUsernameInput } from "./utils/matrix";
 import { usePushNotifications } from "./hooks/usePushNotifications";
 import { EncryptionProvider } from "./context/EncryptionContext";
 import EncryptionRecovery, { EncryptionSignOut } from "./components/EncryptionRecovery";
@@ -207,6 +207,7 @@ function App() {
 
   const [homeserver, setHomeserver] = useState("");
   const [username, setUsername] = useState("");
+  const prefilledLoginRef = useRef<{ homeserver: string; userId: string } | null>(null);
   const [password, setPassword] = useState("");
   const [confirmPassword, setConfirmPassword] = useState("");
   const [registrationToken, setRegistrationToken] = useState("");
@@ -304,16 +305,30 @@ function App() {
     setTab("login");
   }, []);
 
+  const prefillUsername = useCallback(({ homeserver, userId }: LoginDetails) => {
+    prefilledLoginRef.current = userId ? { homeserver, userId } : null;
+    setUsername(userId ? localpartFromUserId(userId) : "");
+  }, []);
+
+  function loginIdentifier() {
+    const saved = prefilledLoginRef.current;
+    // For the unchanged prefill, keep the exact account ID and its homeserver together.
+    if (saved && saved.homeserver.replace(/\/+$/, "") === homeserver.replace(/\/+$/, "")) {
+      return saved.userId;
+    }
+    return username;
+  }
+
   useEffect(() => {
     const unlisten = listen<LoginDetails>("session-ended", ({ payload }) => {
       showSignedOut();
       setHomeserver(payload.homeserver);
-      setUsername(payload.userId ?? "");
+      prefillUsername(payload);
       setRememberMe(payload.rememberMe);
       setError(payload.message);
     });
     return () => { void unlisten.then((stop) => stop()); };
-  }, [showSignedOut]);
+  }, [prefillUsername, showSignedOut]);
 
   const enterSession = useCallback(async (id: string) => {
     setUserId(id);
@@ -337,7 +352,7 @@ function App() {
     try {
       const id = await invoke<string>("login", {
         homeserver,
-        username,
+        username: loginIdentifier(),
         password,
         persistSession: rememberMe,
       });
@@ -357,7 +372,9 @@ function App() {
     if (authBusyRef.current) return;
     authBusyRef.current = true; setLoading(true); setConversionError(null);
     try {
-      const id = await invoke<string>("resume_pax_conversion", { homeserver, username, currentPassword, newPassword, persistSession: rememberMe });
+      const id = await invoke<string>("resume_pax_conversion", {
+        homeserver, username: loginIdentifier(), currentPassword, newPassword, persistSession: rememberMe,
+      });
       await enterSession(id);
       setConversionOpen(false); setPassword("");
     } catch (e) { setConversionError(String(e)); throw e; }
@@ -412,6 +429,7 @@ function App() {
     } catch (error) {
       setError(String(error));
     } finally {
+      prefilledLoginRef.current = null;
       showSignedOut();
     }
   }
@@ -440,7 +458,7 @@ function App() {
           }
           setRememberMe(creds.rememberMe);
           if (creds.userId) {
-            setUsername(creds.userId);
+            prefillUsername(creds);
             if (restoreError.startsWith("PAX_CONVERSION_PENDING:")) {
               setConversionOpen(true);
             } else {
@@ -454,13 +472,14 @@ function App() {
     })().finally(() => {
       setAutoLoggingIn(false);
     });
-  }, [userId, authConfig, enterSession]);
+  }, [userId, authConfig, enterSession, prefillUsername]);
 
   function switchTab(newTab: "login" | "signup") {
     if (authBusyRef.current) return;
     setTab(newTab);
     setError(null);
     if (newTab === "signup") {
+      prefilledLoginRef.current = null;
       setUsername((u) => sanitizeSignupUsernameInput(u));
     }
   }
@@ -597,13 +616,14 @@ function App() {
           autoCapitalize="none"
           spellCheck={false}
           disabled={loading}
-          onChange={(e) =>
+          onChange={(e) => {
+            prefilledLoginRef.current = null;
             setUsername(
               tab === "signup"
                 ? sanitizeSignupUsernameInput(e.target.value)
                 : e.target.value,
-            )
-          }
+            );
+          }}
           onKeyDown={(e) => {
             if (tab === "signup" && e.key === " ") {
               e.preventDefault();
