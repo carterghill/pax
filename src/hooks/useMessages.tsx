@@ -150,6 +150,17 @@ function trySaveRoomMessagesCache(
 /*  Pure helpers                                                       */
 /* ------------------------------------------------------------------ */
 
+function mergeTimelineUpdates(current: Message[], updates: Message[]): Message[] {
+  const byId = new Map(current.map((message) => [message.eventId, message]));
+  for (const message of updates) {
+    const previous = byId.get(message.eventId);
+    if (!message.decryptionFailed || !previous || previous.decryptionFailed) {
+      byId.set(message.eventId, message);
+    }
+  }
+  return trimTimelineWindow([...byId.values()].sort((a, b) => a.timestamp - b.timestamp), WINDOW_SIZE, "latest");
+}
+
 function revokeLocalPreviewIfNeeded(m: Message) {
   const u = m.localImagePreviewObjectUrl;
   if (u && u.startsWith("blob:")) {
@@ -473,6 +484,11 @@ export function useMessages(roomId: string | null, currentUserId: string | null 
 
       const recent = batch.messages.slice().reverse();
       const byId = new Map(recent.map((message) => [message.eventId, message]));
+      for (const message of messagesRef.current) {
+        if (!message.decryptionFailed && byId.get(message.eventId)?.decryptionFailed) {
+          byId.set(message.eventId, message);
+        }
+      }
       // Keep sync updates that arrived while the history request was in flight.
       const latestEventId = fetch.latestEventId && !byId.has(fetch.latestEventId)
         ? fetch.latestEventId
@@ -533,7 +549,8 @@ export function useMessages(roomId: string | null, currentUserId: string | null 
     if (cached) {
       commit(cached.messages, cached.olderToken, cached.isAtLatest);
       primeAvatarsFromMessagesRef.current(cached.messages);
-      setInitialLoading(false);
+      // Keep the snapshot as a fallback if the fetch fails, and wait before showing its placeholders.
+      setInitialLoading(cached.messages.some((message) => message.decryptionFailed));
     } else {
       commit([], null, true);
       setInitialLoading(true);
@@ -594,7 +611,7 @@ export function useMessages(roomId: string | null, currentUserId: string | null 
     const onTimelineEntry = ({ roomId: rid, message }: RoomMessagePayload) => {
       if (rid !== roomId || activeRoomIdRef.current !== roomId) return;
       const existing = messagesRef.current.find((m) => m.eventId === message.eventId);
-      if (existing?.directCallNotice && message.decryptionFailed) return;
+      if (existing && !existing.decryptionFailed && message.decryptionFailed) return;
       const alreadyVisible = existing !== undefined;
       const isNotice = isTimelineNotice(message);
       const fetch = latestFetchRef.current;
@@ -814,24 +831,8 @@ export function useMessages(roomId: string | null, currentUserId: string | null 
       if (activeRoomIdRef.current !== target) return;
       if (!isAtLatestRef.current) return;
 
-      const fetched = batch.messages.slice().reverse();
       setLatestCursor({ roomId: target, eventId: batch.latestEventId ?? null });
-      const prev = messagesRef.current;
-
-      const fetchedIds = new Set(fetched.map((m) => m.eventId));
-      const kept = prev.filter((m) => !fetchedIds.has(m.eventId));
-
-      let combined = [...kept, ...fetched];
-      combined.sort((a, b) => a.timestamp - b.timestamp);
-
-      const seen = new Set<string>();
-      combined = combined.filter((m) => {
-        if (seen.has(m.eventId)) return false;
-        seen.add(m.eventId);
-        return true;
-      });
-
-      combined = trimTimelineWindow(combined, WINDOW_SIZE, "latest");
+      const combined = mergeTimelineUpdates(messagesRef.current, batch.messages.slice().reverse());
 
       commit(combined, batch.prevBatch, true);
       primeAvatarsFromMessagesRef.current(combined);
@@ -875,9 +876,7 @@ export function useMessages(roomId: string | null, currentUserId: string | null 
           if (atLatest) setLatestCursor({ roomId, eventId: batch.latestEventId ?? null });
           const recovered = batch.messages.filter((message) => atLatest || snapshot.length === 0
             || (message.timestamp >= snapshot[0].timestamp && message.timestamp <= snapshot[snapshot.length - 1].timestamp));
-          const byId = new Map(messagesRef.current.map((message) => [message.eventId, message]));
-          for (const message of recovered) byId.set(message.eventId, message);
-          const combined = trimTimelineWindow([...byId.values()].sort((a, b) => a.timestamp - b.timestamp), WINDOW_SIZE, "latest");
+          const combined = mergeTimelineUpdates(messagesRef.current, recovered);
           commit(combined, snapshot.length === 0 ? batch.prevBatch : olderTokenRef.current, atLatest);
           primeAvatarsFromMessagesRef.current(recovered);
         } catch (error) {
@@ -1129,7 +1128,7 @@ export function useMessages(roomId: string | null, currentUserId: string | null 
     hasOlder,
     isAtLatest,
     loadingOlder,
-    initialLoading,
+    initialLoading: initialLoading || latestCursor.roomId !== roomId,
     pendingRecentCount,
     showJumpToRecent,
     jumpToRecent,

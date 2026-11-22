@@ -536,7 +536,7 @@ const MessageList = forwardRef<MessageListHandle, MessageListProps>(function Mes
     {
       readThroughEventId,
       atBottom: isAtLatest && atBottom,
-      blocked: automaticReadBlocked,
+      blocked: initialLoading || automaticReadBlocked,
       privateOnly: privateReadOnly,
       alreadyAcknowledgedEventId: acknowledgedThrough,
     },

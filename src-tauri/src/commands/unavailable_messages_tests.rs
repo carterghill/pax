@@ -1,7 +1,7 @@
 use super::*;
 use crate::commands::{
     auth::SavedSession,
-    messages::unavailable_message,
+    messages::{retry_timeline_decryption, unavailable_message},
     pax_auth::tests::{client, Server, TestDir, USER},
 };
 use serde_json::json;
@@ -158,6 +158,64 @@ async fn setup() -> (Server, TestDir, Client, Room) {
         .get_room(&matrix_sdk::ruma::RoomId::parse(ROOM).unwrap())
         .unwrap();
     (server, dir, sdk, room)
+}
+
+#[tokio::test]
+async fn timeline_uses_keys_from_backup_before_returning_placeholders() {
+    use matrix_sdk::encryption::vodozemac::{
+        base64_encode,
+        megolm::{GroupSession, InboundGroupSession, SessionConfig},
+        pk_encryption::PkEncryption,
+        Curve25519PublicKey, Curve25519SecretKey, Ed25519Keypair,
+    };
+    use matrix_sdk::room::MessagesOptions;
+
+    let (server, _dir, sdk, room) = setup().await;
+    sdk.encryption().backups().create().await.unwrap();
+
+    let config = SessionConfig::version_1();
+    let mut session = GroupSession::new(config);
+    let session_id = session.session_id();
+    let session_key = InboundGroupSession::new(&session.session_key(), config)
+        .export_at_first_known_index();
+    let sender_key = Curve25519PublicKey::from(&Curve25519SecretKey::new()).to_base64();
+    let plaintext = json!({"room_id": ROOM, "type": "m.room.message",
+        "content": {"msgtype": "m.text", "body": "Recovered before display"}});
+    let mut recoverable = encrypted("$recoverable", 200);
+    recoverable["content"]["ciphertext"] = session.encrypt(plaintext.to_string()).to_base64().into();
+    recoverable["content"]["sender_key"] = sender_key.clone().into();
+    recoverable["content"]["session_id"] = session_id.clone().into();
+    let mut missing_session = GroupSession::new(config);
+    let mut missing = encrypted("$missing", 100);
+    missing["content"]["session_id"] = missing_session.session_id().into();
+    missing["content"]["ciphertext"] = missing_session.encrypt(plaintext.to_string()).to_base64().into();
+
+    {
+        let mut state = server.state.lock().unwrap();
+        let backup_public_key = state.backup.as_ref().unwrap()["auth_data"]["public_key"]
+            .as_str().unwrap();
+        let backup = PkEncryption::from_key(Curve25519PublicKey::from_base64(backup_public_key).unwrap());
+        let backed_up_key = json!({"algorithm": "m.megolm.v1.aes-sha2", "sender_key": sender_key,
+            "session_key": session_key.to_base64(),
+            "sender_claimed_keys": {"ed25519": Ed25519Keypair::new().public_key().to_base64()}});
+        let data = backup.encrypt(backed_up_key.to_string().as_bytes());
+        state.route_overrides.insert(
+            ("GET".into(), format!("/_matrix/client/v3/room_keys/keys/{ROOM}/{session_id}")),
+            (200, json!({"first_message_index": 0, "forwarded_count": 0, "is_verified": false,
+                "session_data": {"ciphertext": base64_encode(data.ciphertext),
+                    "mac": base64_encode(data.mac), "ephemeral": data.ephemeral_key.to_base64()}})),
+        );
+        state.timeline = vec![missing, recoverable];
+    }
+
+    let mut page = room.messages(MessagesOptions::backward()).await.unwrap();
+    assert_eq!(page.chunk.len(), 2);
+    assert!(unavailable_message(page.chunk[0].raw().json()).is_some());
+    retry_timeline_decryption(&room, &mut page.chunk, &Default::default(), &mut None).await;
+    assert_eq!(page.chunk[0].event_id().unwrap().as_str(), "$recoverable");
+    let recovered: serde_json::Value = serde_json::from_str(page.chunk[0].raw().json().get()).unwrap();
+    assert_eq!(recovered["content"]["body"], "Recovered before display");
+    assert_eq!(unavailable_message(page.chunk[1].raw().json()).unwrap().event_id, "$missing");
 }
 
 #[test]

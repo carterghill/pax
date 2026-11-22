@@ -2,7 +2,8 @@ use std::collections::{HashMap, HashSet};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
 
-use matrix_sdk::deserialized_responses::{EncryptionInfo, TimelineEvent};
+use futures_util::StreamExt;
+use matrix_sdk::deserialized_responses::{EncryptionInfo, TimelineEvent, TimelineEventKind};
 use matrix_sdk::room::edit::EditedContent;
 use matrix_sdk::room::reply::{EnforceThread, Reply};
 use matrix_sdk::room::IncludeRelations;
@@ -13,6 +14,7 @@ use matrix_sdk::ruma::events::ignored_user_list::IgnoredUserListEvent;
 use matrix_sdk::ruma::events::presence::PresenceEvent;
 use matrix_sdk::ruma::events::reaction::ReactionEventContent;
 use matrix_sdk::ruma::events::relation::Annotation;
+use matrix_sdk::ruma::events::room::encrypted::OriginalSyncRoomEncryptedEvent;
 use matrix_sdk::ruma::events::room::member::MembershipState;
 use matrix_sdk::ruma::events::room::member::OriginalSyncRoomMemberEvent;
 use matrix_sdk::ruma::events::room::message::OriginalSyncRoomMessageEvent;
@@ -43,6 +45,7 @@ use matrix_sdk::ruma::UInt;
 use matrix_sdk::ruma::UserId;
 use matrix_sdk::Room;
 use tauri::{Emitter, State};
+use tokio::time::{timeout_at, Duration, Instant};
 
 use crate::types::{
     MessageBatch, MessageEditPayload, MessageInfo, MessageReactionDeltaPayload,
@@ -63,6 +66,70 @@ use super::{
     direct_calls::{call_notice, CALL_EVENT},
     fmt_error_chain, get_client, resolve_room,
 };
+
+const TIMELINE_KEY_WAIT: Duration = Duration::from_millis(750);
+
+pub(super) async fn retry_timeline_decryption(
+    room: &Room,
+    events: &mut [TimelineEvent],
+    ignored: &IgnoredUserIds,
+    deadline: &mut Option<Instant>,
+) {
+    if deadline.is_some_and(|end| end <= Instant::now()) {
+        return;
+    }
+    let mut pending: Vec<_> = events
+        .iter_mut()
+        .filter(|event| {
+            matches!(&event.kind, TimelineEventKind::UnableToDecrypt { utd_info, .. }
+                if utd_info.reason.is_missing_room_key() && utd_info.session_id.is_some())
+                && !hides_event(ignored, event.raw())
+        })
+        .collect();
+    if pending.is_empty() {
+        return;
+    }
+
+    // The SDK has already tried the local keys and queued any backup downloads.
+    // Share one grace period across the pages of this history request.
+    let deadline = *deadline.get_or_insert_with(|| Instant::now() + TIMELINE_KEY_WAIT);
+    let Some(keys) = room.client().encryption().room_keys_received_stream().await else {
+        return;
+    };
+    futures_util::pin_mut!(keys);
+    // Retry once after subscribing in case a key arrived since the SDK's first attempt.
+    let mut received_sessions: Option<HashSet<String>> = None;
+    loop {
+        for event in &mut pending {
+            if received_sessions.as_ref().is_some_and(|sessions| {
+                !event.kind.session_id().is_some_and(|id| sessions.contains(id))
+            }) {
+                continue;
+            }
+            let encrypted = event.raw().cast_ref_unchecked::<OriginalSyncRoomEncryptedEvent>();
+            match room.decrypt_event(encrypted, None).await {
+                Ok(decrypted) if matches!(decrypted.kind, TimelineEventKind::Decrypted(_)) => {
+                    event.kind = decrypted.kind;
+                }
+                _ => {}
+            }
+        }
+        pending.retain(|event| event.kind.is_utd());
+        if pending.is_empty() || Instant::now() >= deadline {
+            return;
+        }
+        received_sessions = match timeout_at(deadline, keys.next()).await {
+            Ok(Some(Ok(keys))) => Some(
+                keys.into_iter()
+                    .filter(|key| key.room_id == room.room_id())
+                    .map(|key| key.session_id)
+                    .collect(),
+            ),
+            Ok(Some(Err(_))) => None, // A lagged stream may have skipped a key we need.
+            _ => return,
+        };
+    }
+}
 
 /// Keep the envelope's public metadata when the SDK cannot decrypt an event.
 /// Never expose ciphertext as message text or confuse redactions with missing keys.
@@ -412,6 +479,7 @@ pub async fn get_messages(
     let mut timeline_event_count_total: usize = 0;
     let mut prev_batch: Option<String>;
     let mut events_for_reactions: Vec<TimelineEvent> = Vec::new();
+    let mut decryption_deadline = None;
 
     // Cap on how many pages we'll walk in one `get_messages` call while looking
     // for enough visible messages.  With the end-token-based stop below we can
@@ -447,11 +515,12 @@ pub async fn get_messages(
             .map_err(|e| format!("Failed to fetch messages: {}", fmt_error_chain(&e)))?;
 
         let matrix_sdk::room::Messages {
-            chunk,
+            mut chunk,
             end: pagination_end,
             ..
         } = response;
 
+        retry_timeline_decryption(&room, &mut chunk, &ignored, &mut decryption_deadline).await;
         if let Some(filter) = &mut rss {
             filter.remember_commands(&chunk);
         }
@@ -951,7 +1020,7 @@ async fn current_pinned_event_ids(room: &Room) -> Result<Vec<OwnedEventId>, Stri
 /// Build [`MessageInfo`] rows from decrypted timeline events (chronological order in, any order out).
 async fn build_message_infos_from_timeline_events(
     room: &Room,
-    timeline_events: Vec<TimelineEvent>,
+    mut timeline_events: Vec<TimelineEvent>,
     avatars: &std::sync::Arc<crate::avatars::AvatarService>,
     ignored: &IgnoredUserIds,
 ) -> Result<Vec<MessageInfo>, String> {
@@ -976,6 +1045,7 @@ async fn build_message_infos_from_timeline_events(
     let client = room.client();
     let me = client.user_id();
     let encrypted_room = room.encryption_state().is_encrypted();
+    retry_timeline_decryption(room, &mut timeline_events, ignored, &mut None).await;
     let reaction_map = aggregate_reactions_from_timeline(&timeline_events, me, ignored);
     let mut rss = super::rss::activity::Filter::for_room(room).await;
     if let Some(filter) = &mut rss {
