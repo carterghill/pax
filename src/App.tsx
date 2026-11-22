@@ -13,7 +13,7 @@ import { useRooms } from "./hooks/useRooms";
 import { clearMessageCache } from "./hooks/useMessages";
 import { clearPersistedSpaceHomeCache } from "./utils/spaceHomeCache";
 import { clearPersistedRoomsList } from "./utils/roomsCache";
-import { setAndroidBadgeSessionActive } from "./utils/appBadge";
+import { getAndroidPushKey, setAndroidBadgeSessionActive } from "./utils/appBadge";
 import { useExternalLinkInterceptor } from "./hooks/useExternalLinks";
 import { listen } from "@tauri-apps/api/event";
 import QuitConfirmDialog from "./components/QuitConfirmDialog";
@@ -407,7 +407,7 @@ function App() {
   async function handleSignOut() {
     setAndroidBadgeSessionActive(false);
     try {
-      await invoke("logout");
+      await invoke("logout", { androidPushKey: getAndroidPushKey() });
       setError(null);
     } catch (error) {
       setError(String(error));
@@ -778,7 +778,7 @@ function AuthedApp({
     setAndroidBadgeSessionActive(true);
   }, [userId]);
 
-  // Register mobile push tokens with the homeserver.
+  // iOS push tokens are registered through the WebView.
   const { unregisterPush } = usePushNotifications({ userId });
   const [signOutRequested, setSignOutRequested] = useState(false);
   const { invite, error, loading, dismiss } = roomLink;

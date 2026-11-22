@@ -3,6 +3,7 @@ import { invoke } from "@tauri-apps/api/core";
 interface AndroidAppBadge {
   setBadgeCount(count: number): void;
   setBadgeSessionActive(active: boolean): void;
+  getFcmToken(): string;
 }
 
 function androidBadge(): AndroidAppBadge | undefined {
@@ -11,6 +12,10 @@ function androidBadge(): AndroidAppBadge | undefined {
 
 export function setAndroidBadgeSessionActive(active: boolean) {
   androidBadge()?.setBadgeSessionActive?.(active);
+}
+
+export function getAndroidPushKey(): string | null {
+  return androidBadge()?.getFcmToken?.() || null;
 }
 
 export function setAppNotificationCount(count: number, showOnDesktop: boolean) {

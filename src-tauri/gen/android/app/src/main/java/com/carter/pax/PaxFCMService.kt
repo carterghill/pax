@@ -19,10 +19,7 @@ import org.json.JSONObject
  * We build and show an Android system notification directly — no need
  * to route through the WebView / Tauri layer, which may not be alive.
  *
- * Token lifecycle:
- *   - [onNewToken] saves the token to SharedPreferences.
- *   - [MainActivity] reads it on startup and injects it into the WebView
- *     so the frontend can register the pusher with the homeserver.
+ * [onNewToken] saves the latest token and schedules Matrix pusher registration.
  */
 class PaxFCMService : FirebaseMessagingService() {
 
@@ -39,17 +36,13 @@ class PaxFCMService : FirebaseMessagingService() {
         PaxNotificationBadge.createChannels(this)
     }
 
-    /**
-     * Called when the FCM token is created or rotated.
-     * Persisted in SharedPreferences; the frontend reads it on next launch
-     * and re-registers the pusher.
-     */
     override fun onNewToken(token: String) {
         super.onNewToken(token)
         getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
             .edit()
             .putString(PREF_FCM_TOKEN, token)
-            .apply()
+            .commit()
+        PaxPushJob.schedule(this, replacePending = true)
     }
 
     /**
@@ -67,9 +60,9 @@ class PaxFCMService : FirebaseMessagingService() {
         val data = message.data
         if (data.isEmpty() || !PaxNotificationBadge.sessionActive(this)) return
 
-        val roomName = data["room_name"]?.trim()?.takeIf { it.isNotEmpty() }
+        var roomName = data["room_name"]?.trim()?.takeIf { it.isNotEmpty() }
         val roomAlias = data["room_alias"]?.trim()?.takeIf { it.isNotEmpty() }
-        val senderName = (data["sender_display_name"] ?: data["sender"])
+        var senderName = (data["sender_display_name"] ?: data["sender"])
             ?.trim()?.takeIf { it.isNotEmpty() }
         val roomId = data["room_id"] ?: ""
         val eventId = data["event_id"]?.trim()?.takeIf { it.isNotEmpty() } ?: ""
@@ -82,25 +75,27 @@ class PaxFCMService : FirebaseMessagingService() {
         }
 
         val directCallEvent = type == "com.carter.pax.direct_call" || type?.startsWith("m.call.") == true
+        var resolvedPreview: String? = null
+        var silent = false
         if ((directCallEvent || type == "m.room.encrypted" || type == null) &&
             roomId.isNotEmpty() && eventId.isNotEmpty()
         ) {
-            val callEvent = runCatching {
+            val resolved = runCatching {
                 PaxCallPush.resolve(applicationInfo.dataDir, roomId, eventId)?.let { JSONObject(it) }
             }.getOrNull()
-            if (callEvent != null) {
-                when (callEvent.optString("kind")) {
+            if (resolved != null) {
+                when (resolved.optString("kind")) {
                     "ring" -> {
-                        PaxCallNotifications.parse(callEvent)?.let { PaxCallNotifications.show(this, it, eventId) }
+                        PaxCallNotifications.parse(resolved)?.let { PaxCallNotifications.show(this, it, eventId) }
                         return
                     }
                     "ended" -> {
-                        PaxCallNotifications.parse(callEvent)?.let { PaxCallNotifications.close(this, it.id, true) }
+                        PaxCallNotifications.parse(resolved)?.let { PaxCallNotifications.close(this, it.id, true) }
                         return
                     }
                     "missed" -> {
-                        val call = PaxCallNotifications.parse(callEvent) ?: return
-                        val ringEventId = callEvent.optString("ringEventId").ifBlank { eventId }
+                        val call = PaxCallNotifications.parse(resolved) ?: return
+                        val ringEventId = resolved.optString("ringEventId").ifBlank { eventId }
                         PaxCallNotifications.close(this, call.id, true)
                         val manager = getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager
                         manager.cancel(eventId, 0)
@@ -116,12 +111,19 @@ class PaxFCMService : FirebaseMessagingService() {
                         return
                     }
                     "ignore" -> return
+                    "message" -> {
+                        roomName = resolved.optString("roomName", "").trim().takeIf { it.isNotEmpty() } ?: roomName
+                        senderName = resolved.optString("sender", "").trim().takeIf { it.isNotEmpty() } ?: senderName
+                        resolvedPreview = resolved.optString("preview", "").trim()
+                            .takeIf { it.isNotEmpty() }?.let { truncate(it, MAX_PREVIEW_LEN) }
+                        silent = resolved.optBoolean("silent")
+                    }
                 }
             }
         }
         if (directCallEvent || PaxCallNotifications.hasSeenRing(this, eventId)) return
 
-        val preview = messagePreview(data)
+        val preview = resolvedPreview ?: messagePreview(data)
         val roomLabel = roomContextLabel(roomName, roomAlias, senderName)
 
         val title: String
@@ -145,7 +147,7 @@ class PaxFCMService : FirebaseMessagingService() {
             }
         }
 
-        postNotification(roomId, eventId, title, body, unreadCount)
+        postNotification(roomId, eventId, title, body, unreadCount, silent = silent)
     }
 
     private fun postNotification(
@@ -155,7 +157,9 @@ class PaxFCMService : FirebaseMessagingService() {
         body: String,
         unreadCount: Int?,
         missedCallId: String? = null,
+        silent: Boolean = false,
     ) {
+        if (!PaxNotificationBadge.sessionActive(this)) return
         // Tap opens the app (MainActivity is singleTask, so it'll reuse the existing instance).
         // `event_id` lets the WebView scroll to the notified message after switching rooms.
         val intent = Intent(this, MainActivity::class.java).apply {
@@ -180,11 +184,12 @@ class PaxFCMService : FirebaseMessagingService() {
                 .setStyle(NotificationCompat.BigTextStyle().bigText(body))
                 .setAutoCancel(true)
                 .setPriority(NotificationCompat.PRIORITY_HIGH)
+                .setSilent(silent)
+                .setOnlyAlertOnce(eventId.isNotEmpty())
                 .setContentIntent(pendingIntent)
                 .apply {
                     if (missedCallId != null) {
                         setCategory(NotificationCompat.CATEGORY_MISSED_CALL)
-                        setOnlyAlertOnce(true)
                     }
                 }
                 .build()

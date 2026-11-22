@@ -688,7 +688,6 @@ pub fn run() {
             commands::push::push_gateway_configured,
             commands::push::get_ios_voip_token,
             commands::push::get_ios_badge_token,
-            commands::push::get_fcm_token,
             commands::tray_indicator::set_tray_unread_indicator,
             app_badge::set_app_notification_count,
             commands::lifecycle::exit_app,

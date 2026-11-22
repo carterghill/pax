@@ -1,34 +1,28 @@
 //! Matrix pusher registration for FCM, iOS VoIP, and iOS badges.
 //!
-//! The flow is:
-//!   1. Kotlin `MainActivity` fetches the FCM device token and injects it
-//!      into the WebView (`window.__paxFcmToken`).
-//!   2. The frontend hook `usePushNotifications` reads the token and
-//!      calls `register_pusher` with it.
-//!   3. This module POSTs `/_matrix/client/v3/pushers/set` on the user's
-//!      homeserver, pointing at our Sygnal push-gateway instance.
-//!   4. On logout the frontend calls `unregister_pusher` to remove it.
-//!
-//! Pusher `data` omits `format: event_id_only` so the homeserver sends the
-//! full notification payload (sender, room name, message preview) to Sygnal.
-//!
-//! Background notification *display* is handled entirely on the Kotlin side
-//! (`PaxFCMService`) — Sygnal sends FCM data messages, the service shows an
-//! Android system notification, no Rust involvement needed for that path.
+//! Android reconciles its pusher from a native job. iOS registers its tokens
+//! through the WebView as they become available.
 
 use std::sync::Arc;
 
-#[cfg(target_os = "android")]
-use tauri::Manager;
+use matrix_sdk::{
+    config::RequestConfig,
+    ruma::{
+        api::client::push::{get_pushrule, set_pushrule},
+        push::{Action, NewConditionalPushRule, NewPushRule, PushCondition, RuleKind, Tweak},
+    },
+    Client,
+};
 use tauri::State;
 
 use crate::AppState;
 
-/// Compile-time push gateway URL (e.g. `https://push.brandxtech.ca`).
-/// Set via `PAX_PUSH_GATEWAY_URL` in `.env` / shell environment.
+#[cfg(target_os = "android")]
+pub(crate) mod android;
+
 pub(crate) fn push_gateway_url() -> Option<&'static str> {
     #[cfg(target_os = "android")]
-    return option_env!("PAX_PUSH_GATEWAY_URL");
+    return option_env!("PAX_PUSH_GATEWAY_URL").filter(|url| !url.trim().is_empty());
     #[cfg(target_os = "ios")]
     return option_env!("PAX_IOS_VOIP_PUSH_GATEWAY_URL");
     #[cfg(not(any(target_os = "android", target_os = "ios")))]
@@ -54,6 +48,70 @@ fn badge_gateway_url() -> Option<&'static str> {
 /// Human-readable name shown in the homeserver's pusher list.
 const APP_DISPLAY_NAME: &str = "Pax";
 
+fn notify_url(gateway_url: &str) -> Result<String, String> {
+    const NOTIFY_PATH: &str = "/_matrix/push/v1/notify";
+    let mut url = reqwest::Url::parse(gateway_url).map_err(|_| "Invalid push gateway URL")?;
+    if url.scheme() != "https"
+        || url.host_str().is_none()
+        || !url.username().is_empty()
+        || url.password().is_some()
+        || url.query().is_some()
+        || url.fragment().is_some()
+    {
+        return Err(
+            "The push gateway must be an HTTPS URL without credentials, query or fragment".into(),
+        );
+    }
+    if matches!(url.path().trim_end_matches('/'), "" | NOTIFY_PATH) {
+        url.set_path(NOTIFY_PATH);
+        Ok(url.into())
+    } else {
+        Err(format!(
+            "The push gateway URL must have a root path or {NOTIFY_PATH}"
+        ))
+    }
+}
+
+async fn ensure_call_rule(client: &Client) {
+    let rule_id = super::direct_calls::CALL_EVENT;
+    let config = RequestConfig::new()
+        .timeout(std::time::Duration::from_secs(3))
+        .disable_retry();
+    let existing = client
+        .send(get_pushrule::v3::Request::new(
+            RuleKind::Underride,
+            rule_id.to_owned(),
+        ))
+        .with_request_config(config)
+        .await;
+    if existing
+        .err()
+        .and_then(|error| error.as_client_api_error().map(|api| api.status_code))
+        != Some(reqwest::StatusCode::NOT_FOUND)
+    {
+        return;
+    }
+
+    let rule = NewConditionalPushRule::new(
+        rule_id.to_owned(),
+        vec![PushCondition::EventMatch {
+            key: "type".into(),
+            pattern: rule_id.into(),
+        }],
+        vec![
+            Action::Notify,
+            Action::SetTweak(Tweak::Sound("ring".into())),
+        ],
+    );
+    if let Err(error) = client
+        .send(set_pushrule::v3::Request::new(NewPushRule::Underride(rule)))
+        .with_request_config(config)
+        .await
+    {
+        log::warn!("Could not set up the push rule for unencrypted Pax calls: {error}");
+    }
+}
+
 /// Register a mobile push token as a Matrix pusher on the user's homeserver.
 ///
 /// Called by the frontend after login / session restore / token refresh.
@@ -76,15 +134,16 @@ pub async fn register_pusher(
 
     let ac = super::get_authed_client(&state).await?;
 
-    let url = format!(
-        "{}/_matrix/client/v3/pushers/set",
-        ac.homeserver
-    );
+    let url = format!("{}/_matrix/client/v3/pushers/set", ac.homeserver);
 
     // Android previews and the existing VoIP gateway use the full payload.
     // The badge gateway needs only the event ID and notification count.
     let mut data = serde_json::json!({
-        "url": format!("{}/_matrix/push/v1/notify", gateway_url.trim_end_matches('/'))
+        "url": if cfg!(target_os = "android") {
+            notify_url(gateway_url)?
+        } else {
+            format!("{}/_matrix/push/v1/notify", gateway_url.trim_end_matches('/'))
+        }
     });
     if badge_only {
         data["format"] = serde_json::json!("event_id_only");
@@ -117,31 +176,8 @@ pub async fn register_pusher(
     }
 
     log::info!("[push] pusher registered successfully");
-    if badge_only {
-        return Ok(());
-    }
-
-    // Encrypted room events already use the homeserver's encrypted-message rules.
-    // Unencrypted Pax calls need a rule below room-level notification preferences.
-    let rule = "com.carter.pax.direct_call";
-    let rule_url = format!("{}/_matrix/client/v3/pushrules/global/underride/{rule}", ac.homeserver);
-    if let Ok(existing) = state.http_client.get(&rule_url).bearer_auth(&ac.access_token).send().await {
-        if existing.status() == reqwest::StatusCode::NOT_FOUND {
-            let result = super::push_rules::put_push_rule_raw(
-                &state,
-                "underride",
-                rule,
-                &serde_json::json!({
-                    "conditions": [{ "kind": "event_match", "key": "type", "pattern": rule }],
-                    "actions": ["notify", { "set_tweak": "sound", "value": "ring" }],
-                }),
-                None,
-                None,
-            ).await;
-            if let Err(error) = result {
-                log::warn!("Could not set up the push rule for unencrypted Pax calls: {error}");
-            }
-        }
+    if !badge_only {
+        ensure_call_rule(&ac.client).await;
     }
     Ok(())
 }
@@ -159,10 +195,7 @@ pub async fn unregister_pusher(
 ) -> Result<(), String> {
     let ac = super::get_authed_client(&state).await?;
 
-    let url = format!(
-        "{}/_matrix/client/v3/pushers/set",
-        ac.homeserver
-    );
+    let url = format!("{}/_matrix/client/v3/pushers/set", ac.homeserver);
 
     let body = serde_json::json!({
         "app_id": if badge_only.unwrap_or(false) { IOS_BADGE_APP_ID } else { APP_ID },
@@ -198,49 +231,6 @@ pub async fn unregister_pusher(
     Ok(())
 }
 
-/// Read the FCM token from the file written by MainActivity.kt.
-/// Returns `None` if the file doesn't exist (non-Android builds, or
-/// first launch before Firebase has fetched a token).
-#[tauri::command]
-pub async fn get_fcm_token(app: tauri::AppHandle) -> Result<Option<String>, String> {
-    #[cfg(target_os = "android")]
-    {
-        // Kotlin's filesDir = /data/data/<pkg>/files/
-        // Try multiple paths since Tauri's data_dir may differ from filesDir
-        let candidates = vec![
-            std::path::PathBuf::from("/data/data/com.carter.pax/files/fcm_token.txt"),
-            {
-                let d = app.path().data_dir().unwrap_or_default();
-                d.join("fcm_token.txt")
-            },
-            {
-                let d = app.path().app_data_dir().unwrap_or_default();
-                d.join("fcm_token.txt")
-            },
-        ];
-        for path in &candidates {
-            if let Ok(token) = std::fs::read_to_string(path) {
-                let token = token.trim().to_string();
-                if !token.is_empty() {
-                    log::info!(
-                        "[push] read FCM token from {:?} ({} chars)",
-                        path,
-                        token.len()
-                    );
-                    return Ok(Some(token));
-                }
-            }
-        }
-        log::warn!("[push] FCM token file not found in any candidate path");
-        Ok(None)
-    }
-    #[cfg(not(target_os = "android"))]
-    {
-        let _ = app;
-        Ok(None)
-    }
-}
-
 /// Returns whether push notifications are configured for this build.
 /// The frontend uses this to decide whether to attempt registration.
 #[tauri::command]
@@ -268,4 +258,24 @@ pub fn get_ios_voip_token() -> Option<String> {
     return crate::call_notifications::ios_voip_token();
     #[cfg(not(target_os = "ios"))]
     return None;
+}
+
+#[cfg(test)]
+mod tests {
+    use super::notify_url;
+
+    #[test]
+    fn gateway_origin_and_full_endpoint_produce_the_same_notify_url() {
+        let expected = "https://push.example.org/_matrix/push/v1/notify";
+        for input in ["https://push.example.org/", expected] {
+            assert_eq!(notify_url(input).unwrap(), expected);
+        }
+    }
+
+    #[test]
+    fn gateway_url_rejects_http_and_non_matrix_paths() {
+        for input in ["http://push.example.org", "https://push.example.org/custom"] {
+            assert!(notify_url(input).is_err(), "{input}");
+        }
+    }
 }

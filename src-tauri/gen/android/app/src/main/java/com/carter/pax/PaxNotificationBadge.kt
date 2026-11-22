@@ -56,6 +56,8 @@ internal object PaxNotificationBadge {
 
     fun sessionActive(context: Context): Boolean = prefs(context).getBoolean(ACTIVE, true)
 
+    fun pushRegistrationActive(context: Context): Boolean = prefs(context).getBoolean(ACTIVE, false)
+
     @Synchronized
     fun setSessionActive(context: Context, active: Boolean) {
         prefs(context).edit().putBoolean(ACTIVE, active).apply()

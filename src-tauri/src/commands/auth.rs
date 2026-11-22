@@ -141,8 +141,16 @@ pub async fn get_access_token(state: State<'_, Arc<AppState>>) -> Result<String,
 }
 
 #[tauri::command]
-pub async fn logout(state: State<'_, Arc<AppState>>, app: tauri::AppHandle) -> Result<(), String> {
+pub async fn logout(
+    state: State<'_, Arc<AppState>>,
+    app: tauri::AppHandle,
+    android_push_key: Option<String>,
+) -> Result<(), String> {
+    #[cfg(not(target_os = "android"))]
+    let _ = android_push_key;
     let _operation = state.encryption.operation.lock().await;
+    #[cfg(target_os = "android")]
+    let _push_registration = super::push::android::REGISTRATION_LOCK.lock().await;
     #[cfg(target_os = "android")]
     let _cold_store = crate::call_notifications::android::COLD_STORE.lock().await;
     let client = state.client.lock().await.clone();
@@ -158,6 +166,14 @@ pub async fn logout(state: State<'_, Arc<AppState>>, app: tauri::AppHandle) -> R
         }
         // Stop sync before revoking the token to avoid racing a refresh.
         state.stop_sync_task().await;
+        #[cfg(target_os = "android")]
+        if let Ok(base) = app.path().app_data_dir() {
+            let _ = timeout(
+                Duration::from_secs(8),
+                super::push::android::unregister(&base, client, android_push_key),
+            )
+            .await;
+        }
         if let Some(user_id) = client.user_id() {
             let request = matrix_sdk::ruma::api::client::presence::set_presence::v3::Request::new(
                 user_id.to_owned(),

@@ -23,6 +23,9 @@
 -keepclasseswithmembernames class com.carter.pax.PaxCallPush {
     native <methods>;
 }
+-keepclasseswithmembernames class com.carter.pax.PaxPushJob {
+    native <methods>;
+}
 -keepclassmembers class com.carter.pax.MainActivity$PaxBridge {
     @android.webkit.JavascriptInterface <methods>;
 }

@@ -13,10 +13,9 @@ export function usePushNotifications({ userId }: { userId: string | null }) {
   const signingOut = useRef(false);
 
   useEffect(() => {
-    if (!userId) return;
+    if (!userId || "PaxAndroid" in window) return;
 
     let cancelled = false;
-    let pollTimer: ReturnType<typeof setTimeout> | undefined;
     const listeners: UnlistenFn[] = [];
 
     function register(token: string, deviceDisplayName: string, badgeOnly = false) {
@@ -56,33 +55,15 @@ export function usePushNotifications({ userId }: { userId: string | null }) {
       await readToken();
     }
 
-    async function start() {
-      const android = (window as Window & { PaxAndroid?: { getFcmToken(): string } }).PaxAndroid;
-      if (!android) {
-        await Promise.all([
-          watchAppleToken("voip-token-changed", "get_ios_voip_token", "Pax (iPhone)", false),
-          watchAppleToken("badge-token-changed", "get_ios_badge_token", "Pax (iPhone badges)", true),
-        ]);
-        return;
-      }
-      if (!(await invoke<boolean>("push_gateway_configured")) || cancelled) return;
-
-      function pollForToken() {
-        if (cancelled) return;
-        const token = android?.getFcmToken();
-        if (token) register(token, "Pax (Android)");
-        else pollTimer = setTimeout(pollForToken, 2000);
-      }
-      pollForToken();
-    }
-
-    void start().catch((error) => {
+    void Promise.all([
+      watchAppleToken("voip-token-changed", "get_ios_voip_token", "Pax (iPhone)", false),
+      watchAppleToken("badge-token-changed", "get_ios_badge_token", "Pax (iPhone badges)", true),
+    ]).catch((error) => {
       if (!cancelled) console.warn("[push] Could not initialize push registration:", error);
     });
 
     return () => {
       cancelled = true;
-      clearTimeout(pollTimer);
       listeners.forEach((unlisten) => unlisten());
     };
   }, [userId]);

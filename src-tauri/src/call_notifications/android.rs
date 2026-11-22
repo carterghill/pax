@@ -12,10 +12,11 @@ use jni::{
 };
 use matrix_sdk::{
     authentication::matrix::MatrixSession,
-    ruma::{EventId, RoomId, UserId},
-    Client, SessionMeta,
+    deserialized_responses::TimelineEvent,
+    ruma::{EventId, OwnedUserId, RoomId, UserId},
+    Client, Room, SessionMeta,
 };
-use serde_json::Value;
+use serde_json::{json, Value};
 use tokio::sync::Mutex;
 
 use crate::{
@@ -35,7 +36,7 @@ pub(crate) fn set_app_state(state: &Arc<AppState>) {
     let _ = APP.set(Arc::downgrade(state));
 }
 
-fn runtime() -> Option<&'static tokio::runtime::Runtime> {
+pub(crate) fn runtime() -> Option<&'static tokio::runtime::Runtime> {
     if let Some(runtime) = RUNTIME.get() {
         return Some(runtime);
     }
@@ -47,7 +48,11 @@ fn runtime() -> Option<&'static tokio::runtime::Runtime> {
     Some(RUNTIME.get_or_init(|| runtime))
 }
 
-async fn saved_client(base: &Path) -> Option<Client> {
+pub(crate) fn app_state() -> Option<Arc<AppState>> {
+    APP.get().and_then(Weak::upgrade)
+}
+
+pub(crate) async fn saved_client(base: &Path) -> Option<Client> {
     let path = base.join(CREDENTIALS_FILENAME);
     let credentials = read_credentials_at(&path).ok()??;
     if credentials.pax_enrollment_pending {
@@ -95,7 +100,7 @@ async fn saved_client(base: &Path) -> Option<Client> {
 }
 
 async fn push_client(base: &Path) -> Option<Client> {
-    if let Some(state) = APP.get().and_then(Weak::upgrade) {
+    if let Some(state) = app_state() {
         return state.client.lock().await.clone();
     }
     saved_client(base).await
@@ -112,27 +117,77 @@ async fn inspect_event(base: PathBuf, room_id: String, event_id: String) -> Opti
         .await
         .ok()?;
     let event = context.event.as_ref()?;
-    if let Some(outcome) = matrix_voip::call_push_event(&room, event, &context.events_before, &context.events_after).await {
+    if let Some(outcome) =
+        matrix_voip::call_push_event(&room, event, &context.events_before, &context.events_after)
+            .await
+    {
         return Some(outcome);
     }
-    let peer = direct_calls::direct_call_peer(&room).await?;
-    let ignored = if let Some(state) = APP.get().and_then(Weak::upgrade) {
-        state.ignored_users.users(&client).await.contains(&peer)
-    } else {
-        client.is_user_ignored(&peer).await
-    };
-    if ignored {
-        return Some(serde_json::json!({ "kind": "ignore" }));
+
+    if event.raw().get_field::<&str>("type").ok().flatten() == Some("com.carter.pax.direct_call") {
+        let ignored = json!({ "kind": "ignore" });
+        let Some(peer) = direct_calls::direct_call_peer(&room).await else {
+            return Some(ignored);
+        };
+        if is_ignored(&client, &peer).await {
+            return Some(ignored);
+        }
+        return direct_calls::call_push_event(
+            &room,
+            &peer,
+            event,
+            &context.events_before,
+            &context.events_after,
+            now_ms(),
+        )
+        .await
+        .or(Some(ignored));
     }
-    direct_calls::call_push_event(
-        &room,
-        &peer,
-        event,
-        &context.events_before,
-        &context.events_after,
-        now_ms(),
-    )
-    .await
+    message_push_event(&room, event).await
+}
+
+async fn is_ignored(client: &Client, sender: &UserId) -> bool {
+    if let Some(state) = app_state() {
+        state.ignored_users.users(client).await.contains(sender)
+    } else {
+        client.is_user_ignored(sender).await
+    }
+}
+
+async fn message_push_event(room: &Room, event: &TimelineEvent) -> Option<Value> {
+    let raw = event.raw();
+    let sender = raw.get_field::<OwnedUserId>("sender").ok()??;
+    let sender: &UserId = &sender;
+    if sender == room.own_user_id() || is_ignored(&room.client(), sender).await {
+        return Some(json!({ "kind": "ignore" }));
+    }
+
+    // The SDK evaluated the actions against the event after decryption.
+    let actions = event.push_actions()?;
+    if !actions.iter().any(|action| action.should_notify()) {
+        return Some(json!({ "kind": "ignore" }));
+    }
+    if raw.get_field::<&str>("type").ok()?? == "m.room.encrypted" {
+        return None;
+    }
+
+    let content: Option<Value> = raw.get_field("content").ok()?;
+    let preview = content
+        .as_ref()
+        .and_then(|content| content["body"].as_str());
+    let sender_name = room
+        .get_member_no_sync(sender)
+        .await
+        .ok()
+        .flatten()
+        .and_then(|member| member.display_name().map(str::to_owned));
+    Some(json!({
+        "kind": "message",
+        "sender": sender_name.as_deref().unwrap_or(sender.as_str()),
+        "roomName": room.cached_display_name().map(|name| name.to_string()).unwrap_or_default(),
+        "preview": preview.unwrap_or_default(),
+        "silent": !actions.iter().any(|action| action.sound().is_some()),
+    }))
 }
 
 #[no_mangle]
