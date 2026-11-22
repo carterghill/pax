@@ -7,7 +7,7 @@ import NewRecoveryDialog from "./NewRecoveryDialog";
 export default function EncryptionSettingsPanel({ compact = false }: { compact?: boolean }) {
   const { palette, typography } = useTheme();
   const encryption = useEncryption();
-  const { status, error, busy } = encryption;
+  const { status, error, busy, identityChange } = encryption;
   const [key, setKey] = useState("");
   const [password, setPassword] = useState("");
   const [replaceConfirm, setReplaceConfirm] = useState(false);
@@ -34,6 +34,21 @@ export default function EncryptionSettingsPanel({ compact = false }: { compact?:
         {status?.paxLogin ? "Your Pax password unlocks encrypted recovery automatically when you sign in." : "Your message keys are backed up encrypted, and only your verified devices or recovery key can unlock them."}
       </p>
       {!status && !error && <p role="status">Checking encrypted backup…</p>}
+      {identityChange && (
+        <div style={{ padding: 14, borderRadius: 10, background: palette.bgTertiary, lineHeight: 1.5 }}>
+          <strong>Your encryption identity changed</strong>
+          <p style={{ margin: "4px 0 10px", color: palette.textSecondary }}>
+            {identityChange.deviceVerified
+              ? "This device is already verified under the new identity. Continue if you recognize the change."
+              : "Verify this device using another device that has the new encryption identity."}
+          </p>
+          <button type="button" style={button} disabled={!!busy} onClick={() => {
+            ignore(identityChange.deviceVerified
+              ? encryption.acknowledgeIdentityChange(identityChange.id)
+              : encryption.requestVerification());
+          }}>{identityChange.deviceVerified ? "Continue" : "Verify this device"}</button>
+        </div>
+      )}
       {encryption.recoveryKey && encryption.recoveryKeyDismissed && (
         <button type="button" style={button} onClick={encryption.showRecoveryKey}>View and save recovery key</button>
       )}
@@ -71,7 +86,7 @@ export default function EncryptionSettingsPanel({ compact = false }: { compact?:
           </button>
         </form>
       )}
-      {status?.paxLogin && !ready && <p style={{ margin: 0, lineHeight: 1.5 }}>Sign in again with your Pax password to restore encrypted recovery automatically.</p>}
+      {status?.paxLogin && !ready && !identityChange && <p style={{ margin: 0, lineHeight: 1.5 }}>Sign in again with your Pax password to restore encrypted recovery automatically.</p>}
       {!status?.paxLogin && status?.secretStorageExists && (!ready || !compact || status.recoveryKeyNeedsSave) && (
         <form onSubmit={(e) => { e.preventDefault(); ignore(encryption.restore(key).then(() => setKey(""))); }} style={{ display: "grid", gap: 10 }}>
           <label htmlFor={keyInputId}>Recovery key or recovery passphrase</label>
@@ -80,7 +95,7 @@ export default function EncryptionSettingsPanel({ compact = false }: { compact?:
           <button type="submit" disabled={!!busy || !key.trim()} style={button}>Restore encrypted history</button>
         </form>
       )}
-      {status?.hasIdentity && (!ready || !compact) && (
+      {!identityChange && status?.hasIdentity && (!ready || !compact) && (
         <button type="button" disabled={!!busy} style={button} onClick={() => ignore(encryption.requestVerification())}>
           Verify with another device
         </button>

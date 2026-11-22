@@ -422,8 +422,17 @@ fn respond(s: &mut ServerState, method: &str, path: &str, body: &Value) -> (u16,
     if path.ends_with("/keys/signatures/upload") {
         if let Some(objects) = body[USER].as_object() {
             for (id, signed) in objects {
-                if s.devices.contains_key(id) {
-                    s.devices.insert(id.clone(), signed.clone());
+                if let Some(device) = s.devices.get_mut(id) {
+                    // Signature upload adds signatures to existing keys. The
+                    // uploaded object can omit the device's original signature.
+                    for (user, signatures) in signed["signatures"].as_object().into_iter().flatten() {
+                        if let Some(signatures) = signatures.as_object() {
+                            if !device["signatures"][user].is_object() {
+                                device["signatures"][user] = json!({});
+                            }
+                            device["signatures"][user].as_object_mut().unwrap().extend(signatures.clone());
+                        }
+                    }
                 }
             }
         }

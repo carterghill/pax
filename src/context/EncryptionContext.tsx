@@ -21,9 +21,15 @@ export interface EncryptionStatus {
 
 export interface VerificationStatus {
   flowId: string;
+  identityChangeId: string | null;
   state: "requested" | "waiting" | "comparing" | "confirmed" | "done" | "cancelled";
   emojis: [string, string][];
   decimals: [number, number, number] | null;
+}
+
+interface IdentityChange {
+  id: string;
+  deviceVerified: boolean;
 }
 
 export interface HistoryExport {
@@ -45,6 +51,7 @@ interface EncryptionContextValue {
   dismissRecoveryKey: () => void;
   showRecoveryKey: () => void;
   verification: VerificationStatus | null;
+  identityChange: IdentityChange | null;
   refresh: () => Promise<void>;
   setup: (password?: string) => Promise<void>;
   startRecoveryFromDevice: (password: string) => Promise<void>;
@@ -60,6 +67,7 @@ interface EncryptionContextValue {
   requestVerification: () => Promise<void>;
   respondVerification: (action: "accept" | "confirm" | "mismatch" | "cancel") => Promise<void>;
   dismissVerification: () => void;
+  acknowledgeIdentityChange: (changeId: string) => Promise<void>;
 }
 
 const EncryptionContext = createContext<EncryptionContextValue | null>(null);
@@ -72,12 +80,14 @@ export function EncryptionProvider({ children, userId }: { children: ReactNode; 
   const [recoveryKey, setRecoveryKey] = useState<string | null>(null);
   const [recoveryKeyDismissed, setRecoveryKeyDismissed] = useState(false);
   const [verification, setVerification] = useState<VerificationStatus | null>(null);
+  const [identityChange, setIdentityChange] = useState<IdentityChange | null>(null);
   const [historyExport, setHistoryExport] = useState<HistoryExport | null>(null);
   const [historyImport, setHistoryImport] = useState<HistoryImport | null>(null);
   const mounted = useRef(true);
   const refreshing = useRef(false);
   const operating = useRef(false);
   const dismissedFlow = useRef<string | null>(null);
+  const identityRequest = useRef(0);
 
   const refresh = useCallback(async () => {
     if (refreshing.current) return;
@@ -101,15 +111,25 @@ export function EncryptionProvider({ children, userId }: { children: ReactNode; 
     }
   }, []);
 
+  const refreshIdentityChange = useCallback(async () => {
+    const request = ++identityRequest.current;
+    const next = await invoke<IdentityChange | null>("get_encryption_identity_change");
+    if (mounted.current && request === identityRequest.current) setIdentityChange(next);
+  }, []);
+
   const refreshVerification = useCallback(async () => {
     const next = await invoke<VerificationStatus | null>("get_encryption_verification");
-    if (mounted.current && next?.flowId !== dismissedFlow.current) setVerification(next);
-  }, []);
+    if (mounted.current && next?.flowId !== dismissedFlow.current) {
+      setVerification(next);
+      if (next?.state === "done") void refreshIdentityChange().catch(() => {});
+    }
+  }, [refreshIdentityChange]);
 
   useEffect(() => {
     mounted.current = true;
     void refresh();
     let refreshTimer: ReturnType<typeof setTimeout> | undefined;
+    const checkIdentity = () => { void refreshIdentityChange().catch(() => {}); };
     const listeners = [
       listen("encryption-status-changed", () => {
         clearTimeout(refreshTimer);
@@ -117,6 +137,10 @@ export function EncryptionProvider({ children, userId }: { children: ReactNode; 
       }),
       listen("encryption-verification-request", () => {
         void refreshVerification().catch((e) => { if (mounted.current) setError(String(e)); });
+      }),
+      listen("encryption-identity-changed", checkIdentity).then((unlisten) => {
+        if (mounted.current) checkIdentity();
+        return unlisten;
       }),
     ];
     const timer = setInterval(() => void refresh(), 15_000);
@@ -126,7 +150,7 @@ export function EncryptionProvider({ children, userId }: { children: ReactNode; 
       clearTimeout(refreshTimer);
       for (const listener of listeners) void listener.then((unlisten) => unlisten());
     };
-  }, [refresh, refreshVerification]);
+  }, [refresh, refreshVerification, refreshIdentityChange]);
 
   useEffect(() => {
     let cancelled = false;
@@ -219,12 +243,16 @@ export function EncryptionProvider({ children, userId }: { children: ReactNode; 
     await invoke("respond_encryption_verification", { flowId: verification.flowId, action });
     await refreshVerification();
   });
+  const acknowledgeIdentityChange = (changeId: string) => run("Updating device verification…", async () => {
+    await invoke("acknowledge_encryption_identity_change", { changeId });
+    await refreshIdentityChange();
+  }, false);
 
   return (
-    <EncryptionContext.Provider value={{ status, error: error ?? connectionError, busy, recoveryKey, verification, refresh,
+    <EncryptionContext.Provider value={{ status, error: error ?? connectionError, busy, recoveryKey, verification, identityChange, refresh,
       recoveryKeyDismissed, dismissRecoveryKey: () => setRecoveryKeyDismissed(true), showRecoveryKey: () => setRecoveryKeyDismissed(false),
       setup, startRecoveryFromDevice, restore, acknowledgeKey, replaceKey, backUp, convertToPax, historyExport, historyImport, exportHistory, importHistory,
-      requestVerification, respondVerification,
+      requestVerification, respondVerification, acknowledgeIdentityChange,
       dismissVerification: () => { dismissedFlow.current = verification?.flowId ?? null; setVerification(null); void refresh(); },
     }}>
       {children}

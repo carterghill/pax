@@ -980,6 +980,11 @@ pub(super) async fn restore_authenticated_client(
     restore_tokens(&client, session).await.map_err(|_| {
         "Could not open the encryption store. The original files have been preserved."
     })?;
+    // Capture the existing device's cached identity before sync or recovery
+    // imports the current signing keys from the homeserver.
+    if let Err(error) = super::encryption::identity::current(app, &client).await {
+        log::warn!("Could not remember the cached encryption identity: {error}");
+    }
     Ok(client)
 }
 
@@ -1399,8 +1404,15 @@ pub async fn login(
         if pending {
             pax_auth::complete_enrollment(&state.http_client, &client, keys, local_setup).await?;
         } else {
-            let envelope = pax_auth::fetch_envelope(&client).await?.ok_or("Account recovery information is missing. Try your original computer; no encryption data has been replaced.")?;
-            pax_auth::unlock(&client, keys, &envelope).await?;
+            let recovery = async {
+                let envelope = pax_auth::fetch_envelope(&client).await?.ok_or("Account recovery information is missing. Try your original computer; no encryption data has been replaced.")?;
+                pax_auth::unlock(&client, keys, &envelope).await
+            };
+            if let Err(error) = recovery.await {
+                if !super::encryption::identity::refresh_known_change(&app, &client).await {
+                    return Err(error);
+                }
+            }
         }
         if let Some(pin) = pin.as_mut() {
             pin.ready = true;
@@ -1579,12 +1591,14 @@ pub async fn restore_session(
             .encryption()
             .wait_for_e2ee_initialization_tasks()
             .await;
-        if !client
+        let recovery_ready = client
             .encryption()
             .cross_signing_status()
             .await
             .is_some_and(|status| status.is_complete())
-            || !client.encryption().backups().are_enabled().await
+            && client.encryption().backups().are_enabled().await;
+        if !recovery_ready
+            && !super::encryption::identity::refresh_known_change(&app, &client).await
         {
             return Err(PAX_RECOVERY_REQUIRED.into());
         }

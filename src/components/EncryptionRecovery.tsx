@@ -75,7 +75,7 @@ export function EncryptionSignOut({ onCancel, onSignOut }: { onCancel: () => voi
 /** Mounted once per signed-in account, including when Settings is closed. */
 export default function EncryptionRecovery({ userId }: { userId: string }) {
   const encryption = useEncryption();
-  const { status, recoveryKey, verification, busy, error } = encryption;
+  const { status, recoveryKey, verification, identityChange, busy, error } = encryption;
   const { palette } = useTheme();
   const preferenceKey = `pax:hide-encryption-recovery-prompt:${userId}`;
   const [snoozed, setSnoozed] = useState(() => {
@@ -83,6 +83,7 @@ export default function EncryptionRecovery({ userId }: { userId: string }) {
     catch { return false; }
   });
   const [dontShowAgain, setDontShowAgain] = useState(false);
+  const [deferredIdentityChange, setDeferredIdentityChange] = useState<string | null>(null);
   const [saved, setSaved] = useState(false);
   const [copied, setCopied] = useState(false);
   useEffect(() => { setSaved(false); setCopied(false); }, [recoveryKey]);
@@ -141,13 +142,43 @@ export default function EncryptionRecovery({ userId }: { userId: string }) {
       {error && <p role="alert">{error}</p>}
       <div style={{ marginTop: 20 }}>
         {["done", "cancelled"].includes(verification.state)
-          ? <button type="button" style={button} onClick={encryption.dismissVerification}>Continue</button>
+          ? <button type="button" style={button} disabled={!!busy} onClick={() => {
+              if (verification.state === "done" && identityChange?.deviceVerified
+                && verification.identityChangeId === identityChange.id) {
+                ignore(encryption.acknowledgeIdentityChange(identityChange.id).then(encryption.dismissVerification));
+              } else {
+                encryption.dismissVerification();
+              }
+            }}>Continue</button>
           : <button type="button" style={button} disabled={!!busy} onClick={() => ignore(encryption.respondVerification("cancel"))}>Cancel verification</button>}
       </div>
     </RecoveryDialog>
   );
 
-  if (snoozed || recoveryKey || (ready && !status?.recoveryKeyNeedsSave) || !status) return null;
+  if (identityChange && identityChange.id !== deferredIdentityChange) {
+    const defer = () => setDeferredIdentityChange(identityChange.id);
+    return (
+      <RecoveryDialog title="Your encryption identity changed" onClose={defer}>
+        <p style={{ lineHeight: 1.5 }}>
+          {identityChange.deviceVerified
+            ? "Your account has a new encryption identity. This device is already verified under it. Continue if you recognize the change."
+            : "If you reset your encryption identity on another device, use that device to verify this one again."}
+        </p>
+        <p style={{ lineHeight: 1.5 }}>If the change was unexpected, check your other device before continuing.</p>
+        {error && <p role="alert">{error}</p>}
+        <div style={{ display: "flex", gap: 10, flexWrap: "wrap", marginTop: 20 }}>
+          <button type="button" style={button} disabled={!!busy} onClick={() => {
+            ignore(identityChange.deviceVerified
+              ? encryption.acknowledgeIdentityChange(identityChange.id)
+              : encryption.requestVerification());
+          }}>{identityChange.deviceVerified ? "Continue" : "Verify this device"}</button>
+          <button type="button" style={button} onClick={defer}>Later</button>
+        </div>
+      </RecoveryDialog>
+    );
+  }
+
+  if (identityChange || snoozed || recoveryKey || (ready && !status?.recoveryKeyNeedsSave) || !status) return null;
   return (
     <RecoveryDialog onClose={() => setSnoozed(true)} title={status.canSetup ? "Protect your encrypted history" : "Restore your encrypted history"}>
       <EncryptionSettingsPanel compact />

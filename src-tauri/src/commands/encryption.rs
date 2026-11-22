@@ -20,6 +20,8 @@ use tokio::time::timeout;
 use super::{fmt_error_chain, get_client};
 use crate::AppState;
 
+#[path = "encryption_identity.rs"]
+pub(super) mod identity;
 #[path = "recovery_restart.rs"]
 mod restart;
 
@@ -32,13 +34,28 @@ pub struct BackupProgress {
     pub error: Option<String>,
 }
 
+#[derive(Clone)]
+struct ActiveVerification {
+    request: VerificationRequest,
+    master_key: Option<String>,
+    identity_change_id: Option<String>,
+}
+
+impl ActiveVerification {
+    fn identity_changed(&self, current_key: Option<&str>) -> bool {
+        self.master_key
+            .as_deref()
+            .is_some_and(|key| current_key != Some(key))
+    }
+}
+
 #[derive(Default)]
 pub struct EncryptionService {
     /// Serialize recovery changes with logout, login, and each other.
     pub operation: Mutex<()>,
     progress: Arc<Mutex<BackupProgress>>,
     task: Mutex<Option<JoinHandle<()>>>,
-    verification: Arc<Mutex<Option<VerificationRequest>>>,
+    verification: Arc<Mutex<Option<ActiveVerification>>>,
     confirmed_flow: Mutex<Option<String>>,
     // Keep an unacknowledged key available if the webview is reloaded. Do not
     // put recovery secrets in logs, events, credentials.json, or localStorage.
@@ -96,17 +113,23 @@ impl EncryptionService {
                         )
                         .await
                     {
+                        let master_key = identity::cached_master_key(&client).await.ok().flatten();
                         let mut active = verification.lock().await;
                         if generation.load(std::sync::atomic::Ordering::Acquire)
                             != session_generation
                         {
                             return;
                         }
-                        if active
-                            .as_ref()
-                            .is_none_or(|r| r.is_done() || r.is_cancelled())
-                        {
-                            *active = Some(request);
+                        if active.as_ref().is_none_or(|entry| {
+                            entry.request.is_done()
+                                || entry.request.is_cancelled()
+                                || entry.identity_changed(master_key.as_deref())
+                        }) {
+                            *active = Some(ActiveVerification {
+                                request,
+                                master_key,
+                                identity_change_id: None,
+                            });
                             let _ = app.emit("encryption-verification-request", ());
                         }
                     }
@@ -117,37 +140,47 @@ impl EncryptionService {
         let client = client.clone();
         let progress = self.progress.clone();
         let backup_operation = self.backup_operation.clone();
+        let identity_client = client.clone();
+        let identity_app = app.clone();
         *task = Some(tokio::spawn(async move {
-            let Some(keys) = client.encryption().room_keys_received_stream().await else {
-                return;
+            let identity_loop = async {
+                if let Err(error) = identity::watch(identity_app, identity_client).await {
+                    log::warn!("Could not watch for encryption identity changes: {error}");
+                }
             };
-            futures_util::pin_mut!(keys);
-            let backup_loop = async {
-                let mut timer = tokio::time::interval(Duration::from_secs(30));
-                loop {
-                    timer.tick().await;
-                    if client.encryption().backups().are_enabled().await {
-                        let _backup = backup_operation.lock().await;
-                        run_backup(&client, &progress, &app).await;
+            let backup_updates = async {
+                let Some(keys) = client.encryption().room_keys_received_stream().await else {
+                    return;
+                };
+                futures_util::pin_mut!(keys);
+                let backup_loop = async {
+                    let mut timer = tokio::time::interval(Duration::from_secs(30));
+                    loop {
+                        timer.tick().await;
+                        if client.encryption().backups().are_enabled().await {
+                            let _backup = backup_operation.lock().await;
+                            run_backup(&client, &progress, &app).await;
+                        }
                     }
-                }
+                };
+                let keys_loop = async {
+                    while let Some(update) = keys.next().await {
+                        *progress.lock().await = BackupProgress {
+                            state: "pending".into(),
+                            ..Default::default()
+                        };
+                        let room_ids = update.ok().map(|keys| {
+                            keys.into_iter()
+                                .map(|key| key.room_id.to_string())
+                                .collect::<Vec<_>>()
+                        });
+                        let _ = app.emit("encryption-keys-received", room_ids);
+                    }
+                };
+                // A slow backup request must not hold up restored-message updates.
+                tokio::select! { _ = backup_loop => {}, _ = keys_loop => {} }
             };
-            let keys_loop = async {
-                while let Some(update) = keys.next().await {
-                    *progress.lock().await = BackupProgress {
-                        state: "pending".into(),
-                        ..Default::default()
-                    };
-                    let room_ids = update.ok().map(|keys| {
-                        keys.into_iter()
-                            .map(|key| key.room_id.to_string())
-                            .collect::<Vec<_>>()
-                    });
-                    let _ = app.emit("encryption-keys-received", room_ids);
-                }
-            };
-            // A slow backup request must not hold up restored-message updates.
-            tokio::select! { _ = backup_loop => {}, _ = keys_loop => {} }
+            tokio::join!(identity_loop, backup_updates);
         }));
     }
 }
@@ -366,6 +399,27 @@ mod tests {
         assert!(can_setup_recovery(false, false, false, false, false));
         assert!(can_setup_recovery(false, true, true, true, true));
     }
+}
+
+#[tauri::command]
+pub async fn get_encryption_identity_change(
+    state: State<'_, Arc<AppState>>,
+    app: tauri::AppHandle,
+) -> Result<Option<identity::IdentityChange>, String> {
+    let _operation = state.encryption.operation.lock().await;
+    let client = get_client(&state).await?;
+    identity::current(&app, &client).await
+}
+
+#[tauri::command]
+pub async fn acknowledge_encryption_identity_change(
+    state: State<'_, Arc<AppState>>,
+    app: tauri::AppHandle,
+    change_id: String,
+) -> Result<(), String> {
+    let _operation = state.encryption.operation.lock().await;
+    let client = get_client(&state).await?;
+    identity::acknowledge(&app, &client, &change_id).await
 }
 
 #[tauri::command]
@@ -624,6 +678,7 @@ pub async fn sync_encryption_backup(
 #[serde(rename_all = "camelCase")]
 pub struct VerificationStatus {
     flow_id: String,
+    identity_change_id: Option<String>,
     state: String,
     emojis: Vec<(String, String)>,
     decimals: Option<(u16, u16, u16)>,
@@ -632,16 +687,10 @@ pub struct VerificationStatus {
 #[tauri::command]
 pub async fn request_encryption_verification(
     state: State<'_, Arc<AppState>>,
+    app: tauri::AppHandle,
 ) -> Result<(), String> {
     let _operation = state.encryption.operation.lock().await;
     let client = get_client(&state).await?;
-    let mut active = state.encryption.verification.lock().await;
-    if active
-        .as_ref()
-        .is_some_and(|r| !r.is_done() && !r.is_cancelled())
-    {
-        return Ok(());
-    }
     let identity = client
         .encryption()
         .request_user_identity(client.user_id().ok_or("Not logged in")?)
@@ -650,12 +699,27 @@ pub async fn request_encryption_verification(
         .ok_or(
             "No encryption identity exists yet. Set up recovery on your original device first.",
         )?;
-    *active = Some(
-        identity
-            .request_verification_with_methods(vec![VerificationMethod::SasV1])
-            .await
-            .map_err(|e| fmt_error_chain(&e))?,
-    );
+    let master_key = identity::master_key(&identity);
+    let identity_change_id = identity::current(&app, &client)
+        .await?
+        .and_then(|change| change.id_for_key(master_key.as_deref()));
+    let mut active = state.encryption.verification.lock().await;
+    if active.as_ref().is_some_and(|entry| {
+        !entry.request.is_done()
+            && !entry.request.is_cancelled()
+            && !entry.identity_changed(master_key.as_deref())
+    }) {
+        return Ok(());
+    }
+    let request = identity
+        .request_verification_with_methods(vec![VerificationMethod::SasV1])
+        .await
+        .map_err(|e| fmt_error_chain(&e))?;
+    *active = Some(ActiveVerification {
+        request,
+        master_key,
+        identity_change_id,
+    });
     *state.encryption.confirmed_flow.lock().await = None;
     Ok(())
 }
@@ -665,17 +729,21 @@ pub async fn get_encryption_verification(
     state: State<'_, Arc<AppState>>,
 ) -> Result<Option<VerificationStatus>, String> {
     let _operation = state.encryption.operation.lock().await;
-    let request = state.encryption.verification.lock().await.clone();
-    let Some(request) = request else {
+    let active = state.encryption.verification.lock().await.clone();
+    let Some(active) = active else {
         return Ok(None);
     };
+    let request = &active.request;
     let mut result = VerificationStatus {
         flow_id: request.flow_id().into(),
+        identity_change_id: active.identity_change_id.clone(),
         state: "waiting".into(),
         emojis: vec![],
         decimals: None,
     };
-    if request.is_passive() {
+    let client = get_client(&state).await?;
+    let master_key = identity::cached_master_key(&client).await?;
+    if request.is_passive() || active.identity_changed(master_key.as_deref()) {
         result.state = "cancelled".into();
         return Ok(Some(result));
     }
@@ -729,15 +797,23 @@ pub async fn respond_encryption_verification(
     action: String,
 ) -> Result<(), String> {
     let _operation = state.encryption.operation.lock().await;
-    let request = state
+    let active = state
         .encryption
         .verification
         .lock()
         .await
         .clone()
         .ok_or("No verification is active")?;
+    let request = active.request.clone();
     if request.flow_id() != flow_id {
         return Err("This verification is no longer active.".into());
+    }
+    if action != "cancel" {
+        let client = get_client(&state).await?;
+        let master_key = identity::cached_master_key(&client).await?;
+        if active.identity_changed(master_key.as_deref()) {
+            return Err("Your encryption identity changed again. Start a new verification.".into());
+        }
     }
     match action.as_str() {
         "accept" => {

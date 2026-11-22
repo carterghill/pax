@@ -491,6 +491,8 @@ pub fn run() {
             commands::account_conversion::convert_account_to_pax,
             commands::account_conversion::resume_pax_conversion,
             commands::encryption::get_encryption_status,
+            commands::encryption::get_encryption_identity_change,
+            commands::encryption::acknowledge_encryption_identity_change,
             commands::encryption::get_pending_encryption_recovery_key,
             commands::encryption::setup_encryption_recovery,
             commands::encryption::start_encryption_recovery_from_device,
