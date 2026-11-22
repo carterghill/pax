@@ -1,5 +1,6 @@
 import { useEffect } from "react";
 import { openUrl } from "@tauri-apps/plugin-opener";
+import { roomLinkTarget } from "../utils/roomLinks";
 
 /**
  * Global click interceptor for external links.
@@ -25,11 +26,16 @@ export function useExternalLinkInterceptor(): void {
       // Inline image / GIF links open in the in-app media viewer (see MessageMarkdown).
       if (anchor.closest("[data-pax-open-image-viewer]")) return;
 
-      // Only intercept external (http/https) links.
-      if (!/^https?:\/\//i.test(href)) return;
-
       // Don't intercept if inside an iframe (e.g. YouTube embed controls).
       if (anchor.ownerDocument !== document) return;
+
+      if (roomLinkTarget(href)) {
+        e.preventDefault();
+        e.stopPropagation();
+        window.dispatchEvent(new CustomEvent("pax-room-link", { detail: href }));
+        return;
+      }
+      if (!/^https?:\/\//i.test(href)) return;
 
       e.preventDefault();
       e.stopPropagation();

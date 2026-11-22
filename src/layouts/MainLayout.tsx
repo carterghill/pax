@@ -113,12 +113,16 @@ interface MainLayoutProps {
   userId: string;
   onSignOut: () => void;
   rooms: RoomsForLayout;
+  joinedInviteRoomId: string | null;
+  onInviteRoomOpened: () => void;
 }
 
 export default function MainLayout({
   userId,
   onSignOut,
   rooms: { rooms, spaces, roomsBySpace, getRoom, fetchRooms, upsertOptimisticRoom },
+  joinedInviteRoomId,
+  onInviteRoomOpened,
 }: MainLayoutProps) {
   const joinedSpaceIdSet = useMemo(() => {
     const ids = new Set<string>();
@@ -315,7 +319,7 @@ export default function MainLayout({
     });
   }, [spaceKey]);
 
-  const openDirectCallRoom = useCallback((roomId: string) => {
+  const openJoinedRoom = useCallback((roomId: string) => {
     const room = getRoom(roomId, true);
     if (room?.membership !== "joined") return;
     const parentSpaceId = activeRoomId === roomId
@@ -328,6 +332,21 @@ export default function MainLayout({
     });
     if (isMobile) setMobileNavDrawerOpen(false);
   }, [activeRoomId, activeSpaceId, getRoom, isMobile, joinedSpaceIdSet]);
+
+  useEffect(() => {
+    if (!joinedInviteRoomId) return;
+    const room = getRoom(joinedInviteRoomId);
+    if (room?.membership !== "joined") return;
+    if (room.isSpace) {
+      setDiscoverOpen(false);
+      setActiveSpaceId(room.id);
+      setActiveRoomBySpace((previous) => ({ ...previous, [room.id]: null }));
+      if (isMobile) setMobileNavDrawerOpen(false);
+    } else {
+      openJoinedRoom(room.id);
+    }
+    onInviteRoomOpened();
+  }, [joinedInviteRoomId, getRoom, isMobile, openJoinedRoom, onInviteRoomOpened]);
 
   useEffect(() => {
     invoke<string>("current_homeserver")
@@ -799,10 +818,10 @@ export default function MainLayout({
 
   const reconnectVoiceCall = useCallback(() => {
     if (directCall?.roomId === activeVoiceRoomId || eligibleRecovery?.direct) {
-      return reconnectDirectCall(openDirectCallRoom);
+      return reconnectDirectCall(openJoinedRoom);
     }
     if (activeVoiceRoomId) return connectVoiceCall(activeVoiceRoomId, { forceReconnect: true, replaceOtherSessions: false });
-  }, [activeVoiceRoomId, connectVoiceCall, directCall?.roomId, eligibleRecovery?.direct, openDirectCallRoom, reconnectDirectCall]);
+  }, [activeVoiceRoomId, connectVoiceCall, directCall?.roomId, eligibleRecovery?.direct, openJoinedRoom, reconnectDirectCall]);
 
   const abandonVoiceChannel = useCallback(() => {
     const roomId = targetVoiceRoomId ?? eligibleRecovery?.roomId;
@@ -819,9 +838,9 @@ export default function MainLayout({
   const answerDirectCall = useCallback((callId?: string) => {
     answerIncomingCall((roomId) => {
       abandonVoiceChannel();
-      openDirectCallRoom(roomId);
+      openJoinedRoom(roomId);
     }, callId);
-  }, [abandonVoiceChannel, answerIncomingCall, openDirectCallRoom]);
+  }, [abandonVoiceChannel, answerIncomingCall, openJoinedRoom]);
 
   useEffect(() => {
     const roomId = directCall?.roomId ?? targetVoiceRoomId;

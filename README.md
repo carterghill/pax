@@ -12,6 +12,14 @@ On Debian-based Linux, install the Pax `.deb` with APT (for example, `sudo apt i
 
 Build AppImages on Ubuntu with the GStreamer packages installed so Tauri can include the media framework.
 
+## Room and space invitations
+
+**Invite people → Email** uses Matrix third-party invitations. Pax checks the active account's identity-service preference and the homeserver's Matrix discovery information. If the identity service publishes terms, Pax asks the sender to review them before sending. The identity service handles delivery and controls where its emails open.
+
+**Invite people → Room link** can copy a Matrix permalink or a `pax:` link. The Pax link opens the installed app in clients that support custom links. **Share by email** opens a draft with both links. Recipients sign in on their own homeserver and can join if the room's access settings allow it. Invite-only rooms require a Matrix invitation. Rooms that allow requests to join can receive them from Pax.
+
+Verified HTTPS links that open an installed app require a domain associated with the app. The Pax link uses the native URL scheme and works independently of the recipient's homeserver.
+
 ## Unavailable encrypted messages
 
 Encrypted events that cannot currently be decrypted remain in the timeline as **Message unavailable on this device**, with their sender and timestamp. Opening a chat with such messages shows a notice rather than silently hiding a reply.

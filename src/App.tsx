@@ -24,6 +24,8 @@ import EncryptionRecovery, { EncryptionSignOut } from "./components/EncryptionRe
 import AuthModeSelector, { type AccountMode } from "./components/AuthModeSelector";
 import Dialog from "./components/Dialog";
 import PaxConversionForm from "./components/PaxConversionForm";
+import RoomLinkPreview, { RoomLinkPreviewProvider } from "./components/RoomLinkPreview";
+import { useRoomInviteLink } from "./hooks/useRoomInviteLink";
 
 if (import.meta.env.DEV) {
   const w = window as unknown as { invoke: typeof invoke; listen: typeof listen };
@@ -224,6 +226,10 @@ function App() {
   const [quitConfirmOpen, setQuitConfirmOpen] = useState(false);
   const [conversionOpen, setConversionOpen] = useState(false);
   const [conversionError, setConversionError] = useState<string | null>(null);
+  const roomLink = useRoomInviteLink();
+  const { invite, error: inviteError, loading: inviteLoading, dismiss: dismissInvite } = roomLink;
+  const [joinedInviteRoomId, setJoinedInviteRoomId] = useState<string | null>(null);
+  const clearJoinedInviteRoom = useCallback(() => setJoinedInviteRoomId(null), []);
 
   useEffect(() => {
     let cancelled = false;
@@ -280,6 +286,7 @@ function App() {
 
   // Whether to hide the homeserver + token fields
   const hideServerConfig =
+    !invite &&
     authConfig?.hide_server_config &&
     !!authConfig.default_homeserver &&
     (tab === "login" || !!authConfig.registration_token);
@@ -293,6 +300,7 @@ function App() {
     setPassword("");
     setConfirmPassword("");
     setUserId(null);
+    setJoinedInviteRoomId(null);
     setTab("login");
   }, []);
 
@@ -487,6 +495,10 @@ function App() {
                       userId={userId}
                       onSignOut={handleSignOut}
                       loadingStyles={authStyles}
+                      joinedInviteRoomId={joinedInviteRoomId}
+                      onLinkedRoomOpen={setJoinedInviteRoomId}
+                      onInviteRoomOpened={clearJoinedInviteRoom}
+                      roomLink={roomLink}
                     />
                   </IgnoredUsersProvider>
                 </RoomDownloadsProvider>
@@ -543,6 +555,23 @@ function App() {
       </div>
 
       <div style={authStyles.form}>
+        {(invite || inviteError || inviteLoading) && (
+          <section aria-label="Shared room" style={{
+            border: `1px solid ${palette.border}`, borderRadius: spacing.unit * 2,
+            padding: spacing.unit * 3, display: "grid", gap: spacing.unit * 2,
+          }}>
+            {inviteLoading && <p role="status" style={authStyles.usernameHint}>Opening link…</p>}
+            {inviteError && <p role="alert" style={{ ...authStyles.error, margin: 0 }}>{inviteError}</p>}
+            {invite && (
+              <p style={{ ...authStyles.usernameHint, overflowWrap: "anywhere" }}>
+                Sign in with your Matrix account to open <strong>{invite.roomId}</strong>.
+              </p>
+            )}
+            <div style={{ display: "flex", gap: 6, flexWrap: "wrap" }}>
+              <button type="button" disabled={loading} style={authStyles.tab} onClick={() => dismissInvite()}>Dismiss</button>
+            </div>
+          </section>
+        )}
         {/* Homeserver — hidden when env says so */}
         {!hideServerConfig && (
           <input
@@ -718,10 +747,18 @@ function AuthedApp({
   userId,
   onSignOut,
   loadingStyles,
+  joinedInviteRoomId,
+  onLinkedRoomOpen,
+  onInviteRoomOpened,
+  roomLink,
 }: {
   userId: string;
   onSignOut: () => void;
   loadingStyles: LoadingStyles;
+  joinedInviteRoomId: string | null;
+  onLinkedRoomOpen: (roomId: string) => void;
+  onInviteRoomOpened: () => void;
+  roomLink: ReturnType<typeof useRoomInviteLink>;
 }) {
   const {
     rooms,
@@ -734,12 +771,21 @@ function AuthedApp({
   } = useRooms(userId);
 
   useEffect(() => {
+    if (joinedInviteRoomId) void fetchRooms();
+  }, [fetchRooms, joinedInviteRoomId]);
+
+  useEffect(() => {
     setAndroidBadgeSessionActive(true);
   }, [userId]);
 
   // Register mobile push tokens with the homeserver.
   const { unregisterPush } = usePushNotifications({ userId });
   const [signOutRequested, setSignOutRequested] = useState(false);
+  const { invite, error, loading, dismiss } = roomLink;
+  const openRoom = useCallback((roomId: string) => {
+    dismiss();
+    onLinkedRoomOpen(roomId);
+  }, [dismiss, onLinkedRoomOpen]);
 
   // Wrap the sign-out handler to unregister the pusher first.
   const handleSignOut = useCallback(async () => {
@@ -760,11 +806,26 @@ function AuthedApp({
 
   return (
     <>
-    <MainLayout
-      userId={userId}
-      onSignOut={() => setSignOutRequested(true)}
-      rooms={{ rooms, spaces, roomsBySpace, getRoom, fetchRooms, upsertOptimisticRoom }}
-    />
+    <RoomLinkPreviewProvider key={userId} getRoom={getRoom} openRoom={openRoom}>
+      <MainLayout
+        userId={userId}
+        onSignOut={() => setSignOutRequested(true)}
+        rooms={{ rooms, spaces, roomsBySpace, getRoom, fetchRooms, upsertOptimisticRoom }}
+        joinedInviteRoomId={joinedInviteRoomId}
+        onInviteRoomOpened={onInviteRoomOpened}
+      />
+      {(invite || error || loading) && (
+        <Dialog aria-labelledby="room-link-title" onClose={() => dismiss()} style={{ width: 410, padding: 20 }}>
+          <h2 id="room-link-title" style={{ marginTop: 0 }}>Open Matrix room</h2>
+          {loading && <p role="status">Opening link…</p>}
+          {error && <p role="alert">{error}</p>}
+          {invite && <RoomLinkPreview url={invite.url} allowUnknownJoin />}
+          <div style={{ display: "flex", justifyContent: "flex-end", marginTop: 14 }}>
+            <button type="button" onClick={() => dismiss()}>Close</button>
+          </div>
+        </Dialog>
+      )}
+    </RoomLinkPreviewProvider>
     {signOutRequested && <EncryptionSignOut onCancel={() => setSignOutRequested(false)} onSignOut={handleSignOut} />}
     </>
   );

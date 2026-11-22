@@ -10,6 +10,7 @@ import {
 } from "../utils/emojifyTwemoji";
 import { resolveEmbed } from "../utils/urlEmbed";
 import LinkEmbed from "./LinkEmbed";
+import RoomLinkPreview from "./RoomLinkPreview";
 import {
   Braces,
   ExternalLink,
@@ -30,6 +31,7 @@ import {
   normalizeImageSrcHref,
 } from "../utils/directImageUrl";
 import { MATRIX_BODY_MXID_RE_GLOBAL, mentionDisplayName, mentionPillLabel } from "../utils/matrixBodyMxid";
+import { appendRoomLinkPreviews, roomLinkTarget } from "../utils/roomLinks";
 import {
   matrixHtmlToHast,
   matrixUserHref,
@@ -176,7 +178,8 @@ export default memo(function MessageMarkdown({
   }, [palette.accent, selfUserId, mentionSet, onMentionClick]);
 
   const messagePlugins = useMemo(() => [() => (tree: Root) => {
-    const formatted = formattedBody && (preferFormattedBody || mentionSet.size > 0)
+    const hasFormattedRoomLink = formattedBody && /matrix\.to\/#\/|matrix:(?:r|room|roomid)\/|pax:\/\/room\?/.test(formattedBody);
+    const formatted = formattedBody && (preferFormattedBody || mentionSet.size > 0 || hasFormattedRoomLink)
       ? matrixHtmlToHast(parseMatrixMessageHtml(formattedBody))
       : undefined;
     const formattedFallback = formatted?.length
@@ -201,8 +204,6 @@ export default memo(function MessageMarkdown({
         }
       }
     }
-    if (!mentionsRoom && !legacyMentions && mentionSet.size === 0) return;
-
     function markMentions(parent: Root | Element) {
       let index = 0;
       while (index < parent.children.length) {
@@ -238,7 +239,8 @@ export default memo(function MessageMarkdown({
         index += parts.length;
       }
     }
-    markMentions(tree);
+    if (mentionsRoom || legacyMentions || mentionSet.size > 0) markMentions(tree);
+    appendRoomLinkPreviews(tree, formatted);
   }], [edited, formattedBody, preferFormattedBody, legacyMentions, mentionSet, mentionsRoom]);
 
   const markdownSource = useMemo(() => {
@@ -255,6 +257,10 @@ export default memo(function MessageMarkdown({
       );
 
       return {
+      div: ({ node, children: c }) => {
+        const url = node?.properties.dataRoomLinkPreview;
+        return typeof url === "string" ? <RoomLinkPreview url={url} /> : <div>{c}</div>;
+      },
       span: ({ node, children: c }) => {
         const id = node?.properties.dataMentionId;
         if (id === "@room") return renderMention(null, id);
@@ -838,7 +844,9 @@ export default memo(function MessageMarkdown({
       <ReactMarkdown
         remarkPlugins={[remarkGfm]}
         rehypePlugins={messagePlugins}
-        urlTransform={(url) => matrixUserIdFromHref(url) ? url : defaultUrlTransform(url)}
+        urlTransform={(url, key) =>
+          matrixUserIdFromHref(url) || (key === "href" && roomLinkTarget(url)) ? url : defaultUrlTransform(url)
+        }
         components={components}
       >
         {markdownSource}

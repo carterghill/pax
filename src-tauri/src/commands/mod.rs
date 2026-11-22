@@ -7,6 +7,7 @@ pub mod downloads;
 pub mod embed;
 pub mod encryption;
 pub mod history_backup;
+pub mod invites;
 pub mod lifecycle;
 pub mod matrix_voip;
 #[cfg(target_os = "linux")]

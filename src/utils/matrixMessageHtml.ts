@@ -1,5 +1,6 @@
 import type { Element, ElementContent, Root, Text } from "hast";
 import { defaultUrlTransform } from "react-markdown";
+import { roomLinkTarget } from "./roomLinks.ts";
 
 /** Matrix user permalinks, including the native matrix: URI form. */
 export function matrixUserIdFromHref(href: string): string | null {
@@ -61,7 +62,7 @@ export function parseMatrixMessageHtml(html: string): DocumentFragment {
     const el = document.createElement(tag);
     if (tag === "a") {
       const href = source.getAttribute("href") ?? "";
-      const safeHref = matrixUserIdFromHref(href) ? href : defaultUrlTransform(href);
+      const safeHref = matrixUserIdFromHref(href) || roomLinkTarget(href) ? href : defaultUrlTransform(href);
       if (safeHref) el.setAttribute("href", safeHref);
     } else if (tag === "img") {
       const src = source.getAttribute("src") ?? "";

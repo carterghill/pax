@@ -367,7 +367,17 @@ pub fn run() {
     #[cfg(target_os = "android")]
     call_notifications::android::set_app_state(&state);
 
-    let app_builder = tauri::Builder::default()
+    let app_builder = tauri::Builder::default();
+    #[cfg(desktop)]
+    let app_builder = app_builder.plugin(tauri_plugin_single_instance::init(|app, _, _| {
+        if let Some(window) = app.get_webview_window("main") {
+            let _ = window.unminimize();
+            let _ = window.show();
+            let _ = window.set_focus();
+        }
+    }));
+    let app_builder = app_builder
+        .plugin(tauri_plugin_deep_link::init())
         .on_window_event(|window, event| {
             #[cfg(not(desktop))]
             let _ = (window, event);
@@ -468,6 +478,10 @@ pub fn run() {
             commands::auth::clear_saved_credentials,
             commands::auth::login,
             commands::auth::register,
+            commands::invites::room_share_links,
+            commands::invites::parse_room_link,
+            commands::invites::get_linked_room_preview,
+            commands::invites::invite_by_email,
             commands::auth::restore_session,
             commands::account_conversion::get_account_conversion_status,
             commands::account_conversion::convert_account_to_pax,
@@ -693,6 +707,16 @@ pub fn run() {
         .build(tauri::generate_context!())
         .expect("error while building tauri application")
         .run(|app, event| {
+            #[cfg(target_os = "macos")]
+            if let tauri::RunEvent::Opened { urls } = &event {
+                if urls.iter().any(|url| url.scheme() == "pax") {
+                    if let Some(window) = app.get_webview_window("main") {
+                        let _ = window.unminimize();
+                        let _ = window.show();
+                        let _ = window.set_focus();
+                    }
+                }
+            }
             if let tauri::RunEvent::Exit = event {
                 tauri::async_runtime::block_on(commands::lifecycle::close_voice_before_exit(app));
             }

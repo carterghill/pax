@@ -28,6 +28,14 @@
       }
     }
   },
+  "plugins": {
+    "deep-link": {
+      "desktop": { "schemes": ["pax"] },
+      "mobile": [
+        { "scheme": ["pax"], "appLink": false }
+      ]
+    }
+  },
   "bundle": {
     "active": true,
     "targets": "all",

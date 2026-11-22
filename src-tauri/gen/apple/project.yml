@@ -56,6 +56,9 @@ targets:
           - UIInterfaceOrientationLandscapeLeft
           - UIInterfaceOrientationLandscapeRight
         CFBundleShortVersionString: 0.1.0
+        CFBundleURLTypes:
+          - CFBundleURLName: pax
+            CFBundleURLSchemes: [pax]
         CFBundleVersion: "0.1.0"
     entitlements:
       path: pax_iOS/pax_iOS.entitlements

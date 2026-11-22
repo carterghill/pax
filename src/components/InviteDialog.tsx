@@ -6,6 +6,9 @@ import { paletteDialogOuterBorderStyle } from "../theme/paletteBorder";
 import Dialog from "./Dialog";
 import { parseInviteUserInput } from "../utils/matrix";
 import UserAvatar from "./UserAvatar";
+import InviteLinkForm from "./InviteLinkForm";
+
+const INVITE_METHODS = [["people", "Find people"], ["email", "Email"], ["link", "Room link"]] as const;
 
 export type InviteTargetKind = "room" | "space";
 
@@ -39,6 +42,7 @@ export default function InviteDialog({
   const [invitingUserId, setInvitingUserId] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [successMxid, setSuccessMxid] = useState<string | null>(null);
+  const [mode, setMode] = useState<"people" | "email" | "link">("people");
 
   const [suggestions, setSuggestions] = useState<InviteUserCandidate[]>([]);
   const [suggestionsLoading, setSuggestionsLoading] = useState(true);
@@ -235,7 +239,7 @@ export default function InviteDialog({
                 <strong style={{ color: palette.textPrimary, fontWeight: typography.fontWeightMedium }}>
                   {targetName}
                 </strong>
-                . They will receive an invitation on their account.
+                .
               </p>
             </div>
           </div>
@@ -258,8 +262,24 @@ export default function InviteDialog({
           </button>
         </div>
 
-        <div style={{ padding: "8px 20px 20px 20px" }}>
-          {successMxid ? (
+        <div style={{ padding: "8px 20px 20px 20px", overflowY: "auto", maxHeight: "calc(100dvh - 120px)" }}>
+          {!successMxid && (
+            <div role="group" aria-label="Invitation method" style={{ display: "flex", gap: 6, marginBottom: 14 }}>
+              {INVITE_METHODS.map(([value, label]) => (
+                <button key={value} type="button" aria-pressed={mode === value} disabled={submitting}
+                  onClick={() => setMode(value)} style={{
+                    padding: "6px 10px", borderRadius: 6, border: `1px solid ${palette.border}`,
+                    background: mode === value ? palette.bgTertiary : "transparent", color: palette.textPrimary,
+                    font: "inherit", fontSize: typography.fontSizeSmall, cursor: "pointer",
+                  }}>
+                  {label}
+                </button>
+              ))}
+            </div>
+          )}
+          {mode !== "people" ? (
+            <InviteLinkForm key={mode} roomId={roomId} mode={mode} />
+          ) : successMxid ? (
             <div>
               <div
                 style={{
