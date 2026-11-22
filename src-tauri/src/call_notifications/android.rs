@@ -24,6 +24,7 @@ use crate::{
         auth::{persist_refreshed_tokens, read_credentials_at, CREDENTIALS_FILENAME},
         direct_calls, matrix_voip,
     },
+    crypto_store::{self, OpenMode},
     voice_presence::now_ms,
     AppState,
 };
@@ -64,23 +65,17 @@ pub(crate) async fn saved_client(base: &Path) -> Option<Client> {
         return None;
     }
     let session = credentials.session?;
-    let store = base
-        .join(
-            credentials
-                .sqlite_store_dir
-                .as_deref()
-                .unwrap_or("matrix_store"),
-        )
-        .canonicalize()
-        .ok()?;
-    if !store.starts_with(base.canonicalize().ok()?) {
-        return None;
-    }
+    let root = crypto_store::session_path(
+        base,
+        credentials.sqlite_store_dir.as_deref().unwrap_or("matrix_store"),
+    )
+    .ok()?;
+    let store = crypto_store::config(base, &root, OpenMode::Existing).await.ok()?;
     // A cold push can read the existing device keys. It must not create a new identity
     // or advance the normal sync token before the UI sees the ringing event.
     let client = Client::builder()
         .homeserver_url(&credentials.homeserver)
-        .sqlite_store(store, None)
+        .store_config(store)
         .handle_refresh_tokens()
         .build()
         .await

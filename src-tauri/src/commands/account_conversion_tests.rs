@@ -5,6 +5,30 @@ const OLD: &str = "ordinary Matrix password";
 const NEW: &str = "a distinct memorable Pax password 🔐";
 
 #[tokio::test]
+async fn a_remote_conversion_blocks_store_migration_until_it_is_complete() {
+    let server = Server::start().await;
+    let dir = TestDir::new();
+    let client = original(&server, &dir).await;
+    check_remote_store_migration(&client).await.unwrap();
+
+    let keys = pax_auth::derive(USER, NEW).await.unwrap();
+    let mut record = ConversionRecord::new(USER, &keys).unwrap();
+    put_data(&client, RECORD_TYPE, &record).await.unwrap();
+    assert_eq!(
+        check_remote_store_migration(&client).await.unwrap_err(),
+        PENDING_MESSAGE
+    );
+
+    let recovery_key = "test secret storage recovery key";
+    record.envelope =
+        Some(RecoveryEnvelope::encrypt(USER, "key-id", recovery_key, &keys).unwrap());
+    record.password_change_requested = true;
+    record.complete = true;
+    put_data(&client, RECORD_TYPE, &record).await.unwrap();
+    check_remote_store_migration(&client).await.unwrap();
+}
+
+#[tokio::test]
 async fn resume_requires_local_password_proof_before_old_password_authentication() {
     let server = Server::start().await;
     let http = reqwest::Client::new();

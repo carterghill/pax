@@ -15,7 +15,7 @@ use super::{
     auth,
     pax_auth::{self, AccountMode, Descriptor, Enrollment, PaxKeys, RecoveryEnvelope},
 };
-use crate::AppState;
+use crate::{crypto_store::OpenMode, AppState};
 
 pub const PENDING_MESSAGE: &str = "PAX_CONVERSION_PENDING: Finish switching this account to Pax sign-in using the new Pax password you chose.";
 const RECORD_TYPE: &str = "com.carter.pax.conversion";
@@ -207,6 +207,34 @@ async fn fetch_record(client: &Client) -> Result<Option<ConversionRecord>, Strin
             Ok(r)
         })
         .transpose()
+}
+
+pub(super) async fn check_store_migration(
+    app: &tauri::AppHandle,
+    home: &str,
+    session: &auth::SavedSession,
+) -> Result<(), String> {
+    if read_journal(app, home, &session.user_id)?.is_some_and(|journal| !journal.record.complete) {
+        return Err(PENDING_MESSAGE.into());
+    }
+    // Another installation can start the switch. Check its journal using a
+    // memory-only client before opening or writing the persistent crypto store.
+    let probe = Client::builder()
+        .homeserver_url(home)
+        .build()
+        .await
+        .map_err(|_| "Could not check whether Pax sign-in conversion is in progress.")?;
+    auth::restore_tokens(&probe, session)
+        .await
+        .map_err(|_| "Could not check whether Pax sign-in conversion is in progress.")?;
+    check_remote_store_migration(&probe).await
+}
+
+async fn check_remote_store_migration(client: &Client) -> Result<(), String> {
+    if fetch_record(client).await?.is_some_and(|record| !record.complete) {
+        return Err(PENDING_MESSAGE.into());
+    }
+    Ok(())
 }
 
 async fn persist(
@@ -596,6 +624,7 @@ async fn reauthenticate(
         &session,
         &journal.store_dir,
         AccountMode::Pax,
+        OpenMode::DeferMigration,
     )
     .await?;
     *state.client.lock().await = Some(client.clone());
@@ -650,6 +679,8 @@ pub async fn convert_account_to_pax(
     new_password: String,
 ) -> Result<(), String> {
     let _operation = state.encryption.operation.lock().await;
+    #[cfg(target_os = "android")]
+    let _cold_store = crate::call_notifications::android::COLD_STORE.lock().await;
     let old = Zeroizing::new(current_password);
     let new = Zeroizing::new(new_password);
     validate_passwords(&old, &new)?;
@@ -779,6 +810,8 @@ pub async fn resume_pax_conversion(
     persist_session: bool,
 ) -> Result<String, String> {
     let _operation = state.encryption.operation.lock().await;
+    #[cfg(target_os = "android")]
+    let _cold_store = crate::call_notifications::android::COLD_STORE.lock().await;
     let old = Zeroizing::new(current_password);
     let new = Zeroizing::new(new_password);
     validate_passwords(&old, &new)?;
@@ -807,9 +840,15 @@ pub async fn resume_pax_conversion(
         .as_ref()
         .map(|j| j.store_dir.clone())
         .unwrap_or_else(|| format!("matrix_sessions/pw_{}", uuid::Uuid::new_v4()));
-    let client =
-        auth::restore_authenticated_client(&app, &homeserver, &session, &rel, AccountMode::Pax)
-            .await?;
+    let client = auth::restore_authenticated_client(
+        &app,
+        &homeserver,
+        &session,
+        &rel,
+        AccountMode::Pax,
+        OpenMode::DeferMigration,
+    )
+    .await?;
     let record = match local {
         Some(local) => local.record,
         None => fetch_record(&client)

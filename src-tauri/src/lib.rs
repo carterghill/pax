@@ -7,6 +7,7 @@ mod app_badge;
 mod call_notifications;
 mod file_cache;
 mod commands;
+mod crypto_store;
 mod idle;
 pub mod native_overlay;
 pub mod platform;
@@ -249,6 +250,9 @@ unsafe extern "system" fn JNI_OnLoad(
         return jni::sys::JNI_ERR;
     };
     libwebrtc::android::initialize_android(&vm);
+    if crate::crypto_store::initialize_android(&vm).is_err() {
+        return jni::sys::JNI_ERR;
+    }
     jni::sys::JNI_VERSION_1_6
 }
 

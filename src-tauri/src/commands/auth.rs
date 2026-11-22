@@ -12,7 +12,10 @@ use serde::{Deserialize, Serialize};
 use tauri::{Emitter, Manager, State};
 use tokio::time::timeout;
 
-use crate::AppState;
+use crate::{
+    crypto_store::{self, OpenMode},
+    AppState,
+};
 
 use super::fmt_error_chain;
 use super::pax_auth::{self, AccountMode, Descriptor, Enrollment};
@@ -622,8 +625,10 @@ async fn transfer_previous_room_keys(
             if same_user && same_server && path.exists() {
                 // Use default settings for this source client: do not
                 // bootstrap an identity or create backups using an old token.
+                let config =
+                    crypto_store::config(&app_data_dir(app)?, &path, OpenMode::Existing).await?;
                 let old = Client::builder().homeserver_url(&creds.homeserver)
-                    .sqlite_store(path, None).build().await
+                    .store_config(config).build().await
                     .map_err(|e| format!("Could not open your previous encryption keys. The original store has been kept: {}", fmt_error_chain(&e)))?;
                 old.restore_session(MatrixSession {
                     meta: SessionMeta {
@@ -690,10 +695,10 @@ fn sqlite_path_for_restore(
     creds: &SavedCredentials,
 ) -> Result<std::path::PathBuf, String> {
     let base = app_data_dir(app)?;
-    Ok(match &creds.sqlite_store_dir {
-        Some(rel) => base.join(rel),
-        None => base.join("matrix_store"),
-    })
+    crypto_store::session_path(
+        &base,
+        creds.sqlite_store_dir.as_deref().unwrap_or("matrix_store"),
+    )
 }
 
 fn reusable_login_store(
@@ -730,14 +735,14 @@ fn reusable_login_store(
 /// delays before giving up.
 async fn build_client_for_mode(
     homeserver: &str,
-    store_path: &std::path::Path,
+    store: matrix_sdk::config::StoreConfig,
     mode: AccountMode,
 ) -> Result<Client, String> {
     let mut last_err = String::new();
     for attempt in 0u64..3 {
         match Client::builder()
             .homeserver_url(homeserver)
-            .sqlite_store(store_path, None)
+            .store_config(store.clone())
             .handle_refresh_tokens()
             .with_encryption_settings(EncryptionSettings {
                 // Pax must recover the existing identity before doing anything
@@ -961,8 +966,16 @@ pub(super) async fn restore_authenticated_client(
     session: &SavedSession,
     rel: &str,
     mode: AccountMode,
+    store_mode: OpenMode,
 ) -> Result<Client, String> {
-    let client = build_client_for_mode(home, &app_data_dir(app)?.join(rel), mode).await?;
+    let base = app_data_dir(app)?;
+    let root = crypto_store::session_path(&base, rel)?;
+    if store_mode == OpenMode::Migrate && crypto_store::has_legacy_store(&root)? {
+        super::account_conversion::check_store_migration(app, home, session).await?;
+        progress(app, "Protecting your local encryption store…");
+    }
+    let store = crypto_store::config(&base, &root, store_mode).await?;
+    let client = build_client_for_mode(home, store, mode).await?;
     persist_refreshed_tokens(&client, credentials_path(app)?, session)?;
     restore_tokens(&client, session).await.map_err(|_| {
         "Could not open the encryption store. The original files have been preserved."
@@ -1046,7 +1059,9 @@ pub async fn register(
             mode,
             false,
         )?;
-        let client = restore_authenticated_client(&app, &homeserver, &session, &rel, mode).await?;
+        let client =
+            restore_authenticated_client(&app, &homeserver, &session, &rel, mode, OpenMode::Migrate)
+                .await?;
         initial_sync(&client).await?;
         // Explicit standard markers are helpful, but legacy servers without
         // custom profile support remain fully usable.
@@ -1120,7 +1135,9 @@ pub async fn register(
             &app, &homeserver, session.clone(), Some(rel.clone()), mode, true,
         )?;
         stop_previous_session(&state).await;
-        let client = restore_authenticated_client(&app, &homeserver, &session, &rel, mode).await?;
+        let client =
+            restore_authenticated_client(&app, &homeserver, &session, &rel, mode, OpenMode::Migrate)
+                .await?;
         pax_auth::publish(&state.http_client, &client, &Descriptor::new(&user, mode, false)).await?;
         initial_sync(&client).await?;
         progress(&app, "Setting up encrypted history…");
@@ -1366,7 +1383,14 @@ pub async fn login(
         None
     };
     stop_previous_session(&state).await;
-    let client = restore_authenticated_client(&app, &homeserver, &session, &rel, mode).await?;
+    let previous_client = previous_client.filter(|client| {
+        !client.user_id().is_some_and(|id| id.as_str() == session.user_id)
+            || !client.device_id().is_some_and(|id| id.as_str() == session.device_id)
+            || client.homeserver().as_str().trim_end_matches('/') != homeserver.trim_end_matches('/')
+    });
+    let client =
+        restore_authenticated_client(&app, &homeserver, &session, &rel, mode, OpenMode::Migrate)
+            .await?;
     transfer_previous_room_keys(&app, &client, previous_client, previous_credentials).await?;
     initial_sync(&client).await?;
     if let Some(keys) = &keys {
@@ -1438,7 +1462,7 @@ async fn check_saved_session(
     Err("Pax could not verify the saved session. Check your connection and try again.".into())
 }
 
-async fn restore_tokens(client: &Client, saved: &SavedSession) -> Result<(), String> {
+pub(super) async fn restore_tokens(client: &Client, saved: &SavedSession) -> Result<(), String> {
     client
         .restore_session(MatrixSession {
             meta: SessionMeta {
@@ -1540,8 +1564,16 @@ pub async fn restore_session(
     if mode == AccountMode::Pax && !sqlite_path_for_restore(&app, &creds)?.exists() {
         return Err(PAX_RECOVERY_REQUIRED.into());
     }
-    let client =
-        restore_authenticated_client(&app, &creds.homeserver, &session, store_dir, mode).await?;
+    stop_previous_session(&state).await;
+    let client = restore_authenticated_client(
+        &app,
+        &creds.homeserver,
+        &session,
+        store_dir,
+        mode,
+        OpenMode::Migrate,
+    )
+    .await?;
     if mode == AccountMode::Pax {
         client
             .encryption()

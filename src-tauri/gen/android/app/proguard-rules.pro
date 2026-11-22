@@ -26,6 +26,9 @@
 -keepclasseswithmembernames class com.carter.pax.PaxPushJob {
     native <methods>;
 }
+-keep class com.carter.pax.PaxStoreKey {
+    public static byte[] open(java.lang.String, boolean);
+}
 -keepclassmembers class com.carter.pax.MainActivity$PaxBridge {
     @android.webkit.JavascriptInterface <methods>;
 }
