@@ -409,11 +409,21 @@ pub struct VoiceJoinResult {
     pub livekit_url: String,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub enum RemoteVoiceJoin {
+    Join,
+    Handoff,
+}
+
 /// Optional server snapshot. Unknown flags stay null; connected calls use SDK events.
 #[derive(Clone, Serialize, serde::Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct LivekitVoiceParticipantInfo {
     pub identity: String,
+    /// Computed locally for the signed-in account and the discovered voice service.
+    #[serde(skip_deserializing)]
+    pub remote_join: Option<RemoteVoiceJoin>,
     #[serde(default, alias = "is_muted")]
     pub is_muted: Option<bool>,
     #[serde(default, alias = "is_deafened")]

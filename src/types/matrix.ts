@@ -248,9 +248,12 @@ export interface VoiceParticipant {
   avatarUrl: string | null;
 }
 
+export type RemoteVoiceJoin = "join" | "handoff";
+
 /** Optional homeserver voice snapshot; unknown flags remain null. */
 export interface LivekitVoiceParticipantInfo {
   identity: string;
+  remoteJoin: RemoteVoiceJoin | null;
   isMuted: boolean | null;
   isDeafened: boolean | null;
   isSpeaking: boolean | null;

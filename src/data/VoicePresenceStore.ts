@@ -1,4 +1,4 @@
-import type { LivekitVoiceParticipantInfo, LivekitVoiceSnapshot, VoiceMembershipSnapshot, VoiceParticipant } from "../types/matrix.ts";
+import type { LivekitVoiceParticipantInfo, LivekitVoiceSnapshot, RemoteVoiceJoin, VoiceMembershipSnapshot, VoiceParticipant } from "../types/matrix.ts";
 import { compareByDisplayThenKey } from "../utils/matrix.ts";
 
 type MatrixMap = Record<string, VoiceParticipant[]>;
@@ -8,6 +8,21 @@ export type VoicePresenceSnapshot = {
   livekitByRoom: LivekitMap;
   livekitFreshByRoom: Record<string, boolean>;
 };
+
+export function getRemoteVoiceCalls(snapshot: VoicePresenceSnapshot): Map<string, RemoteVoiceJoin> {
+  const calls = new Map<string, RemoteVoiceJoin>();
+  for (const id of Object.keys(snapshot.livekitFreshByRoom).sort()) {
+    if (!snapshot.livekitFreshByRoom[id]) continue;
+    for (const { remoteJoin } of snapshot.livekitByRoom[id] ?? []) {
+      if (!remoteJoin) continue;
+      calls.set(id, remoteJoin);
+      // A move must cover every one of our devices still in this room.
+      if (remoteJoin === "join") break;
+    }
+  }
+  return calls;
+}
+
 type Options = {
   loadMatrix: (roomIds?: string[]) => Promise<VoiceMembershipSnapshot>;
   loadLivekit: (roomIds: string[]) => Promise<LivekitVoiceSnapshot>;
@@ -26,7 +41,7 @@ function stableRows<T>(old: T[] | undefined, incoming: T[], key: (row: T) => str
 }
 
 const sameMatrix = (a: VoiceParticipant, b: VoiceParticipant) => a.userId === b.userId && a.displayName === b.displayName && a.avatarUrl === b.avatarUrl;
-const sameLivekit = (a: LivekitVoiceParticipantInfo, b: LivekitVoiceParticipantInfo) => a.identity === b.identity && a.isMuted === b.isMuted && a.isDeafened === b.isDeafened && a.isSpeaking === b.isSpeaking;
+const sameLivekit = (a: LivekitVoiceParticipantInfo, b: LivekitVoiceParticipantInfo) => a.identity === b.identity && a.remoteJoin === b.remoteJoin && a.isMuted === b.isMuted && a.isDeafened === b.isDeafened && a.isSpeaking === b.isSpeaking;
 const sameMap = <T>(a: Record<string, T>, b: Record<string, T>) => Object.keys(a).length === Object.keys(b).length && Object.keys(a).every((id) => a[id] === b[id]);
 
 /** One session owner for membership and activity snapshots. Each source has

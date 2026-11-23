@@ -703,7 +703,6 @@ export default function SpaceSidebar({
   return (
     <>
       <div
-        ref={sidebarScrollRef}
         style={{
           width: 72,
           minWidth: 72,
@@ -714,319 +713,318 @@ export default function SpaceSidebar({
           alignItems: "center",
           padding: "12px 0",
           gap: 8,
-          overflowY: "auto",
-          height: "100vh",
+          height: "100%",
+          minHeight: 0,
         }}
       >
-        {/* Home button */}
-        <div
-          onMouseEnter={(e) => {
-            sidebarTooltipAnchorRef.current = e.currentTarget;
-            const r = e.currentTarget.getBoundingClientRect();
-            setSidebarTooltip({
-              name: "Home",
-              left: r.right + 8,
-              top: r.top + r.height / 2,
-            });
-          }}
-          onMouseLeave={() => {
-            sidebarTooltipAnchorRef.current = null;
-            setSidebarTooltip(null);
-          }}
-          style={{ position: "relative" }}
-        >
-          <SpaceIconRow
-            selected={!isDiscoverOpen && (activeSpaceId === "" || activeSpaceId === null)}
-            unread={isHomeUnread}
-            mentions={homeMentionCount}
-            indicatorColor={palette.textHeading}
-          >
-            <SpaceSidebarSquircleClip>
-              <div
-                role="button"
-                tabIndex={0}
-                aria-label="Home"
-                onClick={() => onSelectSpace("")}
-                onKeyDown={(e) => {
-                  if (e.key === "Enter" || e.key === " ") {
-                    e.preventDefault();
-                    onSelectSpace("");
-                  }
-                }}
-                style={{
-                  ...SIDEBAR_ICON_INNER_BUTTON_BASE,
-                  backgroundColor: palette.accent,
-                  cursor: "pointer",
-                }}
-              >
-                {/* Filter on a child: `filter` can expand paint bounds; keep it
-                    inside the squircle clip so halos don’t leak past corners. */}
-                <div
-                  style={{
-                    width: "100%",
-                    height: "100%",
-                    padding: 5,
-                    boxSizing: "border-box",
-                    display: "flex",
-                    alignItems: "center",
-                    justifyContent: "center",
-                    filter: "brightness(0) invert(1)",
-                  }}
-                >
-                  <img
-                    src="/logoWhiteAlt.png"
-                    alt=""
-                    draggable={false}
-                    style={{
-                      width: "100%",
-                      height: "100%",
-                      objectFit: "contain",
-                      display: "block",
-                    }}
-                  />
-                </div>
-              </div>
-            </SpaceSidebarSquircleClip>
-          </SpaceIconRow>
-        </div>
-
-        {/* Divider */}
-        <div
-          style={{
-            width: 32,
-            height: 2,
-            backgroundColor: "#35363c",
-            borderRadius: 1,
-            flexShrink: 0,
-          }}
-        />
-
-        {/* Space avatars.
-         *
-         * Drop-position is computed by the container's `onDragOver` from
-         * `clientY` vs each avatar's bounding rect midpoint — one handler
-         * for the whole column, no per-element wiring, no spacer elements,
-         * no gap-seam issues.  A document-level dragover listener (active
-         * only during drags) suppresses the deny cursor everywhere else on
-         * screen.
-         *
-         * Each avatar carries a `data-space-id` attribute so the container
-         * handler can identify it via `querySelectorAll`. */}
-        <div
-          ref={spaceListRef}
-          onDragOver={handleContainerDragOver}
-          onDrop={handleSpaceDrop}
-          style={{
-            display: "flex",
-            flexDirection: "column",
-            alignItems: "center",
-            gap: 8,
-            width: "100%",
-          }}
-        >
-          {spaces.map((space, idx) => {
-            const selected = !isDiscoverOpen && spaceHighlightId === space.id;
-            const unread = !selected && isSpaceUnread(space.id);
-            const mentions = spaceMentionCount(space.id);
-            const isBeingDragged = draggedSpaceId === space.id;
-            const showInsertBefore = dropBeforeId === space.id;
-            const showInsertAfterLast =
-              idx === spaces.length - 1 && dropBeforeId === "end";
-            const va = spaceVoiceActivity[space.id];
-            const spaceAriaLabel =
-              va === "self"
-                ? `${space.name}, you are in a voice channel`
-                : va === "others"
-                  ? `${space.name}, voice activity`
-                  : space.name;
-
-            return (
-              <div
-                key={space.id}
-                data-space-id={space.id}
-                aria-label={spaceAriaLabel}
-                draggable={!!onReorderSpaces}
-                onDragStart={(e) => handleSpaceDragStart(e, space.id)}
-                onDragEnd={handleSpaceDragEnd}
-                onClick={(e) => {
-                  if (e.defaultPrevented) return;
-                  onSelectSpace(space.id);
-                }}
-                onMouseEnter={(e) => {
-                  sidebarTooltipAnchorRef.current = e.currentTarget;
-                  const r = e.currentTarget.getBoundingClientRect();
-                  setSidebarTooltip({
-                    name: space.name,
-                    left: r.right + 8,
-                    top: r.top + r.height / 2,
-                  });
-                }}
-                onMouseLeave={() => {
-                  sidebarTooltipAnchorRef.current = null;
-                  setSidebarTooltip(null);
-                }}
-                onContextMenu={(e) => {
-                  e.preventDefault();
-                  setSpaceContextMenu({
-                    x: e.clientX,
-                    y: e.clientY,
-                    spaceId: space.id,
-                    spaceName: space.name,
-                  });
-                }}
-                style={{
-                  position: "relative",
-                  cursor: onReorderSpaces ? "grab" : "pointer",
-                  borderRadius: ICON_RADIUS,
-                  opacity: isBeingDragged ? 0.35 : 1,
-                  transition: "opacity 0.08s linear",
-                }}
-              >
-                {showInsertBefore && (
-                  <div
-                    aria-hidden
-                    style={{
-                      position: "absolute",
-                      left: (SIDEBAR_WIDTH - ICON_SIZE) / 2 - 2,
-                      right: (SIDEBAR_WIDTH - ICON_SIZE) / 2 - 2,
-                      top: -5,
-                      height: 3,
-                      borderRadius: 2,
-                      backgroundColor: palette.textPrimary,
-                      pointerEvents: "none",
-                    }}
-                  />
-                )}
-                <SpaceIconRow
-                  selected={selected}
-                  unread={unread}
-                  mentions={mentions}
-                  indicatorColor={palette.textHeading}
-                  voiceActivity={spaceVoiceActivity[space.id]}
-                >
-                  <SpaceAvatar space={space} />
-                </SpaceIconRow>
-                {showInsertAfterLast && (
-                  <div
-                    aria-hidden
-                    style={{
-                      position: "absolute",
-                      left: (SIDEBAR_WIDTH - ICON_SIZE) / 2 - 2,
-                      right: (SIDEBAR_WIDTH - ICON_SIZE) / 2 - 2,
-                      bottom: -5,
-                      height: 3,
-                      borderRadius: 2,
-                      backgroundColor: palette.textPrimary,
-                      pointerEvents: "none",
-                    }}
-                  />
-                )}
-              </div>
-            );
-          })}
-        </div>
-
-        {/* Discover button */}
-        <div
-          onMouseEnter={(e) => {
-            setDiscoverHovered(true);
-            sidebarTooltipAnchorRef.current = e.currentTarget;
-            const r = e.currentTarget.getBoundingClientRect();
-            setSidebarTooltip({
-              name: "Discover",
-              left: r.right + 8,
-              top: r.top + r.height / 2,
-            });
-          }}
-          onMouseLeave={() => {
-            setDiscoverHovered(false);
-            sidebarTooltipAnchorRef.current = null;
-            setSidebarTooltip(null);
-          }}
-          style={{ position: "relative" }}
-        >
-          <SpaceIconRow
-            selected={isDiscoverOpen}
-            unread={false}
-            mentions={0}
-            indicatorColor={palette.textHeading}
-          >
-            <SpaceSidebarSquircleClip>
-              <div
-                role="button"
-                tabIndex={0}
-                onClick={onToggleDiscover}
-                aria-label="Discover spaces and rooms"
-                onKeyDown={(e) => {
-                  if (e.key === "Enter" || e.key === " ") {
-                    e.preventDefault();
-                    onToggleDiscover();
-                  }
-                }}
-                style={{
-                  ...SIDEBAR_ICON_INNER_BUTTON_BASE,
-                  backgroundColor: discoverHovered ? palette.bgActive : palette.bgPrimary,
-                  color: isDiscoverOpen || discoverHovered ? palette.textHeading : palette.textSecondary,
-                  cursor: "pointer",
-                  transition: "background-color 0.15s ease, color 0.15s ease",
-                }}
-              >
-                <Compass
-                  size={22}
-                  strokeWidth={2}
-                  style={{ display: "block", shapeRendering: "geometricPrecision" }}
-                />
-              </div>
-            </SpaceSidebarSquircleClip>
-          </SpaceIconRow>
-        </div>
-
-        {/* Add space button */}
-        <SpaceSidebarSquircleClip>
+        <div ref={sidebarScrollRef} className="pax-space-sidebar-scroll">
+          {/* Home button */}
           <div
-            role="button"
-            tabIndex={0}
-            onClick={handleOpenDialog}
-            aria-label="Create or join a space"
-            onKeyDown={(e) => {
-              if (e.key === "Enter" || e.key === " ") {
-                e.preventDefault();
-                handleOpenDialog();
-              }
-            }}
             onMouseEnter={(e) => {
-              setAddHovered(true);
               sidebarTooltipAnchorRef.current = e.currentTarget;
               const r = e.currentTarget.getBoundingClientRect();
               setSidebarTooltip({
-                name: "Create or join a space",
+                name: "Home",
                 left: r.right + 8,
                 top: r.top + r.height / 2,
               });
             }}
             onMouseLeave={() => {
-              setAddHovered(false);
               sidebarTooltipAnchorRef.current = null;
               setSidebarTooltip(null);
             }}
+            style={{ position: "relative" }}
+          >
+            <SpaceIconRow
+              selected={!isDiscoverOpen && (activeSpaceId === "" || activeSpaceId === null)}
+              unread={isHomeUnread}
+              mentions={homeMentionCount}
+              indicatorColor={palette.textHeading}
+            >
+              <SpaceSidebarSquircleClip>
+                <div
+                  role="button"
+                  tabIndex={0}
+                  aria-label="Home"
+                  onClick={() => onSelectSpace("")}
+                  onKeyDown={(e) => {
+                    if (e.key === "Enter" || e.key === " ") {
+                      e.preventDefault();
+                      onSelectSpace("");
+                    }
+                  }}
+                  style={{
+                    ...SIDEBAR_ICON_INNER_BUTTON_BASE,
+                    backgroundColor: palette.accent,
+                    cursor: "pointer",
+                  }}
+                >
+                  {/* Filter on a child: `filter` can expand paint bounds; keep it
+                      inside the squircle clip so halos don’t leak past corners. */}
+                  <div
+                    style={{
+                      width: "100%",
+                      height: "100%",
+                      padding: 5,
+                      boxSizing: "border-box",
+                      display: "flex",
+                      alignItems: "center",
+                      justifyContent: "center",
+                      filter: "brightness(0) invert(1)",
+                    }}
+                  >
+                    <img
+                      src="/logoWhiteAlt.png"
+                      alt=""
+                      draggable={false}
+                      style={{
+                        width: "100%",
+                        height: "100%",
+                        objectFit: "contain",
+                        display: "block",
+                      }}
+                    />
+                  </div>
+                </div>
+              </SpaceSidebarSquircleClip>
+            </SpaceIconRow>
+          </div>
+
+          {/* Divider */}
+          <div
             style={{
-              ...SIDEBAR_ICON_INNER_BUTTON_BASE,
-              backgroundColor: addHovered ? "#3ba55d" : palette.bgPrimary,
-              color: addHovered ? "#fff" : "#3ba55d",
-              cursor: "pointer",
-              transition: "background-color 0.2s ease, color 0.2s ease",
+              width: 32,
+              height: 2,
+              backgroundColor: "#35363c",
+              borderRadius: 1,
+              flexShrink: 0,
+            }}
+          />
+
+          {/* Space avatars.
+           *
+           * Drop-position is computed by the container's `onDragOver` from
+           * `clientY` vs each avatar's bounding rect midpoint — one handler
+           * for the whole column, no per-element wiring, no spacer elements,
+           * no gap-seam issues.  A document-level dragover listener (active
+           * only during drags) suppresses the deny cursor everywhere else on
+           * screen.
+           *
+           * Each avatar carries a `data-space-id` attribute so the container
+           * handler can identify it via `querySelectorAll`. */}
+          <div
+            ref={spaceListRef}
+            onDragOver={handleContainerDragOver}
+            onDrop={handleSpaceDrop}
+            style={{
+              display: "flex",
+              flexDirection: "column",
+              alignItems: "center",
+              gap: 8,
+              width: "100%",
             }}
           >
-            <Plus
-              size={24}
-              strokeWidth={2}
-              style={{ display: "block", shapeRendering: "geometricPrecision" }}
-            />
-          </div>
-        </SpaceSidebarSquircleClip>
+            {spaces.map((space, idx) => {
+              const selected = !isDiscoverOpen && spaceHighlightId === space.id;
+              const unread = !selected && isSpaceUnread(space.id);
+              const mentions = spaceMentionCount(space.id);
+              const isBeingDragged = draggedSpaceId === space.id;
+              const showInsertBefore = dropBeforeId === space.id;
+              const showInsertAfterLast =
+                idx === spaces.length - 1 && dropBeforeId === "end";
+              const va = spaceVoiceActivity[space.id];
+              const spaceAriaLabel =
+                va === "self"
+                  ? `${space.name}, you are in a voice channel`
+                  : va === "others"
+                    ? `${space.name}, voice activity`
+                    : space.name;
 
-        {/* Spacer to keep settings pinned at the bottom */}
-        <div style={{ flex: 1 }} />
+              return (
+                <div
+                  key={space.id}
+                  data-space-id={space.id}
+                  aria-label={spaceAriaLabel}
+                  draggable={!!onReorderSpaces}
+                  onDragStart={(e) => handleSpaceDragStart(e, space.id)}
+                  onDragEnd={handleSpaceDragEnd}
+                  onClick={(e) => {
+                    if (e.defaultPrevented) return;
+                    onSelectSpace(space.id);
+                  }}
+                  onMouseEnter={(e) => {
+                    sidebarTooltipAnchorRef.current = e.currentTarget;
+                    const r = e.currentTarget.getBoundingClientRect();
+                    setSidebarTooltip({
+                      name: space.name,
+                      left: r.right + 8,
+                      top: r.top + r.height / 2,
+                    });
+                  }}
+                  onMouseLeave={() => {
+                    sidebarTooltipAnchorRef.current = null;
+                    setSidebarTooltip(null);
+                  }}
+                  onContextMenu={(e) => {
+                    e.preventDefault();
+                    setSpaceContextMenu({
+                      x: e.clientX,
+                      y: e.clientY,
+                      spaceId: space.id,
+                      spaceName: space.name,
+                    });
+                  }}
+                  style={{
+                    position: "relative",
+                    cursor: onReorderSpaces ? "grab" : "pointer",
+                    borderRadius: ICON_RADIUS,
+                    opacity: isBeingDragged ? 0.35 : 1,
+                    transition: "opacity 0.08s linear",
+                  }}
+                >
+                  {showInsertBefore && (
+                    <div
+                      aria-hidden
+                      style={{
+                        position: "absolute",
+                        left: (SIDEBAR_WIDTH - ICON_SIZE) / 2 - 2,
+                        right: (SIDEBAR_WIDTH - ICON_SIZE) / 2 - 2,
+                        top: -5,
+                        height: 3,
+                        borderRadius: 2,
+                        backgroundColor: palette.textPrimary,
+                        pointerEvents: "none",
+                      }}
+                    />
+                  )}
+                  <SpaceIconRow
+                    selected={selected}
+                    unread={unread}
+                    mentions={mentions}
+                    indicatorColor={palette.textHeading}
+                    voiceActivity={spaceVoiceActivity[space.id]}
+                  >
+                    <SpaceAvatar space={space} />
+                  </SpaceIconRow>
+                  {showInsertAfterLast && (
+                    <div
+                      aria-hidden
+                      style={{
+                        position: "absolute",
+                        left: (SIDEBAR_WIDTH - ICON_SIZE) / 2 - 2,
+                        right: (SIDEBAR_WIDTH - ICON_SIZE) / 2 - 2,
+                        bottom: -5,
+                        height: 3,
+                        borderRadius: 2,
+                        backgroundColor: palette.textPrimary,
+                        pointerEvents: "none",
+                      }}
+                    />
+                  )}
+                </div>
+              );
+            })}
+          </div>
+
+          {/* Discover button */}
+          <div
+            onMouseEnter={(e) => {
+              setDiscoverHovered(true);
+              sidebarTooltipAnchorRef.current = e.currentTarget;
+              const r = e.currentTarget.getBoundingClientRect();
+              setSidebarTooltip({
+                name: "Discover",
+                left: r.right + 8,
+                top: r.top + r.height / 2,
+              });
+            }}
+            onMouseLeave={() => {
+              setDiscoverHovered(false);
+              sidebarTooltipAnchorRef.current = null;
+              setSidebarTooltip(null);
+            }}
+            style={{ position: "relative" }}
+          >
+            <SpaceIconRow
+              selected={isDiscoverOpen}
+              unread={false}
+              mentions={0}
+              indicatorColor={palette.textHeading}
+            >
+              <SpaceSidebarSquircleClip>
+                <div
+                  role="button"
+                  tabIndex={0}
+                  onClick={onToggleDiscover}
+                  aria-label="Discover spaces and rooms"
+                  onKeyDown={(e) => {
+                    if (e.key === "Enter" || e.key === " ") {
+                      e.preventDefault();
+                      onToggleDiscover();
+                    }
+                  }}
+                  style={{
+                    ...SIDEBAR_ICON_INNER_BUTTON_BASE,
+                    backgroundColor: discoverHovered ? palette.bgActive : palette.bgPrimary,
+                    color: isDiscoverOpen || discoverHovered ? palette.textHeading : palette.textSecondary,
+                    cursor: "pointer",
+                    transition: "background-color 0.15s ease, color 0.15s ease",
+                  }}
+                >
+                  <Compass
+                    size={22}
+                    strokeWidth={2}
+                    style={{ display: "block", shapeRendering: "geometricPrecision" }}
+                  />
+                </div>
+              </SpaceSidebarSquircleClip>
+            </SpaceIconRow>
+          </div>
+
+          {/* Add space button */}
+          <SpaceSidebarSquircleClip>
+            <div
+              role="button"
+              tabIndex={0}
+              onClick={handleOpenDialog}
+              aria-label="Create or join a space"
+              onKeyDown={(e) => {
+                if (e.key === "Enter" || e.key === " ") {
+                  e.preventDefault();
+                  handleOpenDialog();
+                }
+              }}
+              onMouseEnter={(e) => {
+                setAddHovered(true);
+                sidebarTooltipAnchorRef.current = e.currentTarget;
+                const r = e.currentTarget.getBoundingClientRect();
+                setSidebarTooltip({
+                  name: "Create or join a space",
+                  left: r.right + 8,
+                  top: r.top + r.height / 2,
+                });
+              }}
+              onMouseLeave={() => {
+                setAddHovered(false);
+                sidebarTooltipAnchorRef.current = null;
+                setSidebarTooltip(null);
+              }}
+              style={{
+                ...SIDEBAR_ICON_INNER_BUTTON_BASE,
+                backgroundColor: addHovered ? "#3ba55d" : palette.bgPrimary,
+                color: addHovered ? "#fff" : "#3ba55d",
+                cursor: "pointer",
+                transition: "background-color 0.2s ease, color 0.2s ease",
+              }}
+            >
+              <Plus
+                size={24}
+                strokeWidth={2}
+                style={{ display: "block", shapeRendering: "geometricPrecision" }}
+              />
+            </div>
+          </SpaceSidebarSquircleClip>
+        </div>
 
         {/* Divider before settings button */}
         <div

@@ -14,7 +14,7 @@ use serde_json::{json, Value};
 use tokio::sync::Mutex;
 
 use crate::{
-    types::LivekitVoiceParticipantInfo,
+    types::{LivekitVoiceParticipantInfo, RemoteVoiceJoin},
     voice_presence::{self, LivekitVoiceSnapshot},
 };
 
@@ -278,6 +278,32 @@ fn decode_snapshot(
     Ok(response.participants_by_room)
 }
 
+fn remote_voice_join(
+    identity: &str,
+    user_id: &str,
+    device_id: &str,
+    replace_sessions: bool,
+) -> Option<RemoteVoiceJoin> {
+    let suffix = identity.strip_prefix(user_id)?;
+    let (device, action) = if let Some(device) = suffix.strip_prefix('|') {
+        // Older snapshot identities can identify a device, but the replacement
+        // API only advertises support for user_id:device_id identities.
+        (device, RemoteVoiceJoin::Join)
+    } else {
+        let device = suffix.strip_prefix(':')?;
+        // A server port can look like a device suffix. Without the advertised
+        // identity format, a bare MXID is insufficient to confirm a device.
+        if device.contains(':')
+            || device.contains('|')
+            || (!replace_sessions && matrix_sdk::ruma::UserId::parse(identity).is_ok())
+        {
+            return None;
+        }
+        (device, if replace_sessions { RemoteVoiceJoin::Handoff } else { RemoteVoiceJoin::Join })
+    };
+    (!device.is_empty() && device != device_id).then_some(action)
+}
+
 impl VoiceApiClient {
     async fn discover(&self, homeserver: &Url) -> Result<Option<VoiceApi>, String> {
         let Some(homeserver) = https_base(homeserver.as_str()) else {
@@ -459,6 +485,13 @@ impl VoiceApiClient {
             }
         })
         .await;
+        if let (Some(user), Some(device)) = (client.user_id(), client.device_id()) {
+            for row in snapshot.participants_by_room.values_mut().flatten() {
+                row.remote_join = remote_voice_join(
+                    &row.identity, user.as_str(), device.as_str(), api.replace_sessions,
+                );
+            }
+        }
         Ok(snapshot)
     }
 
@@ -466,16 +499,16 @@ impl VoiceApiClient {
         &self,
         client: &Client,
         backend: &str,
-    ) -> Result<(), String> {
+    ) -> Result<bool, String> {
         let Some(api) = self
             .discover(&client.homeserver())
             .await?
             .filter(|api| api.replace_sessions)
         else {
-            return Ok(());
+            return Ok(false);
         };
         if https_base(backend).as_ref() != Some(&api.backend) || client.device_id().is_none() {
-            return Ok(());
+            return Ok(false);
         }
         let token = client.access_token().ok_or("Not logged in")?;
         let response = self
@@ -493,13 +526,30 @@ impl VoiceApiClient {
             return Err("Some other voice sessions could not be disconnected".into());
         }
         log::debug!("Voice service replaced {removed} other device sessions");
-        Ok(())
+        Ok(true)
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn remote_calls_distinguish_device_presence_from_replacement_support() {
+        use RemoteVoiceJoin::{Handoff, Join};
+        let user = "@alice:host:8448";
+        for replace in [true, false] {
+            let action = |identity| remote_voice_join(identity, user, "MAC", replace);
+            assert_eq!(action("@alice:host:8448:PC"), Some(if replace { Handoff } else { Join }));
+            assert_eq!(action("@alice:host:8448|PC"), Some(Join));
+            for identity in [user, "@alice:host:8448:", "@alice:host:8448:MAC",
+                "@alice:host:8448|MAC", "@alice:host:PC", "@bob:host:8448:PC"] {
+                assert_eq!(action(identity), None);
+            }
+        }
+        assert_eq!(remote_voice_join(user, "@alice:host", "MAC", false), None);
+        assert_eq!(remote_voice_join("@alice:host:8448:PC", "@alice:host", "MAC", true), None);
+    }
 
     fn fixture() -> (Url, Url, Value, Value) {
         let home = https_base("https://matrix.example.org").unwrap();
@@ -539,12 +589,22 @@ mod tests {
         let api = validate_capabilities(&home, base.clone(), &discovery, &caps).unwrap();
         assert!(api.snapshots && api.replace_sessions);
         assert_eq!(api.max_rooms, 32);
+        let features = caps["features"].clone();
+        for (snapshots, replacement) in [(true, false), (false, true), (false, false)] {
+            caps["features"] = json!({});
+            if snapshots {
+                caps["features"]["participant_snapshots"] = features["participant_snapshots"].clone();
+            }
+            if replacement {
+                caps["features"]["replace_own_sessions"] = features["replace_own_sessions"].clone();
+            }
+            let api = validate_capabilities(&home, base.clone(), &discovery, &caps).unwrap();
+            assert_eq!((api.snapshots, api.replace_sessions), (snapshots, replacement));
+        }
+        caps["features"] = features;
         caps["features"]["replace_own_sessions"]["enabled"] = json!(false);
-        assert!(
-            !validate_capabilities(&home, base.clone(), &discovery, &caps)
-                .unwrap()
-                .replace_sessions
-        );
+        let api = validate_capabilities(&home, base.clone(), &discovery, &caps).unwrap();
+        assert!(api.snapshots && !api.replace_sessions);
         caps["authentication"]["homeserver_url"] = json!("https://other.example");
         assert!(validate_capabilities(&home, base, &discovery, &caps).is_none());
     }

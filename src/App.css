@@ -47,6 +47,21 @@ html, body {
   padding-right: env(safe-area-inset-right, 0px);
 }
 
+.pax-space-sidebar-scroll {
+  display: flex;
+  flex: 1;
+  flex-direction: column;
+  align-items: center;
+  gap: 8px;
+  width: 100%;
+  min-height: 0;
+  overflow-y: auto;
+}
+
+.pax-space-sidebar-scroll > * {
+  flex-shrink: 0;
+}
+
 /* Scrollbar styling (Chromium/WebView2: kill arrow buttons app-wide; padding on buttons can reserve native chrome). */
 ::-webkit-scrollbar {
   width: 15px;

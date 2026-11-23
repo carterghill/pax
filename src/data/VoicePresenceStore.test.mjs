@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { VoicePresenceStore } from "./VoicePresenceStore.ts";
+import { getRemoteVoiceCalls, VoicePresenceStore } from "./VoicePresenceStore.ts";
 
 const a = "!a:server", b = "!b:server";
 const tick = (ms = 2) => new Promise((resolve) => setTimeout(resolve, ms));
@@ -27,6 +27,54 @@ function fixture(t, options = {}) {
   t.after(() => store.dispose());
   return { store, calls };
 }
+
+test("remote calls follow fresh device confirmation and the room's available action", async (t) => {
+  const otherDevice = { ...live("@alice:server:PC"), remoteJoin: "handoff" };
+  let response = activity({ [a]: [otherDevice], [b]: [] });
+  const { store } = fixture(t, { loadLivekit: () => response, retryMs: 10000 });
+  const leaveSpace = store.watchLivekit([a, b]);
+  store.watchLivekit([a]); // Own Matrix membership keeps this room in scope.
+  store.start();
+  const remoteCall = () => getRemoteVoiceCalls(store.getSnapshot()).get(a);
+  await until(() => remoteCall() === "handoff");
+  leaveSpace();
+  assert.equal(remoteCall(), "handoff");
+
+  response = activity({});
+  store.invalidateLivekit([a]);
+  await until(() => !store.getSnapshot().livekitFreshByRoom[a]);
+  assert.equal(store.getSnapshot().livekitByRoom[a][0].remoteJoin, "handoff");
+  assert.equal(remoteCall(), undefined);
+
+  response = activity({ [a]: [{ ...otherDevice, remoteJoin: "join" }] });
+  store.invalidateLivekit([a]);
+  await until(() => store.getSnapshot().livekitFreshByRoom[a]);
+  assert.equal(remoteCall(), "join");
+
+  response = activity({ [a]: [otherDevice] });
+  store.invalidateLivekit([a]);
+  await until(() => remoteCall() === "handoff");
+  response = activity({ [a]: [] });
+  store.invalidateLivekit([a]);
+  await until(() => remoteCall() === undefined);
+  assert.equal(store.getSnapshot().participantsByRoom[a].length, 1);
+});
+
+test("each room offers only actions supported by all confirmed remote devices", () => {
+  const snapshot = {
+    participantsByRoom: { [a]: [member()], [b]: [member()] },
+    livekitFreshByRoom: { [a]: true, [b]: true },
+    livekitByRoom: {
+      [a]: [{ remoteJoin: "handoff" }, { remoteJoin: "join" }, { remoteJoin: null }],
+      [b]: [{ remoteJoin: null }, { remoteJoin: "handoff" }],
+    },
+  };
+  assert.deepEqual([...getRemoteVoiceCalls(snapshot)], [[a, "join"], [b, "handoff"]]);
+  snapshot.livekitByRoom[a].reverse();
+  assert.equal(getRemoteVoiceCalls(snapshot).get(a), "join");
+  snapshot.livekitFreshByRoom = {};
+  assert.equal(getRemoteVoiceCalls(snapshot).size, 0);
+});
 
 test("consumers share initial reads and overlapping visible rooms form one batch", async (t) => {
   const { store, calls } = fixture(t);

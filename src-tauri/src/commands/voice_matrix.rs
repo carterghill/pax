@@ -323,13 +323,25 @@ fn body_indicates_msc4140_unsupported(body: &str) -> bool {
         return true;
     }
     if let Ok(v) = serde_json::from_str::<serde_json::Value>(body) {
-        if v.get("org.matrix.msc4140.errcode").and_then(|x| x.as_str())
-            == Some("M_MAX_DELAY_UNSUPPORTED")
+        if v.get("errcode").and_then(|x| x.as_str()) == Some("M_UNRECOGNIZED")
+            || v.get("org.matrix.msc4140.errcode").and_then(|x| x.as_str()) == Some("M_MAX_DELAY_UNSUPPORTED")
         {
             return true;
         }
     }
     false
+}
+
+fn delayed_leave_id(response: &serde_json::Value) -> Result<String, DelayedLeaveError> {
+    if let Some(id) = response["delay_id"].as_str().filter(|id| !id.is_empty()) {
+        return Ok(id.to_owned());
+    }
+    // A server that ignores the delay parameter returns a normal state event.
+    // The join that follows can publish membership with a short expiry.
+    if response["event_id"].as_str().is_some_and(|id| !id.is_empty()) {
+        return Err(DelayedLeaveError::Unsupported);
+    }
+    Err(DelayedLeaveError::Other("send_delayed_leave: no delay_id in response".into()))
 }
 
 /// PUT a delayed leave event (empty content) for this device.
@@ -385,12 +397,7 @@ async fn send_delayed_leave_event(
         .await
         .map_err(|e| DelayedLeaveError::Other(format!("send_delayed_leave JSON: {e}")))?;
 
-    json.get("delay_id")
-        .and_then(|d| d.as_str())
-        .map(|s| s.to_string())
-        .ok_or_else(|| {
-            DelayedLeaveError::Other("send_delayed_leave: no delay_id in response".into())
-        })
+    delayed_leave_id(&json)
 }
 
 /// Restart the delayed leave timer (heartbeat). Must be called every ~15s.
@@ -1034,6 +1041,7 @@ pub async fn voice_connect(
     input_device_id: Option<String>,
     output_device_id: Option<String>,
     replace_other_sessions: Option<bool>,
+    require_session_replacement: Option<bool>,
 ) -> Result<(), String> {
     log::debug!("voice_connect called for room {}", room_id);
     let state_arc: Arc<AppState> = (*state).clone();
@@ -1121,18 +1129,28 @@ pub async fn voice_connect(
                 return Err(error);
             }
         };
-    // Manual joins may replace other devices, but automatic reconnects must
-    // never take a newer session away from another device. Extras are optional.
-    if replace_other_sessions.unwrap_or(true) {
-        match tokio::time::timeout(
+    // A normal join can proceed without replacement. An explicit handoff needs
+    // the service to acknowledge replacement before we connect this device.
+    let handoff = require_session_replacement.unwrap_or(false);
+    if handoff || replace_other_sessions.unwrap_or(true) {
+        let replacement = tokio::time::timeout(
             Duration::from_secs(6),
             presence_session.run(
                 presence_session.voice_api.replace_own_sessions(&client, &jwt_service_url),
             ),
-        ).await {
-            Ok(Ok(())) => {}
-            Ok(Err(error)) => log::warn!("Optional voice session replacement: {error}"),
-            Err(_) => log::warn!("Optional voice session replacement timed out; continuing the call"),
+        ).await;
+        let error = match replacement {
+            Ok(Ok(false)) if handoff => Some("This voice service does not support moving the call".into()),
+            Ok(Ok(_)) => None,
+            Ok(Err(error)) => Some(error),
+            Err(_) => Some("The voice service timed out".into()),
+        };
+        if let Some(error) = error {
+            if handoff {
+                let _ = send_or_fallback_leave(&client, &http_client, &room_id, delay_id_opt.as_deref()).await;
+                return Err(format!("Could not confirm the move to this device. {error}"));
+            }
+            log::warn!("Optional voice session replacement: {error}");
         }
     }
     let identity = client.user_id().ok_or("No user ID")?.to_string();
@@ -1364,7 +1382,17 @@ pub async fn get_all_livekit_voice_snapshots(
 
 #[cfg(test)]
 mod voice_membership_cleanup_tests {
-    use super::own_device_membership;
+    use super::{body_indicates_msc4140_unsupported, delayed_leave_id, own_device_membership, DelayedLeaveError};
+
+    #[test]
+    fn ordinary_state_writes_allow_join_without_delayed_events() {
+        use serde_json::json;
+        assert_eq!(delayed_leave_id(&json!({"delay_id":"timer"})).unwrap(), "timer");
+        assert!(matches!(delayed_leave_id(&json!({"event_id":"$leave"})), Err(DelayedLeaveError::Unsupported)));
+        assert!(matches!(delayed_leave_id(&json!({})), Err(DelayedLeaveError::Other(_))));
+        assert!(body_indicates_msc4140_unsupported(r#"{"errcode":"M_UNRECOGNIZED"}"#));
+        assert!(!body_indicates_msc4140_unsupported(r#"{"errcode":"M_FORBIDDEN"}"#));
+    }
 
     #[test]
     fn a_replaced_device_can_only_clear_its_own_membership() {

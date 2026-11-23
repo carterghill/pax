@@ -1104,7 +1104,8 @@ export default function RoomSidebar({
       borderRight: `1px solid ${palette.border}`,
       display: "flex",
       flexDirection: "column",
-      height: "100vh",
+      height: "100%",
+      minHeight: 0,
     }}>
       <div
         style={{
@@ -1171,7 +1172,7 @@ export default function RoomSidebar({
           </button>
         ) : null}
       </div>
-      <div style={{ flex: 1, overflowY: "auto", padding: spacing.unit * 2 }}>
+      <div style={{ flex: 1, minHeight: 0, overflowY: "auto", padding: spacing.unit * 2 }}>
         <style>{`@keyframes spin { from { transform: rotate(0deg); } to { transform: rotate(360deg); } }`}</style>
         {discoverMode && (
           <div style={{ display: "flex", flexDirection: "column" }}>

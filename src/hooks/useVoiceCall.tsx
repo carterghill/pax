@@ -69,7 +69,7 @@ export interface ScreenShareWindowOption {
 export interface VoiceCallActions {
   connect: (
     roomId: string,
-    options?: { forceReconnect?: boolean; replaceOtherSessions?: boolean },
+    options?: { forceReconnect?: boolean; replaceOtherSessions?: boolean | "required" },
   ) => Promise<boolean>;
   disconnect: (expectedRoomId?: string) => Promise<void>;
   toggleMic: () => void;
@@ -167,7 +167,7 @@ export function useVoiceCall(isVoiceChannel: (roomId: string) => boolean) {
     return stopping;
   }, []);
 
-  const connectAttempt = useCallback(async (roomId: string, attempt: number, replaceOtherSessions: boolean) => {
+  const connectAttempt = useCallback(async (roomId: string, attempt: number, replacement: boolean | "required") => {
     if (pendingDisconnect.current) await pendingDisconnect.current;
     if (revision.current !== attempt) return false;
     const { inputDeviceId, outputDeviceId } = getStoredAudioDevicePreferences();
@@ -176,7 +176,11 @@ export function useVoiceCall(isVoiceChannel: (roomId: string) => boolean) {
     try {
       await requestMicrophonePermission();
       if (revision.current !== attempt) return false;
-      await invoke("voice_connect", { roomId, attemptId, inputDeviceId, outputDeviceId, replaceOtherSessions });
+      await invoke("voice_connect", {
+        roomId, attemptId, inputDeviceId, outputDeviceId,
+        replaceOtherSessions: replacement !== false,
+        requireSessionReplacement: replacement === "required",
+      });
       return revision.current === attempt && targetRoomIdRef.current === roomId;
     } catch (error) {
       if (revision.current === attempt) {
@@ -205,7 +209,7 @@ export function useVoiceCall(isVoiceChannel: (roomId: string) => boolean) {
     previousParticipants.current.clear();
     setState((prev) => ({
       ...prev, targetRoomId: roomId, connectedRoomId: null, isConnecting: true,
-      isReconnecting: wasInRoom || !!options?.forceReconnect, endedRoomId: null,
+      isReconnecting: options?.replaceOtherSessions !== "required" && (wasInRoom || !!options?.forceReconnect), endedRoomId: null,
       error: null, participants: [], screenSharingOwners: [], isLocalScreenSharing: false,
       disconnectingFromRoomId: null,
     }));

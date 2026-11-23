@@ -1,24 +1,58 @@
-import { PhoneOff, Loader2, Wifi, WifiOff, X } from "lucide-react";
+import { ArrowRightToLine, Laptop, PhoneIncoming, PhoneOff, Loader2, Wifi, WifiOff, X, type LucideIcon } from "lucide-react";
 import { useTheme } from "../theme/ThemeContext";
 
-export interface ActiveCallBarProps {
+export interface VoiceJoinButton {
+  label: "Join here instead" | "Join voice";
+  onClick: () => void;
+}
+
+export interface RemoteCallBarProps {
+  roomName: string;
+  status: "remote";
+  joinButton: VoiceJoinButton;
+}
+
+export type ActiveCallBarProps = RemoteCallBarProps | {
   roomName: string;
   status: "connecting" | "reconnecting" | "connected" | "disconnected" | "disconnecting";
   detail?: string;
   canReconnect: boolean;
   onReconnect: () => void;
+  onGoToRoom?: () => void;
   onDisconnect: () => void;
+};
+
+function CallBarIconButton({ label, icon: Icon, onClick, disabled }: {
+  label: string;
+  icon: LucideIcon;
+  onClick: () => void;
+  disabled?: boolean;
+}) {
+  const { palette, spacing } = useTheme();
+  return (
+    <button
+      type="button"
+      onClick={onClick}
+      disabled={disabled}
+      aria-label={label}
+      title={label}
+      style={{
+        display: "flex", alignItems: "center", justifyContent: "center",
+        width: 28, height: 28, padding: 0, flexShrink: 0, borderRadius: spacing.unit,
+        backgroundColor: "transparent", border: "none", cursor: "pointer", color: palette.textSecondary,
+      }}
+      onMouseEnter={(e) => { e.currentTarget.style.backgroundColor = palette.bgHover; }}
+      onMouseLeave={(e) => { e.currentTarget.style.backgroundColor = "transparent"; }}
+    >
+      <Icon size={18} aria-hidden="true" />
+    </button>
+  );
 }
 
-export default function ActiveCallBar({
-  roomName,
-  status,
-  detail,
-  canReconnect,
-  onReconnect,
-  onDisconnect,
-}: ActiveCallBarProps) {
+export default function ActiveCallBar(props: ActiveCallBarProps) {
   const { palette, spacing, typography } = useTheme();
+  const { roomName, status } = props;
+  const detail = status === "remote" ? undefined : props.detail;
 
   const labels = {
     connecting: "Connecting…",
@@ -26,10 +60,14 @@ export default function ActiveCallBar({
     connected: "Connected",
     disconnected: "Connection lost",
     disconnecting: "Disconnecting…",
+    remote: "On another device",
   };
   const statusColor = status === "connected" && !detail ? "#23a55a" : palette.textSecondary;
-  const isWaiting = status !== "connected" && status !== "disconnected";
+  const isWaiting = status === "connecting" || status === "reconnecting" || status === "disconnecting";
   const statusIconSize = typography.fontSizeSmall * 2 - 1;
+  const ActionIcon = status === "remote" ? PhoneIncoming : status === "disconnected" ? X : PhoneOff;
+  const actionLabel = status === "remote" ? props.joinButton.label
+    : status === "disconnected" ? "Dismiss voice session" : "Disconnect";
 
   return (
     <div
@@ -42,7 +80,7 @@ export default function ActiveCallBar({
       }}
     >
       <div style={{ flexShrink: 0, display: "flex", alignItems: "center", color: statusColor }}>
-        {isWaiting ? (
+        {status === "remote" ? <Laptop size={statusIconSize} /> : isWaiting ? (
           <Loader2
             size={statusIconSize}
             style={{ animation: "spin 1s linear infinite" }}
@@ -53,6 +91,7 @@ export default function ActiveCallBar({
       </div>
       <div style={{ flex: 1, minWidth: 0 }}>
         <div
+          title={roomName}
           style={{
             fontSize: typography.fontSizeSmall,
             fontWeight: typography.fontWeightMedium,
@@ -74,8 +113,8 @@ export default function ActiveCallBar({
         </div>
       </div>
 
-      {status === "disconnected" && canReconnect && (
-        <button type="button" onClick={onReconnect} style={{
+      {status === "disconnected" && props.canReconnect && (
+        <button type="button" onClick={props.onReconnect} style={{
           border: "none", borderRadius: spacing.unit, padding: spacing.unit,
           background: palette.bgHover, color: palette.textPrimary, cursor: "pointer", font: "inherit",
           fontSize: typography.fontSizeSmall, flexShrink: 0,
@@ -83,34 +122,15 @@ export default function ActiveCallBar({
           Reconnect
         </button>
       )}
-      <button
-        type="button"
-        onClick={onDisconnect}
+      {status === "connected" && props.onGoToRoom && (
+        <CallBarIconButton label="Go to room" icon={ArrowRightToLine} onClick={props.onGoToRoom} />
+      )}
+      <CallBarIconButton
+        label={actionLabel}
+        icon={ActionIcon}
+        onClick={status === "remote" ? props.joinButton.onClick : props.onDisconnect}
         disabled={status === "disconnecting"}
-        style={{
-          display: "flex",
-          alignItems: "center",
-          justifyContent: "center",
-          width: 28,
-          height: 28,
-          borderRadius: spacing.unit,
-          backgroundColor: "transparent",
-          border: "none",
-          cursor: "pointer",
-          flexShrink: 0,
-          color: palette.textSecondary,
-        }}
-        onMouseEnter={(e) => {
-          (e.currentTarget as HTMLButtonElement).style.backgroundColor = palette.bgHover;
-        }}
-        onMouseLeave={(e) => {
-          (e.currentTarget as HTMLButtonElement).style.backgroundColor = "transparent";
-        }}
-        aria-label={status === "disconnected" ? "Dismiss voice session" : "Disconnect"}
-        title={status === "disconnected" ? "Dismiss voice session" : "Disconnect"}
-      >
-        {status === "disconnected" ? <X size={18} /> : <PhoneOff size={18} />}
-      </button>
+      />
     </div>
   );
 }

@@ -16,6 +16,7 @@ import VolumeContextMenu from "./VolumeContextMenu";
 import VoiceAudioSettingsSection from "./VoiceAudioSettingsSection";
 import ScreenShareGrid from "./ScreenShareGrid";
 import VoiceLinkStatus from "./VoiceLinkStatus";
+import type { VoiceJoinButton } from "./ActiveCallBar";
 import type { VoiceParticipantState } from "../hooks/useVoiceParticipantStates";
 import type { DirectCallPeerConnection } from "../hooks/useDirectCall";
 import { useOverlayObstruction } from "../hooks/useOverlayObstruction";
@@ -27,6 +28,7 @@ interface VoiceCallPanelProps {
   voiceParticipants?: MatrixVoiceParticipant[];
   participantStates?: Record<string, VoiceParticipantState>;
   canReconnect?: boolean;
+  joinButton?: VoiceJoinButton;
   userId: string;
   directCall?: { peer: MatrixVoiceParticipant; peerDeviceId?: string; peerConnection: DirectCallPeerConnection };
 }
@@ -84,6 +86,7 @@ export function VoiceCallPanel({
   voiceParticipants = EMPTY_VOICE_PARTICIPANTS,
   participantStates = EMPTY_PARTICIPANT_STATES,
   canReconnect = false,
+  joinButton,
   userId,
   directCall,
 }: VoiceCallPanelProps) {
@@ -597,7 +600,7 @@ export function VoiceCallPanel({
         }}>
           <button
             type="button"
-            onClick={() => onConnect(roomId)}
+            onClick={joinButton?.onClick ?? (() => onConnect(roomId))}
             style={{
               padding: `${spacing.unit * 2}px ${spacing.unit * 5}px`,
               borderRadius: spacing.unit * 2,
@@ -609,7 +612,7 @@ export function VoiceCallPanel({
               color: "#fff",
             }}
           >
-            {canReconnect ? "Reconnect" : "Join voice"}
+            {joinButton?.label ?? (canReconnect ? "Reconnect" : "Join voice")}
           </button>
         </div>
       )}

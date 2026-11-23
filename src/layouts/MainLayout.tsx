@@ -1,5 +1,6 @@
 import SpaceSidebar from "../components/SpaceSidebar";
 import RoomSidebar from "../components/RoomSidebar";
+import type { RemoteCallBarProps } from "../components/ActiveCallBar";
 import DiscoverView from "../components/DiscoverView";
 import ChatView from "../layouts/ChatView";
 import VoiceRoomView, { VoiceCallPanel } from "../components/VoiceRoomView";
@@ -38,6 +39,7 @@ import { collectRoomIdsInSpaceTree } from "../utils/spaceModeration";
 import { setAppNotificationCount } from "../utils/appBadge";
 import { sortBySpaceChildOrder } from "../utils/spaceChildOrdering";
 import { useLivekitVoiceSnapshots } from "../hooks/useLivekitVoiceSnapshots";
+import { getRemoteVoiceCalls } from "../data/VoicePresenceStore";
 import { useMatrixUserProfile } from "../hooks/useMatrixUserProfile";
 import { useUserAvatar } from "../hooks/useUserAvatar";
 import { useResizeHandle } from "../hooks/useResizeHandle";
@@ -322,14 +324,12 @@ export default function MainLayout({
   const openJoinedRoom = useCallback((roomId: string) => {
     const room = getRoom(roomId, true);
     if (room?.membership !== "joined") return;
-    const parentSpaceId = activeRoomId === roomId
+    const parentSpaceId = activeRoomId === roomId || (activeSpaceId && room.parentSpaceIds.includes(activeSpaceId))
       ? activeSpaceId
       : room.parentSpaceIds.find((id) => joinedSpaceIdSet.has(id)) ?? null;
-    startTransition(() => {
-      setDiscoverOpen(false);
-      setActiveSpaceId(parentSpaceId);
-      setActiveRoomBySpace((previous) => ({ ...previous, [parentSpaceId ?? ""]: roomId }));
-    });
+    setDiscoverOpen(false);
+    setActiveSpaceId(parentSpaceId);
+    setActiveRoomBySpace((previous) => ({ ...previous, [parentSpaceId ?? ""]: roomId }));
     if (isMobile) setMobileNavDrawerOpen(false);
   }, [activeRoomId, activeSpaceId, getRoom, isMobile, joinedSpaceIdSet]);
 
@@ -762,7 +762,7 @@ export default function MainLayout({
     return out;
   }, [topLevelSpaces, roomsBySpace, getRoom, allParticipantsByRoom, voiceCall.connectedRoomId]);
 
-  const voicePresence = useLivekitVoiceSnapshots(voiceRoomIds, voiceCall.connectedRoomId);
+  const voicePresence = useLivekitVoiceSnapshots(voiceRoomIds, voiceCall.connectedRoomId, userId);
   const voiceParticipantStatesByRoom = useVoiceParticipantStates(
     voiceRoomIds, allParticipantsByRoom, voicePresence, voiceCall, userId,
     eligibleRecovery?.direct ? undefined : eligibleRecovery?.roomId,
@@ -774,6 +774,9 @@ export default function MainLayout({
   const connectedVoiceRoom = connectedVoiceRoomId && getRoom(connectedVoiceRoomId, true);
   const connectedChannelId = connectedVoiceRoom && connectedVoiceRoom.roomType === VOICE_ROOM_TYPE
     ? connectedVoiceRoom.id : null;
+  const remoteCalls = useMemo(() => getRemoteVoiceCalls(voicePresence), [voicePresence]);
+  const showRemoteCalls = !directCall && !eligibleRecovery?.direct && !connectedVoiceRoomId &&
+    !voiceCall.isConnecting && !voiceCall.isReconnecting && !voiceCall.disconnectingFromRoomId;
 
   useEffect(() => {
     if (!connectedChannelId) return;
@@ -811,10 +814,31 @@ export default function MainLayout({
     if (latestChannelJoin.current !== request) return false;
     return connectVoice(roomId, {
       ...options,
-      replaceOtherSessions: options?.replaceOtherSessions ?? (eligibleRecovery?.roomId === roomId ? false : undefined),
+      replaceOtherSessions: options?.replaceOtherSessions ?? false,
       forceReconnect: options?.forceReconnect ?? (eligibleRecovery?.roomId === roomId && connectedVoiceRoomId !== roomId),
     });
   }, [connectVoice, connectedVoiceRoomId, directCall?.roomId, disconnectVoice, eligibleRecovery?.roomId, endDirectCall, forgetVoice, targetVoiceRoomId]);
+
+  function remoteCallBarFor(room: Room | null): RemoteCallBarProps | undefined {
+    if (!showRemoteCalls || room?.roomType !== VOICE_ROOM_TYPE || room.membership !== "joined" ||
+      room.upgradePending || room.replacementRoomId) return;
+    const mode = remoteCalls.get(room.id);
+    if (!mode) return;
+    return {
+      roomName: room.name,
+      status: "remote",
+      joinButton: {
+        label: mode === "handoff" ? "Join here instead" : "Join voice",
+        onClick: () => {
+          openJoinedRoom(room.id);
+          void connectVoiceCall(room.id, { replaceOtherSessions: mode === "handoff" ? "required" : false });
+        },
+      },
+    };
+  }
+  const activeRoomRemoteCall = remoteCallBarFor(activeRoom);
+  const remoteCallBar = activeRoomRemoteCall ?? Array.from(remoteCalls.keys(), (id) =>
+    remoteCallBarFor(getRoom(id, true))).find((bar) => bar !== undefined);
 
   const reconnectVoiceCall = useCallback(() => {
     if (directCall?.roomId === activeVoiceRoomId || eligibleRecovery?.direct) {
@@ -864,8 +888,9 @@ export default function MainLayout({
 
     const room = getRoom(roomId);
     if (room && room.roomType === VOICE_ROOM_TYPE && room.membership === "joined" && connectedVoiceRoomId !== roomId) {
-      // Join voice room on click (only if not already connected to this room)
-      connectVoiceCall(roomId);
+      // Open the lobby for a transferable call so only "Join here instead"
+      // disconnects another device. All other channels keep one-click joining.
+      if (!showRemoteCalls || remoteCalls.get(roomId) !== "handoff") void connectVoiceCall(roomId);
     }
   }, [
     isMobile,
@@ -875,6 +900,8 @@ export default function MainLayout({
     getRoom,
     connectedVoiceRoomId,
     connectVoiceCall,
+    showRemoteCalls,
+    remoteCalls,
   ]);
 
   const handleStartDirectMessage = useCallback(
@@ -1356,7 +1383,7 @@ export default function MainLayout({
         userAvatarUrl={userAvatarUrl}
         voiceParticipants={voiceParticipants}
         connectedVoiceRoomId={voiceCall.connectedRoomId}
-        callBar={activeVoiceRoomId || voiceCall.disconnectingFromRoomId ? {
+        callBar={remoteCallBar ?? (activeVoiceRoomId || voiceCall.disconnectingFromRoomId ? {
           roomName: directCall?.roomId === activeVoiceRoomId && directCallName
             ? directCallName
             : getRoom(activeVoiceRoomId ?? voiceCall.disconnectingFromRoomId!, true)?.name ?? "Voice Call",
@@ -1368,8 +1395,9 @@ export default function MainLayout({
             : directCallPeerConnection === "interrupted" ? `${directCallName}’s connection was interrupted` : undefined,
           canReconnect: (!!directCall?.established && directCall.transport !== "matrix") || !!targetVoiceRoomId || (!!eligibleRecovery && !eligibleRecovery.direct),
           onReconnect: reconnectVoiceCall,
+          onGoToRoom: activeVoiceRoomId ? () => openJoinedRoom(activeVoiceRoomId) : undefined,
           onDisconnect: disconnectVoiceCall,
-        } : undefined}
+        } : undefined)}
         screenSharingOwners={voiceCall.screenSharingOwners}
         voiceParticipantStatesByRoom={voiceParticipantStatesByRoom}
         onSetParticipantVolume={voiceCall.setParticipantVolume}
@@ -1468,7 +1496,7 @@ export default function MainLayout({
               style={{
                 display: "flex",
                 flexDirection: "row",
-                height: "100%",
+                flex: 1,
                 width: "100%",
                 minHeight: 0,
                 overflow: "hidden",
@@ -1533,6 +1561,7 @@ export default function MainLayout({
                 voiceParticipants={voiceParticipants[activeRoom.id] ?? []}
                 participantStates={voiceParticipantStatesByRoom[activeRoom.id]}
                 canReconnect={eligibleRecovery?.roomId === activeRoom.id || targetVoiceRoomId === activeRoom.id}
+                joinButton={activeRoomRemoteCall?.joinButton}
                 userId={userId}
               />
             ) : activeRoom ? (
