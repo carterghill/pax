@@ -11,7 +11,7 @@ pub(crate) use vault::initialize_android;
 
 use std::{
     fs::{self, File},
-    io::ErrorKind,
+    io::{self, ErrorKind},
     path::{Component, Path, PathBuf},
 };
 
@@ -126,7 +126,11 @@ async fn open_crypto_with(
     if !protected_exists {
         let staging = root.join(STAGING);
         if present(&staging, true)? {
-            fs::remove_dir_all(&staging).map_err(store_error)?;
+            retry_store_file_operation(|| fs::remove_dir_all(&staging))
+                .await
+                .map_err(|error| {
+                    format!("Could not clear an unfinished Matrix store migration: {error}")
+                })?;
         }
         if legacy_exists {
             log::info!("Migrating the local Matrix crypto store");
@@ -157,7 +161,9 @@ async fn open_crypto_with(
                 .await
                 .map_err(store_error)?,
         );
-        fs::rename(&staging, &protected).map_err(store_error)?;
+        retry_store_file_operation(|| fs::rename(&staging, &protected))
+            .await
+            .map_err(|error| format!("Could not publish the encrypted Matrix store: {error}"))?;
         sync_directory(root)?;
         return open_protected(root, &protected, &key, legacy_exists).await;
     }
@@ -193,7 +199,7 @@ async fn open_protected(
             "matrix-sdk-crypto.sqlite3-journal",
             DATABASE,
         ] {
-            match fs::remove_file(root.join(file)) {
+            match retry_store_file_operation(|| fs::remove_file(root.join(file))).await {
                 Ok(()) => {}
                 Err(error) if error.kind() == ErrorKind::NotFound => {}
                 Err(error) => {
@@ -206,6 +212,30 @@ async fn open_protected(
         sync_directory(root)?;
     }
     Ok(store)
+}
+
+async fn retry_store_file_operation<T>(
+    mut operation: impl FnMut() -> io::Result<T>,
+) -> io::Result<T> {
+    use tokio::time::{sleep, Duration, Instant};
+
+    // The SDK's connection pool closes SQLite handles on background threads
+    // after the store is dropped. Windows cannot rename or remove their files
+    // until those handles close. Keep the migration lock while waiting, and
+    // bound retries so a persistent permissions problem still reaches the user.
+    let deadline = Instant::now() + Duration::from_secs(5);
+    loop {
+        match operation() {
+            Err(error)
+                if cfg!(windows)
+                    && matches!(error.raw_os_error(), Some(5 | 32 | 33))
+                    && Instant::now() < deadline =>
+            {
+                sleep(Duration::from_millis(25)).await;
+            }
+            result => return result,
+        }
+    }
 }
 
 fn sync_directory(directory: &Path) -> Result<(), String> {

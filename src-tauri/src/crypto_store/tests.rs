@@ -180,3 +180,75 @@ async fn conversion_on_a_fresh_install_creates_an_encrypted_store() {
     assert!(!root.join(DATABASE).exists());
     assert!(root.join(PROTECTED).join(DATABASE).exists());
 }
+
+#[cfg(windows)]
+#[tokio::test]
+async fn publishing_waits_for_windows_to_release_sqlite_files() {
+    use std::os::windows::fs::OpenOptionsExt;
+
+    let dir = directory();
+    let staging = dir.0.join(STAGING);
+    let protected = dir.0.join(PROTECTED);
+    fs::create_dir(&staging).unwrap();
+    fs::write(staging.join(DATABASE), b"encrypted store").unwrap();
+    let handle = File::options()
+        .read(true)
+        .share_mode(0)
+        .open(staging.join(DATABASE))
+        .unwrap();
+    // Reproduce Windows refusing publication while a SQLite file is open.
+    assert_eq!(
+        fs::rename(&staging, &protected).unwrap_err().kind(),
+        ErrorKind::PermissionDenied
+    );
+    let release = tokio::spawn(async move {
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+        drop(handle);
+    });
+
+    retry_store_file_operation(|| fs::rename(&staging, &protected))
+        .await
+        .unwrap();
+    release.await.unwrap();
+    assert!(!staging.exists());
+    assert_eq!(
+        fs::read(protected.join(DATABASE)).unwrap(),
+        b"encrypted store"
+    );
+}
+
+#[cfg(windows)]
+#[tokio::test]
+async fn migration_retries_cleanup_of_locked_staging_files() {
+    use std::os::windows::fs::OpenOptionsExt;
+
+    let dir = directory();
+    let root = dir.0.join("new-session");
+    let staging = root.join(STAGING);
+    fs::create_dir_all(&staging).unwrap();
+    fs::write(staging.join(DATABASE), b"unfinished migration").unwrap();
+    let handle = File::options()
+        .read(true)
+        .share_mode(0)
+        .open(staging.join(DATABASE))
+        .unwrap();
+    let release = tokio::spawn(async move {
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+        drop(handle);
+    });
+
+    drop(
+        open_crypto_with(&dir.0, &root, OpenMode::Migrate, key)
+            .await
+            .unwrap(),
+    );
+    release.await.unwrap();
+    assert!(!staging.exists());
+    assert!(!root.join(DATABASE).exists());
+    assert!(root.join(PROTECTED).join(DATABASE).exists());
+    drop(
+        open_crypto_with(&dir.0, &root, OpenMode::Existing, key)
+            .await
+            .unwrap(),
+    );
+}
