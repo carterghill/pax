@@ -8,9 +8,12 @@ use matrix_sdk::{
     deserialized_responses::TimelineEvent,
     ruma::{
         api::client::voip::get_turn_server_info,
-        events::{room::join_rules::JoinRule, AnySyncTimelineEvent},
+        events::{
+            room::{join_rules::JoinRule, member::MembershipState},
+            AnySyncTimelineEvent,
+        },
         serde::Raw,
-        RoomId, UserId,
+        OwnedUserId, RoomId, UserId,
     },
     sync::SyncResponse,
     Client, Room, RoomMemberships, RoomState,
@@ -50,6 +53,7 @@ const VOIP_EVENTS: &[&str] = &[
 pub(crate) struct MatrixVoip {
     media: Mutex<Option<PeerMedia>>,
     inbox: Mutex<VecDeque<Signal>>,
+    participants: Mutex<VecDeque<(String, OwnedUserId)>>,
     livekit_peers: Mutex<HashSet<(String, String)>>,
 }
 
@@ -57,7 +61,19 @@ impl MatrixVoip {
     pub async fn reset(&self) {
         self.media.lock().await.take();
         self.inbox.lock().await.clear();
+        self.participants.lock().await.clear();
         self.livekit_peers.lock().await.clear();
+    }
+
+    async fn remember_participant(&self, id: &str, peer: &UserId) {
+        let mut calls = self.participants.lock().await;
+        if calls.iter().any(|(known, _)| known == id) {
+            return;
+        }
+        if calls.len() >= MAX_SIGNALS {
+            calls.pop_front();
+        }
+        calls.push_back((id.to_owned(), peer.to_owned()));
     }
 
     pub async fn remember_livekit_peer(&self, room_id: &RoomId, peer: &UserId) {
@@ -249,11 +265,48 @@ pub(super) async fn call_peer(room: &Room) -> Option<matrix_sdk::ruma::OwnedUser
         .map(|member| member.user_id().to_owned())
 }
 
-fn can_ring(room: &Room, signal: &Signal) -> bool {
-    !matches!(room.join_rule(), Some(JoinRule::Public))
-        && signal.content["invitee"]
-            .as_str()
-            .is_none_or(|id| id == room.own_user_id().as_str())
+pub(super) fn callable_room(room: &Room) -> bool {
+    room.state() == RoomState::Joined && !room.is_space() && !room.is_tombstoned()
+}
+
+async fn joined_peer(room: &Room, peer: &UserId) -> bool {
+    if !callable_room(room) || room.own_user_id() == peer {
+        return false;
+    }
+    let member = match room.get_member_no_sync(peer).await {
+        Ok(Some(member)) => Some(member),
+        Ok(None) => room.get_member(peer).await.ok().flatten(),
+        Err(_) => None,
+    };
+    member.is_some_and(|member| *member.membership() == MembershipState::Join)
+}
+
+async fn invite_peer(room: &Room, signal: &Signal) -> Option<OwnedUserId> {
+    if signal.kind != "m.call.invite" {
+        return None;
+    }
+    let sender = UserId::parse(&signal.sender).ok()?;
+    let peer = match signal.content.get("invitee") {
+        Some(target) => {
+            let target = UserId::parse(target.as_str()?).ok()?;
+            if !signal.from_peer {
+                target
+            } else if target == room.own_user_id() {
+                sender
+            } else {
+                return None;
+            }
+        }
+        None if !matches!(room.join_rule(), Some(JoinRule::Public)) => {
+            if signal.from_peer {
+                sender
+            } else {
+                call_peer(room).await?
+            }
+        }
+        None => return None,
+    };
+    joined_peer(room, &peer).await.then_some(peer)
 }
 
 fn settles_invite(invite: &Signal, response: &Signal) -> bool {
@@ -289,7 +342,19 @@ pub(crate) async fn call_push_event(
     let Some(signal) = Signal::parse(event, room) else {
         return Some(ignored);
     };
-    let Some(peer) = call_peer(room).await else {
+    let mut peer = None;
+    for invite in std::iter::once(signal.clone()).chain(
+        before
+            .iter()
+            .chain(after)
+            .filter_map(|e| Signal::parse(e, room)),
+    ) {
+        if invite.notification_id == signal.notification_id && invite.kind == "m.call.invite" {
+            peer = invite_peer(room, &invite).await;
+            break;
+        }
+    }
+    let Some(peer) = peer else {
         return Some(ignored);
     };
     if room.client().is_user_ignored(&peer).await {
@@ -299,7 +364,7 @@ pub(crate) async fn call_push_event(
         return Some(ignored);
     }
     let mut kind = "ignore";
-    if signal.kind == "m.call.invite" && signal.from_peer && can_ring(room, &signal) {
+    if signal.kind == "m.call.invite" && signal.from_peer {
         let settled = before
             .iter()
             .chain(after)
@@ -342,14 +407,14 @@ pub(crate) async fn decline_pushed_call(room: &Room, call_id: &str, ring_event_i
         return false;
     };
     let Some(invite) = Signal::parse(&event, room) else {
-        return false;
+        return super::group_calls::decline_pushed_ring(room, &event, call_id).await;
     };
-    let Some(peer) = call_peer(room).await else {
+    let Some(peer) = invite_peer(room, &invite).await else {
         return false;
     };
     if invite.kind != "m.call.invite"
         || invite.sender != peer.as_str()
-        || !can_ring(room, &invite)
+        || !invite.from_peer
         || invite.notification_id != call_id
         || invite.expires_at <= now_ms()
     {
@@ -399,13 +464,47 @@ pub(super) async fn receive_signals(
         if signals.is_empty() {
             continue;
         }
-        let Some(peer) = call_peer(&room).await else {
-            continue;
-        };
-        if state.ignored_users.users(client).await.contains(&peer) {
+        if !callable_room(&room) {
             continue;
         }
+        let ignored = state.ignored_users.users(client).await;
+        let mut other_members_calls = Vec::new();
         for (index, signal) in signals.iter().enumerate() {
+            let peer = if signal.kind == "m.call.invite" {
+                if signal.from_peer
+                    && signal.content["invitee"]
+                        .as_str()
+                        .is_some_and(|id| id != room.own_user_id().as_str())
+                {
+                    other_members_calls.push(signal.notification_id.clone());
+                    continue;
+                }
+                let Some(peer) = invite_peer(&room, signal).await else {
+                    continue;
+                };
+                if signal.expires_at > now {
+                    state
+                        .matrix_voip
+                        .remember_participant(&signal.notification_id, &peer)
+                        .await;
+                }
+                Some(peer)
+            } else {
+                state
+                    .matrix_voip
+                    .participants
+                    .lock()
+                    .await
+                    .iter()
+                    .find(|(id, _)| id == &signal.notification_id)
+                    .map(|(_, peer)| peer.clone())
+            };
+            let Some(peer) = peer else {
+                continue;
+            };
+            if ignored.contains(&peer) {
+                continue;
+            }
             if signal.from_peer && signal.sender != peer.as_str() {
                 continue;
             }
@@ -442,7 +541,6 @@ pub(super) async fn receive_signals(
             }
             if signal.kind == "m.call.invite"
                 && (!signal.from_peer
-                    || !can_ring(&room, signal)
                     || signals[index + 1..]
                         .iter()
                         .any(|response| settles_invite(signal, response)))
@@ -453,6 +551,13 @@ pub(super) async fn receive_signals(
                 log::info!("Matrix call received {}", signal.kind);
             }
             incoming.push(signal.clone());
+        }
+        if !other_members_calls.is_empty() {
+            // The homeserver's default call push rule can count even a ring addressed to somebody else.
+            state
+                .unread_projection
+                .acknowledge_calls(&room, &other_members_calls)
+                .await;
         }
     }
     if incoming.is_empty() {
@@ -481,13 +586,21 @@ async fn close_if_participant_left(
         return;
     };
     let id = media.id.clone();
+    let peer = media.peer.clone();
     drop(current);
     if !response.rooms.left.contains_key(&room_id) {
         if !response.rooms.joined.contains_key(&room_id) {
             return;
         }
         if let Some(room) = client.get_room(&room_id) {
-            if call_peer(&room).await.is_some() {
+            if callable_room(&room)
+                && room
+                    .get_member_no_sync(&peer)
+                    .await
+                    .ok()
+                    .flatten()
+                    .is_some_and(|m| *m.membership() == MembershipState::Join)
+            {
                 return;
             }
         }
@@ -528,12 +641,20 @@ pub(crate) async fn prefer_livekit_call(
         .livekit_peers
         .lock()
         .await
-        .contains(&(room_id.clone(), peer_user_id))
+        .contains(&(room_id.clone(), peer_user_id.clone()))
     {
         return Ok(false);
     }
     let client = super::get_client(&state).await?;
     let room = super::resolve_room(&client, &room_id)?;
+    if super::direct_calls::direct_call_peer(&room)
+        .await
+        .as_deref()
+        .map(UserId::as_str)
+        != Some(peer_user_id.as_str())
+    {
+        return Ok(false);
+    }
     Ok(tokio::time::timeout(
         Duration::from_secs(4),
         super::voice_matrix::probe_livekit_call(&room, &state.http_client),
@@ -548,6 +669,7 @@ pub(crate) async fn send_matrix_voip_signal(
     app: AppHandle,
     room_id: String,
     call_id: String,
+    peer_user_id: OwnedUserId,
     version: u8,
     kind: String,
     mut content: Value,
@@ -568,10 +690,14 @@ pub(crate) async fn send_matrix_voip_signal(
         super::unread::acknowledge_calls(&state, &app, &room, &[id]).await;
     }
     if kind == "m.call.invite" {
-        let peer = call_peer(&room)
-            .await
-            .ok_or("Both participants must join before calling.")?;
-        data.insert("invitee".into(), json!(peer));
+        if !joined_peer(&room, &peer_user_id).await {
+            return Err("The person you’re calling must be a joined member of this room.".into());
+        }
+        state
+            .matrix_voip
+            .remember_participant(&notification_id(&room_id, &call_id), &peer_user_id)
+            .await;
+        data.insert("invitee".into(), json!(peer_user_id));
     }
     if matches!(kind.as_str(), "m.call.invite" | "m.call.answer") {
         data.insert(LIVEKIT_SUPPORT.into(), json!(true));
@@ -616,11 +742,12 @@ pub(crate) async fn open_matrix_voip_media(
     app: AppHandle,
     room_id: String,
     call_id: String,
+    peer_user_id: OwnedUserId,
     offer: Option<Description>,
 ) -> Result<Description, String> {
     let client = super::get_client(&state).await?;
     let room = super::resolve_room(&client, &room_id)?;
-    if call_peer(&room).await.is_none() {
+    if !joined_peer(&room, &peer_user_id).await {
         return Err("Both participants must join before calling.".into());
     }
     let mut current = state.matrix_voip.media.lock().await;
@@ -654,7 +781,7 @@ pub(crate) async fn open_matrix_voip_media(
             vec![]
         }
     };
-    let media = PeerMedia::open(&app, call_id, room_id, ice_servers)?;
+    let media = PeerMedia::open(&app, call_id, room_id, peer_user_id, ice_servers)?;
     let local = media.setup(offer).await?;
     *current = Some(media);
     Ok(local)
@@ -722,8 +849,89 @@ pub(crate) async fn close_matrix_voip_media(
 }
 
 #[cfg(test)]
-mod tests {
+pub(super) mod tests {
     use super::*;
+
+    pub(crate) async fn shared_room() -> (
+        super::super::pax_auth::tests::TestDir,
+        super::super::pax_auth::tests::Server,
+        Room,
+    ) {
+        use crate::commands::{
+            auth::SavedSession,
+            pax_auth::tests::{client, Server, TestDir, USER},
+            room_listing::tests::joined_room,
+        };
+        let bob = "@bob:example.org";
+        let id = "!shared:example.org";
+        let mut joined = joined_room(&[
+            (USER, "Alice"),
+            (bob, "Bob"),
+            ("@carol:example.org", "Carol"),
+        ]);
+        let membership = json!({
+            "type":"org.matrix.msc3401.call.member", "state_key":format!("_{bob}_PHONE_m.call"), "sender":bob,
+            "event_id":"$rtc", "origin_server_ts":now_ms(), "content":{"application":"m.call", "call_id":"",
+                "device_id":"PHONE","expires":60000,"scope":"m.room"}
+        });
+        joined["state"]["events"]
+            .as_array_mut()
+            .unwrap()
+            .push(membership);
+        let server = Server::start().await;
+        server.state.lock().unwrap().route_overrides.insert(
+            ("GET".into(), "/_matrix/client/v3/sync".into()),
+            (200, json!({"next_batch":"s1","rooms":{"join":{id:joined}}})),
+        );
+        let dir = TestDir::new();
+        let client = client(
+            &server.home,
+            &dir.0.join("store"),
+            SavedSession {
+                user_id: USER.into(),
+                device_id: "TEST".into(),
+                access_token: "token".into(),
+                refresh_token: None,
+            },
+        )
+        .await;
+        let room = client.get_room(&RoomId::parse(id).unwrap()).unwrap();
+        (dir, server, room)
+    }
+
+    #[tokio::test]
+    async fn member_call_routes_only_between_the_two_named_room_members() {
+        use crate::commands::pax_auth::tests::USER;
+        let (_dir, _server, room) = shared_room().await;
+        let bob = "@bob:example.org";
+        let carol = "@carol:example.org";
+        let invite = |sender, target| {
+            let raw = Raw::from_json_string(json!({
+                "type":"m.call.invite", "event_id":"$ring", "sender":sender, "origin_server_ts":now_ms(),
+                "content":{"call_id":"private", "invitee":target, "party_id":"phone","version":"1","lifetime":30000}
+            }).to_string()).unwrap();
+            Signal::parse_raw(&raw, &room, false).unwrap()
+        };
+        assert_eq!(
+            invite_peer(&room, &invite(bob, USER))
+                .await
+                .unwrap()
+                .as_str(),
+            bob
+        );
+        assert_eq!(
+            invite_peer(&room, &invite(USER, carol))
+                .await
+                .unwrap()
+                .as_str(),
+            carol
+        );
+        assert!(invite_peer(&room, &invite(bob, carol)).await.is_none());
+        assert!(invite_peer(&room, &invite(USER, USER)).await.is_none());
+        assert!(super::super::direct_calls::direct_call_peer(&room)
+            .await
+            .is_none());
+    }
 
     #[test]
     fn a_decline_acknowledges_the_call_only_for_the_user_who_declined() {

@@ -356,7 +356,7 @@ pub async fn current_homeserver(state: State<'_, Arc<AppState>>) -> Result<Strin
 }
 
 #[cfg(test)]
-mod tests {
+pub(super) mod tests {
     use super::*;
     use crate::commands::{
         auth::SavedSession,
@@ -365,7 +365,7 @@ mod tests {
     use matrix_sdk::ruma::RoomId;
     use serde_json::{json, Value};
 
-    fn joined_room(members: &[(&str, &str)]) -> Value {
+    pub(crate) fn joined_room(members: &[(&str, &str)]) -> Value {
         let mut state = vec![json!({
             "type": "m.room.create", "sender": USER, "state_key": "",
             "event_id": "$create", "origin_server_ts": 1,

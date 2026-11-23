@@ -1,6 +1,6 @@
 import { useEffect, useLayoutEffect, useRef, useState } from "react";
 import { createPortal } from "react-dom";
-import { Ban, Copy, MessageSquare, User, UserMinus, VolumeX } from "lucide-react";
+import { Ban, Copy, MessageSquare, Phone, User, UserMinus, VolumeX } from "lucide-react";
 import { useTheme } from "../theme/ThemeContext";
 import { useOverlayObstruction } from "../hooks/useOverlayObstruction";
 import { useIgnoredUsers } from "../context/IgnoredUsersContext";
@@ -14,6 +14,7 @@ interface MemberContextMenuProps {
   onClose: () => void;
   onProfile: () => void;
   onSendMessage?: () => void;
+  onCall?: () => void;
   /** When set, show kick/ban once loaded (omit while fetching). */
   moderation?: { canKick: boolean; canBan: boolean };
   onKick?: () => void;
@@ -29,6 +30,7 @@ export default function MemberContextMenu({
   onClose,
   onProfile,
   onSendMessage,
+  onCall,
   moderation,
   onKick,
   onBan,
@@ -80,7 +82,7 @@ export default function MemberContextMenu({
     const { width, height } = el.getBoundingClientRect();
     el.style.left = `${Math.max(8, Math.min(x, window.innerWidth - width - 8))}px`;
     el.style.top = `${Math.max(8, Math.min(y, window.innerHeight - height - 8))}px`;
-  }, [x, y, error, moderation, isIgnored]);
+  }, [x, y, error, moderation, isIgnored, onCall]);
 
   return createPortal(
     <div
@@ -151,10 +153,14 @@ export default function MemberContextMenu({
         Profile
       </button>
 
-      {onSendMessage && (
+      {[
+        { label: "Send message", Icon: MessageSquare, action: onSendMessage },
+        { label: "Call", Icon: Phone, action: isIgnored ? undefined : onCall },
+      ].map(({ label, Icon, action }) => action && (
         <button
+          key={label}
           type="button"
-          onClick={() => onSendMessage()}
+          onClick={action}
           style={{
             display: "flex",
             alignItems: "center",
@@ -176,10 +182,10 @@ export default function MemberContextMenu({
             (e.currentTarget as HTMLButtonElement).style.backgroundColor = "transparent";
           }}
         >
-          <MessageSquare size={14} color={palette.textSecondary} />
-          Send message
+          <Icon size={14} color={palette.textSecondary} />
+          {label}
         </button>
-      )}
+      ))}
 
       {userId !== currentUserId && (
         <>

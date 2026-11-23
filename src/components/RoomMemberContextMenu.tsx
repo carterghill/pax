@@ -1,6 +1,7 @@
 import { useEffect, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import type { MemberModerationPermissions } from "../types/matrix";
+import { useRoomMembers } from "../hooks/useRoomMembers";
 import MemberContextMenu from "./MemberContextMenu";
 import ModerationScopeDialog from "./ModerationScopeDialog";
 
@@ -13,6 +14,7 @@ export interface MemberMenuTarget {
 
 interface RoomMemberContextMenuProps {
   target: MemberMenuTarget | null;
+  onCallMember?: (userId: string) => void;
   roomId: string;
   roomName: string;
   currentUserId: string;
@@ -33,6 +35,7 @@ export default function RoomMemberContextMenu({
   onClose,
   onOpenProfile,
   onStartDirectMessage,
+  onCallMember,
 }: RoomMemberContextMenuProps) {
   const [allowed, setAllowed] = useState<{
     target: MemberMenuTarget;
@@ -43,6 +46,7 @@ export default function RoomMemberContextMenu({
     target: MemberMenuTarget;
   } | null>(null);
   const [moderationBusy, setModerationBusy] = useState(false);
+  const { members } = useRoomMembers(target && onCallMember ? roomId : "");
   const isSelf = target?.userId === currentUserId;
 
   useEffect(() => {
@@ -100,6 +104,10 @@ export default function RoomMemberContextMenu({
             onClose();
             onStartDirectMessage(target.userId, target.displayName);
           }}
+          onCall={!isSelf && onCallMember && members.some(member => member.userId === target.userId) ? () => {
+            onClose();
+            onCallMember(target.userId);
+          } : undefined}
           moderation={allowed?.target === target ? allowed.permissions : undefined}
           onKick={() => chooseModeration("kick")}
           onBan={() => chooseModeration("ban")}

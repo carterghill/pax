@@ -517,10 +517,10 @@ async fn matrix_voice_put_call_member(
     room_id: &str,
     livekit_service_url: &str,
     expires_ms: u64,
-) -> Result<(), String> {
+) -> Result<matrix_sdk::ruma::OwnedEventId, String> {
     let room_id_parsed =
         matrix_sdk::ruma::RoomId::parse(room_id).map_err(|e| format!("Invalid room ID: {e}"))?;
-    client
+    let room = client
         .get_room(&room_id_parsed)
         .filter(|room| room.state() == RoomState::Joined && !room.is_tombstoned())
         .ok_or("You no longer have access to this voice call")?;
@@ -547,7 +547,7 @@ async fn matrix_voice_put_call_member(
             "focus_selection": "oldest_membership",
             "type": "livekit"
         },
-        "m.call.intent": "video",
+        "m.call.intent": if room.room_type().is_some_and(|kind| kind.as_str() == voice_presence::VOICE_ROOM_TYPE) { "video" } else { "audio" },
         "scope": "m.room"
     });
 
@@ -575,7 +575,13 @@ async fn matrix_voice_put_call_member(
         return Err(format!("Failed to send state event ({}): {}", status, body));
     }
 
-    Ok(())
+    #[derive(serde::Deserialize)]
+    struct Published {
+        event_id: matrix_sdk::ruma::OwnedEventId,
+    }
+    resp.json::<Published>().await
+        .map(|event| event.event_id)
+        .map_err(|e| e.to_string())
 }
 
 /// Discover JWT service URL, validate via `/sfu/get`, then PUT `m.call.member` with the working URL.
@@ -585,7 +591,7 @@ async fn matrix_voice_join(
     http: &reqwest::Client,
     room_id: &str,
     expires_ms: u64,
-) -> Result<(VoiceJoinResult, String), String> {
+) -> Result<(VoiceJoinResult, String, matrix_sdk::ruma::OwnedEventId), String> {
     let room_id_parsed =
         matrix_sdk::ruma::RoomId::parse(room_id).map_err(|e| format!("Invalid room ID: {e}"))?;
     let room = client.get_room(&room_id_parsed).ok_or("Room not found")?;
@@ -639,9 +645,9 @@ async fn matrix_voice_join(
 
     let join = join?;
     let service_url = discovered.url;
-    matrix_voice_put_call_member(client, http, room_id, &service_url, expires_ms).await?;
+    let membership = matrix_voice_put_call_member(client, http, room_id, &service_url, expires_ms).await?;
 
-    Ok((join, service_url))
+    Ok((join, service_url, membership))
 }
 
 /// Send a single leave (empty content) for one (event_type, state_key) in a room.
@@ -866,7 +872,7 @@ fn start_heartbeat_loop(
                         )
                         .await
                         {
-                            Ok(()) => {
+                            Ok(_) => {
                                 log::info!("m.call.member refreshed successfully");
                                 last_membership_refresh = tokio::time::Instant::now();
                                 membership_missing_since = None;
@@ -1042,7 +1048,7 @@ pub async fn voice_connect(
     output_device_id: Option<String>,
     replace_other_sessions: Option<bool>,
     require_session_replacement: Option<bool>,
-) -> Result<(), String> {
+) -> Result<matrix_sdk::ruma::OwnedEventId, String> {
     log::debug!("voice_connect called for room {}", room_id);
     let state_arc: Arc<AppState> = (*state).clone();
     let presence_session = state_arc.voice_presence.session();
@@ -1115,7 +1121,7 @@ pub async fn voice_connect(
     } else {
         FALLBACK_MEMBERSHIP_EXPIRES_MS
     };
-    let (result, jwt_service_url) =
+    let (result, jwt_service_url, membership) =
         match matrix_voice_join(&client, &http_client, &room_id, expires_ms).await {
             Ok(result) => result,
             Err(error) => {
@@ -1209,7 +1215,7 @@ pub async fn voice_connect(
         );
     }
 
-    Ok(())
+    Ok(membership)
 }
 
 #[tauri::command]

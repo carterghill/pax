@@ -65,13 +65,13 @@ interface Session {
 function signal(session: Session, kind: SignalKind, content: object = {}) {
   return invoke<void>("send_matrix_voip_signal", {
     roomId: session.call.roomId, callId: session.wireId, version: session.version,
-    kind, content,
+    kind, content, peerUserId: session.call.peerUserId,
   });
 }
 
 function openMedia(session: Session) {
   return invoke<Description>("open_matrix_voip_media", {
-    roomId: session.call.roomId, callId: session.call.callId, offer: session.offer,
+    roomId: session.call.roomId, callId: session.call.callId, peerUserId: session.call.peerUserId, offer: session.offer,
   });
 }
 
@@ -257,7 +257,7 @@ export function useMatrixVoip(
       const preparing = current.current?.transport === "selecting"
         && current.current.roomId === event.roomId && current.current.peerUserId === event.sender;
       const crossed = session?.call.phase === "dialing" && session.call.roomId === event.roomId
-        && (!session.publication || session.wireId > content.call_id);
+        && session.call.peerUserId === event.sender && (!session.publication || session.wireId > content.call_id);
       if (current.current && !crossed && !preparing) return;
       if (crossed) await finish(true);
       else if (stopping.current) return;

@@ -58,6 +58,7 @@ interface ChatViewProps {
   onUserMenuWidthChange: (width: number) => void;
   onStartDirectMessage: (peerUserId: string, displayNameHint: string) => void;
   onStartCall?: () => void;
+  onCallMember?: (userId: string) => void;
   callUnavailable?: string;
   callContent?: ReactNode;
   /** Opened from a system notification: scroll this timeline event after the room is active. */
@@ -175,6 +176,7 @@ export default function ChatView({
   onUserMenuWidthChange,
   onStartDirectMessage,
   onStartCall,
+  onCallMember,
   callUnavailable,
   callContent,
   notificationJump = null,
@@ -756,6 +758,7 @@ export default function ChatView({
               onSelectEventId={handleSelectPinnedMessage}
             />
             <RoomDownloadsButton roomId={activeRoom.id} />
+            {isGroupChat && !callContent && callButton(onStartCall, callUnavailable ?? "Call group")}
             <button
               type="button"
               onClick={() => setShowUsers((prev) => !prev)}
@@ -1006,6 +1009,7 @@ export default function ChatView({
       )}
       <RoomMemberContextMenu
         key={activeRoom.id}
+        onCallMember={onCallMember}
         target={memberMenu?.roomId === activeRoom.id ? memberMenu : null}
         roomId={activeRoom.id}
         roomName={activeRoom.name}

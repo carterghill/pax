@@ -78,7 +78,7 @@ Local regression checks: `npm run build` and, from `src-tauri`, `cargo test --li
 
 ## Incoming call notifications
 
-Pax prefers LiveKit for direct calls when the peer has advertised support and the room's LiveKit service can issue a token. For other direct calls, Pax uses the Matrix two-party VoIP protocol with native WebRTC audio and the homeserver's TURN service when available. Voice channels continue to use MatrixRTC with LiveKit.
+Pax prefers LiveKit for direct calls when the peer has advertised support and the room's LiveKit service can issue a token. For other direct calls, Pax uses the Matrix two-party VoIP protocol with native WebRTC audio and the homeserver's TURN service when available. The member menu places a two-party Matrix call in the current room and addresses the invitation to the selected member. The phone button in a group chat joins its MatrixRTC voice session and sends an `org.matrix.msc4075.rtc.notification` to the other joined members. Group chats use the same LiveKit service as voice channels.
 
 Windows and Linux show call alerts while Pax runs in the background. An installed Windows build uses the Windows notification center. Linux exposes Answer and Decline on desktop notification services that support actions. A bundled macOS `.app` can show the system banner even while Pax has focus. An unbundled macOS development build shows an actionable floating alert.
 
@@ -86,7 +86,7 @@ Android registers its FCM token with the signed-in homeserver when `PAX_PUSH_GAT
 
 The iOS CallKit integration can present calls received by a running app. To deliver calls while the app is suspended, sign the `com.carter.pax` iOS target with an APNs-enabled provisioning profile and set `PAX_IOS_VOIP_PUSH_GATEWAY_URL`. Pax registers a separate Matrix pusher with app ID `com.carter.pax.voip`. The gateway must send APNs pushes only for verified new calls, with push type `voip`, topic `com.carter.pax.voip`, and a short APNs expiration. The payload contains the Matrix call UUID, caller label, and absolute deadline in milliseconds in `callId`, `caller`, and `expiresAt`. Call-end updates use Matrix sync. An ordinary Sygnal push cannot identify a call in encrypted Matrix traffic. Waking iOS for those calls requires a notification service extension with device-side decryption and Apple’s notification-filtering entitlement, or a separate verified call-delivery service.
 
-For a standard `m.call.invite`, derive the CallKit `callId` with UUIDv5 in the OID namespace. The UTF-8 input is `matrix-voip`, a NUL byte, the room ID, a NUL byte, then the event's `content.call_id`. The same ID links system call actions to the invitation received through Matrix sync.
+For a standard `m.call.invite`, derive the CallKit `callId` with UUIDv5 in the OID namespace. The UTF-8 input is `matrix-voip`, a NUL byte, the room ID, a NUL byte, then the event's `content.call_id`. For a targeted invite, deliver the alert only to the account in `content.invitee`. For a group ring, verify the referenced caller membership and the recipient in `m.mentions.user_ids`. Derive its UUID the same way using `matrix-rtc`, a NUL byte, the room ID, a NUL byte, and the notification’s Matrix event ID. These IDs link system call actions to the invitation received through sync.
 
 ### App icon badges
 

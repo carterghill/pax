@@ -22,7 +22,7 @@ use tokio::sync::Mutex;
 use crate::{
     commands::{
         auth::{persist_refreshed_tokens, read_credentials_at, CREDENTIALS_FILENAME},
-        direct_calls, matrix_voip,
+        direct_calls, group_calls, matrix_voip,
     },
     crypto_store::{self, OpenMode},
     voice_presence::now_ms,
@@ -112,6 +112,7 @@ async fn inspect_event(base: PathBuf, room_id: String, event_id: String) -> Opti
         .await
         .ok()?;
     let event = context.event.as_ref()?;
+    if let Some(outcome) = group_calls::push_event(&room, event, &context.events_after, &context.state).await { return Some(outcome); }
     if let Some(outcome) =
         matrix_voip::call_push_event(&room, event, &context.events_before, &context.events_after)
             .await

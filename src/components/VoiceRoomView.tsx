@@ -30,6 +30,7 @@ interface VoiceCallPanelProps {
   canReconnect?: boolean;
   joinButton?: VoiceJoinButton;
   userId: string;
+  groupCall?: boolean;
   directCall?: { peer: MatrixVoiceParticipant; peerDeviceId?: string; peerConnection: DirectCallPeerConnection };
 }
 
@@ -89,6 +90,7 @@ export function VoiceCallPanel({
   joinButton,
   userId,
   directCall,
+  groupCall = false,
 }: VoiceCallPanelProps) {
   const {
     connect: onConnect,
@@ -110,10 +112,11 @@ export function VoiceCallPanel({
   const isConnected = callState.connectedRoomId === roomId && !callState.isConnecting;
   const isConnecting = callState.isConnecting && callState.targetRoomId === roomId;
   const error = callState.targetRoomId === roomId || callState.endedRoomId === roomId ? callState.error : null;
+  const inChat = !!directCall || groupCall;
   const isDirectCall = directCall != null;
   const hasScreenShare = isConnected && (callState.screenSharingOwners.length > 0 || callState.isLocalScreenSharing);
   const participantsBesideShare = hasScreenShare && !directCall;
-  const avatarSize = directCall ? (hasScreenShare ? 40 : 64) : 80;
+  const avatarSize = inChat ? (hasScreenShare ? 40 : 64) : 80;
   const peer = directCall?.peer;
   const [screenShareMenuOpen, setScreenShareMenuOpen] = useState(false);
   const [generalSettingsOpen, setGeneralSettingsOpen] = useState(false);
@@ -145,9 +148,9 @@ export function VoiceCallPanel({
 
   const reconnectAfterDeviceChange = useCallback(async () => {
     if (isConnected) {
-      await onConnect(roomId, { forceReconnect: true, replaceOtherSessions: isDirectCall ? false : undefined });
+      await onConnect(roomId, { forceReconnect: true, replaceOtherSessions: inChat ? false : undefined });
     }
-  }, [isConnected, onConnect, roomId, isDirectCall]);
+  }, [isConnected, onConnect, roomId, inChat]);
 
   useEffect(() => {
     if (!showScreenShareMenu || isLinux) return;
@@ -334,14 +337,14 @@ export function VoiceCallPanel({
   }, [callState.participants, isConnected, isDirectCall, participantStates, peer, peerDeviceId, peerConnection, userId, voiceParticipants]);
 
   return (
-    <section aria-label={directCall ? "Voice call" : undefined} style={{
-      flex: directCall ? "0 1 auto" : 1,
+    <section aria-label={inChat ? "Voice call" : undefined} style={{
+      flex: inChat ? "0 1 auto" : 1,
       display: "flex",
       flexDirection: "column",
       minWidth: 0,
       minHeight: 0,
-      height: directCall ? (hasScreenShare ? "min(55vh, 460px)" : 180) : undefined,
-      maxHeight: directCall ? "55%" : undefined,
+      height: inChat ? (hasScreenShare ? "min(55vh, 460px)" : 180) : undefined,
+      maxHeight: inChat ? "55%" : undefined,
     }}>
       {/* Main content: screen share (primary) or participant grid */}
       <div style={{
@@ -375,7 +378,7 @@ export function VoiceCallPanel({
           alignContent: participantsBesideShare ? "flex-start" : "safe center",
           justifyContent: "center",
           gap: spacing.unit * 4,
-          padding: spacing.unit * (directCall ? 2 : 6),
+          padding: spacing.unit * (inChat ? 2 : 6),
           overflowY: "auto",
           width: participantsBesideShare ? 180 : undefined,
         }}>
@@ -620,13 +623,13 @@ export function VoiceCallPanel({
       {/* Controls bar */}
       {isConnected && (
         <div style={{
-          padding: spacing.unit * (directCall ? 2 : 4),
+          padding: spacing.unit * (inChat ? 2 : 4),
           borderTop: `1px solid ${palette.border}`,
           display: "flex",
           flexShrink: 0,
-          flexWrap: directCall ? "wrap" : undefined,
+          flexWrap: inChat ? "wrap" : undefined,
           justifyContent: "center",
-          gap: spacing.unit * (directCall ? 2 : 3),
+          gap: spacing.unit * (inChat ? 2 : 3),
         }}>
           {/* Mute/Unmute */}
           <button
@@ -1104,7 +1107,7 @@ export function VoiceCallPanel({
           <button
             type="button"
             onClick={onDisconnect}
-            title={directCall ? "Hang up" : "Disconnect"}
+            title={inChat ? "Hang up" : "Disconnect"}
             style={{
               width: 48,
               height: 48,

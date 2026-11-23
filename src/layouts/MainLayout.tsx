@@ -13,6 +13,7 @@ import type { Room } from "../types/matrix";
 import { usePresence } from "../hooks/usePresence";
 import { useVoiceParticipants } from "../hooks/useVoiceParticipants";
 import { useVoiceCall, type VoiceCallActions } from "../hooks/useVoiceCall";
+import { useRoomMembers } from "../hooks/useRoomMembers";
 import { useDirectCall } from "../hooks/useDirectCall";
 import { useCallNotifications } from "../hooks/useCallNotifications";
 import { ROOM_RECOVERY_MS, VOICE_RECOVERY_REFRESH_MS, useVoiceRecovery } from "../hooks/useVoiceRecovery";
@@ -161,7 +162,7 @@ export default function MainLayout({
       : recoveryRoom.roomType === VOICE_ROOM_TYPE) ? voiceRecovery : null;
   const {
     call: directCall, error: directCallError, peerConnection: directCallPeerConnection,
-    start: startDirectCall, answer: answerIncomingCall,
+    start: startDirectCall, startGroup: startGroupCall, answer: answerIncomingCall,
     end: endDirectCall, decline: declineDirectCall, endFromNotification: endDirectCallFromNotification,
     clearError: clearDirectCallError, reconnect: reconnectDirectCall,
     isMicEnabled: isDirectCallMicEnabled, toggleMic: toggleDirectCallMic,
@@ -854,9 +855,9 @@ export default function MainLayout({
     void disconnectVoice(roomId);
   }, [disconnectVoice, eligibleRecovery?.roomId, forgetVoice, getRoom, targetVoiceRoomId]);
 
-  const placeDirectCall = useCallback((roomId: string, peerUserId: string) => {
+  const placeDirectCall = useCallback((roomId: string, peerUserId: string, memberCall = false) => {
     abandonVoiceChannel();
-    startDirectCall(roomId, peerUserId);
+    startDirectCall(roomId, peerUserId, memberCall);
   }, [abandonVoiceChannel, startDirectCall]);
 
   const answerDirectCall = useCallback((callId?: string) => {
@@ -871,7 +872,7 @@ export default function MainLayout({
     if (!roomId) return;
     const room = getRoom(roomId, true);
     if (room?.membership === "joined" && !room.upgradePending && !room.replacementRoomId &&
-        (!directCall || directCall.transport === "matrix" || room.dmPeerUserId === directCall.peerUserId)) return;
+        (!directCall || directCall.transport !== undefined || room.dmPeerUserId === directCall.peerUserId)) return;
     forgetVoice(roomId);
     if (directCall) void endDirectCall();
     else void disconnectVoice(roomId);
@@ -1355,8 +1356,15 @@ export default function MainLayout({
   );
 
   const directCallRoom = directCall && getRoom(directCall.roomId, true);
-  const directCallName = directCallRoom ? effectiveDmTitle(directCallRoom) : directCall?.peerUserId ?? "";
-  useCallNotifications(directCall, directCallName, answerDirectCall, endDirectCallFromNotification,
+  const groupCall = directCall?.transport === "group";
+  const { members: callMembers } = useRoomMembers(directCall?.roomId ?? "");
+  const peer = callMembers.find(member => member.userId === directCall?.peerUserId);
+  const peerName = peer?.displayName || directCall?.peerUserId || "";
+  const roomDescribesPeer = directCallRoom && directCallRoom.dmPeerUserId === directCall.peerUserId;
+  const directCallName = groupCall ? directCallRoom?.name || "Group chat"
+    : roomDescribesPeer ? effectiveDmTitle(directCallRoom) : peerName;
+  const callAvatar = roomDescribesPeer ? directCallRoom.avatarUrl : peer?.avatarUrl;
+  useCallNotifications(directCall, groupCall && directCall.phase === "incoming" ? `${peerName} · ${directCallName}` : directCallName, answerDirectCall, endDirectCallFromNotification,
     !!voiceCall.connectedRoomId || voiceCall.isConnecting);
   const roomSidebarEl = (
     <>
@@ -1393,7 +1401,7 @@ export default function MainLayout({
             : connectedVoiceRoomId || directCall?.phase === "active" ? "connected" : "disconnected",
           detail: directCallPeerConnection === "lost" ? `${directCallName} lost connection`
             : directCallPeerConnection === "interrupted" ? `${directCallName}’s connection was interrupted` : undefined,
-          canReconnect: (!!directCall?.established && directCall.transport !== "matrix") || !!targetVoiceRoomId || (!!eligibleRecovery && !eligibleRecovery.direct),
+          canReconnect: directCall ? !!directCall.established && !directCall.transport : !!targetVoiceRoomId || !!eligibleRecovery,
           onReconnect: reconnectVoiceCall,
           onGoToRoom: activeVoiceRoomId ? () => openJoinedRoom(activeVoiceRoomId) : undefined,
           onDisconnect: disconnectVoiceCall,
@@ -1453,7 +1461,8 @@ export default function MainLayout({
     <DirectCallControls
       call={directCall}
       name={directCallName}
-      avatarUrl={directCallRoom?.avatarUrl}
+      groupCaller={groupCall ? peerName : undefined}
+      avatarUrl={callAvatar}
       isMicEnabled={isDirectCallMicEnabled}
       peerConnection={directCallPeerConnection}
       canMute={directCall.transport === "matrix" || connectedVoiceRoomId === directCall.roomId}
@@ -1468,7 +1477,7 @@ export default function MainLayout({
   const activeDmPeer = activeRoom?.dmPeerUserId;
   const callUnavailable = directCall || connectedVoiceRoomId || voiceCall.isConnecting
     ? "End the current call before starting another"
-    : activeRoom?.upgradePending || !activeDmPeer ? "Open a joined direct message to call" : undefined;
+    : activeRoom?.upgradePending || activeRoom?.membership !== "joined" ? "Join the room to call" : undefined;
 
   return (
     <PresenceContext.Provider value={{ manualStatus, setManualStatus, effectivePresence, statusMessage, setStatusMessage }}>
@@ -1577,8 +1586,11 @@ export default function MainLayout({
                   setUserMenuWidth(clamped);
                 }}
                 onStartDirectMessage={handleStartDirectMessage}
-                onStartCall={activeDmPeer && !callUnavailable
-                  ? () => placeDirectCall(activeRoom.id, activeDmPeer) : undefined}
+                onCallMember={callUnavailable ? undefined : (user) => placeDirectCall(activeRoom.id, user, true)}
+                onStartCall={callUnavailable || !activeRoom.isDirect ? undefined : () => {
+                  if (activeDmPeer) placeDirectCall(activeRoom.id, activeDmPeer);
+                  else { abandonVoiceChannel(); startGroupCall(activeRoom.id, userId); }
+                }}
                 callUnavailable={callUnavailable}
                 callContent={chatCall && (
                   <>
@@ -1589,11 +1601,14 @@ export default function MainLayout({
                         voiceCall={voiceCall}
                         onDisconnect={endDirectCall}
                         userId={userId}
-                        directCall={{
+                        groupCall={groupCall}
+                        participantStates={groupCall ? voiceParticipantStatesByRoom[chatCall.roomId] : undefined}
+                        voiceParticipants={groupCall ? callMembers : undefined}
+                        directCall={groupCall ? undefined : {
                           peer: {
                             userId: chatCall.peerUserId,
                             displayName: directCallName,
-                            avatarUrl: directCallRoom?.avatarUrl ?? null,
+                            avatarUrl: callAvatar ?? null,
                           },
                           peerDeviceId: chatCall.peerDeviceId,
                           peerConnection: directCallPeerConnection,

@@ -230,6 +230,7 @@ async fn clear_local_session(state: &Arc<AppState>, app: &tauri::AppHandle) {
     state.audio_recording.lock().await.take();
     state.stop_sync_task().await;
     state.direct_calls.lock().await.clear();
+    state.group_calls.lock().await.clear();
     state.matrix_voip.reset().await;
     state.notifications.reset();
     state.voice_presence.reset();
@@ -953,6 +954,7 @@ pub(super) async fn submit_registration(
 async fn stop_previous_session(state: &AppState) {
     state.stop_sync_task().await;
     state.direct_calls.lock().await.clear();
+    state.group_calls.lock().await.clear();
     state.matrix_voip.reset().await;
     state.notifications.reset();
     state.voice_presence.reset();

@@ -4,6 +4,7 @@ import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 import type { VoiceCall } from "./useVoiceCall";
 import { VOICE_RECOVERY_REFRESH_MS, type VoiceRecovery } from "./useVoiceRecovery";
 import { isVoiceParticipantOnDevice } from "../utils/matrix";
+import { useGroupCall } from "./useGroupCall";
 import { useMatrixVoip } from "./useMatrixVoip";
 import { getCallDuration } from "../features/chat/messages/callHistory";
 
@@ -27,7 +28,7 @@ interface CallSignal extends CallId {
 }
 
 export interface DirectCall extends CallId {
-  transport?: "matrix" | "selecting";
+  transport?: "matrix" | "selecting" | "group";
   phase: "dialing" | "incoming" | "answering" | "connecting" | "active" | "interrupted" | "resuming";
   peerDeviceId?: string;
   ringEventId?: string;
@@ -94,6 +95,9 @@ export function useDirectCall(
     connection: matrixConnection, micEnabled: matrixMicEnabled, toggleMic: toggleMatrixMic,
   } = useMatrixVoip(current, voiceBusy, update, setError, recoveryReady);
 
+  const { start: startGroup, answer: answerGroup, finish: finishGroup } =
+    useGroupCall(voice, current, voiceBusy, update, setError, recoveryReady);
+
   const finish = useCallback((notifyPeer: boolean, options: {
     connectionLost?: boolean;
     declined?: boolean;
@@ -101,6 +105,7 @@ export function useDirectCall(
   } = {}) => {
     const pending = current.current;
     if (!pending) return mediaStop.current ?? finishMatrix(false);
+    if (pending.transport === "group") return finishGroup(notifyPeer);
     if (pending.transport === "matrix") {
       const reason = options.connectionLost || options.endReason === "failed" ? "ice_failed" : undefined;
       return finishMatrix(notifyPeer, reason, options.declined);
@@ -124,7 +129,7 @@ export function useDirectCall(
       return stopping;
     }
     return Promise.resolve();
-  }, [disconnect, finishMatrix, forget, update]);
+  }, [disconnect, finishGroup, finishMatrix, forget, update]);
 
   const end = useCallback(() => finish(true), [finish]);
   const decline = useCallback(() => {
@@ -205,7 +210,7 @@ export function useDirectCall(
   const receive = useCallback((signal: CallSignal) => {
     if (signal.expiresAt <= Date.now()) return;
     const pending = current.current;
-    if (pending?.transport === "matrix") return;
+    if (pending?.transport === "matrix" || pending?.transport === "group") return;
     const matches = pending?.callId === signal.callId && pending.roomId === signal.roomId &&
       pending.peerUserId === signal.peerUserId && pending.peerDeviceId === signal.deviceId;
     if (signal.kind === "resume") {
@@ -316,7 +321,7 @@ export function useDirectCall(
   }, [receive, recoveryReady]);
 
   useEffect(() => {
-    if (!call || call.established || call.phase === "connecting" || call.phase === "active"
+    if (!call || call.transport === "group" || call.established || call.phase === "connecting" || call.phase === "active"
         || (call.transport === "matrix" && call.phase === "dialing")) return;
     const timer = setTimeout(() => {
       if (current.current !== call) return;
@@ -327,7 +332,7 @@ export function useDirectCall(
     return () => clearTimeout(timer);
   }, [call, finish]);
 
-  const inCall = call?.transport !== "matrix" && call?.phase === "active"
+  const inCall = !call?.transport && call?.phase === "active"
     && voice.connectedRoomId === call.roomId && !voice.isConnecting;
   const peer = inCall ? voice.remoteParticipants.find(({ identity }) =>
       isVoiceParticipantOnDevice(identity, call.peerUserId, call.peerDeviceId),
@@ -336,7 +341,7 @@ export function useDirectCall(
   // the reconnect window while our own connection is healthy.
   const peerJoined = peer !== undefined;
   useEffect(() => {
-    if (!call || call.transport === "matrix" || (!call.established && call.phase !== "active")) return;
+    if (!call || call.transport || (!call.established && call.phase !== "active")) return;
     if (peerJoined) {
       outage.current = null;
       if (!call.established) {
@@ -373,13 +378,13 @@ export function useDirectCall(
   }, [call, finish, peerJoined, remember, update, voice.isConnecting]);
 
   useEffect(() => {
-    if (call && call.transport !== "matrix" && voice.endedRoomId === call.roomId) {
+    if (call && !call.transport && voice.endedRoomId === call.roomId) {
       void finish(true);
       setError("The voice session ended on this device.");
     }
   }, [call, finish, voice.endedRoomId]);
 
-  const start = useCallback((roomId: string, peerUserId: string) => {
+  const start = useCallback((roomId: string, peerUserId: string, memberCall = false) => {
     if (current.current || voiceBusy.current || mediaStop.current) return;
     const pending: DirectCall = {
       roomId, peerUserId, callId: crypto.randomUUID(), phase: "dialing", expiresAt: Date.now() + RING_MS,
@@ -388,7 +393,7 @@ export function useDirectCall(
     setError(null);
     update(pending);
     void (async () => {
-      const useLiveKit = await invoke<boolean>("prefer_livekit_call", { roomId, peerUserId }).catch(() => false);
+      const useLiveKit = !memberCall && await invoke<boolean>("prefer_livekit_call", { roomId, peerUserId }).catch(() => false);
       if (current.current !== pending) return;
       if (!useLiveKit) {
         startMatrix({ ...pending, transport: "matrix" });
@@ -414,6 +419,10 @@ export function useDirectCall(
     const pending = current.current;
     if (pending?.phase !== "incoming" || pending.expiresAt <= Date.now() || voiceBusy.current) return;
     if (expectedCallId && pending.callId !== expectedCallId) return;
+    if (pending.transport === "group") {
+      answerGroup(onStarted);
+      return;
+    }
     if (pending.transport === "matrix") {
       answerMatrix(onStarted);
       return;
@@ -426,7 +435,7 @@ export function useDirectCall(
       void finish(true);
       setError(String(reason));
     });
-  }, [answerMatrix, finish, update]);
+  }, [answerGroup, answerMatrix, finish, update]);
 
   const endFromNotification = useCallback((callId: string, action: DirectCallEndAction) => {
     const pending = current.current;
@@ -436,11 +445,12 @@ export function useDirectCall(
   }, [finish]);
 
   const clearError = useCallback(() => setError(null), []);
-  const peerConnection: DirectCallPeerConnection = call?.transport === "matrix" ? matrixConnection : peer
+  const peerConnection: DirectCallPeerConnection = call?.transport === "group" ? (call.phase === "active" ? "connected" : "connecting")
+    : call?.transport === "matrix" ? matrixConnection : peer
     ? peer.connectionInterrupted && call?.established ? "interrupted" : "connected"
     : inCall && call.established ? "lost" : "connecting";
   return {
-    call, error, peerConnection, reconnect, start, answer, end, decline, endFromNotification, clearError,
+    call, error, peerConnection, reconnect, start, startGroup, answer, end, decline, endFromNotification, clearError,
     isMicEnabled: call?.transport === "matrix" ? matrixMicEnabled : voice.isMicEnabled,
     toggleMic: call?.transport === "matrix" ? toggleMatrixMic : voice.toggleMic,
   };

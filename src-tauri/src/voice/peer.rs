@@ -56,6 +56,7 @@ struct PeerCandidate<'a> {
 pub(crate) struct PeerMedia {
     pub id: String,
     pub room_id: String,
+    pub peer: matrix_sdk::ruma::OwnedUserId,
     pc: PeerConnection,
     track: RtcAudioTrack,
     source: NativeAudioSource,
@@ -70,9 +71,10 @@ impl PeerMedia {
         app: &AppHandle,
         id: String,
         room_id: String,
+        peer: matrix_sdk::ruma::OwnedUserId,
         ice_servers: Vec<libwebrtc::peer_connection_factory::IceServer>,
     ) -> Result<Self, String> {
-        let peer = Self::new(id, room_id, ice_servers)?;
+        let peer = Self::new(id, room_id, peer, ice_servers)?;
         let pc = &peer.pc;
         let app_status = app.clone();
         let status_id = peer.id.clone();
@@ -132,6 +134,7 @@ impl PeerMedia {
     fn new(
         id: String,
         room_id: String,
+        peer: matrix_sdk::ruma::OwnedUserId,
         ice_servers: Vec<libwebrtc::peer_connection_factory::IceServer>,
     ) -> Result<Self, String> {
         let factory = PeerConnectionFactory::default();
@@ -171,6 +174,7 @@ impl PeerMedia {
         Ok(Self {
             id,
             room_id,
+            peer,
             pc,
             track,
             source,
@@ -363,8 +367,8 @@ mod tests {
 
     #[tokio::test]
     async fn matrix_web_rtc_offer_answer_and_trickle_ice_carry_audio_both_ways() {
-        let caller = PeerMedia::new("caller".into(), "room".into(), vec![]).unwrap();
-        let callee = PeerMedia::new("callee".into(), "room".into(), vec![]).unwrap();
+        let caller = PeerMedia::new("caller".into(), "room".into(), matrix_sdk::ruma::UserId::parse("@peer:test").unwrap(), vec![]).unwrap();
+        let callee = PeerMedia::new("callee".into(), "room".into(), matrix_sdk::ruma::UserId::parse("@peer:test").unwrap(), vec![]).unwrap();
         let mut caller_ice = watch_candidates(&caller);
         let mut callee_ice = watch_candidates(&callee);
         let offer = caller.setup(None).await.unwrap();

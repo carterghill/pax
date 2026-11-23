@@ -69,7 +69,7 @@ export interface ScreenShareWindowOption {
 export interface VoiceCallActions {
   connect: (
     roomId: string,
-    options?: { forceReconnect?: boolean; replaceOtherSessions?: boolean | "required" },
+    options?: { forceReconnect?: boolean; replaceOtherSessions?: boolean | "required"; onJoined?: (membershipEventId: string) => void },
   ) => Promise<boolean>;
   disconnect: (expectedRoomId?: string) => Promise<void>;
   toggleMic: () => void;
@@ -167,7 +167,7 @@ export function useVoiceCall(isVoiceChannel: (roomId: string) => boolean) {
     return stopping;
   }, []);
 
-  const connectAttempt = useCallback(async (roomId: string, attempt: number, replacement: boolean | "required") => {
+  const connectAttempt = useCallback(async (roomId: string, attempt: number, replacement: boolean | "required", onJoined?: (id: string) => void) => {
     if (pendingDisconnect.current) await pendingDisconnect.current;
     if (revision.current !== attempt) return false;
     const { inputDeviceId, outputDeviceId } = getStoredAudioDevicePreferences();
@@ -176,12 +176,14 @@ export function useVoiceCall(isVoiceChannel: (roomId: string) => boolean) {
     try {
       await requestMicrophonePermission();
       if (revision.current !== attempt) return false;
-      await invoke("voice_connect", {
+      const membership = await invoke<string>("voice_connect", {
         roomId, attemptId, inputDeviceId, outputDeviceId,
         replaceOtherSessions: replacement !== false,
         requireSessionReplacement: replacement === "required",
       });
-      return revision.current === attempt && targetRoomIdRef.current === roomId;
+      if (revision.current !== attempt || targetRoomIdRef.current !== roomId) return false;
+      onJoined?.(membership);
+      return true;
     } catch (error) {
       if (revision.current === attempt) {
         connectedRoomIdRef.current = null;
@@ -213,7 +215,7 @@ export function useVoiceCall(isVoiceChannel: (roomId: string) => boolean) {
       error: null, participants: [], screenSharingOwners: [], isLocalScreenSharing: false,
       disconnectingFromRoomId: null,
     }));
-    const joining = connectAttempt(roomId, attempt, options?.replaceOtherSessions ?? !wasInRoom)
+    const joining = connectAttempt(roomId, attempt, options?.replaceOtherSessions ?? !wasInRoom, options?.onJoined)
       .then((joined) => {
         if (!joined && revision.current === attempt) {
           setState((prev) => ({ ...prev, isConnecting: false, isReconnecting: false }));

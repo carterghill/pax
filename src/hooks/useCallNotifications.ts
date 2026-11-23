@@ -76,7 +76,7 @@ export function useCallNotifications(
   const roomId = call?.roomId;
   const expiresAt = call?.expiresAt;
   const ringEventId = call?.ringEventId;
-  const matrixVoip = call?.transport === "matrix";
+  const matrixVoip = call?.transport === "matrix" || call?.transport === "group";
   const busy = voiceBusy || (!!phase && phase !== "incoming");
   useEffect(() => {
     const queued = queuedAction.current;

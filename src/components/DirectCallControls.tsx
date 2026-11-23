@@ -9,6 +9,7 @@ import { useTheme } from "../theme/ThemeContext";
 interface DirectCallControlsProps {
   call: DirectCall;
   name: string;
+  groupCaller?: string;
   avatarUrl?: string | null;
   isMicEnabled: boolean;
   peerConnection: DirectCallPeerConnection;
@@ -22,7 +23,7 @@ interface DirectCallControlsProps {
 }
 
 export default function DirectCallControls({
-  call, name, avatarUrl, isMicEnabled, peerConnection, canMute, isReconnecting,
+  call, name, groupCaller, avatarUrl, isMicEnabled, peerConnection, canMute, isReconnecting,
   showActions = true, onAnswer, onDecline, onEnd, onToggleMic,
 }: DirectCallControlsProps) {
   const { palette, spacing, typography } = useTheme();
@@ -67,9 +68,9 @@ export default function DirectCallControls({
     return (
       <Dialog onClose={onEnd} aria-label="Incoming voice call" style={{ width: 340 }}>
         <div style={{ display: "grid", justifyItems: "center", gap: spacing.unit * 2, padding: spacing.unit * 4 }}>
-          <UserAvatar userId={call.peerUserId} displayName={name} avatarUrlHint={avatarUrl} size={56} />
+          <UserAvatar userId={call.peerUserId} displayName={groupCaller ?? name} avatarUrlHint={avatarUrl} size={56} />
           <div style={{ textAlign: "center", overflowWrap: "anywhere", minWidth: 0 }}>
-            <div style={{ color: palette.textSecondary, fontSize: typography.fontSizeSmall }}>Incoming voice call</div>
+            <div style={{ color: palette.textSecondary, fontSize: typography.fontSizeSmall }}>{groupCaller ? `${groupCaller} is calling the group` : "Incoming voice call"}</div>
             <div style={{ fontSize: typography.fontSizeBase, fontWeight: typography.fontWeightBold }}>{name}</div>
           </div>
           <div style={{ display: "flex", gap: spacing.unit * 2, flexWrap: "wrap", justifyContent: "center" }}>

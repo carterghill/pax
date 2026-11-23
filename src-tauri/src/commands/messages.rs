@@ -2540,6 +2540,7 @@ pub async fn start_sync(
 
             super::direct_calls::receive_signals(&reconcile_state_arc, &client, &app, &response)
                 .await;
+            super::group_calls::receive_signals(&reconcile_state_arc, &client, &app, &response).await;
             super::matrix_voip::receive_signals(&reconcile_state_arc, &client, &app, &response)
                 .await;
 

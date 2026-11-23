@@ -3,6 +3,7 @@ pub mod account_conversion;
 pub mod codec;
 pub mod config;
 pub mod direct_calls;
+pub mod group_calls;
 pub mod downloads;
 pub mod embed;
 pub mod encryption;

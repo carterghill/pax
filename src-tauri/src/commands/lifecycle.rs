@@ -73,6 +73,7 @@ pub(crate) async fn close_voice_before_exit(app: &AppHandle) {
     let result = tokio::time::timeout(VOICE_EXIT_TIMEOUT, async {
         let _voice_operation = state.voice_room.lock().await;
         state.stop_heartbeat_loop();
+        state.group_calls.lock().await.clear();
         state.matrix_voip.reset().await;
         voice.close_media_for_exit().await;
     })

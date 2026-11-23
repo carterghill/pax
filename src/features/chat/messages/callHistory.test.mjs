@@ -184,3 +184,16 @@ test("text messages and predecessor calls each consume their own row", () => {
   assert.deepEqual(trimTimelineWindow([previous, current, chat], 2, "latest"), [current, chat]);
   assert.deepEqual(trimTimelineWindow([previous, current, chat], 2, "oldest"), [previous, current]);
 });
+
+test("a named invitation is shown only in the two participants' call history", () => {
+  const ring = signal("ring", "$ring", "a-call", { invitee: ME });
+  const end = signal("end");
+  const chat = { eventId: "$chat" };
+  const timeline = [ring, chat, end];
+  for (const viewer of [ME, CARTER]) {
+    assert.deepEqual(projectCallHistory(timeline, null, 2_000, viewer).messages, [ring, chat]);
+  }
+  const observer = projectCallHistory(timeline, null, 2_000, "@third:example.org");
+  assert.deepEqual(observer.messages, [chat]);
+  assert.equal(observer.readThroughEventId, end.eventId);
+});

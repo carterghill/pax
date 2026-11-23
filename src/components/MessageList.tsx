@@ -170,8 +170,8 @@ const MessageList = forwardRef<MessageListHandle, MessageListProps>(function Mes
   const { userIds: ignoredUsers } = useIgnoredUsers();
   const [callHistoryTime, setCallHistoryTime] = useState(Date.now);
   const { messages, anchors, callSummaries, nextCallExpiry, readThroughEventId } = useMemo(
-    () => projectCallHistory(timeline, latestEventId, Math.max(callHistoryTime, Date.now())),
-    [timeline, latestEventId, callHistoryTime],
+    () => projectCallHistory(timeline, latestEventId, Math.max(callHistoryTime, Date.now()), userId),
+    [timeline, latestEventId, callHistoryTime, userId],
   );
   useEffect(() => {
     if (nextCallExpiry === undefined) return;

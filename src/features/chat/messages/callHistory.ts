@@ -112,7 +112,7 @@ function callKey(message: Message, callId: string): string {
   return `${message.historyRoomId ?? ""}\0${callId}`;
 }
 
-export function projectCallHistory(timeline: Message[], latestEventId?: string | null, now = Date.now()) {
+export function projectCallHistory(timeline: Message[], latestEventId?: string | null, now = Date.now(), userId?: string) {
   const calls = new Map<string, CallHistory>();
   let lastEvent: Message | undefined;
   let timelineHead: Message | undefined;
@@ -147,6 +147,8 @@ export function projectCallHistory(timeline: Message[], latestEventId?: string |
     if (!notice) return true;
     const anchor = calls.get(callKey(message, notice.callId))!.anchor.eventId;
     anchors.set(message.eventId, anchor);
+    const summary = callSummaries.get(anchor);
+    if (userId && summary?.invitee && summary.caller?.sender !== userId && summary.invitee !== userId) return false;
     return message.eventId === anchor;
   });
 
