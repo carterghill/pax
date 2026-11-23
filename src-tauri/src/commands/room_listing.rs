@@ -99,6 +99,7 @@ async fn build_room_info(
         has_explicit_name,
         avatar_url,
         is_space: room.is_space(),
+        is_encrypted: room.encryption_state().is_encrypted(),
         parent_space_ids,
         space_child_orders,
         room_type: room_type_str,

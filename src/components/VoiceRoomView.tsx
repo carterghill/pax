@@ -10,7 +10,7 @@ import {
   localpartFromUserId,
 } from "../utils/matrix";
 import UserAvatar from "./UserAvatar";
-import RoomHeaderTitle from "./RoomHeaderTitle";
+import RoomHeaderTitle, { RoomHeaderIcon } from "./RoomHeaderTitle";
 import { useUserVolume } from "../hooks/useUserVolume";
 import VolumeContextMenu from "./VolumeContextMenu";
 import VoiceAudioSettingsSection from "./VoiceAudioSettingsSection";
@@ -40,6 +40,8 @@ export default function VoiceRoomView({
 }: Omit<VoiceCallPanelProps, "roomId" | "directCall"> & { room: Room }) {
   const { palette, spacing, typography } = useTheme();
   const { connectedRoomId, isConnecting } = panelProps.voiceCall;
+  const topic = room.topic?.trim();
+  const encryptionLabel = room.isEncrypted === true ? "Encrypted room" : undefined;
 
   return (
     <div style={{ flex: 1, display: "flex", flexDirection: "column", minHeight: 0 }}>
@@ -52,8 +54,10 @@ export default function VoiceRoomView({
         alignItems: "center",
         gap: spacing.unit * 3,
       }}>
-        <Volume2 size={20} color={palette.textSecondary} style={{ flexShrink: 0 }} />
-        <RoomHeaderTitle name={room.name} caption={room.topic} />
+        <RoomHeaderIcon encryptionLabel={encryptionLabel} announceEncryption={Boolean(topic)}>
+          <Volume2 size={20} color={palette.textSecondary} style={{ flexShrink: 0 }} />
+        </RoomHeaderIcon>
+        <RoomHeaderTitle name={room.name} caption={topic || encryptionLabel} />
         {connectedRoomId === room.id && !isConnecting && (
           <span style={{
             fontSize: typography.fontSizeSmall,

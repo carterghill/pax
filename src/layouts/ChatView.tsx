@@ -16,7 +16,7 @@ import UserMenu from "../components/UserMenu";
 import RoomMemberContextMenu, { type MemberMenuTarget } from "../components/RoomMemberContextMenu";
 import UserProfileDialog from "../components/UserProfileDialog";
 import RoomDownloadsButton from "../components/RoomDownloadsButton";
-import RoomHeaderTitle from "../components/RoomHeaderTitle";
+import RoomHeaderTitle, { RoomHeaderIcon } from "../components/RoomHeaderTitle";
 import SideDrawer from "../components/SideDrawer";
 import { useMessages } from "../hooks/useMessages";
 import { useRoomUpgradeHistory } from "../hooks/useRoomUpgradeHistory";
@@ -660,11 +660,16 @@ export default function ChatView({
   if (!activeRoom) return null;
 
   const isDm = isDmChatUi(activeRoom);
+  const topic = activeRoom.topic?.trim();
+  const encryptionLabel = activeRoom.isEncrypted === true
+    ? (isDm ? "Encrypted chat" : "Encrypted room")
+    : undefined;
+  const caption = topic || encryptionLabel || (isDm ? "Direct message" : undefined);
   const roomHeading = (
     <div style={{ flex: 1, minWidth: 0, display: "flex", alignItems: "center", gap: spacing.unit * 2 }}>
       <RoomHeaderTitle
         name={isDm ? effectiveDmTitle(activeRoom) : activeRoom.name}
-        caption={isDm ? activeRoom.topic?.trim() || "Direct message" : activeRoom.topic}
+        caption={caption}
         style={rssFeed ? { flex: "0 1 auto", maxWidth: "55%" } : undefined}
       />
       {rssFeed && (
@@ -698,12 +703,14 @@ export default function ChatView({
           {isMobile && onOpenNavigation && (
             <NavBackButton onClick={onOpenNavigation} palette={palette} />
           )}
-          <UserAvatar
-            userId={activeRoom.dmPeerUserId ?? activeRoom.id}
-            displayName={effectiveDmTitle(activeRoom)}
-            avatarUrlHint={activeRoom.isDirect ? activeRoom.avatarUrl : undefined}
-            size={32}
-          />
+          <RoomHeaderIcon encryptionLabel={encryptionLabel} announceEncryption={Boolean(topic)} avatar>
+            <UserAvatar
+              userId={activeRoom.dmPeerUserId ?? activeRoom.id}
+              displayName={effectiveDmTitle(activeRoom)}
+              avatarUrlHint={activeRoom.isDirect ? activeRoom.avatarUrl : undefined}
+              size={32}
+            />
+          </RoomHeaderIcon>
           {roomHeading}
           <div style={{ display: "flex", alignItems: "center", gap: spacing.unit * 0.5, flexShrink: 0 }}>
             <PinnedMessagesMenu
@@ -730,9 +737,11 @@ export default function ChatView({
           {isMobile && onOpenNavigation && (
             <NavBackButton onClick={onOpenNavigation} palette={palette} />
           )}
-          {activeRoom.isRss
-            ? <Rss size={20} color={palette.textSecondary} style={{ flexShrink: 0 }} />
-            : <Hash size={20} color={palette.textSecondary} style={{ flexShrink: 0 }} />}
+          <RoomHeaderIcon encryptionLabel={encryptionLabel} announceEncryption={Boolean(topic)}>
+            {activeRoom.isRss
+              ? <Rss size={20} color={palette.textSecondary} style={{ flexShrink: 0 }} />
+              : <Hash size={20} color={palette.textSecondary} style={{ flexShrink: 0 }} />}
+          </RoomHeaderIcon>
           {roomHeading}
           <div style={{
             display: "flex",

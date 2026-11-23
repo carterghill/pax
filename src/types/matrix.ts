@@ -21,6 +21,8 @@ export interface Room {
   hasExplicitName?: boolean;
   avatarUrl: string | null;
   isSpace: boolean;
+  /** Room encryption from Matrix sync. Older cached rooms may omit this field. */
+  isEncrypted?: boolean;
   parentSpaceIds: string[];
   /**
    * For every parent space that lists this room/sub-space as a child, the

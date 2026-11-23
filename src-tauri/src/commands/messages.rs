@@ -2111,7 +2111,8 @@ pub async fn start_sync(
                     && matches!(
                         event_type,
                         StateEventType::RoomName | StateEventType::RoomTopic
-                            | StateEventType::RoomCreate | StateEventType::RoomTombstone
+                            | StateEventType::RoomCreate | StateEventType::RoomEncryption
+                            | StateEventType::RoomTombstone
                     );
                 async move {
                     if feed_changed {

@@ -23,6 +23,7 @@ pub struct RoomInfo {
     pub has_explicit_name: bool,
     pub avatar_url: Option<String>,
     pub is_space: bool,
+    pub is_encrypted: bool,
     pub parent_space_ids: Vec<String>,
     /// For every parent space this room/sub-space is a child of: the
     /// `m.space.child` event's `order` string (when present) and its
