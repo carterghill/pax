@@ -1,4 +1,4 @@
-import React, { useMemo, useCallback, isValidElement, memo, type MouseEvent, type ReactNode } from "react";
+import React, { useMemo, useCallback, useState, isValidElement, memo, type MouseEvent, type ReactNode } from "react";
 import ReactMarkdown, { defaultUrlTransform } from "react-markdown";
 import type { Element, ElementContent, Root } from "hast";
 import remarkGfm from "remark-gfm";
@@ -10,6 +10,7 @@ import {
 } from "../utils/emojifyTwemoji";
 import { resolveEmbed } from "../utils/urlEmbed";
 import LinkEmbed from "./LinkEmbed";
+import MessageMatrixImage from "./MessageMatrixImage";
 import RoomLinkPreview from "./RoomLinkPreview";
 import {
   Braces,
@@ -33,10 +34,11 @@ import {
 import { MATRIX_BODY_MXID_RE_GLOBAL, mentionDisplayName, mentionPillLabel } from "../utils/matrixBodyMxid";
 import { appendRoomLinkPreviews, roomLinkTarget } from "../utils/roomLinks";
 import {
+  isMatrixMediaUri,
+  isMatrixMessageLink,
   matrixHtmlToHast,
   matrixUserHref,
   matrixUserIdFromHref,
-  mergeFormattedMentions,
   parseMatrixMessageHtml,
 } from "../utils/matrixMessageHtml";
 
@@ -50,7 +52,6 @@ interface MessageMarkdownProps {
   /** When set, https image/GIF links (inline previews) open in the app media viewer instead of the browser. */
   onOpenDirectImage?: (url: string, title: string) => void;
   formattedBody?: string;
-  preferFormattedBody?: boolean;
   mentionedUserIds?: string[];
   mentionsRoom?: boolean;
   selfUserId?: string;
@@ -137,12 +138,33 @@ function MentionPillSpan({
   );
 }
 
+function MatrixSpoiler({ reason, children }: { reason: string; children: ReactNode }) {
+  const [revealed, setRevealed] = useState(false);
+  const { palette, spacing } = useTheme();
+  return (
+    <span>
+      <button
+        type="button"
+        aria-expanded={revealed}
+        onClick={() => setRevealed((previous) => !previous)}
+        style={{
+          padding: `0 ${spacing.unit}px`, borderRadius: spacing.unit / 2,
+          border: `1px solid ${palette.border}`, background: palette.bgActive,
+          color: palette.textPrimary, font: "inherit", cursor: "pointer",
+        }}
+      >
+        {revealed ? "Hide spoiler" : "Show spoiler"}{reason && ` (${reason})`}
+      </button>
+      {revealed && <> {children}</>}
+    </span>
+  );
+}
+
 export default memo(function MessageMarkdown({
   children,
   edited = false,
   onOpenDirectImage,
   formattedBody,
-  preferFormattedBody,
   mentionedUserIds,
   mentionsRoom,
   selfUserId,
@@ -153,6 +175,11 @@ export default memo(function MessageMarkdown({
 
   const mentionSet = useMemo(() => new Set(mentionedUserIds), [mentionedUserIds]);
   const legacyMentions = mentionedUserIds == null;
+  const formatted = useMemo(() => {
+    if (!formattedBody) return null;
+    const fragment = parseMatrixMessageHtml(formattedBody);
+    return fragment.firstElementChild || fragment.textContent?.trim() ? fragment : null;
+  }, [formattedBody]);
   const renderMention = useCallback((userId: string | null, label: string) => {
     const isSelf = userId != null && userId === selfUserId && mentionSet.has(userId);
     return (
@@ -178,17 +205,8 @@ export default memo(function MessageMarkdown({
   }, [palette.accent, selfUserId, mentionSet, onMentionClick]);
 
   const messagePlugins = useMemo(() => [() => (tree: Root) => {
-    const hasFormattedRoomLink = formattedBody && /matrix\.to\/#\/|matrix:(?:r|room|roomid)\/|pax:\/\/room\?/.test(formattedBody);
-    const formatted = formattedBody && (preferFormattedBody || mentionSet.size > 0 || hasFormattedRoomLink)
-      ? matrixHtmlToHast(parseMatrixMessageHtml(formattedBody))
-      : undefined;
-    const formattedFallback = formatted?.length
-      ? preferFormattedBody ? formatted : mergeFormattedMentions(tree, {
-          type: "root", children: formatted,
-        }, mentionSet, edited ? EDITED_LABEL : undefined)
-      : undefined;
-    if (formattedFallback) {
-      tree.children = formattedFallback;
+    if (formatted) {
+      tree.children = matrixHtmlToHast(formatted);
       if (edited) {
         const label: Element = {
           type: "element",
@@ -240,15 +258,16 @@ export default memo(function MessageMarkdown({
       }
     }
     if (mentionsRoom || legacyMentions || mentionSet.size > 0) markMentions(tree);
-    appendRoomLinkPreviews(tree, formatted);
-  }], [edited, formattedBody, preferFormattedBody, legacyMentions, mentionSet, mentionsRoom]);
+    appendRoomLinkPreviews(tree);
+  }], [edited, formatted, legacyMentions, mentionSet, mentionsRoom]);
 
   const markdownSource = useMemo(() => {
+    if (formatted) return "";
     if (!edited) return children;
     return `${children.trimEnd()} *${EDITED_LABEL}*`;
-  }, [children, edited]);
+  }, [children, edited, formatted]);
 
-  const emojiOnlyBody = useMemo(() => isOnlyEmojisAndWhitespace(children), [children]);
+  const emojiOnlyBody = useMemo(() => !formatted && isOnlyEmojisAndWhitespace(children), [children, formatted]);
 
   const components = useMemo<Components>(
     () => {
@@ -267,7 +286,14 @@ export default memo(function MessageMarkdown({
         if (typeof id === "string" && (legacyMentions || mentionSet.has(id))) {
           return renderMention(id, mentionPillLabel(id, mentionDisplayName(id, resolveMemberLabel?.(id))));
         }
-        return <span><E>{c}</E></span>;
+        const { dataMxSpoiler, dataMxColor, dataMxBgColor } = node?.properties ?? {};
+        const content = (
+          <span style={{
+            color: typeof dataMxColor === "string" ? dataMxColor : undefined,
+            backgroundColor: typeof dataMxBgColor === "string" ? dataMxBgColor : undefined,
+          }}><E>{c}</E></span>
+        );
+        return typeof dataMxSpoiler === "string" ? <MatrixSpoiler reason={dataMxSpoiler}>{content}</MatrixSpoiler> : content;
       },
       p: ({ children: c }) => (
         <p
@@ -315,16 +341,18 @@ export default memo(function MessageMarkdown({
         </del>
       ),
       a: ({ href, children: c }) => {
-        const userId = href ? matrixUserIdFromHref(href) : null;
+        if (!href) return <E>{c}</E>;
+        const userId = matrixUserIdFromHref(href);
         if (userId && mentionSet.has(userId)) {
           const displayName = mentionDisplayName(userId, resolveMemberLabel?.(userId), flattenTextNode(c));
           const label = mentionPillLabel(userId, displayName);
           return onMentionClick
             ? renderMention(userId, label)
-            : <a href={matrixUserHref(userId)}>{renderMention(userId, label)}</a>;
+            : <a href={matrixUserHref(userId)} rel="noopener noreferrer">{renderMention(userId, label)}</a>;
         }
-        const src = href ? normalizeImageSrcHref(href) : null;
-        if (src && href && hrefLooksLikeDirectImageUrl(href)) {
+        const src = normalizeImageSrcHref(href);
+        const canPreviewImage = !formattedBody || (formatted && flattenTextNode(c).trim() === href);
+        if (src && canPreviewImage && hrefLooksLikeDirectImageUrl(href)) {
           const alt = flattenTextNode(c).trim() || "Image";
           const imgStyle = {
             maxWidth: "100%",
@@ -517,7 +545,7 @@ export default memo(function MessageMarkdown({
           </ul>
         </div>
       ),
-      ol: ({ children: c }) => (
+      ol: ({ children: c, start }) => (
         <div
           style={{
             display: "flex",
@@ -534,6 +562,7 @@ export default memo(function MessageMarkdown({
             aria-hidden
           />
           <ol
+            start={start}
             style={{
               margin: 0,
               paddingLeft: spacing.unit * 3,
@@ -744,8 +773,20 @@ export default memo(function MessageMarkdown({
           <E>{c}</E>
         </td>
       ),
-      img: ({ src, alt }) => {
+      img: ({ src, alt, title, width, height }) => {
         const s = src?.trim() ?? "";
+        if (isMatrixMediaUri(s)) {
+          return (
+            <MessageMatrixImage
+              key={s}
+              request={{ source: { url: s }, format: "File" }}
+              metaWidth={typeof width === "number" ? width : undefined}
+              metaHeight={typeof height === "number" ? height : undefined}
+              inline={{ alt: alt ?? "", title }}
+            />
+          );
+        }
+        if (formattedBody || !s) return alt ?? null;
         const abs = s ? normalizeImageSrcHref(s) : null;
         const canViewer =
           Boolean(onOpenDirectImage && abs && /^https?:\/\//i.test(s));
@@ -808,25 +849,22 @@ export default memo(function MessageMarkdown({
       },
     };
     },
-    [palette, typography, spacing, resolvedColorScheme, edited, onOpenDirectImage, onMentionClick, legacyMentions, mentionSet, renderMention, resolveMemberLabel],
+    [palette, typography, spacing, resolvedColorScheme, edited, formatted, formattedBody, onOpenDirectImage, onMentionClick, legacyMentions, mentionSet, renderMention, resolveMemberLabel],
   );
 
-  // Extract embeddable URLs from the raw text and render them below the markdown.
-  // This keeps block-level embed elements (divs, video) outside the <p> tree.
+  // Keep embeds outside the message paragraphs and leave concealed links inside their disclosure.
   const embeds = useMemo(() => {
     const urlRe = /\bhttps?:\/\/[^\s)\]>"'`]+/gi;
-    const seen = new Set<string>();
-    const result: { href: string; embed: ReturnType<typeof resolveEmbed> }[] = [];
-    let m: RegExpExecArray | null;
-    while ((m = urlRe.exec(children)) !== null) {
-      const href = m[0];
-      if (seen.has(href)) continue;
-      seen.add(href);
+    const urls = formatted
+      ? Array.from(formatted.querySelectorAll("a[href]"))
+          .filter((link) => !link.closest("[data-mx-spoiler], details, code, pre, blockquote"))
+          .map((link) => link.getAttribute("href")!)
+      : formattedBody ? [] : Array.from(children.matchAll(urlRe), ([url]) => url);
+    return [...new Set(urls)].flatMap((href) => {
       const embed = resolveEmbed(href);
-      if (embed) result.push({ href, embed });
-    }
-    return result;
-  }, [children]);
+      return embed ? [{ href, embed }] : [];
+    });
+  }, [children, formatted, formattedBody]);
 
   return (
     <div
@@ -844,15 +882,17 @@ export default memo(function MessageMarkdown({
       <ReactMarkdown
         remarkPlugins={[remarkGfm]}
         rehypePlugins={messagePlugins}
-        urlTransform={(url, key) =>
-          matrixUserIdFromHref(url) || (key === "href" && roomLinkTarget(url)) ? url : defaultUrlTransform(url)
-        }
+        urlTransform={(url, key) => {
+          if (key === "src" && isMatrixMediaUri(url)) return url;
+          if (formatted) return key === "href" && isMatrixMessageLink(url) ? url : "";
+          return key === "href" && (matrixUserIdFromHref(url) || roomLinkTarget(url)) ? url : defaultUrlTransform(url);
+        }}
         components={components}
       >
         {markdownSource}
       </ReactMarkdown>
       {embeds.map(({ href, embed }) => (
-        <LinkEmbed key={href} embed={embed!} href={href} />
+        <LinkEmbed key={href} embed={embed} href={href} />
       ))}
     </div>
   );

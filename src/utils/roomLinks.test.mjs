@@ -18,16 +18,19 @@ test("room links recognize native and web Matrix links without consuming message
   assert.equal(roomLinkTarget("matrix:roomid/room/e/event"), null);
 });
 
-test("previews include bare and formatted links, deduplicate targets, and ignore code and quotes", () => {
+test("previews deduplicate targets and skip code, quotes, and concealed content", () => {
   const tree = {
     type: "root", children: [
       element("p", [text(`Open ${pax}.`), element("a", [text("same room")], { href: permalink })]),
       element("code", [text("pax://room?id=%21ignored")]),
       element("blockquote", [element("a", [text("quoted")], { href: "https://matrix.to/#/!quoted" })]),
+      element("span", [element("a", [text("spoiler")], { href: "https://matrix.to/#/!spoiler" })], { dataMxSpoiler: "" }),
+      element("details", [element("a", [text("collapsed")], { href: "https://matrix.to/#/!collapsed" })]),
+      element("a", [text("the community")], { href: aliasUri }),
     ],
   };
-  appendRoomLinkPreviews(tree, [element("a", [text("the community")], { href: aliasUri })]);
-  assert.deepEqual(tree.children.slice(3).map((node) => node.properties.dataRoomLinkPreview), [pax, aliasUri]);
+  appendRoomLinkPreviews(tree);
+  assert.deepEqual(tree.children.slice(6).map((node) => node.properties.dataRoomLinkPreview), [pax, aliasUri]);
   assert.equal(tree.children[0].children[1].properties.href, pax);
   assert.equal(tree.children[0].children[2].value, ".");
 });

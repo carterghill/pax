@@ -1,9 +1,7 @@
-import { micromark } from "micromark";
-import { gfm, gfmHtml } from "micromark-extension-gfm";
 import type { Message } from "../types/matrix";
 import { normalizeImageSrcHref } from "./directImageUrl";
 import { MATRIX_BODY_MXID_RE_GLOBAL, mentionDisplayName, mentionPillLabel } from "./matrixBodyMxid";
-import { matrixUserHref, matrixUserIdFromHref, parseMatrixMessageHtml } from "./matrixMessageHtml";
+import { formatMatrixMarkdown, isMatrixMediaUri, matrixUserHref, matrixUserIdFromHref, parseMatrixMessageHtml } from "./matrixMessageHtml";
 
 /** Serialized Matrix mention: full MXID (or `@room`) stored on the span; visible label is separate. */
 export const PAX_COMPOSER_MENTION_USER_ID_ATTR = "data-pax-mention-user-id";
@@ -215,7 +213,11 @@ export function serializeComposerEditor(
     const el = node as HTMLElement;
     const tag = el.tagName;
 
-    if (tag === "IMG") return el.getAttribute("data-url") ?? "";
+    if (tag === "IMG") {
+      const url = el.getAttribute("data-url") ?? "";
+      const alt = el.getAttribute("alt") ?? "";
+      return isMatrixMediaUri(url) ? `![${alt.replace(/[\\\[\]]/g, "\\$&")}](${url})` : url;
+    }
     if (tag === "BR") return "\n";
     if (tag === "SPAN" && el.hasAttribute(PAX_COMPOSER_MENTION_USER_ID_ATTR)) {
       const userId = el.getAttribute(PAX_COMPOSER_MENTION_USER_ID_ATTR)!;
@@ -255,7 +257,7 @@ export function serializeComposerEditor(
     if (tag === "LI") {
       const parent = el.parentElement;
       if (parent?.tagName === "OL") {
-        const idx = Array.from(parent.children).indexOf(el) + 1;
+        const idx = Array.from(parent.children).indexOf(el) + (parent as HTMLOListElement).start;
         return `${idx}. ${inner}\n`;
       }
       return `- ${inner}\n`;
@@ -280,9 +282,7 @@ export function serializeComposerEditor(
       .join("").replace(/\u200b/g, "").trim();
 
   const body = markdown(false);
-  const formattedBody = userIds.size > 0
-    ? micromark(markdown(true), { extensions: [gfm()], htmlExtensions: [gfmHtml()] })
-    : undefined;
+  const formattedBody = formatMatrixMarkdown(body, userIds.size > 0 ? markdown(true) : body);
   return { body, formattedBody, mentions: { userIds: [...userIds], room } };
 }
 
@@ -367,6 +367,7 @@ export function fillComposerEditorForEdit(
   if (fragment && hasMentionLinks) {
     for (const image of fragment.querySelectorAll("img")) {
       image.setAttribute("data-url", image.getAttribute("src")!);
+      image.removeAttribute("src");
       image.contentEditable = "false";
       image.style.maxWidth = imgStyle.maxWidth;
       image.style.borderRadius = `${imgStyle.borderRadius}px`;

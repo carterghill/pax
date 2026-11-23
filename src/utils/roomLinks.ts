@@ -24,7 +24,7 @@ export function roomLinkTarget(href: string): string | null {
 }
 
 /** Keeps the recipient on the chat timeline and renders each distinct room link once per message. */
-export function appendRoomLinkPreviews(tree: Root, formatted?: Root["children"]): void {
+export function appendRoomLinkPreviews(tree: Root): void {
   const links = new Map<string, string>();
   const addLink = (href: string) => {
     const target = roomLinkTarget(href);
@@ -65,7 +65,8 @@ export function appendRoomLinkPreviews(tree: Root, formatted?: Root["children"])
         if (child.tagName === "a") {
           const href = child.properties.href;
           if (typeof href === "string") addLink(href);
-        } else if (!["code", "pre", "blockquote"].includes(child.tagName)) {
+        } else if (!["code", "pre", "blockquote", "details"].includes(child.tagName)
+          && typeof child.properties.dataMxSpoiler !== "string") {
           visit(child);
         }
       }
@@ -73,7 +74,6 @@ export function appendRoomLinkPreviews(tree: Root, formatted?: Root["children"])
   }
 
   visit(tree);
-  if (formatted && formatted !== tree.children) visit({ type: "root", children: formatted });
   for (const href of links.values()) {
     tree.children.push({
       type: "element", tagName: "div", properties: { dataRoomLinkPreview: href }, children: [],

@@ -1,5 +1,6 @@
-import type { Element, ElementContent, Root, Text } from "hast";
-import { defaultUrlTransform } from "react-markdown";
+import type { Element, ElementContent, Root } from "hast";
+import { micromark } from "micromark";
+import { gfm, gfmHtml } from "micromark-extension-gfm";
 import { roomLinkTarget } from "./roomLinks.ts";
 
 /** Matrix user permalinks, including the native matrix: URI form. */
@@ -32,66 +33,165 @@ export function matrixUserHref(userId: string): string {
 }
 
 const allowedTags = new Set([
-  "a", "b", "blockquote", "br", "caption", "code", "del", "div", "em",
+  "a", "b", "blockquote", "br", "caption", "code", "del", "details", "div", "em",
   "h1", "h2", "h3", "h4", "h5", "h6", "hr", "i", "img", "li", "ol",
-  "p", "pre", "s", "span", "strong", "sub", "sup", "table", "tbody",
+  "p", "pre", "s", "span", "strong", "sub", "summary", "sup", "table", "tbody",
   "td", "th", "thead", "tr", "u", "ul",
 ]);
 
 const omittedTags = new Set(["mx-reply", "script", "style", "template", "iframe"]);
+const inlineTags = new Set(["a", "b", "br", "code", "del", "em", "i", "img", "s", "span", "strong", "sub", "sup", "u"]);
+const maxTagDepth = 100;
+
+export function isMatrixMediaUri(uri: string): boolean {
+  const match = /^mxc:\/\/((?:[A-Za-z0-9.-]+|\[[0-9A-Fa-f:.]+\])(?::[0-9]+)?)\/[A-Za-z0-9_-]+$/.exec(uri);
+  // The SDK stores the slash offset, including the six-byte scheme, in one byte.
+  if (!match || match[0] !== uri || match[1].length > 249) return false;
+  try {
+    return Boolean(new URL(`https://${match[1]}`).hostname);
+  } catch {
+    return false;
+  }
+}
+
+function imageDimension(value: string | null): number | undefined {
+  if (value == null || !/^\d+$/.test(value.trim())) return;
+  const dimension = Number(value);
+  if (Number.isSafeInteger(dimension) && dimension > 0) return dimension;
+}
+
+export function isMatrixMessageLink(href: string): boolean {
+  if (/[\x00-\x1f\x7f]/.test(href)) return false;
+  if (matrixUserIdFromHref(href) || roomLinkTarget(href)) return true;
+  if (!/^(?:(?:https?|ftp):\/\/|mailto:|magnet:)/i.test(href)) return false;
+  try {
+    return Boolean(new URL(href));
+  } catch {
+    return false;
+  }
+}
 
 /** Parse in an inert template and copy only message markup and validated attributes. */
-export function parseMatrixMessageHtml(html: string): DocumentFragment {
+export function parseMatrixMessageHtml(html: string, { forSending = false } = {}): DocumentFragment {
   const template = document.createElement("template");
   template.innerHTML = html;
-  const fragment = document.createDocumentFragment();
+  const inertDocument = template.content.ownerDocument;
+  const fragment = inertDocument.createDocumentFragment();
 
-  function appendNode(parent: DocumentFragment | HTMLElement, source: Node) {
+  function appendNode(parent: DocumentFragment | HTMLElement, source: Node, depth: number) {
     if (source.nodeType === Node.TEXT_NODE) {
       parent.append(source.textContent ?? "");
       return;
     }
-    if (!(source instanceof Element) || source.namespaceURI !== "http://www.w3.org/1999/xhtml") return;
+    if (depth > maxTagDepth || !(source instanceof Element) || source.namespaceURI !== "http://www.w3.org/1999/xhtml") return;
     const tag = source.localName;
     if (omittedTags.has(tag)) return;
+    if (tag === "input" && source.getAttribute("type") === "checkbox" && source.hasAttribute("disabled")) {
+      parent.append(source.hasAttribute("checked") ? "☑" : "☐");
+      return;
+    }
     if (!allowedTags.has(tag)) {
-      for (const child of source.childNodes) appendNode(parent, child);
+      for (const child of source.childNodes) appendNode(parent, child, depth + 1);
       return;
     }
 
-    const el = document.createElement(tag);
+    const el = inertDocument.createElement(tag);
     if (tag === "a") {
-      const href = source.getAttribute("href") ?? "";
-      const safeHref = matrixUserIdFromHref(href) || roomLinkTarget(href) ? href : defaultUrlTransform(href);
-      if (safeHref) el.setAttribute("href", safeHref);
+      const href = source.getAttribute("href")?.trim() ?? "";
+      if (isMatrixMessageLink(href)) el.setAttribute("href", href);
     } else if (tag === "img") {
-      const src = source.getAttribute("src") ?? "";
-      if (!/^https?:\/\//i.test(src) || !defaultUrlTransform(src)) {
-        parent.append(source.getAttribute("alt") ?? "");
+      const src = source.getAttribute("src")?.trim() ?? "";
+      const alt = source.getAttribute("alt") ?? "";
+      if (!isMatrixMediaUri(src)) {
+        if (forSending && /^https?:\/\//i.test(src) && isMatrixMessageLink(src)) {
+          const link = inertDocument.createElement("a");
+          link.setAttribute("href", src);
+          link.textContent = alt || src;
+          parent.append(link);
+        } else {
+          parent.append(alt);
+        }
         return;
       }
       el.setAttribute("src", src);
-      el.setAttribute("alt", source.getAttribute("alt") ?? "");
+      el.setAttribute("alt", alt);
+      const title = source.getAttribute("title");
+      if (title != null) el.setAttribute("title", title);
+      for (const name of ["width", "height"]) {
+        const dimension = imageDimension(source.getAttribute(name));
+        if (dimension != null) el.setAttribute(name, String(dimension));
+      }
     } else if (tag === "code") {
       const language = source.className.match(/(?:^|\s)language-[\w-]+/)?.[0].trim();
       if (language) el.className = language;
-    } else if (tag === "ol" && /^-?\d+$/.test(source.getAttribute("start") ?? "")) {
-      el.setAttribute("start", source.getAttribute("start")!);
+    } else if (tag === "ol") {
+      const start = source.getAttribute("start")?.trim();
+      if (start && /^[+-]?\d+$/.test(start) && Number.isSafeInteger(Number(start))) {
+        el.setAttribute("start", String(Number(start)));
+      }
+    } else if (tag === "span") {
+      for (const name of ["data-mx-color", "data-mx-bg-color"]) {
+        const color = source.getAttribute(name);
+        if (color && /^#[0-9a-f]{6}$/i.test(color)) el.setAttribute(name, color);
+      }
+      const spoiler = source.getAttribute("data-mx-spoiler");
+      if (spoiler != null) el.setAttribute("data-mx-spoiler", spoiler);
     }
-    for (const child of source.childNodes) appendNode(el, child);
+    for (const child of source.childNodes) appendNode(el, child, depth + 1);
     parent.append(el);
   }
 
-  for (const node of template.content.childNodes) appendNode(fragment, node);
+  for (const node of template.content.childNodes) appendNode(fragment, node, 1);
   return fragment;
+}
+
+export function formatMatrixMarkdown(body: string, markdown = body): string | undefined {
+  const html = micromark(markdown, {
+    // The Matrix allowlist below also recognizes native Matrix links and mxc images.
+    allowDangerousProtocol: true,
+    extensions: [gfm()],
+    htmlExtensions: [gfmHtml()],
+  });
+  const fragment = parseMatrixMessageHtml(html, { forSending: true });
+  const nodes = Array.from(fragment.childNodes).filter((node) => node.nodeType !== Node.TEXT_NODE || node.textContent?.trim());
+  const paragraph = nodes.length === 1 && nodes[0] instanceof HTMLElement && nodes[0].localName === "p" ? nodes[0] : null;
+  if (paragraph) {
+    if (!paragraph.firstElementChild && paragraph.textContent === body) return;
+    if (!paragraph.textContent?.includes("\n")) paragraph.replaceWith(...paragraph.childNodes);
+  }
+  const template = document.createElement("template");
+  template.content.append(fragment);
+  return template.innerHTML.trim() || undefined;
+}
+
+/** Keep adjacent inline nodes together inside the timeline's column layout. */
+export function wrapMatrixHtmlInlineRuns(nodes: ElementContent[]): ElementContent[] {
+  const children: ElementContent[] = [];
+  let run: Element | undefined;
+  for (const node of nodes) {
+    if (node.type === "element" && !inlineTags.has(node.tagName)) {
+      children.push(node);
+      run = undefined;
+    } else {
+      if (!run) {
+        if (node.type === "text" && !node.value.trim()) continue;
+        run = { type: "element", tagName: "div", properties: {}, children: [] };
+        children.push(run);
+      }
+      run.children.push(node);
+    }
+  }
+  return children;
 }
 
 export function matrixHtmlToHast(fragment: DocumentFragment): Root["children"] {
   function toHast(node: ChildNode): ElementContent {
     if (!(node instanceof HTMLElement)) return { type: "text", value: node.textContent ?? "" };
-    const properties: Record<string, string> = {};
-    for (const attr of node.attributes) {
-      properties[attr.name === "class" ? "className" : attr.name] = attr.value;
+    const properties: Element["properties"] = {};
+    for (const { name, value } of node.attributes) {
+      if (name === "start" || name === "width" || name === "height") properties[name] = Number(value);
+      else if (name === "class") properties.className = value;
+      else properties[name.replace(/-([a-z])/g, (_, letter: string) => letter.toUpperCase())] = value;
     }
     return {
       type: "element",
@@ -100,89 +200,5 @@ export function matrixHtmlToHast(fragment: DocumentFragment): Root["children"] {
       children: Array.from(node.childNodes, toHast),
     };
   }
-  return Array.from(fragment.childNodes, toHast);
-}
-
-interface TextRange {
-  start: number;
-  end: number;
-}
-
-function projectMessageText(root: Root, mentionedUsers: ReadonlySet<string>, ignoredText?: string) {
-  let plainText = "";
-  const textNodes: (TextRange & { node: Text; parent: Root | Element })[] = [];
-  const links: (TextRange & { userId: string })[] = [];
-
-  function visit(parent: Root | Element, insideLinkOrCode = false) {
-    for (const child of parent.children) {
-      const start = plainText.length;
-      if (child.type === "text") {
-        if (child.value === ignoredText) continue;
-        plainText += child.value.replace(/\s/g, "");
-        if (!insideLinkOrCode && start < plainText.length) {
-          textNodes.push({ node: child, parent, start, end: plainText.length });
-        }
-      } else if (child.type === "element") {
-        const { tagName, properties } = child;
-        const isLink = tagName === "a";
-        visit(child, insideLinkOrCode || isLink || tagName === "code" || tagName === "pre");
-        if (!insideLinkOrCode && isLink && typeof properties.href === "string") {
-          const userId = matrixUserIdFromHref(properties.href);
-          if (userId && mentionedUsers.has(userId) && start < plainText.length) {
-            links.push({ start, end: plainText.length, userId });
-          }
-        }
-      }
-    }
-  }
-
-  visit(root);
-  return { plainText, textNodes, links };
-}
-
-/** Keep the Markdown layout and use Matrix HTML to locate the linked mentions. */
-export function mergeFormattedMentions(
-  markdown: Root,
-  formatted: Root,
-  mentionedUsers: ReadonlySet<string>,
-  editLabel?: string,
-): Root["children"] | undefined {
-  const source = projectMessageText(formatted, mentionedUsers);
-  if (source.links.length === 0) return;
-
-  const target = projectMessageText(markdown, mentionedUsers, editLabel);
-  if (source.plainText !== target.plainText) return formatted.children;
-
-  const replacements = new Map<Text, { parent: Root | Element; links: typeof source.links }>();
-  for (const link of source.links) {
-    if (target.links.some(({ start, end, userId }) =>
-      start === link.start && end === link.end && userId === link.userId,
-    )) continue;
-    const match = target.textNodes.find(({ start, end }) => start <= link.start && end >= link.end);
-    if (!match) return formatted.children;
-    const range = { ...link, start: link.start - match.start, end: link.end - match.start };
-    const existing = replacements.get(match.node);
-    if (existing) existing.links.push(range);
-    else replacements.set(match.node, { parent: match.parent, links: [range] });
-  }
-
-  for (const [node, { parent, links }] of replacements) {
-    const characters = [...node.value.matchAll(/\S/g)];
-    const parts: ElementContent[] = [];
-    let offset = 0;
-    for (const link of links) {
-      const start = characters[link.start].index;
-      const end = characters[link.end - 1].index + 1;
-      if (start > offset) parts.push({ type: "text", value: node.value.slice(offset, start) });
-      parts.push({
-        type: "element",
-        tagName: "a",
-        properties: { href: matrixUserHref(link.userId) },
-        children: [{ type: "text", value: node.value.slice(start, end) }],
-      });
-      offset = end;
-    }
-    if (offset < node.value.length) parts.push({ type: "text", value: node.value.slice(offset) });
-    parent.children.splice(parent.children.indexOf(node), 1, ...parts);
-  }
+  return wrapMatrixHtmlInlineRuns(Array.from(fragment.childNodes, toHast));
 }

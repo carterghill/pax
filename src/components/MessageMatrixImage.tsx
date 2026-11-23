@@ -46,6 +46,7 @@ interface MessageMatrixImageProps {
   metaHeight?: number;
   blurhash?: string;
   onExpand?: () => void;
+  inline?: { alt: string; title?: string };
 }
 
 export default function MessageMatrixImage({
@@ -54,6 +55,7 @@ export default function MessageMatrixImage({
   metaHeight,
   blurhash,
   onExpand,
+  inline,
 }: MessageMatrixImageProps) {
   const { palette, typography, spacing } = useTheme();
   const [src, setSrc] = useState<string | null>(null);
@@ -115,6 +117,26 @@ export default function MessageMatrixImage({
       if (img) img.src = "";
     };
   }, [src]);
+
+  if (inline) {
+    if (failed || !src) {
+      return <span title={inline.title}>{inline.alt || (failed ? "Image unavailable" : null)}</span>;
+    }
+    return (
+      <img
+        ref={imgRef}
+        src={src}
+        alt={inline.alt}
+        title={inline.title}
+        width={metaWidth}
+        height={metaHeight}
+        decoding="async"
+        draggable={false}
+        onError={() => setFailed(true)}
+        style={{ maxWidth: "100%", maxHeight: INLINE_IMAGE_MAX_HEIGHT, objectFit: "contain", verticalAlign: "middle" }}
+      />
+    );
+  }
 
   if (failed) {
     return (

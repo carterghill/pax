@@ -1,34 +1,45 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import { mentionDisplayName, mentionPillLabel } from "./matrixBodyMxid.ts";
-import { mergeFormattedMentions } from "./matrixMessageHtml.ts";
+import { isMatrixMediaUri, isMatrixMessageLink, matrixUserIdFromHref, wrapMatrixHtmlInlineRuns } from "./matrixMessageHtml.ts";
 
 const alice = "@alice:example.org";
-const href = "https://matrix.to/#/@alice:example.org";
-const text = (value) => ({ type: "text", value });
-const element = (tagName, ...children) => ({ type: "element", tagName, properties: {}, children });
-const anchor = (value) => ({ ...element("a", text(value)), properties: { href } });
-const root = (...children) => ({ type: "root", children });
 
-test("formatted mentions keep the Markdown layout and link the right occurrence of a name", () => {
-  const heading = element("h2", text("Updates"));
-  const emphasis = element("strong", text("Alice"));
-  const message = element("p", emphasis, text(" is here. Hey Alice!"));
-  const markdown = root(heading, message);
-  const formatted = root(element("p", text("Updates Alice is here. Hey "), anchor("Alice"), text("!")));
+test("top-level mentions stay in the same inline run as adjacent message text", () => {
+  const text = (value) => ({ type: "text", value });
+  const element = (tagName, children, properties = {}) => ({ type: "element", tagName, properties, children });
+  const aliceLink = element("a", [text("Alice")], { href: "matrix:u/alice:example.org" });
+  const sentence = text(", here's an update:");
+  const list = element("ol", [element("li", [text("First item")])], { start: 7 });
+  const followUp = text("Let me know what you think.");
 
-  assert.equal(mergeFormattedMentions(markdown, formatted, new Set([alice])), undefined);
-  assert.strictEqual(markdown.children[0], heading);
-  assert.deepEqual(message.children, [emphasis, text(" is here. Hey "), anchor("Alice"), text("!")]);
+  assert.deepEqual(wrapMatrixHtmlInlineRuns([text("\n"), aliceLink, sentence, list, followUp]), [
+    element("div", [aliceLink, sentence]), list, element("div", [followUp]),
+  ]);
+});
+test("inline image sources must be Matrix content URIs with a server and one opaque media ID", () => {
+  for (const source of ["mxc://example.org/Aa-2_", "mxc://example.org:8448/abc", "mxc://[2001:db8::1]:8448/abc"]) {
+    assert.equal(isMatrixMediaUri(source), true, source);
+  }
+  for (const source of ["https://example.org/abc", "//example.org/abc", "data:image/png;base64,abc",
+    "mxc://example.org/", "mxc://example.org/abc/def", "mxc://example.org/abc?query=1",
+    "mxc://example.org/abc%2fdef", "mxc://example.org:65536/abc", "mxc://user@example.org/abc",
+    "mxc://example.org/abc#fragment", "mxc://[invalid]/abc", "mxc://example.org/abc\n"]) {
+    assert.equal(isMatrixMediaUri(source), false, source);
+  }
 });
 
-test("formatted HTML without a linked notification leaves the Markdown body alone", () => {
-  const markdown = root(element("p", element("strong", text("Hey Alice"))));
-  const formatted = root(element("div", anchor("Alice")));
-  const original = structuredClone(markdown);
-
-  assert.equal(mergeFormattedMentions(markdown, formatted, new Set()), undefined);
-  assert.deepEqual(markdown, original);
+test("formatted links accept Matrix permalinks and the listed absolute schemes", () => {
+  for (const href of ["https://example.org", "http://example.org", "ftp://example.org/file",
+    "mailto:alice@example.org", "magnet:?xt=urn:btih:example", "matrix:r/room:example.org"]) {
+    assert.equal(isMatrixMessageLink(href), true, href);
+  }
+  for (const href of ["/path", "//example.org", "#fragment", "javascript:void(0)", "https://", "mxc://example.org/abc"]) {
+    assert.equal(isMatrixMessageLink(href), false, href);
+  }
+  const mention = "matrix:u/alice:example.org";
+  assert.equal(isMatrixMessageLink(mention), true);
+  assert.equal(matrixUserIdFromHref(mention), alice);
 });
 
 test("a known member name takes priority over the mention link text", () => {

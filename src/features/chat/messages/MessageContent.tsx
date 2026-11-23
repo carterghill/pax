@@ -14,6 +14,7 @@ const UPLOAD_RING_SIZE = 16;
 const UPLOAD_RING_STROKE = 2;
 
 function shouldShowCaptionBelowMedia(msg: Message): boolean {
+  if (msg.formattedBody?.trim()) return true;
   const body = msg.body.trim();
   if (!body) return false;
   const fname = (msg.fileDisplayName ?? "").trim();
@@ -117,7 +118,7 @@ export default function MessageContent({
         }
       />
     );
-    showCaption = msg.body.trim().length > 0;
+    showCaption = shouldShowCaptionBelowMedia(msg);
   } else if (
     msg.fileMime?.startsWith("video/") &&
     msg.localFileUpload &&
@@ -264,7 +265,6 @@ export default function MessageContent({
           mentionedUserIds={msg.mentionedUserIds}
           mentionsRoom={msg.mentionsRoom}
           formattedBody={msg.formattedBody}
-          preferFormattedBody={mediaElement != null}
           selfUserId={selfUserId}
           resolveMemberLabel={resolveMemberLabel}
           onMentionClick={onOpenSenderProfile}
