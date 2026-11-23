@@ -72,6 +72,13 @@ fn main() {
             println!("cargo:rustc-link-lib=framework=CallKit");
             println!("cargo:rustc-link-lib=framework=PushKit");
         } else {
+            let source = "src/webview_recovery.m";
+            println!("cargo:rerun-if-changed={source}");
+            cc::Build::new()
+                .file(source)
+                .flag("-fobjc-arc")
+                .compile("pax_webview_recovery");
+            println!("cargo:rustc-link-lib=framework=WebKit");
             println!("cargo:rustc-link-lib=framework=AppKit");
             println!("cargo:rustc-link-lib=framework=UserNotifications");
         }

@@ -1502,6 +1502,18 @@ pub async fn restore_session(
     app: tauri::AppHandle,
 ) -> Result<String, String> {
     let _operation = state.encryption.operation.lock().await;
+    // A fresh page can attach to a session already installed in this process,
+    // including a sign-in whose credentials were never saved to disk.
+    if *state.sync_running.lock().await {
+        let client = super::get_client(&state).await?;
+        let user = client.user_id().ok_or("Missing account ID")?;
+        if super::account_conversion::read_journal(&app, client.homeserver().as_str(), user.as_str())?
+            .is_some_and(|journal| !journal.record.complete)
+        {
+            return Err(super::account_conversion::PENDING_MESSAGE.into());
+        }
+        return Ok(user.to_string());
+    }
     #[cfg(target_os = "android")]
     let _cold_store = crate::call_notifications::android::COLD_STORE.lock().await;
     let creds = read_credentials(&app)?.ok_or("No saved credentials")?;
@@ -1668,7 +1680,7 @@ mod encryption_tests {
         write_credentials(&path, &creds).unwrap();
         {
             let mut mock = server.state.lock().unwrap();
-            mock.expired_whoami_token = Some(session.access_token.clone());
+            mock.expired_request_token = Some((WHOAMI.into(), session.access_token.clone()));
             mock.route_overrides.insert(
                 ("POST".into(), REFRESH.into()),
                 (

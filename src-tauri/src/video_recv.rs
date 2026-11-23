@@ -44,6 +44,17 @@ struct StreamState {
     target: (u32, u32),
 }
 
+impl StreamState {
+    /// Only an empty-to-full transition needs to wake the viewer. A suspended
+    /// window retains one notification and the most recent frame until /frame.
+    fn publish(&mut self, number: u64, width: u32, height: u32, body: Vec<u8>) -> bool {
+        self.frame_number = number;
+        self.width = width;
+        self.height = height;
+        self.body.replace(body).is_none()
+    }
+}
+
 static STREAMS: Lazy<Mutex<HashMap<String, StreamState>>> =
     Lazy::new(|| Mutex::new(HashMap::new()));
 
@@ -333,21 +344,19 @@ pub fn spawn_video_receiver(
                             }
                         }
 
-                        {
+                        let notify = {
                             let mut streams = STREAMS.lock();
                             let entry = streams.entry(id.clone()).or_insert_with(|| StreamState {
                                 body: None, width: 0, height: 0, frame_number: 0,
                                 receiving: true, target: (tgt_w, tgt_h),
                             });
-                            entry.body = Some(body);
-                            entry.width = w;
-                            entry.height = h;
-                            entry.frame_number = frame_number;
+                            entry.publish(frame_number, w, h, body)
+                        };
+                        if notify {
+                            let _ = app_handle.emit("screen-share-frame-ready", FrameReadyEvent {
+                                id: id.clone(),
+                            });
                         }
-
-                        let _ = app_handle.emit("screen-share-frame-ready", FrameReadyEvent {
-                            id: id.clone(),
-                        });
                     }
                 }
 
@@ -503,4 +512,27 @@ fn parse_query_param_str(uri: &str, key: &str) -> Option<String> {
         }
     }
     None
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_suspended_viewer_gets_one_notification_and_resumes_at_the_latest_frame() {
+        let mut stream = StreamState {
+            body: None, width: 0, height: 0, frame_number: 0,
+            receiving: true, target: (2, 2),
+        };
+        for number in 1..=10_000u64 {
+            assert_eq!(stream.publish(number, 2, 2, number.to_le_bytes().to_vec()), number == 1);
+        }
+        let id = "slow-viewer-test";
+        STREAMS.lock().insert(id.into(), stream);
+        let request = || tauri::http::Request::get("/frame?id=slow-viewer-test").body(vec![]).unwrap();
+        assert_eq!(handle_protocol_request(request()).body(), &10_000u64.to_le_bytes());
+        assert_eq!(handle_protocol_request(request()).status(), 204);
+        let mut stream = STREAMS.lock().remove(id).unwrap();
+        assert!(stream.publish(10_001, 2, 2, vec![1]));
+    }
 }

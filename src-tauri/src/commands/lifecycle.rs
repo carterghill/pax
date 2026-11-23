@@ -67,6 +67,38 @@ pub fn exit_app(app: AppHandle) {
     app.exit(0);
 }
 
+/// Reload promptly even if leaving a call takes a network round trip.
+/// Session restoration waits on the same lock until old page resources are released.
+#[cfg(target_os = "macos")]
+pub(crate) async fn recover_main_window(window: &tauri::WebviewWindow) {
+    let app = window.app_handle();
+    let state = app.state::<Arc<AppState>>();
+    let _operation = state.encryption.operation.lock().await;
+    if let Err(error) = window.reload() {
+        log::error!("Could not reload the Pax window: {error}");
+    }
+    state.audio_recording.lock().await.take();
+    state.matrix_voip.reset().await;
+    state.group_calls.lock().await.clear();
+    let room_id = state.voice_room.lock().await.clone();
+    if let Some(room_id) = room_id {
+        if let Err(error) = super::voice_matrix::disconnect_from_room(
+            app,
+            &state,
+            &app.state::<VoiceManager>(),
+            room_id,
+        )
+        .await
+        {
+            log::warn!("Could not clear voice membership after renderer termination: {error}");
+        }
+    }
+    state.attachments.reset().await;
+    if state.client.lock().await.is_some() {
+        state.attachments.start_session();
+    }
+}
+
 pub(crate) async fn close_voice_before_exit(app: &AppHandle) {
     let state = app.state::<Arc<AppState>>();
     let voice = app.state::<VoiceManager>();

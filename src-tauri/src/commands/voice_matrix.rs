@@ -2,7 +2,9 @@ use std::sync::atomic::Ordering;
 use std::sync::Arc;
 use std::time::Duration;
 
-use matrix_sdk::ruma::events::StateEventType;
+use matrix_sdk::config::RequestConfig;
+use matrix_sdk::ruma::{api::client::state::send_state_event, events::StateEventType};
+use matrix_sdk::utils::IntoRawStateEventContent;
 use matrix_sdk::{Client, Room, RoomState};
 use tauri::{Emitter, State};
 
@@ -513,7 +515,6 @@ async fn send_or_fallback_leave(
 /// PUT `org.matrix.msc3401.call.member` for this device using a validated JWT service base URL.
 async fn matrix_voice_put_call_member(
     client: &Client,
-    http: &reqwest::Client,
     room_id: &str,
     livekit_service_url: &str,
     expires_ms: u64,
@@ -526,7 +527,6 @@ async fn matrix_voice_put_call_member(
         .ok_or("You no longer have access to this voice call")?;
     let device_id = client.device_id().ok_or("No device ID")?;
 
-    let homeserver = client.homeserver().to_string();
     let state_key = call_member_key(client)?;
     let now_ms = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -551,37 +551,20 @@ async fn matrix_voice_put_call_member(
         "scope": "m.room"
     });
 
-    let access_token = client.access_token().ok_or("No access token")?;
-    let state_url = format!(
-        "{}/_matrix/client/v3/rooms/{}/state/{}/{}",
-        homeserver.trim_end_matches('/'),
-        urlencoding::encode(room_id),
-        urlencoding::encode(CALL_MEMBER_EVENT),
-        urlencoding::encode(&state_key),
+    let request = send_state_event::v3::Request::new_raw(
+        room_id_parsed,
+        CALL_MEMBER_EVENT.into(),
+        state_key,
+        content.into_raw_state_event_content(),
     );
-
-    let resp = http
-        .put(&state_url)
-        .timeout(Duration::from_secs(30))
-        .bearer_auth(access_token.to_string())
-        .json(&content)
-        .send()
+    client
+        .send(request)
+        .with_request_config(
+            RequestConfig::new().timeout(Duration::from_secs(30)).disable_retry(),
+        )
         .await
-        .map_err(|e| format!("Failed to send state event (join): {}", fmt_error_chain(&e)))?;
-
-    let status = resp.status();
-    if !status.is_success() {
-        let body = resp.text().await.unwrap_or_default();
-        return Err(format!("Failed to send state event ({}): {}", status, body));
-    }
-
-    #[derive(serde::Deserialize)]
-    struct Published {
-        event_id: matrix_sdk::ruma::OwnedEventId,
-    }
-    resp.json::<Published>().await
-        .map(|event| event.event_id)
-        .map_err(|e| e.to_string())
+        .map(|response| response.event_id)
+        .map_err(|e| format!("Failed to publish voice membership: {}", fmt_error_chain(&e)))
 }
 
 /// Discover JWT service URL, validate via `/sfu/get`, then PUT `m.call.member` with the working URL.
@@ -645,7 +628,7 @@ async fn matrix_voice_join(
 
     let join = join?;
     let service_url = discovered.url;
-    let membership = matrix_voice_put_call_member(client, http, room_id, &service_url, expires_ms).await?;
+    let membership = matrix_voice_put_call_member(client, room_id, &service_url, expires_ms).await?;
 
     Ok((join, service_url, membership))
 }
@@ -865,7 +848,6 @@ fn start_heartbeat_loop(
                     Ok(url) => {
                         match matrix_voice_put_call_member(
                             c,
-                            &st.http_client,
                             &room_id,
                             &url,
                             expires_ms,
@@ -908,7 +890,6 @@ async fn recover_session(
             let jwt_url = livekit_jwt_service_url_for_refresh(client, http, room_id, app).await?;
             matrix_voice_put_call_member(
                 client,
-                http,
                 room_id,
                 &jwt_url,
                 VOICE_CALL_MEMBER_EXPIRES_MS,
@@ -922,7 +903,6 @@ async fn recover_session(
             let jwt_url = livekit_jwt_service_url_for_refresh(client, http, room_id, app).await?;
             matrix_voice_put_call_member(
                 client,
-                http,
                 room_id,
                 &jwt_url,
                 FALLBACK_MEMBERSHIP_EXPIRES_MS,
@@ -1229,6 +1209,15 @@ pub async fn voice_disconnect(
     voice_mgr: State<'_, voice::VoiceManager>,
     room_id: String,
 ) -> Result<(), String> {
+    disconnect_from_room(&app_handle, &state, &voice_mgr, room_id).await
+}
+
+pub(crate) async fn disconnect_from_room(
+    app_handle: &tauri::AppHandle,
+    state: &AppState,
+    voice_mgr: &voice::VoiceManager,
+    room_id: String,
+) -> Result<(), String> {
     let mut voice_room = state.voice_room.lock().await;
     let mut delay_id = None;
     if voice_room.as_deref() == Some(room_id.as_str()) {
@@ -1245,7 +1234,7 @@ pub async fn voice_disconnect(
         *voice_room = None;
     }
     let presence_session = state.voice_presence.session();
-    let result = if let Ok(client) = super::get_client(&state).await {
+    let result = if let Ok(client) = super::get_client(state).await {
         send_or_fallback_leave(&client, &state.http_client, &room_id, delay_id.as_deref()).await
     } else {
         Ok(())
@@ -1393,6 +1382,57 @@ pub async fn get_all_livekit_voice_snapshots(
 #[cfg(test)]
 mod voice_membership_cleanup_tests {
     use super::{body_indicates_msc4140_unsupported, delayed_leave_id, own_device_membership, DelayedLeaveError};
+
+    #[tokio::test]
+    async fn expired_membership_request_refreshes_and_retries_on_the_same_device() {
+        use crate::commands::{
+            auth::SavedSession,
+            pax_auth::tests::{client, Server, TestDir, USER},
+        };
+        use serde_json::json;
+
+        let server = Server::start().await;
+        let directory = TestDir::new();
+        let room = "!test:example.org";
+        let endpoint = format!(
+            "/_matrix/client/v3/rooms/{room}/state/{}/_{USER}_TEST_m.call",
+            super::CALL_MEMBER_EVENT
+        );
+        {
+            let mut mock = server.state.lock().unwrap();
+            mock.joined_test_room = true;
+            mock.expired_request_token = Some((endpoint.clone(), "expired".into()));
+            mock.route_overrides.insert(
+                ("POST".into(), "/_matrix/client/v3/refresh".into()),
+                (200, json!({"access_token":"renewed", "refresh_token":"next"})),
+            );
+            mock.route_overrides.insert(
+                ("PUT".into(), endpoint.clone()),
+                (200, json!({"event_id":"$membership"})),
+            );
+        }
+        let sdk = client(
+            &server.home,
+            &directory.0.join("store"),
+            SavedSession {
+                user_id: USER.into(),
+                device_id: "TEST".into(),
+                access_token: "expired".into(),
+                refresh_token: Some("refresh".into()),
+            },
+        ).await;
+        let event = super::matrix_voice_put_call_member(
+            &sdk, room, "https://rtc.example.org", super::FALLBACK_MEMBERSHIP_EXPIRES_MS,
+        ).await.unwrap();
+        assert_eq!(event.as_str(), "$membership");
+        let mock = server.state.lock().unwrap();
+        let writes: Vec<_> = mock.requests.iter()
+            .filter(|(_, path, _)| path == &endpoint)
+            .collect();
+        assert_eq!(writes.len(), 2);
+        assert_eq!(writes[0].2, writes[1].2);
+        assert_eq!(writes[1].2["device_id"], "TEST");
+    }
 
     #[test]
     fn ordinary_state_writes_allow_join_without_delayed_events() {

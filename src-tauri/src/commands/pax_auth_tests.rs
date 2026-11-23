@@ -93,7 +93,7 @@ fn envelope_rejects_wrong_password_tampering_and_account_or_key_substitution() {
 pub(crate) struct ServerState {
     versions: Option<Value>,
     pub route_overrides: HashMap<(String, String), (u16, Value)>,
-    pub expired_whoami_token: Option<String>,
+    pub expired_request_token: Option<(String, String)>,
     pub requests: Vec<(String, String, Value)>,
     pub credential: Option<String>,
     required_login_identifier: Option<String>,
@@ -202,17 +202,12 @@ async fn serve(mut socket: TcpStream, state: Arc<Mutex<ServerState>>) {
         state
             .requests
             .push((method.into(), path.clone(), body.clone()));
-        if path.ends_with("/account/whoami")
-            && state.expired_whoami_token.as_ref().is_some_and(|token| {
-                header
-                    .lines()
-                    .filter_map(|line| line.split_once(':'))
-                    .any(|(key, value)| {
-                        key.eq_ignore_ascii_case("authorization")
-                            && value.trim().strip_prefix("Bearer ") == Some(token.as_str())
-                    })
+        if state.expired_request_token.as_ref().is_some_and(|(endpoint, token)| {
+            path == *endpoint && header.lines().filter_map(|line| line.split_once(':')).any(|(key, value)| {
+                key.eq_ignore_ascii_case("authorization")
+                    && value.trim().strip_prefix("Bearer ") == Some(token.as_str())
             })
-        {
+        }) {
             (
                 401,
                 json!({"errcode":"M_UNKNOWN_TOKEN", "error":"Expired access token", "soft_logout":true}),
@@ -623,7 +618,7 @@ pub(crate) async fn client(home: &str, path: &Path, session: SavedSession) -> Cl
 }
 
 pub(crate) async fn client_without_sync(home: &str, path: &Path, session: SavedSession) -> Client {
-    let client = Client::builder()
+    let builder = Client::builder()
         .homeserver_url(home)
         .sqlite_store(path, None)
         .request_config(RequestConfig::new().disable_retry())
@@ -631,10 +626,13 @@ pub(crate) async fn client_without_sync(home: &str, path: &Path, session: SavedS
             auto_enable_cross_signing: false,
             auto_enable_backups: false,
             backup_download_strategy: BackupDownloadStrategy::AfterDecryptionFailure,
-        })
-        .build()
-        .await
-        .unwrap();
+        });
+    let builder = if session.refresh_token.is_some() {
+        builder.handle_refresh_tokens()
+    } else {
+        builder
+    };
+    let client = builder.build().await.unwrap();
     client
         .restore_session(MatrixSession {
             meta: SessionMeta {
@@ -643,7 +641,7 @@ pub(crate) async fn client_without_sync(home: &str, path: &Path, session: SavedS
             },
             tokens: SessionTokens {
                 access_token: session.access_token,
-                refresh_token: None,
+                refresh_token: session.refresh_token,
             },
         })
         .await

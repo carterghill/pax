@@ -104,7 +104,7 @@ const SPEAKING_LEVEL_THRESHOLD: f32 = 0.009;
 /// How often to push voice state so RMS-based speaking indicators stay responsive.
 const SPEAKING_UI_TICK_MS: u64 = 90;
 // ─── Types emitted to the frontend ─────────────────────────────────────────
-#[derive(Clone, Serialize, Debug)]
+#[derive(Clone, Serialize, Debug, PartialEq)]
 #[serde(rename_all = "camelCase")]
 pub struct VoiceParticipantInfo {
     pub identity: String,
@@ -114,7 +114,7 @@ pub struct VoiceParticipantInfo {
     pub is_deafened: bool,
     pub connection_interrupted: bool,
 }
-#[derive(Clone, Serialize, Debug)]
+#[derive(Clone, Serialize, Debug, PartialEq)]
 #[serde(rename_all = "camelCase")]
 pub struct VoiceStateEvent {
     pub room_id: String,
@@ -150,6 +150,7 @@ pub struct AudioDeviceList {
 // ─── Internal shared audio state ────────────────────────────────────────────
 struct AudioState {
     attempt_id: String,
+    last_emitted: Option<VoiceStateEvent>,
     transport_reconnecting: bool,
     reconnect_after_matrix_loss: bool,
     /// Per-track playback buffers from remote participants (f32, mono).
@@ -192,6 +193,7 @@ impl Default for AudioState {
     fn default() -> Self {
         Self {
             attempt_id: String::new(),
+            last_emitted: None,
             transport_reconnecting: false,
             reconnect_after_matrix_loss: false,
             playback_buffers: HashMap::new(),
@@ -1474,7 +1476,7 @@ fn emit_state(
     is_connected: bool,
     error: Option<String>,
 ) {
-    let st = audio_state.lock();
+    let mut st = audio_state.lock();
     let is_reconnecting = st.transport_reconnecting;
     let is_connecting = is_connecting || is_reconnecting;
     let is_connected = is_connected && !is_reconnecting;
@@ -1537,7 +1539,11 @@ fn emit_state(
             Vec::new()
         },
     };
-    let _ = app_handle.emit("voice-state-changed", event);
+    if st.last_emitted.as_ref() != Some(&event)
+        && app_handle.emit("voice-state-changed", &event).is_ok()
+    {
+        st.last_emitted = Some(event);
+    }
 }
 
 /// Best-effort: set only the Pax-specific deafen attribute on our LiveKit participant.

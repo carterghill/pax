@@ -353,6 +353,7 @@ export default function ScreenShareViewer({ active, identity }: ScreenShareViewe
     let mounted = true;
     let frameAvailable = true;
     let fetchInFlight = false;
+    let lastFetch = -Infinity;
     let rafId = 0;
     let unlisten: UnlistenFn | null = null;
     const encodedId = encodeURIComponent(identity);
@@ -379,12 +380,15 @@ export default function ScreenShareViewer({ active, identity }: ScreenShareViewe
       : null;
     if (resizeObs && containerRef.current) resizeObs.observe(containerRef.current);
 
-    const tick = () => {
+    const tick = (now: number) => {
       if (!mounted) return;
       rafId = requestAnimationFrame(tick);
-      if (!frameAvailable || fetchInFlight) return;
+      if (document.hidden || fetchInFlight) return;
+      // An interrupted request can leave a frame pending without a new notification.
+      if (!frameAvailable && now - lastFetch < 1000) return;
       frameAvailable = false;
       fetchInFlight = true;
+      lastFetch = now;
 
       (async () => {
         try {
@@ -434,8 +438,10 @@ export default function ScreenShareViewer({ active, identity }: ScreenShareViewe
         frameAvailable = true;
       }
     }).then((fn) => {
+      if (!mounted) { fn(); return; }
       unlisten = fn;
-    });
+      frameAvailable = true;
+    }).catch((error) => console.warn("Could not subscribe to screen share frames:", error));
 
     return () => {
       mounted = false;

@@ -422,6 +422,7 @@ pub fn run() {
         })
         .plugin(
             tauri_plugin_log::Builder::new()
+                .clear_targets()
                 .level(log::LevelFilter::Info)
                 // So support bundles match local console timestamps.
                 .timezone_strategy(tauri_plugin_log::TimezoneStrategy::UseLocal)

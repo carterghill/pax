@@ -36,6 +36,8 @@ pub fn setup(app: &mut tauri::App) -> Result<(), Box<dyn std::error::Error>> {
     let main_window = app
         .get_webview_window("main")
         .expect("main window not found");
+    #[cfg(target_os = "macos")]
+    renderer_recovery::install(&main_window)?;
     #[cfg(target_os = "windows")]
     crate::app_badge::windows::initialize(&main_window);
     #[cfg(desktop)]
@@ -109,6 +111,33 @@ pub fn setup(app: &mut tauri::App) -> Result<(), Box<dyn std::error::Error>> {
     }
 
     Ok(())
+}
+
+#[cfg(target_os = "macos")]
+mod renderer_recovery {
+    use std::{ffi::c_void, sync::OnceLock};
+    use tauri::WebviewWindow;
+
+    static MAIN_WINDOW: OnceLock<WebviewWindow> = OnceLock::new();
+
+    extern "C" {
+        fn pax_install_renderer_recovery(view: *mut c_void, on_termination: extern "C" fn());
+    }
+
+    pub(super) fn install(window: &WebviewWindow) -> tauri::Result<()> {
+        let _ = MAIN_WINDOW.set(window.clone());
+        window.with_webview(|webview| unsafe {
+            pax_install_renderer_recovery(webview.inner(), on_termination);
+        })
+    }
+
+    extern "C" fn on_termination() {
+        let Some(window) = MAIN_WINDOW.get() else {
+            return;
+        };
+        log::warn!("WebKit terminated the main window renderer. Recovering the window.");
+        tauri::async_runtime::spawn(super::commands::lifecycle::recover_main_window(window));
+    }
 }
 
 fn cleanup_temp_files(app: &mut tauri::App) {
