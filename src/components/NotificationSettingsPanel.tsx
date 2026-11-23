@@ -1,3 +1,4 @@
+import CallPreferenceSelect from "./CallPreferenceSelect";
 import { useEffect, useState } from "react";
 import { useTheme } from "../theme/ThemeContext";
 import {
@@ -227,6 +228,7 @@ export default function NotificationSettingsPanel({
 
   return (
     <div style={{ display: "flex", flexDirection: "column", gap: spacing.unit * 5 }}>
+      {scope !== "space" && <CallPreferenceSelect scope={scope} id={scopeId} />}
       {/* ============ Notification level ============ */}
       <div>
         <h3 style={sectionHeading}>Notification level</h3>

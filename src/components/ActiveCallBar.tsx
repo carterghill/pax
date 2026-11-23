@@ -1,3 +1,4 @@
+import { useRoomCallPermissions } from "../hooks/useRoomCallPermissions";
 import { ArrowRightToLine, Laptop, PhoneIncoming, PhoneOff, Loader2, Wifi, WifiOff, X, type LucideIcon } from "lucide-react";
 import { useTheme } from "../theme/ThemeContext";
 
@@ -7,6 +8,7 @@ export interface VoiceJoinButton {
 }
 
 export interface RemoteCallBarProps {
+  roomId: string;
   roomName: string;
   status: "remote";
   joinButton: VoiceJoinButton;
@@ -52,6 +54,7 @@ function CallBarIconButton({ label, icon: Icon, onClick, disabled }: {
 export default function ActiveCallBar(props: ActiveCallBarProps) {
   const { palette, spacing, typography } = useTheme();
   const { roomName, status } = props;
+  const permissions = useRoomCallPermissions(status === "remote" ? props.roomId : undefined);
   const detail = status === "remote" ? undefined : props.detail;
 
   const labels = {
@@ -129,7 +132,7 @@ export default function ActiveCallBar(props: ActiveCallBarProps) {
         label={actionLabel}
         icon={ActionIcon}
         onClick={status === "remote" ? props.joinButton.onClick : props.onDisconnect}
-        disabled={status === "disconnecting"}
+        disabled={status === "disconnecting" || (status === "remote" && !permissions?.join)}
       />
     </div>
   );

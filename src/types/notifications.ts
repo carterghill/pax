@@ -21,7 +21,10 @@ export type TrayUnreadIndicatorMode =
   | "notifyOnly"
   | "never";
 
+export type CallMode = "ring" | "silent" | "block";
+
 export interface NotificationSettings {
+  calls?: { global: CallMode; rooms: Record<string, CallMode>; users: Record<string, CallMode> };
   version: number;
   trayUnreadIndicator?: TrayUnreadIndicatorMode;
   globalDefault: NotificationLevel | null;

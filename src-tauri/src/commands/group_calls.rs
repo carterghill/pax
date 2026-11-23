@@ -14,6 +14,7 @@ use tauri::{AppHandle, Emitter, State};
 use tokio::sync::Mutex;
 
 use super::matrix_voip::callable_room;
+use super::call_policy::{self, CallKind, CallMode};
 use crate::{
     voice_presence::{active_membership, now_ms},
     AppState,
@@ -33,6 +34,26 @@ pub(crate) struct Ring {
     invitees: Vec<OwnedUserId>,
 }
 
+pub(super) async fn invitees(
+    state: &AppState,
+    room: &Room,
+    levels: &matrix_sdk::ruma::events::room::power_levels::RoomPowerLevels,
+) -> Result<Vec<OwnedUserId>, String> {
+    let ignored = state.ignored_users.users(&room.client()).await;
+    Ok(room
+        .members(RoomMemberships::JOIN)
+        .await
+        .map_err(|e| e.to_string())?
+        .into_iter()
+        .map(|m| m.user_id().to_owned())
+        .filter(|id| {
+            id != room.own_user_id()
+                && !ignored.contains(id)
+                && CallKind::Group.can_answer(levels, room, id)
+        })
+        .collect())
+}
+
 #[tauri::command]
 pub(crate) async fn ring_group_call(
     state: State<'_, Arc<AppState>>,
@@ -47,14 +68,9 @@ pub(crate) async fn ring_group_call(
     {
         return Err("Join the group chat’s voice session before ringing.".into());
     }
-    let invitees: Vec<_> = room
-        .members(RoomMemberships::JOIN)
-        .await
-        .map_err(|e| e.to_string())?
-        .into_iter()
-        .map(|m| m.user_id().to_owned())
-        .filter(|id| id != room.own_user_id())
-        .collect();
+    call_policy::require_start(&room, CallKind::Group, None).await?;
+    let levels = room.power_levels().await.map_err(|e| e.to_string())?;
+    let invitees = invitees(&state, &room, &levels).await?;
     if invitees.is_empty() {
         return Err("No other members have joined this group chat.".into());
     }
@@ -116,6 +132,7 @@ pub(crate) async fn respond_to_group_call(
 #[serde(rename_all = "camelCase")]
 pub(crate) struct GroupSignal {
     kind: &'static str,
+    silent: bool,
     room_id: String,
     sender: OwnedUserId,
     from_self: bool,
@@ -247,6 +264,7 @@ async fn parse(
         }
     };
     Some(GroupSignal {
+        silent: false,
         kind,
         room_id: room.room_id().to_string(),
         sender,
@@ -270,10 +288,20 @@ pub(super) async fn receive_signals(
             continue;
         };
         for event in &update.timeline.events {
-            if let Some(signal) = parse(&room, event, None).await {
-                if !ignored.contains(&signal.sender) {
-                    incoming.push(signal);
+            if let Some(mut signal) = parse(&room, event, None).await {
+                if ignored.contains(&signal.sender) {
+                    continue;
                 }
+                if signal.kind == "ring" {
+                    let mode =
+                        call_policy::incoming_mode(state, &room, &signal.sender, CallKind::Group)
+                            .await;
+                    if mode == CallMode::Block {
+                        continue;
+                    }
+                    signal.silent = mode == CallMode::Silent;
+                }
+                incoming.push(signal);
             }
         }
     }
@@ -338,6 +366,11 @@ pub(crate) async fn push_event(
             }
         }
     } else if !signal.from_self {
+        return Some(ignored);
+    }
+    if kind == "ring"
+        && !call_policy::pushed_call_can_ring(room, &signal.sender, CallKind::Group).await
+    {
         return Some(ignored);
     }
     let caller = room

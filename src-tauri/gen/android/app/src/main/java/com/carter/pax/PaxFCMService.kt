@@ -77,7 +77,8 @@ class PaxFCMService : FirebaseMessagingService() {
         val directCallEvent = type == "com.carter.pax.direct_call" || type?.startsWith("m.call.") == true ||
             type in setOf("org.matrix.msc4075.rtc.notification", "m.rtc.notification", "org.matrix.msc4310.rtc.decline", "m.rtc.decline", "com.carter.pax.rtc.answer")
         var resolvedPreview: String? = null
-        var silent = false
+        // An unresolved encrypted event could be a call the recipient silenced.
+        var silent = type == "m.room.encrypted" || type == null
         if ((directCallEvent || type == "m.room.encrypted" || type == null) &&
             roomId.isNotEmpty() && eventId.isNotEmpty()
         ) {

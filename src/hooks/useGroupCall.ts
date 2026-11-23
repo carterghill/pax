@@ -1,3 +1,4 @@
+import type { CallPermissions } from "./useRoomCallPermissions";
 import { useCallback, useEffect, useRef, type RefObject } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
@@ -7,6 +8,7 @@ import type { VoiceCall } from "./useVoiceCall";
 
 interface GroupSignal extends Omit<GroupResponse, "kind"> {
   kind: "ring" | GroupResponse["kind"];
+  silent: boolean;
   callId: string;
   expiresAt: number;
 }
@@ -30,6 +32,7 @@ export function useGroupCall(
   update: (call: DirectCall | null) => void,
   setError: (error: string | null) => void,
   ready: boolean,
+  dismissQuiet: RefObject<() => void>,
 ) {
   const session = useRef<GroupSession | null>(null);
   const { connect, disconnect } = voice;
@@ -56,6 +59,7 @@ export function useGroupCall(
   }, [disconnect, update]);
 
   const start = useCallback((roomId: string, userId: string) => {
+    dismissQuiet.current();
     if (current.current || busy.current) return;
     const group: GroupSession = {
       call: { callId: crypto.randomUUID(), roomId, peerUserId: userId, transport: "group",
@@ -66,6 +70,9 @@ export function useGroupCall(
     setError(null);
     update(group.call);
     void (async () => {
+      const permissions = await invoke<CallPermissions>("get_room_call_permissions", { roomId, checkGroup: true });
+      if (session.current !== group) return;
+      if (!permissions.group) throw new Error("Your role cannot ring a group call in this room.");
       let membershipEventId: string | undefined;
       const connected = await connect(roomId, { replaceOtherSessions: false, onJoined: (id) => { membershipEventId = id; } });
       if (session.current !== group) return;
@@ -78,7 +85,7 @@ export function useGroupCall(
     })().catch((reason) => {
       if (session.current === group) { void finish(true); setError(String(reason)); }
     });
-  }, [busy, connect, current, finish, publish, setError, update]);
+  }, [busy, connect, current, dismissQuiet, finish, publish, setError, update]);
 
   const answer = useCallback((onStarted?: (roomId: string) => void) => {
     const group = session.current;
@@ -101,9 +108,11 @@ export function useGroupCall(
   const receive = useCallback(async (event: GroupSignal) => {
     const group = session.current;
     if (event.kind === "ring") {
-      if (current.current || busy.current || event.expiresAt <= Date.now()) return;
+      if (busy.current || event.expiresAt <= Date.now()) return;
+      if (!event.silent) dismissQuiet.current();
+      if (current.current) return;
       const call: DirectCall = { callId: event.callId, roomId: event.roomId, peerUserId: event.sender,
-        phase: "incoming", transport: "group", expiresAt: event.expiresAt, ringEventId: event.ringEventId };
+        phase: "incoming", silent: event.silent, transport: "group", expiresAt: event.expiresAt, ringEventId: event.ringEventId };
       session.current = { call, outgoing: false, invitees: new Set(), declined: new Set() };
       setError(null);
       update(call);
@@ -125,7 +134,7 @@ export function useGroupCall(
         setError("Everyone declined the call.");
         break;
     }
-  }, [busy, current, finish, publish, setError, update]);
+  }, [busy, current, dismissQuiet, finish, publish, setError, update]);
 
   useEffect(() => {
     if (!ready) return;
@@ -171,5 +180,10 @@ export function useGroupCall(
     return () => clearTimeout(timer);
   }, [call, finish, hasPeer, publish, setError, voice.connectedRoomId, voice.endedRoomId, voice.isReconnecting, voice.targetRoomId]);
 
-  return { start, answer, finish };
+  const silence = useCallback((silent: boolean) => {
+    const group = session.current;
+    if (group?.call.phase === "incoming") publish(group, { silent });
+  }, [publish]);
+
+  return { start, answer, finish, silence };
 }

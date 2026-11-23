@@ -16,6 +16,7 @@ use serde::{Deserialize, Serialize};
 use tauri::{Emitter, State};
 use tokio::sync::Mutex;
 
+use super::call_policy::{self, CallKind, CallMode};
 use crate::{
     types::{
         DirectCallEndReason, DirectCallNotice, DirectCallNoticeDetails,
@@ -99,6 +100,7 @@ pub(crate) struct DirectCallSignal {
     peer_user_id: OwnedUserId,
     from_peer: bool,
     for_this_device: bool,
+    silent: bool,
     expires_at: u64,
 }
 
@@ -185,6 +187,11 @@ pub(crate) async fn call_push_event(
         CallPushOutcome::Missed(ring) => ("missed", 0, Some(&ring.event_id)),
         CallPushOutcome::Ignore => return Some(ignored),
     };
+    if matches!(kind, "ring" | "missed")
+        && !call_policy::pushed_call_can_ring(room, peer, CallKind::LiveKit).await
+    {
+        return Some(ignored);
+    }
     let caller = room
         .get_member_no_sync(peer)
         .await
@@ -341,8 +348,11 @@ pub(crate) async fn send_direct_call_signal(
     if content.declined {
         super::unread::acknowledge_calls(&state, &app, &room, std::slice::from_ref(&content.call_id)).await;
     }
-    if direct_call_peer(&room).await.is_none() {
-        return Err("Both people must join the direct message before calling.".into());
+    let peer = direct_call_peer(&room)
+        .await
+        .ok_or("Both people must join the direct message before calling.")?;
+    if kind == SignalKind::Ring {
+        call_policy::require_start(&room, CallKind::LiveKit, Some(&peer)).await?;
     }
 
     let payload = serde_json::to_value(&content).map_err(|error| error.to_string())?;
@@ -487,6 +497,18 @@ pub(super) async fn receive_signals(
             if from_peer {
                 state.matrix_voip.remember_livekit_peer(room_id, &peer).await;
             }
+            let mut silent = false;
+            if from_peer && call.content.kind == SignalKind::Ring && expires_at.is_some() {
+                let mode = call_policy::incoming_mode(state, &room, &peer, CallKind::LiveKit).await;
+                if mode == CallMode::Block {
+                    state
+                        .unread_projection
+                        .acknowledge_calls(&room, std::slice::from_ref(&call.content.call_id))
+                        .await;
+                    continue;
+                }
+                silent = mode == CallMode::Silent;
+            }
             let handled_here = call.handled_by(me);
             // A past response can still settle an unread ring on initial sync.
             if handled_here || from_peer {
@@ -515,6 +537,7 @@ pub(super) async fn receive_signals(
                 crate::call_notifications::close_ios_ringing_call(&call.content.call_id);
             }
             incoming.push(DirectCallSignal {
+                silent,
                 for_this_device: call.content.answer_device_id.as_deref() == Some(device.as_str()),
                 content: call.content,
                 event_id: call.event_id,

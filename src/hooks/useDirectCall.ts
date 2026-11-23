@@ -5,6 +5,8 @@ import type { VoiceCall } from "./useVoiceCall";
 import { VOICE_RECOVERY_REFRESH_MS, type VoiceRecovery } from "./useVoiceRecovery";
 import { isVoiceParticipantOnDevice } from "../utils/matrix";
 import { useGroupCall } from "./useGroupCall";
+import type { CallPermissions } from "./useRoomCallPermissions";
+import type { CallMode } from "../types/notifications";
 import { useMatrixVoip } from "./useMatrixVoip";
 import { getCallDuration } from "../features/chat/messages/callHistory";
 
@@ -17,6 +19,7 @@ interface CallId {
 }
 
 interface CallSignal extends CallId {
+  silent: boolean;
   eventId: string;
   kind: SignalKind;
   deviceId: string;
@@ -28,6 +31,7 @@ interface CallSignal extends CallId {
 }
 
 export interface DirectCall extends CallId {
+  silent?: boolean;
   transport?: "matrix" | "selecting" | "group";
   phase: "dialing" | "incoming" | "answering" | "connecting" | "active" | "interrupted" | "resuming";
   peerDeviceId?: string;
@@ -90,13 +94,15 @@ export function useDirectCall(
     setCall(next);
   }, []);
 
+  // A quiet invitation never reserves the phone against an explicit outgoing call or an audible ring.
+  const dismissQuiet = useRef<() => void>(() => {});
   const {
-    finish: finishMatrix, start: startMatrix, answer: answerMatrix,
+    finish: finishMatrix, silence: silenceMatrix, start: startMatrix, answer: answerMatrix,
     connection: matrixConnection, micEnabled: matrixMicEnabled, toggleMic: toggleMatrixMic,
-  } = useMatrixVoip(current, voiceBusy, update, setError, recoveryReady);
+  } = useMatrixVoip(current, voiceBusy, update, setError, recoveryReady, dismissQuiet);
 
-  const { start: startGroup, answer: answerGroup, finish: finishGroup } =
-    useGroupCall(voice, current, voiceBusy, update, setError, recoveryReady);
+  const { start: startGroup, answer: answerGroup, finish: finishGroup, silence: silenceGroup } =
+    useGroupCall(voice, current, voiceBusy, update, setError, recoveryReady, dismissQuiet);
 
   const finish = useCallback((notifyPeer: boolean, options: {
     connectionLost?: boolean;
@@ -131,7 +137,45 @@ export function useDirectCall(
     return Promise.resolve();
   }, [disconnect, finishGroup, finishMatrix, forget, update]);
 
-  const end = useCallback(() => finish(true), [finish]);
+  dismissQuiet.current = () => {
+    if (current.current?.phase === "incoming" && current.current.silent) void finish(false);
+  };
+
+  useEffect(() => {
+    if (call?.phase !== "incoming") return;
+    let active = true;
+    let revision = 0;
+    async function refresh() {
+      const pending = current.current;
+      if (!active || !pending || pending !== call) return;
+      const request = ++revision;
+      const mode = await invoke<CallMode>("get_incoming_call_mode", {
+        roomId: pending.roomId, peerUserId: pending.peerUserId,
+        kind: pending.transport === "group" ? "group" : pending.transport === "matrix" ? "member" : "liveKit",
+      }).catch(() => "block");
+      if (!active || request !== revision || current.current !== pending) return;
+      if (mode === "block") { void finish(false); return; }
+      const silent = mode === "silent";
+      if (silent === !!pending.silent) return;
+      if (pending.transport === "group") silenceGroup(silent);
+      else if (pending.transport === "matrix") silenceMatrix(silent);
+      else update({ ...pending, silent });
+    }
+    const subscriptions = [
+      listen("pax-notification-settings-changed", refresh),
+      listen("pax-notification-settings-invalidated", refresh),
+      listen("ignored-users-changed", refresh),
+      listen<string>("room-call-permissions-changed", ({ payload }) => { if (payload === call.roomId) void refresh(); }),
+      listen<{ roomId: string }>("room-members-changed", ({ payload }) => { if (payload.roomId === call.roomId) void refresh(); }),
+    ];
+    void Promise.allSettled(subscriptions).then(refresh);
+    return () => {
+      active = false;
+      for (const subscription of subscriptions) void subscription.then(remove => remove()).catch(() => {});
+    };
+  }, [call, finish, silenceGroup, silenceMatrix, update]);
+
+  const end = useCallback(() => finish(!(current.current?.phase === "incoming" && current.current.silent)), [finish]);
   const decline = useCallback(() => {
     if (current.current?.phase === "incoming") return finish(true, { declined: true });
   }, [finish]);
@@ -209,6 +253,7 @@ export function useDirectCall(
 
   const receive = useCallback((signal: CallSignal) => {
     if (signal.expiresAt <= Date.now()) return;
+    if (signal.kind === "ring" && signal.fromPeer && !signal.silent) dismissQuiet.current();
     const pending = current.current;
     if (pending?.transport === "matrix" || pending?.transport === "group") return;
     const matches = pending?.callId === signal.callId && pending.roomId === signal.roomId &&
@@ -243,6 +288,7 @@ export function useDirectCall(
         peerDeviceId: signal.deviceId,
         ringEventId: signal.eventId,
         phase: "incoming",
+        silent: signal.silent,
         expiresAt: signal.expiresAt,
       });
       return;
@@ -385,6 +431,7 @@ export function useDirectCall(
   }, [call, finish, voice.endedRoomId]);
 
   const start = useCallback((roomId: string, peerUserId: string, memberCall = false) => {
+    dismissQuiet.current();
     if (current.current || voiceBusy.current || mediaStop.current) return;
     const pending: DirectCall = {
       roomId, peerUserId, callId: crypto.randomUUID(), phase: "dialing", expiresAt: Date.now() + RING_MS,
@@ -393,6 +440,9 @@ export function useDirectCall(
     setError(null);
     update(pending);
     void (async () => {
+      const permissions = await invoke<CallPermissions>("get_room_call_permissions", { roomId, peerUserId });
+      if (current.current !== pending) return;
+      if (!permissions.member) throw new Error("This call is unavailable with the current membership or room permissions.");
       const useLiveKit = !memberCall && await invoke<boolean>("prefer_livekit_call", { roomId, peerUserId }).catch(() => false);
       if (current.current !== pending) return;
       if (!useLiveKit) {
@@ -412,7 +462,11 @@ export function useDirectCall(
       } finally {
         if (offer.current?.sending === sending) offer.current = null;
       }
-    })();
+    })().catch((reason) => {
+      if (current.current !== pending) return;
+      void finish(false);
+      setError(String(reason));
+    });
   }, [finish, startMatrix, update]);
 
   const answer = useCallback((onStarted?: (roomId: string) => void, expectedCallId?: string) => {

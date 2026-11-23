@@ -1,3 +1,4 @@
+import { useRoomCallPermissions, type CallPermissions } from "../hooks/useRoomCallPermissions";
 import SpaceSidebar from "../components/SpaceSidebar";
 import RoomSidebar from "../components/RoomSidebar";
 import type { RemoteCallBarProps } from "../components/ActiveCallBar";
@@ -675,6 +676,10 @@ export default function MainLayout({
     return raw;
   }, [activeRoomId, getRoom, dmTransitionHint]);
 
+  const activeDmPeer = activeRoom?.dmPeerUserId;
+  const permissionsRoomId = activeRoom?.membership === "joined" && !activeRoom.upgradePending ? activeRoom.id : undefined;
+  const callPermissions = useRoomCallPermissions(permissionsRoomId, activeDmPeer, !!activeRoom?.isDirect && !activeDmPeer);
+
   const moderationSpaceTreeRoomIds = useMemo(() => {
     if (!activeSpaceId || !activeRoom || isOneToOneChatUi(activeRoom)) return null;
     const inTree =
@@ -805,6 +810,8 @@ export default function MainLayout({
 
   const connectVoiceCall = useCallback<VoiceCallActions["connect"]>(async (roomId, options) => {
     const request = ++latestChannelJoin.current;
+    const permissions = await invoke<CallPermissions>("get_room_call_permissions", { roomId }).catch(() => null);
+    if (!permissions?.join || latestChannelJoin.current !== request) return false;
     await endDirectCall();
     if (latestChannelJoin.current !== request) return false;
     const previousRoomId = targetVoiceRoomId ?? eligibleRecovery?.roomId;
@@ -828,6 +835,7 @@ export default function MainLayout({
     return {
       roomName: room.name,
       status: "remote",
+      roomId: room.id,
       joinButton: {
         label: mode === "handoff" ? "Join here instead" : "Join voice",
         onClick: () => {
@@ -1364,7 +1372,8 @@ export default function MainLayout({
   const directCallName = groupCall ? directCallRoom?.name || "Group chat"
     : roomDescribesPeer ? effectiveDmTitle(directCallRoom) : peerName;
   const callAvatar = roomDescribesPeer ? directCallRoom.avatarUrl : peer?.avatarUrl;
-  useCallNotifications(directCall, groupCall && directCall.phase === "incoming" ? `${peerName} · ${directCallName}` : directCallName, answerDirectCall, endDirectCallFromNotification,
+  const quietIncoming = directCall?.phase === "incoming" && directCall.silent;
+  useCallNotifications(quietIncoming ? null : directCall, groupCall && directCall.phase === "incoming" ? `${peerName} · ${directCallName}` : directCallName, answerDirectCall, endDirectCallFromNotification,
     !!voiceCall.connectedRoomId || voiceCall.isConnecting);
   const roomSidebarEl = (
     <>
@@ -1453,9 +1462,10 @@ export default function MainLayout({
     </>
   );
 
-  const chatCall = directCall && directCall.phase !== "incoming" && !discoverOpen && !showingDraftDm
-    && activeRoom?.id === directCall.roomId && activeRoom.membership === "joined"
-    && !activeRoom.upgradePending && activeRoom.roomType !== VOICE_ROOM_TYPE ? directCall : null;
+  const viewingCallRoom = directCall && !discoverOpen && !showingDraftDm && activeRoom?.id === directCall.roomId
+    && activeRoom.membership === "joined" && !activeRoom.upgradePending;
+  const chatCall = viewingCallRoom && activeRoom.roomType !== VOICE_ROOM_TYPE && (directCall.phase !== "incoming" || quietIncoming)
+    ? directCall : null;
   const showCallPanel = chatCall?.phase === "active" && connectedVoiceRoomId === chatCall.roomId;
   const directCallStatus = directCall && (
     <DirectCallControls
@@ -1474,10 +1484,13 @@ export default function MainLayout({
       onToggleMic={toggleDirectCallMic}
     />
   );
-  const activeDmPeer = activeRoom?.dmPeerUserId;
-  const callUnavailable = directCall || connectedVoiceRoomId || voiceCall.isConnecting
+  const callUnavailable = (directCall && !quietIncoming) || connectedVoiceRoomId || voiceCall.isConnecting
     ? "End the current call before starting another"
     : activeRoom?.upgradePending || activeRoom?.membership !== "joined" ? "Join the room to call" : undefined;
+
+  const headerCallUnavailable = callUnavailable ?? (
+    !(activeDmPeer ? callPermissions?.member : callPermissions?.group) ? "This call is unavailable with the current membership or room permissions" : undefined
+  );
 
   return (
     <PresenceContext.Provider value={{ manualStatus, setManualStatus, effectivePresence, statusMessage, setStatusMessage }}>
@@ -1529,7 +1542,7 @@ export default function MainLayout({
           flexDirection: "column",
           paddingBottom: isMobile ? "env(safe-area-inset-bottom, 0px)" : 0,
         }}>
-          {!chatCall && directCallStatus}
+          {!chatCall && (!quietIncoming || viewingCallRoom) && directCallStatus}
           {directCallError && <DirectCallError message={directCallError} onDismiss={clearDirectCallError} />}
           <div style={{
             flex: 1,
@@ -1570,6 +1583,7 @@ export default function MainLayout({
                 voiceParticipants={voiceParticipants[activeRoom.id] ?? []}
                 participantStates={voiceParticipantStatesByRoom[activeRoom.id]}
                 canReconnect={eligibleRecovery?.roomId === activeRoom.id || targetVoiceRoomId === activeRoom.id}
+                canJoin={callPermissions?.join ?? false}
                 joinButton={activeRoomRemoteCall?.joinButton}
                 userId={userId}
               />
@@ -1586,12 +1600,12 @@ export default function MainLayout({
                   setUserMenuWidth(clamped);
                 }}
                 onStartDirectMessage={handleStartDirectMessage}
-                onCallMember={callUnavailable ? undefined : (user) => placeDirectCall(activeRoom.id, user, true)}
-                onStartCall={callUnavailable || !activeRoom.isDirect ? undefined : () => {
+                onCallMember={callUnavailable || !callPermissions?.member ? undefined : (user) => placeDirectCall(activeRoom.id, user, true)}
+                onStartCall={headerCallUnavailable || !activeRoom.isDirect ? undefined : () => {
                   if (activeDmPeer) placeDirectCall(activeRoom.id, activeDmPeer);
                   else { abandonVoiceChannel(); startGroupCall(activeRoom.id, userId); }
                 }}
-                callUnavailable={callUnavailable}
+                callUnavailable={headerCallUnavailable}
                 callContent={chatCall && (
                   <>
                     {showCallPanel && (

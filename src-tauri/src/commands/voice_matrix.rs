@@ -1055,10 +1055,14 @@ pub async fn voice_connect(
     let mut voice_room = state_arc.voice_room.lock().await;
     let client = super::get_client(&state).await?;
     let parsed_room = matrix_sdk::ruma::RoomId::parse(&room_id).map_err(|e| e.to_string())?;
-    client
+    let room = client
         .get_room(&parsed_room)
         .filter(|room| room.state() == RoomState::Joined && !room.is_tombstoned())
         .ok_or("You no longer have access to this voice call")?;
+    let levels = room.power_levels().await.map_err(|e| e.to_string())?;
+    if !levels.user_can_send_state(room.own_user_id(), super::call_policy::RTC_MEMBER.into()) {
+        return Err("Your role cannot join the voice session in this room.".into());
+    }
     state_arc.stop_heartbeat_loop();
     if let Ok(mut g) = state_arc.voice_livekit_jwt_service_url.lock() {
         *g = None;

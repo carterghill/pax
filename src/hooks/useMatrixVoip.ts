@@ -25,6 +25,7 @@ type SignalKind =
   | "m.call.reject" | "m.call.hangup" | "m.call.negotiate";
 
 interface WireSignal {
+  silent: boolean;
   kind: SignalKind;
   roomId: string;
   eventId: string;
@@ -105,6 +106,7 @@ export function useMatrixVoip(
   update: (call: DirectCall | null) => void,
   setError: (reason: string | null) => void,
   ready: boolean,
+  dismissQuiet: RefObject<() => void>,
 ) {
   const active = useRef<Session | null>(null);
   const stopping = useRef<Promise<void> | null>(null);
@@ -140,6 +142,7 @@ export function useMatrixVoip(
           }))
         .catch((error) => console.warn("Could not end Matrix call:", error));
     }
+    if (dismissing) return Promise.resolve();
     const closing = closeMedia(session).catch(console.warn).finally(() => {
       if (stopping.current === closing) stopping.current = null;
     });
@@ -253,6 +256,7 @@ export function useMatrixVoip(
       const expiresAt = event.expiresAt;
       if (!event.fromPeer || voiceBusy.current || expiresAt <= Date.now() + 1_000
           || !validDescription(content.offer) || content.offer.type !== "offer") return;
+      if (!event.silent) { dismissQuiet.current(); session = active.current; }
       // On crossed calls in one room, keep the lesser id on both clients.
       const preparing = current.current?.transport === "selecting"
         && current.current.roomId === event.roomId && current.current.peerUserId === event.sender;
@@ -265,7 +269,7 @@ export function useMatrixVoip(
       const call: DirectCall = {
         callId: event.notificationId, roomId: event.roomId, peerUserId: event.sender,
         peerDeviceId: party || undefined, ringEventId: event.eventId, transport: "matrix",
-        phase: "incoming", expiresAt,
+        phase: "incoming", silent: event.silent, expiresAt,
       };
       session = newSession(call, content.call_id, version, content.offer, party);
       active.current = session;
@@ -340,7 +344,7 @@ export function useMatrixVoip(
         break;
       }
     }
-  }, [answer, connectionDeadline, current, enableMedia, finish, setError, setPhase, update, voiceBusy]);
+  }, [answer, connectionDeadline, current, dismissQuiet, enableMedia, finish, setError, setPhase, update, voiceBusy]);
 
   useEffect(() => {
     if (!ready) return;
@@ -424,5 +428,12 @@ export function useMatrixVoip(
       .catch((reason) => setError(String(reason)));
   }, [setError]);
 
-  return { start, answer, finish, toggleMic, micEnabled, connection };
+  const silence = useCallback((silent: boolean) => {
+    const session = active.current;
+    if (session?.call.phase !== "incoming") return;
+    session.call = { ...session.call, silent };
+    update(session.call);
+  }, [update]);
+
+  return { start, answer, finish, toggleMic, micEnabled, connection, silence };
 }

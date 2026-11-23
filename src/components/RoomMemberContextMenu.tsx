@@ -1,7 +1,7 @@
+import { useRoomCallPermissions } from "../hooks/useRoomCallPermissions";
 import { useEffect, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import type { MemberModerationPermissions } from "../types/matrix";
-import { useRoomMembers } from "../hooks/useRoomMembers";
 import MemberContextMenu from "./MemberContextMenu";
 import ModerationScopeDialog from "./ModerationScopeDialog";
 
@@ -46,7 +46,7 @@ export default function RoomMemberContextMenu({
     target: MemberMenuTarget;
   } | null>(null);
   const [moderationBusy, setModerationBusy] = useState(false);
-  const { members } = useRoomMembers(target && onCallMember ? roomId : "");
+  const permissions = useRoomCallPermissions(target && onCallMember ? roomId : undefined, target?.userId);
   const isSelf = target?.userId === currentUserId;
 
   useEffect(() => {
@@ -104,7 +104,7 @@ export default function RoomMemberContextMenu({
             onClose();
             onStartDirectMessage(target.userId, target.displayName);
           }}
-          onCall={!isSelf && onCallMember && members.some(member => member.userId === target.userId) ? () => {
+          onCall={!isSelf && permissions?.member && onCallMember ? () => {
             onClose();
             onCallMember(target.userId);
           } : undefined}

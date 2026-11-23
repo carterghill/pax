@@ -775,9 +775,40 @@ pub async fn apply_room_general_settings(
 pub struct RoomPowerLevelsSettings {
     pub content: serde_json::Value,
     pub can_edit: bool,
-    pub user_power_level: i64,
+    pub user_power_level: Option<i64>,
     /// True when `m.room.create` has `type: "m.space"`.
     pub is_space: bool,
+}
+
+// Room version 12 gives creators infinite power independently of the users map.
+fn editing_power(
+    room: &matrix_sdk::Room,
+    content: &serde_json::Value,
+) -> Result<(bool, Option<i64>), String> {
+    use matrix_sdk::ruma::events::room::power_levels::{
+        RoomPowerLevels, RoomPowerLevelsEventContent, UserPowerLevel,
+    };
+    let content: RoomPowerLevelsEventContent =
+        serde_json::from_value(content.clone()).map_err(|e| e.to_string())?;
+    let levels = RoomPowerLevels::new(
+        content.into(),
+        &room
+            .clone_info()
+            .room_version_rules_or_default()
+            .authorization,
+        room.creators()
+            .ok_or("Room creator information is unavailable.")?,
+    );
+    let me = room.own_user_id();
+    let value = match levels.for_user(me) {
+        UserPowerLevel::Infinite => None,
+        UserPowerLevel::Int(level) => Some(level.into()),
+        _ => return Err("Unrecognized room power level.".into()),
+    };
+    Ok((
+        levels.user_can_send_state(me, StateEventType::RoomPowerLevels),
+        value,
+    ))
 }
 
 #[tauri::command]
@@ -788,9 +819,7 @@ pub async fn get_room_power_levels_settings(
     let ac = get_authed_client(&state).await?;
     let parsed =
         matrix_sdk::ruma::RoomId::parse(&room_id).map_err(|e| format!("Invalid room ID: {e}"))?;
-    let _ = ac.client.get_room(&parsed).ok_or("Room not found")?;
-
-    let user_id = ac.client.user_id().ok_or("No user ID")?.to_string();
+    let room = ac.client.get_room(&parsed).ok_or("Room not found")?;
 
     let create_body = http_get_room_state(
         &state.http_client,
@@ -816,14 +845,12 @@ pub async fn get_room_power_levels_settings(
     .await?
     .ok_or("This room has no power levels state (unexpected).")?;
 
-    let u = power_level_for_user(&pl_body, &user_id);
-    let required_edit = power_required_for_state_event(&pl_body, "m.room.power_levels");
-    let can_edit = u >= required_edit;
+    let (can_edit, user_power_level) = editing_power(&room, &pl_body)?;
 
     Ok(RoomPowerLevelsSettings {
         content: pl_body,
         can_edit,
-        user_power_level: u,
+        user_power_level,
         is_space,
     })
 }
@@ -837,9 +864,7 @@ pub async fn set_room_power_levels(
     let ac = get_authed_client(&state).await?;
     let parsed =
         matrix_sdk::ruma::RoomId::parse(&room_id).map_err(|e| format!("Invalid room ID: {e}"))?;
-    ac.client.get_room(&parsed).ok_or("Room not found")?;
-
-    let user_id = ac.client.user_id().ok_or("No user ID")?.to_string();
+    let room = ac.client.get_room(&parsed).ok_or("Room not found")?;
 
     let pl_body = http_get_room_state(
         &state.http_client,
@@ -851,9 +876,7 @@ pub async fn set_room_power_levels(
     .await?
     .ok_or("Power levels not found")?;
 
-    let u = power_level_for_user(&pl_body, &user_id);
-    let required_edit = power_required_for_state_event(&pl_body, "m.room.power_levels");
-    if u < required_edit {
+    if !editing_power(&room, &pl_body)?.0 {
         return Err("You don't have permission to change power levels.".to_string());
     }
 

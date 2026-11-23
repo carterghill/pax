@@ -28,6 +28,7 @@ interface VoiceCallPanelProps {
   voiceParticipants?: MatrixVoiceParticipant[];
   participantStates?: Record<string, VoiceParticipantState>;
   canReconnect?: boolean;
+  canJoin?: boolean;
   joinButton?: VoiceJoinButton;
   userId: string;
   groupCall?: boolean;
@@ -87,6 +88,7 @@ export function VoiceCallPanel({
   voiceParticipants = EMPTY_VOICE_PARTICIPANTS,
   participantStates = EMPTY_PARTICIPANT_STATES,
   canReconnect = false,
+  canJoin = true,
   joinButton,
   userId,
   directCall,
@@ -603,8 +605,11 @@ export function VoiceCallPanel({
         }}>
           <button
             type="button"
+            disabled={!canJoin}
+            title={canJoin ? undefined : "Your room role cannot join voice sessions"}
             onClick={joinButton?.onClick ?? (() => onConnect(roomId))}
             style={{
+              opacity: canJoin ? 1 : 0.5,
               padding: `${spacing.unit * 2}px ${spacing.unit * 5}px`,
               borderRadius: spacing.unit * 2,
               border: "none",

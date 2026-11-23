@@ -2107,6 +2107,12 @@ pub async fn start_sync(
                 let event_type = event.event_type();
                 let is_room_state = event.state_key().is_empty();
                 let feed_changed = is_room_state && event_type == feed_event;
+                let call_permissions_changed = is_room_state && matches!(
+                    event_type,
+                    StateEventType::RoomPowerLevels | StateEventType::RoomEncryption
+                        | StateEventType::RoomJoinRules | StateEventType::RoomTombstone
+                        | StateEventType::RoomCreate
+                );
                 let details_changed = is_room_state
                     && matches!(
                         event_type,
@@ -2115,6 +2121,9 @@ pub async fn start_sync(
                             | StateEventType::RoomTombstone
                     );
                 async move {
+                    if call_permissions_changed {
+                        let _ = app.emit("room-call-permissions-changed", room.room_id().as_str());
+                    }
                     if feed_changed {
                         let _ = app.emit(super::rss::RSS_FEED_CHANGED, room.room_id().as_str());
                     }
@@ -2538,6 +2547,16 @@ pub async fn start_sync(
                 .map(|(room_id, _)| room_id)
                 .chain(response.rooms.left.keys())).await;
 
+            for event in &response.account_data {
+                if let Ok(value) = event.deserialize_as::<serde_json::Value>() {
+                    super::pax_settings::process_synced_settings(
+                        &reconcile_state_arc,
+                        &app,
+                        &value,
+                    );
+                }
+            }
+
             super::direct_calls::receive_signals(&reconcile_state_arc, &client, &app, &response)
                 .await;
             super::group_calls::receive_signals(&reconcile_state_arc, &client, &app, &response).await;
@@ -2581,16 +2600,6 @@ pub async fn start_sync(
                     }
                     attempts
                 });
-            }
-
-            for event in &response.account_data {
-                if let Ok(value) = event.deserialize_as::<serde_json::Value>() {
-                    super::pax_settings::process_synced_settings(
-                        &reconcile_state_arc,
-                        &app,
-                        &value,
-                    );
-                }
             }
 
             // Emit per-room unread diffs since last iteration.  Pure in-memory

@@ -29,7 +29,7 @@ export default function DirectCallControls({
   const { palette, spacing, typography } = useTheme();
   const incoming = call.phase === "incoming";
   useEffect(() => {
-    if (!incoming) return;
+    if (!incoming || call.silent) return;
     const appleMobile = /iPhone|iPad|iPod/.test(navigator.userAgent)
       || (navigator.userAgent.includes("Macintosh") && navigator.maxTouchPoints > 1);
     const android = (window as Window & {
@@ -45,7 +45,7 @@ export default function DirectCallControls({
       window.removeEventListener("pax-notification-permission-granted", stopRingtone);
       stopRingtone();
     };
-  }, [incoming, call.callId]);
+  }, [incoming, call.callId, call.silent]);
 
   const buttonStyle: CSSProperties = {
     display: "inline-flex",
@@ -64,7 +64,7 @@ export default function DirectCallControls({
   };
   const endStyle = { ...buttonStyle, background: "#b22e39", color: "#fff" };
 
-  if (incoming) {
+  if (incoming && !call.silent) {
     return (
       <Dialog onClose={onEnd} aria-label="Incoming voice call" style={{ width: 340 }}>
         <div style={{ display: "grid", justifyItems: "center", gap: spacing.unit * 2, padding: spacing.unit * 4 }}>
@@ -85,7 +85,7 @@ export default function DirectCallControls({
   }
 
   const active = call.phase === "active";
-  const status = call.phase === "dialing" ? `Calling ${name}…`
+  const status = incoming ? `Silent call from ${groupCaller ?? name}` : call.phase === "dialing" ? `Calling ${name}…`
     : peerConnection === "lost" ? `${name} lost connection and may reconnect.`
     : peerConnection === "interrupted" ? `${name}’s connection was interrupted.`
     : call.phase === "resuming" || isReconnecting ? "Reconnecting…"
@@ -109,7 +109,11 @@ export default function DirectCallControls({
           {isMicEnabled ? <Mic size={17} aria-hidden="true" /> : <MicOff size={17} aria-hidden="true" />}
         </button>
       )}
-      {showActions && (
+      {incoming && <>
+        <button type="button" onClick={onDecline} style={buttonStyle}>Decline</button>
+        <button type="button" onClick={onAnswer} style={buttonStyle}>Answer</button>
+      </>}
+      {showActions && !incoming && (
         <button type="button" aria-label={endLabel} title={endLabel} onClick={onEnd} style={endStyle}>
           <PhoneOff size={17} aria-hidden="true" /> {endLabel}
         </button>

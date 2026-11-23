@@ -1,5 +1,6 @@
 pub mod auth;
 pub mod account_conversion;
+pub mod call_policy;
 pub mod codec;
 pub mod config;
 pub mod direct_calls;

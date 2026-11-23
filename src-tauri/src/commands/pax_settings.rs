@@ -53,7 +53,7 @@ const REQUEST_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
 // ---------- Constants ----------
 
 const UNREAD_SETTINGS_TYPE: &str = "ca.brandxtech.pax.unread_settings";
-const NOTIFICATION_SETTINGS_TYPE: &str = "ca.brandxtech.pax.notification_settings";
+pub(super) const NOTIFICATION_SETTINGS_TYPE: &str = "ca.brandxtech.pax.notification_settings";
 
 const SCHEMA_VERSION: u32 = 1;
 
@@ -144,6 +144,8 @@ pub enum NotificationLevel {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct NotificationSettings {
+    #[serde(default)]
+    pub calls: super::call_policy::CallPreferences,
     #[serde(default = "default_schema_version")]
     pub version: u32,
     #[serde(default)]
@@ -169,6 +171,7 @@ pub struct NotificationSettings {
 impl Default for NotificationSettings {
     fn default() -> Self {
         Self {
+            calls: Default::default(),
             version: SCHEMA_VERSION,
             tray_unread_indicator: TrayUnreadIndicatorMode::default(),
             global_default: None,
@@ -507,6 +510,40 @@ pub async fn get_notification_settings(
     state: State<'_, Arc<AppState>>,
 ) -> Result<NotificationSettings, String> {
     load_notification_settings_inner(&state).await
+}
+
+#[tauri::command]
+pub async fn set_call_preference(
+    state: State<'_, Arc<AppState>>,
+    app: AppHandle,
+    scope: String,
+    id: Option<String>,
+    mode: Option<super::call_policy::CallMode>,
+) -> Result<NotificationSettings, String> {
+    use matrix_sdk::ruma::{RoomId, UserId};
+    let key = id.as_deref().unwrap_or_default();
+    match scope.as_str() {
+        "global" if id.is_none() && mode.is_some() => (),
+        "room" if RoomId::parse(key).is_ok() => (),
+        "user" if UserId::parse(key).is_ok() => (),
+        _ => return Err("Invalid call preference.".into()),
+    }
+    update_notification_settings(&state, &app, |settings| {
+        let entries = match scope.as_str() {
+            "room" => &mut settings.calls.rooms,
+            "user" => &mut settings.calls.users,
+            _ => {
+                settings.calls.global = mode.unwrap_or_default();
+                return;
+            }
+        };
+        if let Some(mode) = mode {
+            entries.insert(key.to_owned(), mode);
+        } else {
+            entries.remove(key);
+        }
+    })
+    .await
 }
 
 #[tauri::command]

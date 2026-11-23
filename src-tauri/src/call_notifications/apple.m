@@ -156,6 +156,12 @@ extern void pax_ios_voip_token(const char *token);
     NSString *name = [data[@"caller"] isKindOfClass:NSString.class] ? data[@"caller"] : @"Pax contact";
     NSNumber *deadline = [data[@"expiresAt"] isKindOfClass:NSNumber.class] ? data[@"expiresAt"] : nil;
     double remaining = deadline.doubleValue - NSDate.date.timeIntervalSince1970 * 1000.0;
+    // An old registration may still have a push in flight during an app upgrade.
+    // Only the policy-aware gateway can produce an actionable incoming call.
+    if (![data[@"callPolicyVersion"] isEqual:@1]) {
+        name = @"Pax";
+        remaining = 0;
+    }
     // PushKit requires each delivered VoIP push to be reported, even if it arrived late.
     [self present:callID ?: NSUUID.UUID caller:name remaining:callID ? (uint64_t)MIN(150000.0, MAX(0.0, remaining)) : 0
           fromPush:YES completion:completion];

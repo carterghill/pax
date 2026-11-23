@@ -1,3 +1,4 @@
+import CallPreferenceSelect from "./CallPreferenceSelect";
 import { useEffect, useState, useCallback, useMemo } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { X, Loader2, MessageCircle, Copy, Shield, Crown, User, Calendar, Hash, MoreHorizontal } from "lucide-react";
@@ -595,6 +596,8 @@ export default function UserProfileDialog({
                     accounts apart.
                   </div>
                 )}
+
+                {!isSelf && <CallPreferenceSelect key={profile.userId} scope="user" id={profile.userId} />}
 
                 {profile.isIgnored && (
                   <div

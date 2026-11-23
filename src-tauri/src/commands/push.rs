@@ -141,6 +141,9 @@ pub async fn register_pusher(
     let mut data = serde_json::json!({
         "url": if cfg!(target_os = "android") {
             notify_url(gateway_url)?
+        } else if cfg!(target_os = "ios") && !badge_only {
+            // A legacy gateway cannot filter a VoIP push once CallKit receives it.
+            format!("{}/pax/call-policy/v1/_matrix/push/v1/notify", gateway_url.trim_end_matches('/'))
         } else {
             format!("{}/_matrix/push/v1/notify", gateway_url.trim_end_matches('/'))
         }

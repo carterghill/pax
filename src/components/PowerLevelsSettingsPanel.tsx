@@ -6,7 +6,7 @@ import { useTheme } from "../theme/ThemeContext";
 export interface RoomPowerLevelsSettingsResponse {
   content: Record<string, unknown>;
   canEdit: boolean;
-  userPowerLevel: number;
+  userPowerLevel: number | null;
   isSpace: boolean;
 }
 
@@ -67,6 +67,13 @@ const ROOM_STATE_EVENT_KEYS: { key: string; label: string }[] = [
   { key: "m.room.tombstone", label: "Room upgrade (tombstone)" },
 ];
 
+const CALL_EVENT_KEYS = [
+  { key: "m.call.invite", label: "Start one-to-one calls", state: false },
+  { key: "org.matrix.msc4075.rtc.notification", label: "Ring a group call", state: false },
+  { key: "m.rtc.notification", label: "Ring a group call (stable event)", state: false },
+  { key: "org.matrix.msc3401.call.member", label: "Join room voice sessions", state: true },
+];
+
 const SPACE_STATE_EVENT_KEYS: { key: string; label: string }[] = [
   { key: "m.space.child", label: "Add or remove rooms & sub-spaces" },
   { key: "m.space.parent", label: "Link parent space" },
@@ -93,6 +100,12 @@ function contentToDraft(content: Record<string, unknown>, isSpace: boolean): Dra
   const eventLevels: Record<string, number> = {};
   for (const k of keys) {
     eventLevels[k] = readEventLevel(content, k, stateDefault);
+  }
+  if (!isSpace && isRecord(content.events)) {
+    for (const { key } of CALL_EVENT_KEYS) {
+      const level = content.events[key];
+      if (typeof level === "number" && Number.isSafeInteger(level)) eventLevels[key] = level;
+    }
   }
   return {
     ban: readTopLevel(content, "ban", 50),
@@ -271,7 +284,7 @@ export default function PowerLevelsSettingsPanel({
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [canEdit, setCanEdit] = useState(false);
-  const [userPl, setUserPl] = useState(0);
+  const [userPl, setUserPl] = useState<number | null>(0);
   const [isSpace, setIsSpace] = useState(false);
   const [baseline, setBaseline] = useState<Draft | null>(null);
   const [draft, setDraft] = useState<Draft | null>(null);
@@ -416,7 +429,7 @@ export default function PowerLevelsSettingsPanel({
       >
         Your power level:{" "}
         <span style={{ color: palette.textHeading, fontWeight: typography.fontWeightMedium }}>
-          {userPl}
+          {userPl ?? "Room creator (unlimited)"}
         </span>
         {!canEdit && (
           <span style={{ marginLeft: 8, color: "#ed4245" }}>
@@ -523,6 +536,15 @@ export default function PowerLevelsSettingsPanel({
         spacing={spacing}
       />
 
+      {!isSpace && <>
+        <SectionTitle palette={palette} typography={typography}>Voice calls</SectionTitle>
+        {CALL_EVENT_KEYS.filter(({ key }) => key !== "m.rtc.notification" || key in draft.eventLevels).map(({ key, label, state }) => (
+          <LevelField key={key} id={`pl-ev-${key}`} label={label}
+            value={draft.eventLevels[key] ?? (state ? draft.stateDefault : draft.eventsDefault)}
+            disabled={disabled} onChange={(n) => updateEventLevel(key, n)}
+            palette={palette} typography={typography} spacing={spacing} />
+        ))}
+      </>}
       <SectionTitle palette={palette} typography={typography}>
         Room settings (state events)
       </SectionTitle>
