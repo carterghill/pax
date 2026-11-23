@@ -5,7 +5,7 @@ import { useRoomCanPinMessages } from "../hooks/useRoomCanPinMessages";
 import { useRoomPinnedEventIds } from "../hooks/useRoomPinnedEventIds";
 import { listen } from "@tauri-apps/api/event";
 import { invoke } from "@tauri-apps/api/core";
-import { ArrowLeft, Hash, Phone, Rss, Users } from "lucide-react";
+import { ArrowLeft, Hash, MessageCircle, Phone, Rss, Users } from "lucide-react";
 import { RssFeedStatusPanel, RssFeedStatusToggle, useRssFeedStatus } from "../components/RssFeedStatus";
 import NavBackButton from "../components/NavBackButton";
 import UserAvatar from "../components/UserAvatar";
@@ -24,7 +24,7 @@ import { useMatrixUserProfile } from "../hooks/useMatrixUserProfile";
 import { useTheme } from "../theme/ThemeContext";
 import { Message, Room } from "../types/matrix";
 import { useResizeHandle } from "../hooks/useResizeHandle";
-import { effectiveDmTitle, isDmChatUi } from "../utils/dmDisplay";
+import { effectiveDmTitle, isDmChatUi, isOneToOneChatUi } from "../utils/dmDisplay";
 import { useUnavailableMessages } from "../hooks/useUnavailableMessages";
 import UnavailableMessagesNotice from "../components/UnavailableMessagesNotice";
 import EncryptionSettingsPanel from "../components/EncryptionSettingsPanel";
@@ -659,16 +659,18 @@ export default function ChatView({
 
   if (!activeRoom) return null;
 
-  const isDm = isDmChatUi(activeRoom);
+  const isOneToOne = isOneToOneChatUi(activeRoom);
+  const isGroupChat = isDmChatUi(activeRoom) && !isOneToOne;
   const topic = activeRoom.topic?.trim();
   const encryptionLabel = activeRoom.isEncrypted === true
-    ? (isDm ? "Encrypted chat" : "Encrypted room")
+    ? (isOneToOne ? "Encrypted chat" : isGroupChat ? "Encrypted group chat" : "Encrypted room")
     : undefined;
-  const caption = topic || encryptionLabel || (isDm ? "Direct message" : undefined);
+  const caption = topic || encryptionLabel || (isOneToOne ? "Direct message" : isGroupChat ? "Group chat" : undefined);
+  const RoomIcon = activeRoom.isRss ? Rss : isGroupChat ? MessageCircle : Hash;
   const roomHeading = (
     <div style={{ flex: 1, minWidth: 0, display: "flex", alignItems: "center", gap: spacing.unit * 2 }}>
       <RoomHeaderTitle
-        name={isDm ? effectiveDmTitle(activeRoom) : activeRoom.name}
+        name={isOneToOne ? effectiveDmTitle(activeRoom) : activeRoom.name}
         caption={caption}
         style={rssFeed ? { flex: "0 1 auto", maxWidth: "55%" } : undefined}
       />
@@ -698,7 +700,7 @@ export default function ChatView({
       overflow: "hidden",
     }}>
       {/* Channel header — 1:1 DM matches draft banner (no member list toggle) */}
-      {isDm ? (
+      {isOneToOne ? (
         <div style={dmBannerStyle}>
           {isMobile && onOpenNavigation && (
             <NavBackButton onClick={onOpenNavigation} palette={palette} />
@@ -738,9 +740,7 @@ export default function ChatView({
             <NavBackButton onClick={onOpenNavigation} palette={palette} />
           )}
           <RoomHeaderIcon encryptionLabel={encryptionLabel} announceEncryption={Boolean(topic)}>
-            {activeRoom.isRss
-              ? <Rss size={20} color={palette.textSecondary} style={{ flexShrink: 0 }} />
-              : <Hash size={20} color={palette.textSecondary} style={{ flexShrink: 0 }} />}
+            <RoomIcon size={20} color={palette.textSecondary} style={{ flexShrink: 0 }} />
           </RoomHeaderIcon>
           {roomHeading}
           <div style={{
@@ -930,7 +930,7 @@ export default function ChatView({
         </div>
 
         {/* User menu: inline on desktop, right drawer on mobile */}
-        {!isMobile && showUsers && !isDmChatUi(activeRoom) && (
+        {!isMobile && showUsers && !isOneToOne && (
           <div style={{
             position: "relative",
             flexShrink: 0,
@@ -968,7 +968,7 @@ export default function ChatView({
         )}
       </div>
 
-      {isMobile && !isDmChatUi(activeRoom) && (
+      {isMobile && !isOneToOne && (
         <SideDrawer
           open={showUsers}
           onClose={() => setShowUsers(false)}

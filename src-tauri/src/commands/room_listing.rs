@@ -2,7 +2,7 @@ use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
 use futures_util::stream::{self, StreamExt};
-use matrix_sdk::RoomMemberships;
+use matrix_sdk::{RoomDisplayName, RoomMemberships};
 use tauri::State;
 
 use crate::types::{RoomInfo, SpaceChildOrder};
@@ -77,20 +77,31 @@ async fn build_room_info(
         .is_some_and(|name| !name.trim().is_empty());
     let mut name = explicit_name.unwrap_or_else(|| "Unnamed".to_string());
     let mut avatar_url = avatars.cached(room.avatar_url().as_deref()).await;
-    let mut is_direct = false;
     let mut dm_peer_user_id: Option<String> = None;
     let mut dm_peer_presence: Option<String> = None;
     let mut dm_peer_status_msg: Option<String> = None;
 
-    if let Some((dname, dav, pid, pres, smsg)) =
-        dm_one_to_one_peer_summary(room, avatars, presence).await
-    {
+    let (is_direct, peer) = direct_chat_summary(room, avatars, presence).await;
+    let direct_target_user_id = if is_direct {
+        let targets = room.direct_targets();
+        if targets.len() == 1 {
+            targets.into_iter().next()
+                .and_then(|target| target.into_user_id())
+                .map(|user_id| user_id.to_string())
+        } else {
+            None
+        }
+    } else {
+        None
+    };
+    if let Some((dname, dav, pid, pres, smsg)) = peer {
         name = dname;
         avatar_url = dav;
-        is_direct = true;
         dm_peer_user_id = Some(pid);
         dm_peer_presence = Some(pres);
         dm_peer_status_msg = smsg;
+    } else if is_direct && !has_explicit_name {
+        name = direct_chat_display_name(room).await.unwrap_or(name);
     }
 
     RoomInfo {
@@ -111,23 +122,40 @@ async fn build_room_info(
         history_room_ids: Vec::new(),
         upgrade_pending: !room.is_space() && room.is_tombstoned(),
         is_direct,
+        direct_target_user_id,
         dm_peer_user_id,
         dm_peer_presence,
         dm_peer_status_msg,
     }
 }
 
-/// 1:1 direct message: use peer display name, avatar, and presence (like Element).
-pub(super) async fn dm_one_to_one_peer_summary(
+type DmPeerSummary = (String, Option<String>, String, String, Option<String>);
+
+pub(super) async fn direct_chat_summary(
     room: &matrix_sdk::Room,
     avatars: &Arc<crate::avatars::AvatarService>,
     presence: &PresenceCache,
-) -> Option<(String, Option<String>, String, String, Option<String>)> {
-    if room.is_space() {
-        return None;
+) -> (bool, Option<DmPeerSummary>) {
+    if room.is_space() || !room.is_direct().await.unwrap_or(false) {
+        return (false, None);
     }
-    let is_dm = room.is_direct().await.ok()?;
-    if !is_dm {
+    (true, dm_one_to_one_peer_summary(room, avatars, presence).await)
+}
+
+pub(super) async fn direct_chat_display_name(room: &matrix_sdk::Room) -> Option<String> {
+    let display = room.display_name().await.ok()?;
+    (!matches!(display, RoomDisplayName::Empty))
+        .then(|| display.to_string())
+        .filter(|name| !name.trim().is_empty())
+}
+
+/// Peer-specific display for conversations with exactly one other person.
+async fn dm_one_to_one_peer_summary(
+    room: &matrix_sdk::Room,
+    avatars: &Arc<crate::avatars::AvatarService>,
+    presence: &PresenceCache,
+) -> Option<DmPeerSummary> {
+    if room.active_members_count() > 2 || room.direct_targets_length() > 1 {
         return None;
     }
     let client = room.client();
@@ -137,11 +165,15 @@ pub(super) async fn dm_one_to_one_peer_summary(
         .members_no_sync(RoomMemberships::JOIN | RoomMemberships::INVITE)
         .await
         .ok()?;
-    let others: Vec<_> = members.into_iter().filter(|m| m.user_id() != me).collect();
-    if others.len() != 1 {
+    let mut others = members.into_iter().filter(|m| m.user_id() != me);
+    let m = others.next()?;
+    if others.next().is_some()
+        || room.direct_targets().iter().any(|target| {
+            target.as_user_id().is_some_and(|target| target != m.user_id())
+        })
+    {
         return None;
     }
-    let m = others.into_iter().next()?;
     let peer_id = m.user_id().to_string();
     let display = m
         .display_name()
@@ -321,4 +353,84 @@ pub async fn get_rooms(state: State<'_, Arc<AppState>>) -> Result<Vec<RoomInfo>,
 pub async fn current_homeserver(state: State<'_, Arc<AppState>>) -> Result<String, String> {
     let client = super::get_client(&state).await?;
     Ok(client.homeserver().to_string())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::commands::{
+        auth::SavedSession,
+        pax_auth::tests::{client, Server, TestDir, USER},
+    };
+    use matrix_sdk::ruma::RoomId;
+    use serde_json::{json, Value};
+
+    fn joined_room(members: &[(&str, &str)]) -> Value {
+        let mut state = vec![json!({
+            "type": "m.room.create", "sender": USER, "state_key": "",
+            "event_id": "$create", "origin_server_ts": 1,
+            "content": {"creator": USER, "room_version": "10"}
+        })];
+        state.extend(members.iter().enumerate().map(|(index, (id, name))| json!({
+            "type": "m.room.member", "sender": id, "state_key": id,
+            "event_id": format!("$member{index}"), "origin_server_ts": index + 2,
+            "content": {"membership": "join", "displayname": name}
+        })));
+        json!({
+            "state": {"events": state},
+            "summary": {"m.joined_member_count": members.len()}
+        })
+    }
+
+    #[tokio::test]
+    async fn direct_chat_marker_controls_classification_independently_of_members() {
+        let bob = "@bob:example.org";
+        let regular_room = "!regular:example.org";
+        let pair_chat = "!pair:example.org";
+        let group_chat = "!group:example.org";
+        let pair = [(USER, "Alice"), (bob, "Bob")];
+        let group = [(USER, "Alice"), (bob, "Bob"), ("@bot:example.org", "Bot")];
+        let server = Server::start().await;
+        server.state.lock().unwrap().route_overrides.insert(
+            ("GET".into(), "/_matrix/client/v3/sync".into()),
+            (200, json!({
+                "next_batch": "s1",
+                "rooms": {"join": {
+                    regular_room: joined_room(&pair),
+                    pair_chat: joined_room(&pair),
+                    group_chat: joined_room(&group)
+                }},
+                "account_data": {"events": [{
+                    "type": "m.direct", "content": {bob: [pair_chat, group_chat]}
+                }]}
+            })),
+        );
+        let dir = TestDir::new();
+        let sdk = client(
+            &server.home,
+            &dir.0.join("matrix"),
+            SavedSession {
+                user_id: USER.into(),
+                device_id: "TEST".into(),
+                access_token: "token".into(),
+                refresh_token: None,
+            },
+        ).await;
+        let files = Arc::new(crate::file_cache::FileCache::new());
+        let avatars = Arc::new(crate::avatars::AvatarService::new(files));
+        let parents = ParentSpaces::default();
+        let presence = PresenceCache::default();
+
+        for (id, expected_direct, expected_peer) in [
+            (regular_room, false, None),
+            (pair_chat, true, Some(bob)),
+            (group_chat, true, None),
+        ] {
+            let room = sdk.get_room(&RoomId::parse(id).unwrap()).unwrap();
+            let info = build_room_info(&room, &parents, &avatars, &presence, "joined").await;
+            assert_eq!(info.is_direct, expected_direct, "{id}");
+            assert_eq!(info.dm_peer_user_id.as_deref(), expected_peer, "{id}");
+            assert_eq!(info.direct_target_user_id.as_deref(), expected_direct.then_some(bob), "{id}");
+        }
+    }
 }

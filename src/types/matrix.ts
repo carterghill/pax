@@ -43,8 +43,11 @@ export interface Room {
   /** Joined predecessor room IDs, from newest to oldest. */
   historyRoomIds?: string[];
   upgradePending?: boolean;
-  /** 1:1 DM: `name` / `avatarUrl` are the peer; use for sidebar/home display. */
+  /** The Matrix direct-chat marker, including chats with more than two participants. */
   isDirect?: boolean;
+  /** The account's single mapped peer, even if other people share the chat. */
+  directTargetUserId?: string;
+  /** In a one-to-one chat, `name` and `avatarUrl` describe this peer. */
   dmPeerUserId?: string | null;
   dmPeerPresence?: string | null;
   dmPeerStatusMsg?: string | null;

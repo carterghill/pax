@@ -4,6 +4,7 @@ import { useIgnoredUsers } from "../context/IgnoredUsersContext";
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 import { useSound } from "react-sounds";
 import type { Message, Room } from "../types/matrix";
+import { isOneToOneChatUi } from "../utils/dmDisplay";
 import { useNotificationSettings, type NotificationLevel } from "./useNotificationSettings";
 
 /* ------------------------------------------------------------------ */
@@ -17,7 +18,7 @@ interface RoomMessagePayload {
   mentionsMe: boolean;
   /** Structured `m.mentions`: the sender set `room: true` (@room ping). */
   roomPing: boolean;
-  /** `matrix-sdk is_direct()` — true for 1:1 DMs. */
+  /** `matrix-sdk is_direct()` — true for rooms marked as direct chats. */
   isDm: boolean;
 }
 
@@ -89,13 +90,13 @@ function truncate(s: string, max: number): string {
 }
 
 /**
- * Notification title.  DMs show the sender's name; group rooms show
+ * Notification title. One-to-one DMs show the sender's name. Other rooms show
  * "<sender> (<room>)" so the room identity is visible at a glance.
  */
 function formatTitle(room: Room | null, senderName: string): string {
   const sender = senderName || "Someone";
   if (!room) return sender;
-  if (room.isDirect) return sender;
+  if (isOneToOneChatUi(room)) return sender;
   const roomName = room.name || "a room";
   return `${sender} (${roomName})`;
 }

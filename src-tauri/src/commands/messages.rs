@@ -2295,18 +2295,20 @@ pub async fn start_sync(
                     return;
                 }
                 if super::members::member_list_changed(&ev) {
+                    let membership_changed = ev.unsigned.prev_content.as_ref()
+                        .is_none_or(|previous| previous.membership != ev.content.membership);
                     let _ = app.emit(
                         "room-members-changed",
                         RoomMembersChangedPayload {
                             room_id: room.room_id().to_string(),
-                            membership_changed: ev
-                                .unsigned
-                                .prev_content
-                                .as_ref()
-                                .map(|previous| previous.membership != ev.content.membership)
-                                .unwrap_or(true),
+                            membership_changed,
                         },
                     );
+                    if membership_changed && ev.state_key.as_str() != room.own_user_id().as_str()
+                        && room.is_direct().await.unwrap_or(false)
+                    {
+                        let _ = app.emit("rooms-changed", ());
+                    }
                 }
                 if ev.content.membership != MembershipState::Join {
                     return;

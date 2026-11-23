@@ -4,6 +4,7 @@ import { listen } from "@tauri-apps/api/event";
 import UserAvatar from "./UserAvatar";
 import {
   Hash,
+  MessageCircle,
   Rss,
   House,
   ArrowLeft,
@@ -36,7 +37,7 @@ import CreateRoomDialog from "./CreateRoomDialog";
 import type { RoomsChangedPayload } from "../types/roomsChanged";
 import { useUserVolume } from "../hooks/useUserVolume";
 import type { AudioControls } from "../hooks/useAudioControls";
-import { dmPresenceDotColor, effectiveDmTitle, isDmChatUi } from "../utils/dmDisplay";
+import { dmPresenceDotColor, effectiveDmTitle, isDmChatUi, isOneToOneChatUi } from "../utils/dmDisplay";
 import { resolvePresenceWithDnd, parseStatusMsg } from "../utils/statusMessage";
 import {
   VOICE_ROOM_TYPE,
@@ -399,6 +400,8 @@ function ChannelBlock({
 }) {
   const isVoice = room.roomType === VOICE_ROOM_TYPE;
   const isDraftDmRow = isPendingDmRoomId(room.id);
+  const isOneToOne = isOneToOneChatUi(room);
+  const isDirectChat = isDmChatUi(room);
   const dmPeerId = room.dmPeerUserId ?? parsePendingDmPeerUserId(room.id) ?? room.id;
   const rawPeerPresence =
     peerPresenceByUserId[normalizeUserId(dmPeerId)] ?? room.dmPeerPresence ?? "offline";
@@ -409,7 +412,7 @@ function ChannelBlock({
   const participants = isVoice ? (voiceParticipants[room.id] ?? []) : [];
   const isConnectedHere = connectedVoiceRoomId === room.id;
   const padLeft = indent ? spacing.unit * 6 : spacing.unit * 3;
-  const roomTitle = isDmChatUi(room) ? effectiveDmTitle(room) : room.name;
+  const roomTitle = isOneToOne ? effectiveDmTitle(room) : room.name;
   const titleFadePx = 20;
   const titleFadeMask = `linear-gradient(to right, #000 calc(100% - ${titleFadePx}px), transparent)`;
 
@@ -468,7 +471,7 @@ function ChannelBlock({
             />
           ) : room.isRss ? (
             <Rss size={16} color={isHighlighted ? palette.textHeading : palette.textSecondary} />
-          ) : isDmChatUi(room) ? (
+          ) : isOneToOne ? (
             <div
               style={{
                 position: "relative",
@@ -501,6 +504,8 @@ function ChannelBlock({
                 />
               )}
             </div>
+          ) : isDirectChat ? (
+            <MessageCircle size={16} color={labelColor} />
           ) : (
             <Hash
               size={16}
@@ -521,7 +526,7 @@ function ChannelBlock({
             }}
           >
             {roomTitle}
-            {isDmChatUi(room) && peerStatusText && (
+            {isOneToOne && peerStatusText && (
               <div style={{
                 fontSize: typography.fontSizeSmall - 1,
                 color: palette.textSecondary,
@@ -718,7 +723,7 @@ export default function RoomSidebar({
   }, [showHomeAddRoom]);
 
   const moderationSpaceTreeRoomIds = useMemo(() => {
-    if (!settingsRoom || settingsRoom.isDirect) return null;
+    if (!settingsRoom || isOneToOneChatUi(settingsRoom)) return null;
     if (!activeSpaceId) return null;
     const inTree =
       settingsRoom.id === activeSpaceId ||
@@ -730,7 +735,7 @@ export default function RoomSidebar({
   const moderationSpaceRootId =
     settingsRoom &&
     activeSpaceId &&
-    !settingsRoom.isDirect &&
+    !isOneToOneChatUi(settingsRoom) &&
     (settingsRoom.id === activeSpaceId || settingsRoom.parentSpaceIds.includes(activeSpaceId))
       ? activeSpaceId
       : null;

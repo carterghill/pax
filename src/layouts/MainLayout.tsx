@@ -43,7 +43,7 @@ import { useUserAvatar } from "../hooks/useUserAvatar";
 import { useResizeHandle } from "../hooks/useResizeHandle";
 import { useSpaceOrder, applyStoredSpaceOrder } from "../hooks/useSpaceOrder";
 import { useIsMobile } from "../hooks/useIsMobile";
-import { effectiveDmTitle } from "../utils/dmDisplay";
+import { effectiveDmTitle, isOneToOneChatUi } from "../utils/dmDisplay";
 import SideDrawer from "../components/SideDrawer";
 import NavBackButton from "../components/NavBackButton";
 
@@ -675,7 +675,7 @@ export default function MainLayout({
   }, [activeRoomId, getRoom, dmTransitionHint]);
 
   const moderationSpaceTreeRoomIds = useMemo(() => {
-    if (!activeSpaceId || !activeRoom || activeRoom.isDirect) return null;
+    if (!activeSpaceId || !activeRoom || isOneToOneChatUi(activeRoom)) return null;
     const inTree =
       activeRoom.id === activeSpaceId || activeRoom.parentSpaceIds.includes(activeSpaceId);
     if (!inTree) return null;
@@ -893,13 +893,12 @@ export default function MainLayout({
       for (const s of spaces) {
         if (s.membership === "joined") addRooms(roomsBySpace(s.id));
       }
-      const existingDm = collected.find(
-        (r) =>
-          r.isDirect &&
-          r.membership === "joined" &&
-          r.dmPeerUserId != null &&
-          normalizeUserId(r.dmPeerUserId) === peerNorm,
-      );
+      const matchingChats = collected.filter((room) => {
+        const target = room.directTargetUserId ?? room.dmPeerUserId;
+        return room.isDirect && room.membership === "joined" && target != null
+          && normalizeUserId(target) === peerNorm;
+      });
+      const existingDm = matchingChats.find(isOneToOneChatUi) ?? matchingChats[0];
       if (existingDm) {
         const room = getRoom(existingDm.id) ?? existingDm;
         const parentSpaceId =
@@ -972,7 +971,7 @@ export default function MainLayout({
   const orphanRoomsForSpaceHome = useMemo(
     () =>
       roomsBySpace(null).filter(
-        (r) => r.membership === "joined" && !r.isDirect
+        (r) => r.membership === "joined" && !isOneToOneChatUi(r)
       ),
     [roomsBySpace]
   );

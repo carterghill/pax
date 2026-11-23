@@ -202,7 +202,7 @@ export interface RoomForRollup {
   isSpace: boolean;
   parentSpaceIds: string[];
   /**
-   * True for 1:1 DMs as reported by matrix-sdk.  Used by the rollup's
+   * True for rooms marked as direct chats. Used by the rollup's
    * "effective" counters to promote unread DM messages into the red
    * mention-badge bucket (they don't produce server-side highlights so
    * they'd otherwise be invisible on the icons).
@@ -221,11 +221,9 @@ export interface SpaceUnreadRollupApi {
   /** Sum of raw mentions across rooms outside every joined space. */
   homeMentionCount: () => number;
   /**
-   * Per-room badge count.  Equals `mentionCount(roomId)` for group rooms,
-   * but for DMs (where the server never raises `highlight_count` for plain
-   * messages) it falls back to the unread message count when the room's
-   * effective notification level is anything other than `none`.  A muted
-   * DM keeps its badge at 0, same as a muted group room would.
+   * Per-room badge count. Equals `mentionCount(roomId)` for regular rooms.
+   * For direct chats it falls back to the unread message count when the room's
+   * effective notification level is anything other than `none`. A muted room has no badge.
    */
   effectiveMentionCount: (roomId: string) => number;
   /** Sum of `effectiveMentionCount` across the space's descendant rooms.

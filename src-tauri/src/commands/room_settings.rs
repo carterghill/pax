@@ -9,7 +9,7 @@ use crate::types::{SpaceChildInfo, SpaceInfo};
 use crate::AppState;
 
 use super::room_discovery::discover_client_base_urls;
-use super::room_listing::dm_one_to_one_peer_summary;
+use super::room_listing::{direct_chat_display_name, direct_chat_summary};
 use super::{fmt_error_chain, get_authed_client};
 
 /// Convert an MXC URI to an unauthenticated thumbnail URL.
@@ -213,22 +213,19 @@ pub async fn get_space_info(
             let mut dm_peer_presence: Option<String> = None;
             let mut dm_peer_status_msg: Option<String> = None;
 
-            if membership == "joined" {
+            if matches!(membership.as_str(), "joined" | "invited") {
                 if let Ok(rid) = matrix_sdk::ruma::RoomId::parse(&child_id) {
                     if let Some(r) = ac.client.get_room(&rid) {
-                        if let Some((dname, dav, pid, pres, smsg)) = dm_one_to_one_peer_summary(
-                            &r,
-                            &avatars,
-                            &state.presence,
-                        )
-                        .await
-                        {
+                        let (direct, peer) = direct_chat_summary(&r, &avatars, &state.presence).await;
+                        is_direct = direct;
+                        if let Some((dname, dav, pid, pres, smsg)) = peer {
                             name = dname;
                             avatar_url = dav;
-                            is_direct = true;
                             dm_peer_user_id = Some(pid);
                             dm_peer_presence = Some(pres);
                             dm_peer_status_msg = smsg;
+                        } else if is_direct && room_data["name"].as_str().is_none_or(|name| name.trim().is_empty()) {
+                            name = direct_chat_display_name(&r).await.unwrap_or(name);
                         }
                     }
                 }

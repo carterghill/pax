@@ -1602,21 +1602,21 @@ function RoomRow({
   const isInvited = room.membership === "invited";
   const canJoin = !isJoined;
   const isDm = room.isDirect === true;
+  const peerUserId = isDm ? room.dmPeerUserId : null;
   const dmPresence = resolvePresenceWithDnd(room.dmPeerPresence ?? "offline", room.dmPeerStatusMsg);
   const dmTitle = effectiveDmTitle({ name: room.name, dmPeerUserId: room.dmPeerUserId ?? null });
 
-  // Non-DM rooms still use the room avatar (keyed by room id, separate
-  // concept from user avatars). DM rows delegate to <UserAvatar>, which
-  // handles its own loading / fallback / on-error invalidation.
-  const nonDmAvatar = useRoomAvatar(!isDm && isJoined ? room.id : null, !isDm ? room.avatarUrl : null);
+  const roomAvatar = useRoomAvatar(!peerUserId && isJoined ? room.id : null, !peerUserId ? room.avatarUrl : null);
   useEffect(() => {
     setImageFailed(false);
-  }, [room.id, nonDmAvatar]);
+  }, [room.id, roomAvatar]);
 
-  const nonDmFallbackIcon = isVoice ? (
+  const fallbackIcon = isVoice ? (
     <Volume2 size={18} color={palette.textSecondary} />
   ) : room.isRss ? (
     <Rss size={18} color={palette.textSecondary} />
+  ) : isDm ? (
+    <MessageCircle size={18} color={palette.textSecondary} />
   ) : (
     <Hash size={18} color={palette.textSecondary} />
   );
@@ -1639,16 +1639,16 @@ function RoomRow({
     >
       {/* Room icon or avatar */}
       <div style={{ position: "relative", width: 36, height: 36, flexShrink: 0 }}>
-        {isDm && room.dmPeerUserId ? (
+        {peerUserId ? (
           <UserAvatar
-            userId={room.dmPeerUserId}
+            userId={peerUserId}
             displayName={dmTitle}
             avatarUrlHint={room.avatarUrl}
             size={36}
           />
-        ) : nonDmAvatar && !imageFailed ? (
+        ) : roomAvatar && !imageFailed ? (
           <img
-            src={avatarSrc(nonDmAvatar)}
+            src={avatarSrc(roomAvatar)}
             alt={dmTitle}
             onError={() => setImageFailed(true)}
             style={{
@@ -1670,10 +1670,10 @@ function RoomRow({
               justifyContent: "center",
             }}
           >
-            {nonDmFallbackIcon}
+            {fallbackIcon}
           </div>
         )}
-        {isDm && isJoined && !!room.dmPeerUserId && (
+        {peerUserId && isJoined && (
           <span
             title={dmPresence}
             style={{
@@ -1709,7 +1709,7 @@ function RoomRow({
             {isDm ? dmTitle : room.name}
           </span>
         </div>
-        {room.topic && !isDm && (
+        {room.topic && !peerUserId && (
           <div style={{
             fontSize: typography.fontSizeSmall,
             color: palette.textSecondary,
@@ -1730,7 +1730,7 @@ function RoomRow({
             marginTop: 1,
           }}>
             <MessageCircle size={11} color={palette.textSecondary} />
-            <span>Direct message</span>
+            <span>{peerUserId ? "Direct message" : "Group chat"}</span>
           </div>
         ) : (
           <div style={{

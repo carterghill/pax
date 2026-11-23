@@ -46,8 +46,11 @@ pub struct RoomInfo {
     pub history_room_ids: Vec<String>,
     #[serde(skip_serializing_if = "std::ops::Not::not")]
     pub upgrade_pending: bool,
-    /// True when this is a 1:1 DM (name/avatar are the peer).
+    /// The Matrix account's direct-chat marker (or the direct hint on an invite).
     pub is_direct: bool,
+    /// The single Matrix account-data target, used to reopen a chat from a profile.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub direct_target_user_id: Option<String>,
     /// Other participant in a 1:1 DM (for presence / display).
     pub dm_peer_user_id: Option<String>,
     /// Last known presence for `dm_peer_user_id` from sync (`online`, `offline`, …).
@@ -333,7 +336,7 @@ pub struct RoomMessagePayload {
     pub mentions_me: bool,
     /// True when `m.mentions.room` is set (the sender pinged `@room`).
     pub room_ping: bool,
-    /// True when the room is a 1:1 DM (matrix-sdk `is_direct()`).  The
+    /// True when the room is marked as a direct chat (matrix-sdk `is_direct()`). The
     /// notification hook mirrors the badge's DM-promotion rule: in a non-muted
     /// DM, every message is treated as notification-worthy for levels that care
     /// about mentions, matching `effectiveMentionCount` behaviour.

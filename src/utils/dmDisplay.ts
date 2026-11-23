@@ -6,10 +6,15 @@ export const DM_ROOM_UNNAMED = "Unnamed";
 
 type DmTitled = { name: string; dmPeerUserId?: string | null };
 
-/** Whether the main chat chrome should use DM layout (banner, peer avatar, no member list). */
+/** The Matrix direct-chat marker, including local drafts before a room exists. */
 export function isDmChatUi(room: Room): boolean {
   if (isPendingDmRoomId(room.id)) return true;
   return room.isDirect === true;
+}
+
+/** Whether the header has a single peer to show instead of room metadata. */
+export function isOneToOneChatUi(room: Room): boolean {
+  return isPendingDmRoomId(room.id) || (room.isDirect === true && !!room.dmPeerUserId);
 }
 
 /** Title for DM header and lists — never show a bare "Unnamed" when we know the peer. */
