@@ -171,17 +171,19 @@ impl PeerMedia {
         let stop = tokio_util::sync::CancellationToken::new();
         let playback = audio.clone();
         let playback_stop = stop.clone();
+        let remote_identity = peer.to_string();
         let runtime = tokio::runtime::Handle::current();
         pc.on_track(Some(Box::new(move |event| {
             if event.streams.is_empty() { return }
             let MediaStreamTrack::Audio(track) = event.track else { return };
             let playback = playback.clone();
             let stop = playback_stop.clone();
+            let identity = remote_identity.clone();
             let key = track.id();
             runtime.spawn(async move {
                 tokio::select! {
                     _ = stop.cancelled() => {},
-                    _ = handle_remote_audio(track, "peer".into(), key, "microphone".into(), false, playback) => {},
+                    _ = handle_remote_audio(track, identity, key, TrackSource::Microphone, playback) => {},
                 }
             });
         })));
@@ -479,6 +481,10 @@ impl PeerMedia {
         Ok(())
     }
 
+    pub fn set_volume(&self, volume: f32) {
+        self.audio.lock().set_participant_volume(self.peer.as_str(), volume, "microphone");
+    }
+
     pub fn toggle_mic(&self) -> bool {
         let mut audio = self.audio.lock();
         audio.mic_enabled = !audio.mic_enabled;
@@ -681,6 +687,8 @@ mod tests {
     async fn matrix_web_rtc_carries_two_way_audio_and_upgrades_to_camera_video() {
         let mut caller = new_peer("caller");
         let mut callee = new_peer("callee");
+        // Match opening a call with this participant's saved slider at 0%.
+        caller.set_volume(0.0);
         let mut caller_ice = watch_candidates(&caller);
         let mut callee_ice = watch_candidates(&callee);
         let offer = caller.setup(None, false).await.unwrap();
@@ -704,15 +712,26 @@ mod tests {
             data: (0..SAMPLES_PER_10MS)
                 .map(|sample| {
                     (f32::sin(sample as f32 * std::f32::consts::TAU * 440.0 / SAMPLE_RATE as f32)
-                        * 12_000.0) as i16
+                        * 400.0) as i16
                 })
                 .collect::<Vec<_>>()
                 .into(),
         };
         let audio = tokio::time::timeout(Duration::from_secs(4), async {
+            let mut verified_mute = false;
             loop {
                 caller.source.capture_frame(&frame).await.unwrap();
                 callee.source.capture_frame(&frame).await.unwrap();
+                if !verified_mute {
+                    let state = caller.audio.lock();
+                    if state.remote_mic_level_smooth.get(caller.peer.as_str()).copied().unwrap_or(0.0) > 0.002 {
+                        assert!(state.playback_buffers.values().flatten().all(|&s| s == 0.0),
+                            "a saved 0% must silence even the first decoded speech");
+                        drop(state);
+                        caller.set_volume(2.0);
+                        verified_mute = true;
+                    }
+                }
                 let received = [&caller, &callee].into_iter().all(|peer| {
                     peer.audio
                         .lock()
@@ -721,7 +740,7 @@ mod tests {
                         .flatten()
                         .any(|sample| sample.abs() > 0.03)
                 });
-                if received {
+                if verified_mute && received {
                     break;
                 }
                 tokio::time::sleep(Duration::from_millis(10)).await;
@@ -730,7 +749,7 @@ mod tests {
         .await;
         assert!(
             audio.is_ok(),
-            "both peers should receive microphone audio (caller {} samples, callee {} samples)",
+            "both peers should amplify the quiet microphone (caller {} samples, callee {} samples)",
             caller
                 .audio
                 .lock()

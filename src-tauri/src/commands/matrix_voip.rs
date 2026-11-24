@@ -60,6 +60,13 @@ pub(crate) struct MatrixVoip {
 }
 
 impl MatrixVoip {
+    pub(super) async fn set_peer_volume(&self, user_id: &str, volume: f32) {
+        let current = self.media.lock().await;
+        if let Some(media) = current.as_ref().filter(|media| media.peer.as_str() == user_id) {
+            media.set_volume(volume);
+        }
+    }
+
     pub async fn reset(&self) {
         self.media.lock().await.take();
         self.inbox.lock().await.clear();
@@ -796,6 +803,7 @@ pub(crate) async fn open_matrix_voip_media(
     peer_user_id: OwnedUserId,
     offer: Option<Description>,
     video: Option<bool>,
+    participant_volume: Option<f32>,
 ) -> Result<Description, String> {
     let client = super::get_client(&state).await?;
     let room = super::resolve_room(&client, &room_id)?;
@@ -838,6 +846,7 @@ pub(crate) async fn open_matrix_voip_media(
         }
     };
     let mut media = PeerMedia::open(&app, call_id, room_id, peer_user_id, ice_servers)?;
+    media.set_volume(participant_volume.unwrap_or(1.0));
     let local = media.setup(offer, video.unwrap_or(false)).await?;
     *current = Some(media);
     Ok(local)

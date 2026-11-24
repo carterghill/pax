@@ -6,6 +6,14 @@ This template should help get you started developing with Tauri, React and Types
 
 - [VS Code](https://code.visualstudio.com/) + [Tauri](https://marketplace.visualstudio.com/items?itemName=tauri-apps.tauri-vscode) + [rust-analyzer](https://marketplace.visualstudio.com/items?itemName=rust-lang.rust-analyzer)
 
+## Rust build storage
+
+Development and test builds keep full debugger information for Pax and file and line numbers for dependencies. Incremental compilation is disabled to avoid accumulating object files on macOS. Cargo still reuses compiled dependencies between edits.
+
+On macOS or Linux, run `du -sh src-tauri/target` to check disk usage. For an optional size budget, install `cargo-sweep` with `cargo install --locked cargo-sweep`. From `src-tauri`, run `cargo sweep --dry-run --maxsize 50GiB` to preview a trim. Rerun it without `--dry-run` between builds to prune older artifacts toward that size.
+
+To reset the whole desktop debug profile with Cargo alone, run `cargo clean --profile dev --dry-run` from `src-tauri` to preview the cleanup. This includes packaged debug apps under `target/debug/bundle`, so copy any you want to keep before rerunning without `--dry-run`. The next clean build downloads the WebRTC library again when using the default configuration.
+
 ## Linux media dependencies
 
 On Debian-based Linux, install the Pax `.deb` with APT (for example, `sudo apt install ./pax_0.1.0_arm64.deb`) so it resolves the GStreamer dependencies. When running Pax from source, use `npm run setup:linux-media` before `npm start`. The setup command reads the same dependency list and uses APT to install missing packages. Restart Pax if it was already running.

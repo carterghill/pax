@@ -20,7 +20,7 @@ use serde::Serialize;
 ///
 /// Architecture:
 ///   Mic:  cpal input → ring buffer → tokio task → NativeAudioSource → LiveKit
-///   Spkr: LiveKit → NativeAudioStream → per-user volume → mix → ring buffer → cpal output
+///   Spkr: decoded tracks → mic leveling → per-user volume → mix and limit → output
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
@@ -31,7 +31,9 @@ use tokio::time::{interval_at, Instant as TokioInstant, MissedTickBehavior};
 
 pub(crate) mod camera;
 pub(crate) mod peer;
+mod playback;
 pub(crate) mod recording;
+use playback::{MixLimiter, TrackPlayback};
 
 fn should_auto_rejoin(reason: livekit::DisconnectReason) -> bool {
     use livekit::DisconnectReason as Reason;
@@ -245,6 +247,20 @@ struct AudioState {
     /// Whether this client is currently sharing its own screen
     is_local_screen_sharing: bool,
 }
+
+fn participant_volume_key(identity: &str, source: &str) -> String {
+    // Match the existing per-user slider key for Matrix IDs and LiveKit device identities.
+    let user = identity.split('|').next().unwrap_or(identity);
+    let user = user.split(':').take(2).collect::<Vec<_>>().join(":");
+    format!("{user}::{source}")
+}
+
+impl AudioState {
+    fn set_participant_volume(&mut self, identity: &str, volume: f32, source: &str) {
+        self.user_volumes.insert(participant_volume_key(identity, source), volume.clamp(0.0, 2.0));
+    }
+}
+
 impl Default for AudioState {
     fn default() -> Self {
         Self {
@@ -582,15 +598,10 @@ impl VoiceManager {
     }
 
     /// Set per-user volume (0.0 – 2.0) for a specific source ("microphone" or "screenshare_audio").
-    pub fn set_participant_volume(&self, identity: String, volume: f32, source: String) {
+    pub fn set_participant_volume(&self, identity: &str, volume: f32, source: &str) {
         let guard = self.session.lock();
-        let clamped = volume.clamp(0.0, 2.0);
         if let Some(session) = guard.as_ref() {
-            let mut state = session.audio_state.lock();
-            // Key format: "@user:server::microphone" or "@user:server::screenshare_audio"
-            let user_part: String = identity.split(':').take(2).collect::<Vec<_>>().join(":");
-            let vol_key = format!("{}::{}", user_part, source);
-            state.user_volumes.insert(vol_key, clamped);
+            session.audio_state.lock().set_participant_volume(identity, volume, source);
         }
     }
 
@@ -972,8 +983,7 @@ async fn handle_remote_audio(
     audio_track: libwebrtc::audio_track::RtcAudioTrack,
     identity: String,
     track_key: String,
-    source_tag: String,
-    is_mic_track: bool,
+    source: TrackSource,
     audio_state: Arc<Mutex<AudioState>>,
 ) {
     let mut stream = NativeAudioStream::new(
@@ -982,36 +992,32 @@ async fn handle_remote_audio(
         NUM_CHANNELS as i32,
     );
     // Build the volume lookup key: "@user:server::microphone" or "@user:server::screenshare_audio"
-    let user_part: String = identity.split(':').take(2).collect::<Vec<_>>().join(":");
-    let vol_key = format!("{}::{}", user_part, source_tag);
+    let source_tag = match source {
+        TrackSource::Microphone => "microphone".to_owned(),
+        TrackSource::ScreenshareAudio => "screenshare_audio".to_owned(),
+        other => format!("{other:?}").to_lowercase(),
+    };
+    let vol_key = participant_volume_key(&identity, &source_tag);
+    let mut playback = TrackPlayback::new(source);
     while let Some(frame) = stream.next().await {
         let samples: &[i16] = frame.data.as_ref();
         let mut st = audio_state.lock();
         let volume = *st.user_volumes.get(&vol_key).unwrap_or(&1.0);
-
-        // Only microphone audio should drive mic speaking indicators.
-        if is_mic_track {
-            let inst = rms_i16_normalized(samples);
-            st.remote_mic_level_smooth
-                .entry(identity.clone())
-                .and_modify(|e| *e = ema_speaking_level(*e, inst))
-                .or_insert(inst);
-        }
 
         let buf = st
             .playback_buffers
             .entry(track_key.clone())
             .or_insert_with(|| VecDeque::with_capacity(SAMPLE_RATE as usize));
 
-        // Cap per-track buffer at ~500ms to prevent unbounded growth
-        let max_buf = (SAMPLE_RATE / 2) as usize;
-        while buf.len() + samples.len() > max_buf {
-            buf.pop_front();
-        }
-
-        for &s in samples {
-            let f = ((s as f32 / 32768.0) * volume).clamp(-1.0, 1.0);
-            buf.push_back(f);
+        let mic_level = playback.push_frame(samples, volume, buf);
+        // Keep at most half a second of decoded audio per track.
+        let excess = buf.len().saturating_sub((SAMPLE_RATE / 2) as usize);
+        buf.drain(..excess);
+        if let Some(level) = mic_level {
+            st.remote_mic_level_smooth
+                .entry(identity.clone())
+                .and_modify(|e| *e = ema_speaking_level(*e, level))
+                .or_insert(level);
         }
     }
     // Track ended — clean up its buffer
@@ -1095,19 +1101,12 @@ async fn run_event_loop(
                             }
                             let state_clone = audio_state.clone();
                             let track_key = format!("{}::{:?}", identity, source);
-                            let source_tag = match source {
-                                TrackSource::Microphone => "microphone".to_string(),
-                                TrackSource::ScreenshareAudio => "screenshare_audio".to_string(),
-                                other => format!("{:?}", other).to_lowercase(),
-                            };
-                            let is_mic_track = source == TrackSource::Microphone;
                             tokio::spawn(async move {
                                 handle_remote_audio(
                                     audio_track.rtc_track(),
                                     identity,
                                     track_key,
-                                    source_tag,
-                                    is_mic_track,
+                                    source,
                                     state_clone,
                                 )
                                 .await;
@@ -1627,7 +1626,7 @@ pub struct NoiseSuppressionConfig {
     /// Higher values apply a VAD-probability-weighted gain curve that further
     /// attenuates non-voice frames.  Range 0.0 – 1.0.
     pub extra_attenuation: f32,
-    /// AGC target RMS level.  0 = AGC disabled (recommended default).
+    /// Outgoing mic AGC target in i16 sample units. 0 disables capture AGC.
     /// When >0, a gentle automatic gain control normalises voice loudness.
     pub agc_target_rms: f32,
 }
@@ -2005,6 +2004,7 @@ fn setup_speaker_output_cpal(
     let state = audio_state.clone();
     let resample_frac: Arc<Mutex<f64>> = Arc::new(Mutex::new(0.0));
     let prev_sample: Arc<Mutex<f32>> = Arc::new(Mutex::new(0.0));
+    let mut limiter = MixLimiter::new(device_rate);
 
     #[inline]
     fn pop_mixed(buffers: &mut HashMap<String, VecDeque<f32>>) -> f32 {
@@ -2012,7 +2012,7 @@ fn setup_speaker_output_cpal(
         for buf in buffers.values_mut() {
             sum += buf.pop_front().unwrap_or(0.0);
         }
-        sum.clamp(-1.0, 1.0)
+        sum
     }
 
     #[inline]
@@ -2021,7 +2021,7 @@ fn setup_speaker_output_cpal(
         for buf in buffers.values() {
             sum += buf.front().copied().unwrap_or(0.0);
         }
-        sum.clamp(-1.0, 1.0)
+        sum
     }
 
     let stream = device
@@ -2052,7 +2052,7 @@ fn setup_speaker_output_cpal(
                             }
                             let next = peek_mixed(&st.playback_buffers);
                             let t = *frac as f32;
-                            let sample = *prev * (1.0 - t) + next * t;
+                            let sample = limiter.process(*prev * (1.0 - t) + next * t);
                             for s in frame.iter_mut() {
                                 *s = sample;
                             }
@@ -2064,7 +2064,7 @@ fn setup_speaker_output_cpal(
                             let _ = pop_mixed(&mut st.playback_buffers);
                             0.0
                         } else {
-                            pop_mixed(&mut st.playback_buffers)
+                            limiter.process(pop_mixed(&mut st.playback_buffers))
                         };
                         for s in frame.iter_mut() {
                             *s = sample;
@@ -2446,6 +2446,7 @@ fn setup_speaker_output_linux(
         .name("gst-speaker-push".into())
         .spawn(move || {
             let chunk_samples = SAMPLES_PER_10MS as usize;
+            let mut limiter = MixLimiter::new(SAMPLE_RATE);
 
             while !shutdown_flag.load(Ordering::Relaxed) {
                 let mut samples = vec![0.0f32; chunk_samples];
@@ -2459,7 +2460,7 @@ fn setup_speaker_output_linux(
                         *sample = if st.deafened {
                             0.0
                         } else {
-                            sum.clamp(-1.0, 1.0)
+                            limiter.process(sum)
                         };
                     }
                 }

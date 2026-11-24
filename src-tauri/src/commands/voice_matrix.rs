@@ -1337,11 +1337,15 @@ pub async fn voice_stop_screen_share(
 #[tauri::command]
 pub async fn voice_set_participant_volume(
     voice_mgr: State<'_, voice::VoiceManager>,
+    state: State<'_, Arc<AppState>>,
     identity: String,
     volume: f32,
     source: String,
 ) -> Result<(), String> {
-    voice_mgr.set_participant_volume(identity, volume, source);
+    voice_mgr.set_participant_volume(&identity, volume, &source);
+    if source == "microphone" {
+        state.matrix_voip.set_peer_volume(&identity, volume).await;
+    }
     Ok(())
 }
 

@@ -352,7 +352,8 @@ export default function VoiceAudioSettingsSection({
           marginTop: spacing.unit * 2,
         }}
       >
-        Noise suppression settings apply immediately
+        These settings apply to your microphone immediately. Pax automatically
+        boosts quiet callers during playback.
       </div>
     </>
   );

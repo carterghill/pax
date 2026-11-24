@@ -378,7 +378,7 @@ export function VoiceCallPanel({
             streams={tiles}
             getVolume={getStreamVolume}
             onVolumeChange={matrixMedia ? undefined : handleStreamVolumeChange}
-            onStreamContextMenu={matrixMedia ? undefined : (e, identity, displayName) => {
+            onStreamContextMenu={(e, identity, displayName) => {
               e.preventDefault();
               setContextMenu({
                 x: e.clientX,
@@ -520,7 +520,7 @@ export function VoiceCallPanel({
           <div
             key={p.userId}
             onContextMenu={(e) => {
-              if (matrixMedia || p.isLocal || (p.status !== "connected" && p.status !== "interrupted")) return;
+              if (p.isLocal || (p.status !== "connected" && p.status !== "interrupted")) return;
               e.preventDefault();
               setContextMenu({
                 x: e.clientX,
@@ -535,7 +535,7 @@ export function VoiceCallPanel({
               alignItems: "center",
               gap: spacing.unit * 2,
               width: 120,
-              cursor: matrixMedia || p.isLocal ? "default" : "context-menu",
+              cursor: p.isLocal ? "default" : "context-menu",
             }}
           >
             <div style={{ position: "relative", display: "flex" }}>

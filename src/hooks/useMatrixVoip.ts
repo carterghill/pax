@@ -3,6 +3,7 @@ import { invoke } from "@tauri-apps/api/core";
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 import type { DirectCall, DirectCallPeerConnection } from "./useDirectCall";
 import { getStoredAudioDevicePreferences, requestMicrophonePermission } from "./useVoiceAudioDevices";
+import { getStoredVolume } from "./useUserVolume";
 import { useCallCamera, type CameraTransport } from "./useCallCamera";
 import type { RemoteCallVideo } from "../utils/callVideoLayout";
 import { getCallDuration } from "../features/chat/messages/callHistory";
@@ -96,7 +97,7 @@ function localMetadata(session: Session) {
 function openMedia(session: Session) {
   return invoke<Description>("open_matrix_voip_media", {
     roomId: session.call.roomId, callId: session.call.callId, peerUserId: session.call.peerUserId,
-    offer: session.offer, video: !!session.call.video,
+    offer: session.offer, video: !!session.call.video, participantVolume: getStoredVolume(session.call.peerUserId),
   });
 }
 

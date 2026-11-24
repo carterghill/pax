@@ -5,6 +5,14 @@ description = "A Tauri App"
 authors = ["you"]
 edition = "2021"
 
+[profile.dev]
+# On macOS, incremental builds leave new debug object files in deps on each edit.
+incremental = false
+
+[profile.dev.package."*"]
+# Keep file and line numbers for dependency backtraces and full debug info for Pax.
+debug = "line-tables-only"
+
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
 [lib]
