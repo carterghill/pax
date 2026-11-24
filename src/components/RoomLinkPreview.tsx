@@ -4,7 +4,7 @@ import { Hash, Layers, LoaderCircle } from "lucide-react";
 import type { Room } from "../types/matrix";
 import { useTheme } from "../theme/ThemeContext";
 import { avatarSrc } from "../utils/avatarSrc";
-import { roomLinkPresentation, roomLinkTarget, type RoomLinkAction } from "../utils/roomLinks";
+import { roomLinkActionFailure, roomLinkPresentation, roomLinkTarget, type RoomLinkAction, type RoomPreviewFailure } from "../utils/roomLinks";
 import RoomAvatar from "./RoomAvatar";
 
 interface LinkedRoomPreview {
@@ -15,12 +15,15 @@ interface LinkedRoomPreview {
   isSpace: boolean;
   membership: string | null;
   joinRule: string | null;
+  allowedRoomIds: string[];
 }
 
+type PreviewResult = LinkedRoomPreview | RoomPreviewFailure | null;
+
 interface PreviewSource {
-  getRoom: (roomId: string) => Room | null;
+  getRoom: (roomId: string, includeHistory?: boolean) => Room | null;
   openRoom: (roomId: string) => void;
-  load: (url: string, refresh: boolean) => Promise<LinkedRoomPreview | null>;
+  load: (url: string, refresh: boolean) => Promise<PreviewResult>;
 }
 
 const RoomLinks = createContext<PreviewSource | null>(null);
@@ -30,11 +33,12 @@ const PREVIEW_CACHE_TTL_MS = 60_000;
 export function RoomLinkPreviewProvider({ getRoom, openRoom, children }: Pick<PreviewSource, "getRoom" | "openRoom"> & {
   children: ReactNode;
 }) {
-  const cache = useRef(new Map<string, { expires: number; result: Promise<LinkedRoomPreview | null> }>());
+  const cache = useRef(new Map<string, { expires: number; result: Promise<PreviewResult> }>());
   const load = useCallback((url: string, refresh: boolean) => {
     const previous = cache.current.get(url);
     if (!refresh && previous && previous.expires > Date.now()) return previous.result;
-    const result = invoke<LinkedRoomPreview>("get_linked_room_preview", { url }).catch(() => null);
+    const result = invoke<LinkedRoomPreview>("get_linked_room_preview", { url }).catch((reason: unknown) =>
+      reason === "invalidLink" || reason === "roomNotFound" ? reason : null);
     cache.current.delete(url);
     if (cache.current.size >= PREVIEW_CACHE_LIMIT) {
       const oldest = cache.current.keys().next().value;
@@ -61,24 +65,24 @@ function RoomLinkCard({ url, target, source, allowUnknownJoin }: {
   allowUnknownJoin: boolean;
 }) {
   const { palette, typography } = useTheme();
-  const [preview, setPreview] = useState<LinkedRoomPreview | null>();
+  const [preview, setPreview] = useState<PreviewResult>();
   const [requested, setRequested] = useState(false);
   const [busy, setBusy] = useState(false);
   const busyRef = useRef(false);
-  const [error, setError] = useState("");
+  const [failedAttempt, setFailedAttempt] = useState<{
+    presentation: ReturnType<typeof roomLinkPresentation>;
+    feedback: ReturnType<typeof roomLinkActionFailure>;
+  } | null>(null);
   const [failedAvatar, setFailedAvatar] = useState<string>();
   const wasKnown = useRef(false);
   const { getRoom, load, openRoom } = source;
-  const room = getRoom(preview?.roomId ?? target);
+  const data = typeof preview === "string" ? null : preview;
+  const room = getRoom(data?.roomId ?? target);
   const known = room != null;
 
   useEffect(() => {
-    if (known) {
-      wasKnown.current = true;
-      return;
-    }
-    const refresh = wasKnown.current;
-    wasKnown.current = false;
+    const refresh = wasKnown.current && !known;
+    wasKnown.current = known;
     if (refresh) setPreview(undefined);
     let active = true;
     void load(url, refresh).then((result) => {
@@ -87,17 +91,27 @@ function RoomLinkCard({ url, target, source, allowUnknownJoin }: {
     return () => { active = false; };
   }, [known, load, url]);
 
-  const resolved = !known && wasKnown.current ? undefined : preview;
+  const resolved = !known && wasKnown.current ? undefined : data;
   const roomId = room?.id ?? resolved?.roomId ?? target;
   const isSpace = room?.isSpace ?? resolved?.isSpace ?? false;
   const label = isSpace ? "space" : "room";
   const name = room?.name || resolved?.name || (target.startsWith("#") ? target : `Matrix ${label}`);
   const membership = room?.membership ?? resolved?.membership;
   const joinRule = resolved?.joinRule;
-  const { action, status } = roomLinkPresentation(membership, joinRule, {
-    label, requested, loading: resolved === undefined, allowUnknownJoin,
-  });
-  const canRequestAfterFailedJoin = allowUnknownJoin && action === "join" && joinRule == null && !!error;
+  // Directory-only previews may omit the allowed rooms. Try the join when access is unknown.
+  const meetsRestriction = resolved?.allowedRoomIds?.length
+    ? resolved.allowedRoomIds.some((id) => getRoom(id, true)?.membership === "joined")
+    : undefined;
+  const loading = resolved === undefined;
+  const previewFailure = typeof preview === "string" ? preview : undefined;
+  const presentation = useMemo(() => roomLinkPresentation(membership, joinRule, {
+    label, requested, loading, allowUnknownJoin, meetsRestriction, previewFailure,
+  }), [membership, joinRule, label, requested, loading, allowUnknownJoin, meetsRestriction, previewFailure]);
+  const { action, buttonLabel, status } = presentation;
+  // An earlier refusal can arrive after sync delivers an invite or updates space membership.
+  const failure = failedAttempt?.presentation === presentation ? failedAttempt.feedback : null;
+  const disabled = busy || !action || !!failure?.buttonLabel;
+  const canRequestAfterFailedJoin = allowUnknownJoin && action === "join" && joinRule == null && failure?.offerKnock;
 
   async function activate(action: RoomLinkAction) {
     if (busyRef.current) return;
@@ -107,7 +121,7 @@ function RoomLinkCard({ url, target, source, allowUnknownJoin }: {
     }
     busyRef.current = true;
     setBusy(true);
-    setError("");
+    setFailedAttempt(null);
     try {
       const { viaServers } = resolved ?? await invoke<{ viaServers: string[] }>("parse_room_link", { url });
       const joinedId = await invoke<string>(action === "knock" ? "knock_room" : "join_room", {
@@ -118,7 +132,14 @@ function RoomLinkCard({ url, target, source, allowUnknownJoin }: {
       if (action === "knock") setRequested(true);
       else openRoom(joinedId);
     } catch (reason) {
-      setError(String(reason));
+      const feedback = roomLinkActionFailure(reason, action, label);
+      // A temporary knock failure still allows retrying the request after a refused join.
+      setFailedAttempt({
+        presentation,
+        feedback: action === "knock" && canRequestAfterFailedJoin && !feedback.buttonLabel
+          ? { ...failure, status: feedback.status }
+          : feedback,
+      });
     } finally {
       busyRef.current = false;
       setBusy(false);
@@ -150,26 +171,24 @@ function RoomLinkCard({ url, target, source, allowUnknownJoin }: {
           <div title={name} style={{ fontWeight: typography.fontWeightMedium, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
             {name}
           </div>
-          <div style={{ color: palette.textSecondary, fontSize: typography.fontSizeSmall }}>{status}</div>
+          <div role={failure ? "alert" : undefined} style={{ color: palette.textSecondary, fontSize: typography.fontSizeSmall }}>
+            {failure?.status ?? status}
+          </div>
         </div>
-        {action && (
-          <button type="button" disabled={busy} onClick={(event) => {
-            event.stopPropagation();
-            void activate(action);
-          }} style={{
-            display: "inline-flex", alignItems: "center", gap: 5, border: 0, borderRadius: 7, padding: "6px 9px",
-            background: action === "open" ? palette.bgTertiary : palette.accent,
-            color: action === "open" ? palette.textPrimary : "#fff", fontSize: typography.fontSizeSmall,
-            fontFamily: typography.fontFamily, fontWeight: typography.fontWeightMedium,
-            cursor: busy ? "default" : "pointer", opacity: busy ? 0.7 : 1,
-          }}>
-            {busy && <LoaderCircle size={12} style={{ animation: "spin .8s linear infinite" }} aria-hidden="true" />}
-            {action === "open" ? `Go to ${label}`
-              : action === "accept" ? "Accept invite"
-              : action === "knock" ? "Request to join"
-              : "Join"}
-          </button>
-        )}
+        <button type="button" disabled={disabled} onClick={(event) => {
+          event.stopPropagation();
+          if (action) void activate(action);
+        }} style={{
+          display: "inline-flex", alignItems: "center", gap: 5, border: 0, borderRadius: 7, padding: "6px 9px",
+          background: disabled || action === "open" ? palette.bgTertiary : palette.accent,
+          color: disabled ? palette.textSecondary : action === "open" ? palette.textPrimary : "#fff",
+          fontSize: typography.fontSizeSmall,
+          fontFamily: typography.fontFamily, fontWeight: typography.fontWeightMedium,
+          cursor: disabled ? "default" : "pointer",
+        }}>
+          {busy && <LoaderCircle size={12} style={{ animation: "spin .8s linear infinite" }} aria-hidden="true" />}
+          {failure?.buttonLabel ?? buttonLabel}
+        </button>
       </div>
       {canRequestAfterFailedJoin && (
         <button type="button" disabled={busy} onClick={() => void activate("knock")}
@@ -177,7 +196,6 @@ function RoomLinkCard({ url, target, source, allowUnknownJoin }: {
           Request to join
         </button>
       )}
-      {error && <div role="alert" style={{ overflowWrap: "anywhere", fontSize: typography.fontSizeSmall, color: "#ed4245" }}>{error}</div>}
     </div>
   );
 }

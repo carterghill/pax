@@ -840,7 +840,8 @@ function AuthedApp({
           {loading && <p role="status">Opening link…</p>}
           {error && <p role="alert">{error}</p>}
           {invite && <RoomLinkPreview url={invite.url} allowUnknownJoin />}
-          <div style={{ display: "flex", justifyContent: "flex-end", marginTop: 14 }}>
+          <div style={{ display: "flex", justifyContent: "flex-end", gap: 8, marginTop: 14 }}>
+            {error && <button type="button" disabled>Link unavailable</button>}
             <button type="button" onClick={() => dismiss()}>Close</button>
           </div>
         </Dialog>

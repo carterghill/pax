@@ -3,11 +3,13 @@ use std::{collections::BTreeSet, sync::Arc, time::Duration};
 use matrix_sdk::ruma::{
     api::client::{
         account::request_openid_token,
+        error::ErrorKind,
         membership::{invite_user, Invite3pidInit},
     },
     matrix_uri::{MatrixId, UriAction},
+    room::JoinRuleSummary,
     thirdparty::Medium,
-    MatrixToUri, MatrixUri, OwnedServerName, RoomId, RoomOrAliasId, ServerName,
+    MatrixToUri, MatrixUri, OwnedRoomId, OwnedServerName, RoomId, RoomOrAliasId, ServerName,
 };
 use matrix_sdk::RoomState;
 use once_cell::sync::Lazy;
@@ -161,6 +163,15 @@ pub struct LinkedRoomPreview {
     is_space: bool,
     membership: Option<&'static str>,
     join_rule: Option<String>,
+    allowed_room_ids: Vec<OwnedRoomId>,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub enum RoomPreviewError {
+    InvalidLink,
+    RoomNotFound,
+    Unavailable,
 }
 
 fn link_membership(state: RoomState) -> &'static str {
@@ -177,15 +188,17 @@ fn link_membership(state: RoomState) -> &'static str {
 pub async fn get_linked_room_preview(
     state: State<'_, Arc<AppState>>,
     url: String,
-) -> Result<LinkedRoomPreview, String> {
-    let link = parse_room_link(url)?;
-    let client = get_client(&state).await?;
+) -> Result<LinkedRoomPreview, RoomPreviewError> {
+    let link = parse_room_link(url).map_err(|_| RoomPreviewError::InvalidLink)?;
+    let client = get_client(&state)
+        .await
+        .map_err(|_| RoomPreviewError::Unavailable)?;
     let _permit = ROOM_PREVIEW_LOOKUPS
         .acquire()
         .await
-        .map_err(|_| "Room previews are unavailable.")?;
+        .map_err(|_| RoomPreviewError::Unavailable)?;
     let target = <&RoomOrAliasId>::try_from(link.room_id.as_str())
-        .map_err(|_| "Invalid room identifier.")?;
+        .map_err(|_| RoomPreviewError::InvalidLink)?;
     let mut via: Vec<OwnedServerName> = link
         .via_servers
         .iter()
@@ -197,9 +210,11 @@ pub async fn get_linked_room_preview(
             let resolution =
                 tokio::time::timeout(Duration::from_secs(5), client.resolve_room_alias(alias))
                     .await
-                    .ok()
-                    .and_then(Result::ok)
-                    .ok_or("The homeserver could not resolve this room link.")?;
+                    .map_err(|_| RoomPreviewError::Unavailable)?
+                    .map_err(|error| match error.client_api_error_kind() {
+                        Some(ErrorKind::NotFound) => RoomPreviewError::RoomNotFound,
+                        _ => RoomPreviewError::Unavailable,
+                    })?;
             for server in resolution.servers {
                 if via.len() == 3 {
                     break;
@@ -219,6 +234,7 @@ pub async fn get_linked_room_preview(
         is_space: false,
         membership: None,
         join_rule: None,
+        allowed_room_ids: Vec::new(),
     };
     // Invites come from the signed-in account's sync state. That state can already
     // include the stripped name/avatar even when the remote summary is unavailable.
@@ -265,7 +281,14 @@ pub async fn get_linked_room_preview(
             .as_ref()
             .is_some_and(|kind| kind.as_str() == "m.space");
         result.membership = preview.state.map(link_membership).or(result.membership);
-        result.join_rule = preview.join_rule.map(|rule| rule.as_str().to_owned());
+        if let Some(rule) = preview.join_rule {
+            result.join_rule = Some(rule.as_str().to_owned());
+            if let JoinRuleSummary::Restricted(summary) | JoinRuleSummary::KnockRestricted(summary) =
+                rule
+            {
+                result.allowed_room_ids = summary.allowed_room_ids;
+            }
+        }
         if let Some(avatar) = preview.avatar_url.as_deref() {
             result.avatar_url = tokio::time::timeout(
                 Duration::from_secs(2),

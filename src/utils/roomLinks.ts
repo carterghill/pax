@@ -82,34 +82,94 @@ export function appendRoomLinkPreviews(tree: Root): void {
 }
 
 export type RoomLinkAction = "open" | "accept" | "join" | "knock";
+export type RoomPreviewFailure = "invalidLink" | "roomNotFound";
+type RoomLabel = "room" | "space";
+
+type UnavailableReason = RoomPreviewFailure | "inviteRequired" | "restricted" | "expired" | "usedUp" | "denied";
+
+function unavailable(reason: UnavailableReason, label: RoomLabel) {
+  const copy = {
+    invalidLink: ["Invalid link", "Ask the sender for a new link."],
+    roomNotFound: [label === "space" ? "Space unavailable" : "Room unavailable", `Your homeserver couldn’t find this ${label}.`],
+    inviteRequired: ["Invite required", `Ask a member to invite you to this ${label}.`],
+    restricted: ["Invite required", "Join a required room or space first, or ask a member for an invite."],
+    expired: ["Invite expired", "Ask the sender for a new invite."],
+    usedUp: ["Invite used up", "Ask the sender for a new invite."],
+    denied: ["Access denied", `Your homeserver denied access to this ${label}.`],
+  }[reason];
+  return { action: null, buttonLabel: copy[0], status: copy[1] };
+}
 
 export function roomLinkPresentation(membership: string | null | undefined, joinRule: string | null | undefined, {
-  label, requested, loading, allowUnknownJoin,
+  label, requested, loading, allowUnknownJoin, meetsRestriction, previewFailure,
 }: {
-  label: "room" | "space";
+  label: RoomLabel;
   requested: boolean;
   loading: boolean;
   allowUnknownJoin: boolean;
-}): { action: RoomLinkAction | null; status: string } {
-  if (membership === "joined") return { action: "open", status: `You’re in this ${label}` };
-  if (membership === "invited") return { action: "accept", status: "You’ve been invited" };
-  if (membership === "banned") return { action: null, status: "Room unavailable" };
-  if (membership === "knocked" || requested) return { action: null, status: "Join request sent" };
+  meetsRestriction?: boolean;
+  previewFailure?: RoomPreviewFailure;
+}): { action: RoomLinkAction | null; buttonLabel: string; status: string } {
+  if (previewFailure === "invalidLink") return unavailable(previewFailure, label);
+  if (membership === "joined") return { action: "open", buttonLabel: `Go to ${label}`, status: `You’re in this ${label}` };
+  if (membership === "invited") return { action: "accept", buttonLabel: "Accept invite", status: "You’ve been invited" };
+  if (membership === "banned") return { action: null, buttonLabel: "Access denied", status: `You’re banned from this ${label}.` };
+  if (membership === "knocked" || requested) return { action: null, buttonLabel: "Request sent", status: "Waiting for approval." };
+  if (previewFailure) return unavailable(previewFailure, label);
   switch (joinRule) {
     case "knock":
     case "knock_restricted":
-      return { action: "knock", status: "Approval required" };
+      if (joinRule === "knock_restricted" && meetsRestriction) {
+        return { action: "join", buttonLabel: "Join", status: `Restricted ${label}` };
+      }
+      return { action: "knock", buttonLabel: "Request to join", status: "Approval required" };
     case "public":
-      return { action: "join", status: `Public ${label}` };
+      return { action: "join", buttonLabel: "Join", status: `Public ${label}` };
     case "restricted":
-      return { action: "join", status: `Restricted ${label}` };
+      if (meetsRestriction === false) return unavailable("restricted", label);
+      return { action: "join", buttonLabel: "Join", status: `Restricted ${label}` };
     case "invite":
     case "private":
-      return { action: null, status: "Invite required" };
+      return unavailable("inviteRequired", label);
     default:
       return {
         action: allowUnknownJoin && !loading ? "join" : null,
-        status: loading ? "Loading room preview…" : "Room preview unavailable",
+        buttonLabel: loading ? "Checking access…" : allowUnknownJoin ? "Join" : "Preview unavailable",
+        status: loading ? `Loading ${label} preview…` : "Your homeserver couldn’t confirm access.",
       };
   }
+}
+
+export function roomLinkActionFailure(reason: unknown, action: RoomLinkAction, label: RoomLabel): {
+  status: string;
+  buttonLabel?: string;
+  offerKnock?: boolean;
+} {
+  // join_room returns an SDK error chain; knock_room includes the Matrix JSON response.
+  const detail = String(reason);
+  if (/\bM_LIMIT_EXCEEDED\b/.test(detail)) {
+    return { status: "Too many requests. Wait a moment and try again." };
+  }
+  if (/\binvit(?:e|ation)(?: link)? (?:has |is )?expired\b/i.test(detail)) {
+    return unavailable("expired", label);
+  }
+  if (/\binvit(?:e|ation)(?: link)? (?:has no (?:remaining )?uses|is out of uses|has already been used)\b/i.test(detail)) {
+    return unavailable("usedUp", label);
+  }
+  if (/\binvalid invit(?:e|ation)(?: link)?\b|\binvit(?:e|ation) (?:link )?is invalid\b/i.test(detail)) {
+    return unavailable("invalidLink", label);
+  }
+  if (/\bM_NOT_FOUND\b/.test(detail)) {
+    return unavailable("roomNotFound", label);
+  }
+  if (/\bM_FORBIDDEN\b/.test(detail)) {
+    if (/do not belong to any of the required rooms\/spaces/i.test(detail)) {
+      return unavailable("restricted", label);
+    }
+    if (/\bnot invited\b|\binvite[- ]only\b|\binvit(?:e|ation) (?:is )?required\b/i.test(detail)) {
+      return { ...unavailable("inviteRequired", label), offerKnock: action === "join" };
+    }
+    return { ...unavailable("denied", label), offerKnock: action === "join" };
+  }
+  return { status: action === "knock" ? "Couldn’t send your request. Try again." : `Couldn’t join this ${label}. Try again.` };
 }
