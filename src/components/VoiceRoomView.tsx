@@ -128,6 +128,7 @@ export function VoiceCallPanel({
   const isDirectCall = directCall != null;
   const { tiles, avatarCameras } = callVideoLayout(media.remoteVideo, matrixMedia ? userId : callState.localParticipant?.identity ?? userId,
     media.localCamera, !matrixMedia && callState.isLocalScreenSharing);
+  const localCameraError = media.localCamera && "error" in media.localCamera ? media.localCamera.error : null;
   const hasVideo = isConnected && tiles.length > 0;
   const participantsBesideShare = hasVideo && !directCall;
   const avatarSize = inChat ? (hasVideo ? 40 : 64) : 80;
@@ -569,6 +570,9 @@ export function VoiceCallPanel({
                 }} />
               )}
             </div>
+            {p.isLocal && avatarCameras.has(p.identity) && localCameraError && (
+              <span className="call-camera-error" role="status">{localCameraError}</span>
+            )}
             <span style={{
               fontSize: typography.fontSizeSmall,
               color: palette.textPrimary,

@@ -197,6 +197,7 @@ export function useMatrixVoip(
   }), []);
   const camera = useCallCamera(current.current?.transport === "matrix" && current.current.phase === "active"
     ? current.current.callId : null, cameraTransport);
+  const { refreshCamera } = camera;
 
   const setPhase = useCallback((session: Session, phase: DirectCall["phase"], expiresAt = session.call.expiresAt) => {
     session.call = {
@@ -462,11 +463,12 @@ export function useMatrixVoip(
           }
           const accepted = await syncVideo(peerSession);
           peerSession.cameraAnswer?.(accepted);
+          if (accepted && active.current === peerSession) refreshCamera();
         });
         break;
       }
     }
-  }, [activateWhenReady, answer, connectionDeadline, current, dismissQuiet, enableMedia, finish, setError, setPhase, syncVideo, update, voiceBusy]);
+  }, [activateWhenReady, answer, connectionDeadline, current, dismissQuiet, enableMedia, finish, refreshCamera, setError, setPhase, syncVideo, update, voiceBusy]);
 
   useEffect(() => {
     if (!ready) return;
@@ -521,6 +523,7 @@ export function useMatrixVoip(
         if (session?.call.callId !== payload.callId) return;
         session.connected = payload.status === "connected";
         if (session.connected) {
+          refreshCamera();
           setConnection("connected");
           activateWhenReady(session);
         } else if (payload.status === "failed") {
@@ -536,7 +539,7 @@ export function useMatrixVoip(
       })),
     ]).then(drain).catch((error) => console.warn("Could not listen for Matrix calls:", error));
     return () => { disposed = true; subscriptions.forEach((remove) => remove()); };
-  }, [activateWhenReady, connectionDeadline, fail, finish, flushIce, ready, receive, setError]);
+  }, [activateWhenReady, connectionDeadline, fail, finish, flushIce, ready, receive, refreshCamera, setError]);
 
   useEffect(() => () => {
     const session = active.current;

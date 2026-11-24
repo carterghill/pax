@@ -1,3 +1,5 @@
+import type { LocalCameraPreview } from "./callCameraCapture";
+
 export interface RemoteCallVideo {
   identity: string;
   streamId: string;
@@ -6,11 +8,11 @@ export interface RemoteCallVideo {
 
 export type CallStream =
   | RemoteCallVideo & { local?: false }
-  | { identity: string; local: true; source: "camera"; media: MediaStream }
+  | { identity: string; local: true; source: "camera"; media: LocalCameraPreview }
   | { identity: string; local: true; source: "screen" };
 
 export function callVideoLayout(
-  remote: RemoteCallVideo[], localIdentity: string, localCamera: MediaStream | null, sharingScreen: boolean,
+  remote: RemoteCallVideo[], localIdentity: string, localCamera: LocalCameraPreview | null, sharingScreen: boolean,
 ) {
   const streams: CallStream[] = [...remote];
   if (localCamera) streams.push({ identity: localIdentity, local: true, source: "camera", media: localCamera });

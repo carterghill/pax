@@ -121,6 +121,7 @@ export function useVoiceCall(isVoiceChannel: (roomId: string) => boolean) {
   const revision = useRef(0);
   const transportAttempt = useRef<string | null>(null);
   const camera = useCallCamera(state.connectedRoomId ? transportAttempt.current : null);
+  const { refreshCamera } = camera;
   const pendingConnect = useRef<Promise<boolean> | null>(null);
   const pendingDisconnect = useRef<Promise<void> | null>(null);
   const activeScreenShare = useRef<{
@@ -236,6 +237,9 @@ export function useVoiceCall(isVoiceChannel: (roomId: string) => boolean) {
     let disposed = false;
     const unlisteners: UnlistenFn[] = [];
     void Promise.allSettled([
+      listen<string>("voice-camera-refresh", ({ payload: attemptId }) => {
+        if (!disposed && transportAttempt.current === attemptId) refreshCamera();
+      }),
       listen<VoiceStateEvent>("voice-state-changed", ({ payload: event }) => {
         if (disposed || targetRoomIdRef.current !== event.roomId || transportAttempt.current !== event.attemptId) return;
         const connected = event.connectedRoomId !== null && !event.isConnecting;
@@ -308,7 +312,7 @@ export function useVoiceCall(isVoiceChannel: (roomId: string) => boolean) {
       disposed = true;
       unlisteners.forEach((stop) => stop());
     };
-  }, [connectAttempt, disconnect]);
+  }, [connectAttempt, disconnect, refreshCamera]);
 
   const toggleMic = useCallback(async () => {
     try {

@@ -352,6 +352,7 @@ export default function ScreenShareViewer({ active, identity, camera = false, av
     let mounted = true;
     let frameAvailable = true;
     let fetchInFlight = false;
+    let lastCameraFrame = "0";
     let lastFetch = -Infinity;
     let rafId = 0;
     let unlisten: UnlistenFn | null = null;
@@ -393,7 +394,8 @@ export default function ScreenShareViewer({ active, identity, camera = false, av
 
       (async () => {
         try {
-          const resp = await fetch(`${frameUrl}?id=${encodedId}`);
+          const after = camera ? `&after=${lastCameraFrame}` : "";
+          const resp = await fetch(`${frameUrl}?id=${encodedId}${after}`);
           if (!mounted) { resp.body?.cancel(); return; }
           if (resp.status === 204 || !resp.ok) { resp.body?.cancel(); return; }
 
@@ -419,6 +421,7 @@ export default function ScreenShareViewer({ active, identity, camera = false, av
           if (!glState) return;
 
           uploadAndDraw(glState, buf, width, height);
+          if (camera) lastCameraFrame = resp.headers.get("x-frame-number") ?? "0";
 
           if (loadingRef.current) {
             loadingRef.current = false;
@@ -455,7 +458,7 @@ export default function ScreenShareViewer({ active, identity, camera = false, av
       loadingRef.current = true;
       fetch(`${resizeUrl}?id=${encodeURIComponent(identity)}&w=0&h=0`).catch(() => {});
     };
-  }, [active, identity, useNative]);
+  }, [active, identity, useNative, camera]);
 
   if (!active) return null;
 

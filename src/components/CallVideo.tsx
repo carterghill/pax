@@ -1,4 +1,5 @@
 import { useEffect, useRef } from "react";
+import { VideoOff } from "lucide-react";
 import type { CallStream } from "../utils/callVideoLayout";
 import ScreenShareViewer from "./ScreenShareViewer";
 
@@ -7,7 +8,7 @@ export default function CallVideo({ stream, avatar = false }: { stream: CallStre
   const preview = stream.local && stream.source === "camera" ? stream.media : null;
   useEffect(() => {
     const video = ref.current;
-    if (!video || !preview) return;
+    if (!video || !preview || "error" in preview) return;
     video.srcObject = preview;
     return () => { video.srcObject = null; };
   }, [preview]);
@@ -16,6 +17,12 @@ export default function CallVideo({ stream, avatar = false }: { stream: CallStre
     return <ScreenShareViewer key={stream.streamId} active identity={stream.streamId} camera={stream.source === "camera"} avatar={avatar} />;
   }
   if (!preview) return null;
+  if ("error" in preview) {
+    return <div className="call-camera-placeholder">
+      <VideoOff role="img" aria-label="Your camera is unavailable" />
+      {!avatar && <span className="call-camera-error" role="status">{preview.error}</span>}
+    </div>;
+  }
   return <video ref={ref} autoPlay muted playsInline aria-label="Your camera"
     style={{ display: "block", width: "100%", height: "100%", objectFit: avatar ? "cover" : "contain", transform: "scaleX(-1)" }} />;
 }

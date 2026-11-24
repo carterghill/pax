@@ -97,6 +97,7 @@ impl Drop for AudioStream {
 const SAMPLE_RATE: u32 = 48000;
 const NUM_CHANNELS: u32 = 1;
 const SAMPLES_PER_10MS: u32 = SAMPLE_RATE / 100; // 480
+const CAMERA_SUBSCRIBED_TOPIC: &str = "com.carter.pax.camera.subscribed";
 /// EMA blend for smoothed RMS (higher = snappier).
 const SPEAKING_LEVEL_EMA: f32 = 0.22;
 /// Normalized RMS (0..1) — above this shows the speaking ring alongside LiveKit’s active list.
@@ -1020,7 +1021,7 @@ async fn handle_remote_audio(
 async fn run_event_loop(
     mut events: mpsc::UnboundedReceiver<RoomEvent>,
     audio_state: Arc<Mutex<AudioState>>,
-    _room: Arc<livekit::Room>,
+    room: Arc<livekit::Room>,
     room_id: String,
     local_identity: String,
     app_handle: Arc<AppHandle>,
@@ -1042,6 +1043,10 @@ async fn run_event_loop(
         Duration::from_millis(SPEAKING_UI_TICK_MS),
     );
     speaking_tick.set_missed_tick_behavior(MissedTickBehavior::Skip);
+    let refresh_camera = || {
+        let attempt = audio_state.lock().attempt_id.clone();
+        let _ = app_handle.emit("voice-camera-refresh", attempt);
+    };
     loop {
         tokio::select! {
             biased;
@@ -1053,6 +1058,18 @@ async fn run_event_loop(
             }
             event = events.recv() => {
                 match event {
+                    Some(RoomEvent::LocalTrackSubscribed { track }) if track.source() == TrackSource::Camera => {
+                        refresh_camera();
+                    }
+                    Some(RoomEvent::DataReceived { topic: Some(topic), participant: Some(_), payload, .. })
+                        if topic == CAMERA_SUBSCRIBED_TOPIC => {
+                        let subscribed = room.local_participant().track_publications().into_iter().any(|(sid, track)| {
+                            track.source() == TrackSource::Camera && sid.as_str().as_bytes() == payload.as_slice()
+                        });
+                        if subscribed {
+                            refresh_camera();
+                        }
+                    }
                     Some(RoomEvent::TrackSubscribed { track, publication, participant }) => {
                         let identity = participant.identity().to_string();
                         let source = publication.source();
@@ -1104,6 +1121,18 @@ async fn run_event_loop(
                                     let mut st = audio_state.lock();
                                     st.video_receivers.retain(|r| r.video.identity != identity || r.video.source != source);
                                     st.video_receivers.push(receiver);
+                                }
+                                // LiveKit notifies the publisher of its first subscriber. Confirm subsequent
+                                // subscriptions too, including ones that finish well after the participant joined.
+                                if source == CallVideoSource::Camera {
+                                    let local = room.local_participant();
+                                    let packet = DataPacket {
+                                        topic: Some(CAMERA_SUBSCRIBED_TOPIC.into()),
+                                        destination_identities: vec![participant.identity()],
+                                        payload: publication.sid().as_str().as_bytes().to_vec(),
+                                        reliable: true,
+                                    };
+                                    tokio::spawn(async move { let _ = local.publish_data(packet).await; });
                                 }
                                 emit_state(app_handle.as_ref(), &room_id, &local_identity, &audio_state, false, true, None);
                             }
@@ -1171,6 +1200,7 @@ async fn run_event_loop(
                         }
                     }
                     Some(RoomEvent::ParticipantConnected(participant)) => {
+                        refresh_camera();
                         let identity = participant.identity().to_string();
                         log::info!("Participant connected: {}", identity);
                         {
@@ -1229,6 +1259,9 @@ async fn run_event_loop(
                             }
                         };
                         if changed {
+                            if quality != ConnectionQuality::Lost {
+                                refresh_camera();
+                            }
                             emit_state(app_handle.as_ref(), &room_id, &local_identity, &audio_state, false, true, None);
                         }
                     }

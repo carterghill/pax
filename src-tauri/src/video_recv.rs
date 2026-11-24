@@ -35,23 +35,35 @@ pub struct FrameReadyEvent {
 }
 
 struct StreamState {
-    /// Pre-formatted I420 body. None = already consumed by handler.
+    /// Camera viewers retain the latest I420 body so a new tile can replay it.
     body: Option<Vec<u8>>,
     width: u32,
     height: u32,
     frame_number: u64,
+    last_read: u64,
     receiving: bool,
     target: (u32, u32),
 }
 
 impl StreamState {
-    /// Only an empty-to-full transition needs to wake the viewer. A suspended
-    /// window retains one notification and the most recent frame until /frame.
+    /// Only the first unread frame needs to wake the viewer.
     fn publish(&mut self, number: u64, width: u32, height: u32, body: Vec<u8>) -> bool {
+        let notify = self.last_read == self.frame_number;
         self.frame_number = number;
         self.width = width;
         self.height = height;
-        self.body.replace(body).is_none()
+        self.body = Some(body);
+        notify
+    }
+
+    fn read(&mut self, after: Option<u64>) -> Option<(u64, Vec<u8>)> {
+        let body = match after {
+            Some(number) if number == self.frame_number => return None,
+            Some(_) => self.body.clone()?,
+            None => self.body.take()?,
+        };
+        self.last_read = self.frame_number;
+        Some((self.frame_number, body))
     }
 }
 
@@ -107,7 +119,7 @@ pub fn spawn_video_receiver(
                 if !use_native {
                     let mut streams = STREAMS.lock();
                     let entry = streams.entry(id.clone()).or_insert_with(|| StreamState {
-                        body: None, width: 0, height: 0, frame_number: 0,
+                        body: None, width: 0, height: 0, frame_number: 0, last_read: 0,
                         receiving: true, target: (0, 0),
                     });
                     entry.receiving = true;
@@ -349,7 +361,7 @@ pub fn spawn_video_receiver(
                         let notify = {
                             let mut streams = STREAMS.lock();
                             let entry = streams.entry(id.clone()).or_insert_with(|| StreamState {
-                                body: None, width: 0, height: 0, frame_number: 0,
+                                body: None, width: 0, height: 0, frame_number: 0, last_read: 0,
                                 receiving: true, target: (tgt_w, tgt_h),
                             });
                             entry.publish(frame_number, w, h, body)
@@ -420,6 +432,7 @@ pub fn handle_protocol_request(
                         width: 0,
                         height: 0,
                         frame_number: 0,
+                        last_read: 0,
                         receiving: false,
                         target: (w, h),
                     },
@@ -458,17 +471,20 @@ pub fn handle_protocol_request(
             return ok_204();
         }
 
-        let body = {
+        let after = parse_query_param_str(&uri, "after").and_then(|n| n.parse().ok());
+        let frame = {
             let mut streams = STREAMS.lock();
-            streams.get_mut(&id).and_then(|s| s.body.take())
+            streams.get_mut(&id).and_then(|s| s.read(after))
         };
 
-        if let Some(body) = body {
+        if let Some((number, body)) = frame {
             return tauri::http::Response::builder()
                 .status(200)
                 .header("content-type", "application/octet-stream")
                 .header("cache-control", "no-cache, no-store, must-revalidate")
                 .header("access-control-allow-origin", "*")
+                .header("access-control-expose-headers", "x-frame-number")
+                .header("x-frame-number", number)
                 .body(body)
                 .unwrap_or_else(|_| err_500());
         } else {
@@ -521,9 +537,30 @@ mod tests {
     use super::*;
 
     #[test]
+    fn a_new_camera_tile_can_read_the_still_already_shown_by_another_tile() {
+        let id = "camera-replay-test";
+        let mut stream = StreamState {
+            body: None, width: 0, height: 0, frame_number: 0, last_read: 0,
+            receiving: true, target: (2, 2),
+        };
+        assert!(stream.publish(1, 2, 2, vec![42]));
+        STREAMS.lock().insert(id.into(), stream);
+        let read = |after| handle_protocol_request(
+            tauri::http::Request::get(format!("/frame?id={id}&after={after}")).body(vec![]).unwrap(),
+        );
+        assert_eq!(read(0).headers()["x-frame-number"], "1");
+        assert_eq!(read(1).status(), 204);
+        assert_eq!(read(0).body(), &[42]);
+        assert!(STREAMS.lock().get_mut(id).unwrap().publish(2, 2, 2, vec![99]));
+        assert_eq!(read(1).body(), &[99]);
+        clear_frame_buffer_for(id);
+        assert_eq!(read(0).status(), 204);
+    }
+
+    #[test]
     fn a_suspended_viewer_gets_one_notification_and_resumes_at_the_latest_frame() {
         let mut stream = StreamState {
-            body: None, width: 0, height: 0, frame_number: 0,
+            body: None, width: 0, height: 0, frame_number: 0, last_read: 0,
             receiving: true, target: (2, 2),
         };
         for number in 1..=10_000u64 {

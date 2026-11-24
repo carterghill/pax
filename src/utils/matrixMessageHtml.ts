@@ -190,7 +190,7 @@ export function matrixHtmlToHast(fragment: DocumentFragment): Root["children"] {
     const properties: Element["properties"] = {};
     for (const { name, value } of node.attributes) {
       if (name === "start" || name === "width" || name === "height") properties[name] = Number(value);
-      else if (name === "class") properties.className = value;
+      else if (name === "class") properties.className = Array.from(node.classList);
       else properties[name.replace(/-([a-z])/g, (_, letter: string) => letter.toUpperCase())] = value;
     }
     return {
