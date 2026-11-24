@@ -49,10 +49,9 @@ export function useCallCamera(callId: string | null, transport = livekit) {
     return stop;
   }, [callId, stop]);
 
-  const toggleCamera = useCallback(async () => {
+  const startCamera = useCallback(async () => {
+    if (active.current || !callId) return;
     setError(null);
-    if (active.current) { stop(); return; }
-    if (!callId) return;
     const controller = new AbortController();
     const { signal } = controller;
     active.current = controller;
@@ -127,5 +126,6 @@ export function useCallCamera(callId: string | null, transport = livekit) {
     }
   }, [callId, stop, transport]);
 
-  return { localCamera, cameraPending, cameraError, toggleCamera };
+  const toggleCamera = useCallback(() => active.current ? stop() : startCamera(), [startCamera, stop]);
+  return { localCamera, cameraPending, cameraError, startCamera, toggleCamera };
 }

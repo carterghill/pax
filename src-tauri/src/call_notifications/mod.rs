@@ -33,6 +33,8 @@ enum CallPhase {
 pub(crate) struct IncomingCall {
     call_id: uuid::Uuid,
     caller: String,
+    #[serde(default)]
+    video: bool,
     expires_at: u64,
     phase: CallPhase,
 }

@@ -106,6 +106,8 @@ pub(crate) struct Signal {
     #[serde(skip_deserializing)]
     silent: bool,
     #[serde(skip_deserializing)]
+    video: bool,
+    #[serde(skip_deserializing)]
     from_peer: bool,
     #[serde(skip_deserializing)]
     local_party: String,
@@ -113,6 +115,28 @@ pub(crate) struct Signal {
     notification_id: String,
     #[serde(skip_deserializing)]
     expires_at: u64,
+}
+
+// Classify the invite before presenting an Answer action, including push notifications.
+fn offers_camera(content: &Value) -> bool {
+    let Some(sdp) = content["offer"]["sdp"].as_str() else { return false };
+    let metadata = &content["sdp_stream_metadata"];
+    sdp.split("\nm=").skip(1).any(|section| {
+        let mut lines = section.lines();
+        let mut header = lines.next().unwrap_or_default().split_ascii_whitespace();
+        if header.next() != Some("video") {
+            return false;
+        }
+        let port = header.next().and_then(|port| port.split('/').next()?.parse::<u16>().ok());
+        if port.is_none() || (port == Some(0) && !lines.clone().any(|line| line == "a=bundle-only")) {
+            return false;
+        }
+        !lines.any(|line| {
+            matches!(line, "a=inactive" | "a=recvonly" | "a=content:slides")
+                || line.strip_prefix("a=msid:").and_then(|msid| msid.split_whitespace().next())
+                    .is_some_and(|id| metadata[id]["purpose"] == "m.screenshare")
+        })
+    })
 }
 
 impl Signal {
@@ -138,6 +162,7 @@ impl Signal {
             return None;
         }
         signal.room_id = room.room_id().to_string();
+        signal.video = kind == "m.call.invite" && offers_camera(&signal.content);
         signal.from_peer = signal.sender != room.own_user_id().as_str();
         signal.local_party = room.client().device_id()?.to_string();
         signal.notification_id = notification_id(&signal.room_id, call_id);
@@ -400,7 +425,7 @@ pub(crate) async fn call_push_event(
     Some(json!({
         "kind": kind, "callId": signal.notification_id, "roomId": room.room_id(),
         "caller": caller, "expiresAt": signal.expires_at,
-        "matrixVoip": true,
+        "matrixVoip": true, "video": signal.video,
     }))
 }
 
@@ -770,6 +795,7 @@ pub(crate) async fn open_matrix_voip_media(
     call_id: String,
     peer_user_id: OwnedUserId,
     offer: Option<Description>,
+    video: Option<bool>,
 ) -> Result<Description, String> {
     let client = super::get_client(&state).await?;
     let room = super::resolve_room(&client, &room_id)?;
@@ -811,8 +837,8 @@ pub(crate) async fn open_matrix_voip_media(
             vec![]
         }
     };
-    let media = PeerMedia::open(&app, call_id, room_id, peer_user_id, ice_servers)?;
-    let local = media.setup(offer).await?;
+    let mut media = PeerMedia::open(&app, call_id, room_id, peer_user_id, ice_servers)?;
+    let local = media.setup(offer, video.unwrap_or(false)).await?;
     *current = Some(media);
     Ok(local)
 }
@@ -955,6 +981,23 @@ pub(crate) async fn close_matrix_voip_media(
 #[cfg(test)]
 pub(super) mod tests {
     use super::*;
+
+    #[test]
+    fn video_invites_distinguish_cameras_from_audio_and_screen_shares() {
+        let invite = |section: &str| json!({
+            "offer": { "sdp": format!("v=0\r\nm=audio 9 UDP/TLS/RTP/SAVPF 111\r\n{section}") },
+            "sdp_stream_metadata": { "desktop": { "purpose": "m.screenshare" } }
+        });
+        let video = "m=video 9 UDP/TLS/RTP/SAVPF 96\r\n";
+        assert!(offers_camera(&invite(&format!("{video}a=sendrecv\r\na=msid:user camera\r\n"))));
+        assert!(offers_camera(&invite("m=video 0 UDP/TLS/RTP/SAVPF 96\r\na=bundle-only\r\n")));
+        for section in ["", "m=video 0 UDP/TLS/RTP/SAVPF 96\r\n"] {
+            assert!(!offers_camera(&invite(section)));
+        }
+        for attribute in ["a=recvonly", "a=inactive", "a=content:slides", "a=msid:desktop screen"] {
+            assert!(!offers_camera(&invite(&format!("{video}{attribute}\r\n"))));
+        }
+    }
 
     pub(crate) async fn shared_room() -> (
         super::super::pax_auth::tests::TestDir,

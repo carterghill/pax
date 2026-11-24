@@ -13,7 +13,7 @@ static APP: OnceLock<AppHandle> = OnceLock::new();
 static VOIP_TOKEN: std::sync::Mutex<Option<String>> = std::sync::Mutex::new(None);
 
 extern "C" {
-    fn pax_apple_call_show(id: *const c_char, caller: *const c_char, remaining: u64);
+    fn pax_apple_call_show(id: *const c_char, caller: *const c_char, remaining: u64, video: bool);
     fn pax_apple_call_close(id: *const c_char);
     #[cfg(target_os = "macos")]
     fn pax_macos_call_enable();
@@ -107,7 +107,7 @@ impl Notification {
         let id = CString::new(call.call_id.to_string()).map_err(|error| error.to_string())?;
         let caller =
             CString::new(call.caller.replace('\0', "")).map_err(|error| error.to_string())?;
-        unsafe { pax_apple_call_show(id.as_ptr(), caller.as_ptr(), remaining) };
+        unsafe { pax_apple_call_show(id.as_ptr(), caller.as_ptr(), remaining, call.video) };
         Ok(Self(id))
     }
 

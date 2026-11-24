@@ -7,6 +7,7 @@ import { applyGroupResponse, type GroupResponse } from "./groupCallResponses";
 import type { VoiceCall } from "./useVoiceCall";
 
 interface GroupSignal extends Omit<GroupResponse, "kind"> {
+  video?: boolean;
   kind: "ring" | GroupResponse["kind"];
   silent: boolean;
   callId: string;
@@ -58,12 +59,12 @@ export function useGroupCall(
     return phase === "incoming" ? Promise.resolve() : disconnect(roomId);
   }, [disconnect, update]);
 
-  const start = useCallback((roomId: string, userId: string) => {
+  const start = useCallback((roomId: string, userId: string, video = false) => {
     dismissQuiet.current();
     if (current.current || busy.current) return;
     const group: GroupSession = {
       call: { callId: crypto.randomUUID(), roomId, peerUserId: userId, transport: "group",
-        phase: "connecting", expiresAt: Date.now() + 60_000 },
+        phase: "connecting", video, expiresAt: Date.now() + 60_000 },
       outgoing: true, invitees: new Set(), declined: new Set(),
     };
     session.current = group;
@@ -77,7 +78,7 @@ export function useGroupCall(
       const connected = await connect(roomId, { replaceOtherSessions: false, onJoined: (id) => { membershipEventId = id; } });
       if (session.current !== group) return;
       if (!connected || !membershipEventId) throw new Error("Could not join the group voice session.");
-      group.ring = invoke("ring_group_call", { roomId, membershipEventId });
+      group.ring = invoke("ring_group_call", { roomId, membershipEventId, video });
       const ring = await group.ring;
       if (session.current !== group) return;
       group.invitees = new Set(ring.invitees);
@@ -112,7 +113,7 @@ export function useGroupCall(
       if (!event.silent) dismissQuiet.current();
       if (current.current) return;
       const call: DirectCall = { callId: event.callId, roomId: event.roomId, peerUserId: event.sender,
-        phase: "incoming", silent: event.silent, transport: "group", expiresAt: event.expiresAt, ringEventId: event.ringEventId };
+        phase: "incoming", video: event.video, silent: event.silent, transport: "group", expiresAt: event.expiresAt, ringEventId: event.ringEventId };
       session.current = { call, outgoing: false, invitees: new Set(), declined: new Set() };
       setError(null);
       update(call);

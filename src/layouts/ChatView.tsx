@@ -5,7 +5,8 @@ import { useRoomCanPinMessages } from "../hooks/useRoomCanPinMessages";
 import { useRoomPinnedEventIds } from "../hooks/useRoomPinnedEventIds";
 import { listen } from "@tauri-apps/api/event";
 import { invoke } from "@tauri-apps/api/core";
-import { ArrowLeft, Hash, MessageCircle, Phone, Rss, Users } from "lucide-react";
+import { ArrowLeft, Hash, MessageCircle, Rss, Users } from "lucide-react";
+import DmCallButtons from "../components/DmCallButtons";
 import { RssFeedStatusPanel, RssFeedStatusToggle, useRssFeedStatus } from "../components/RssFeedStatus";
 import NavBackButton from "../components/NavBackButton";
 import UserAvatar from "../components/UserAvatar";
@@ -57,7 +58,7 @@ interface ChatViewProps {
   userMenuWidth: number;
   onUserMenuWidthChange: (width: number) => void;
   onStartDirectMessage: (peerUserId: string, displayNameHint: string) => void;
-  onStartCall?: () => void;
+  onStartCall?: (video: boolean) => void;
   onCallMember?: (userId: string) => void;
   callUnavailable?: string;
   callContent?: ReactNode;
@@ -545,18 +546,6 @@ export default function ChatView({
     minWidth: 0,
   };
 
-  function callButton(onClick: (() => void) | undefined, label: string) {
-    return (
-      <button type="button" disabled={!onClick} onClick={onClick} title={label} aria-label={label} style={{
-        background: "none", border: "none", color: palette.textSecondary, padding: spacing.unit,
-        borderRadius: spacing.unit, display: "flex", alignItems: "center", justifyContent: "center",
-        cursor: onClick ? "pointer" : "default", opacity: onClick ? 1 : 0.55,
-      }}>
-        <Phone size={20} aria-hidden="true" />
-      </button>
-    );
-  }
-
   if (isDraft && draftDm) {
     const hint = draftDm.displayNameHint.trim() || draftDm.peerUserId;
     const title = draftPeerProfile.displayName?.trim() || hint;
@@ -616,7 +605,7 @@ export default function ChatView({
           </div>
           <div style={{ display: "flex", alignItems: "center", gap: spacing.unit * 0.5, flexShrink: 0 }}>
             <RoomDownloadsButton roomId={`draft:${draftDm.peerUserId}`} />
-            {callButton(undefined, "Open a joined direct message to call")}
+            <DmCallButtons unavailable="Open a joined direct message to call" />
           </div>
         </div>
 
@@ -724,7 +713,7 @@ export default function ChatView({
               onSelectEventId={handleSelectPinnedMessage}
             />
             <RoomDownloadsButton roomId={activeRoom.id} />
-            {!callContent && callButton(onStartCall, callUnavailable ?? "Start voice call")}
+            {!callContent && <DmCallButtons onStartCall={onStartCall} unavailable={callUnavailable} />}
           </div>
         </div>
       ) : (
@@ -758,7 +747,7 @@ export default function ChatView({
               onSelectEventId={handleSelectPinnedMessage}
             />
             <RoomDownloadsButton roomId={activeRoom.id} />
-            {isGroupChat && !callContent && callButton(onStartCall, callUnavailable ?? "Call group")}
+            {isGroupChat && !callContent && <DmCallButtons group onStartCall={onStartCall} unavailable={callUnavailable} />}
             <button
               type="button"
               onClick={() => setShowUsers((prev) => !prev)}

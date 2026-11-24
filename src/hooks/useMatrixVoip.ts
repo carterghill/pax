@@ -29,6 +29,7 @@ type SignalKind =
 type StreamMetadata = Record<string, { purpose?: string; video_muted?: boolean }>;
 
 interface WireSignal {
+  video: boolean;
   silent: boolean;
   kind: SignalKind;
   roomId: string;
@@ -59,6 +60,7 @@ interface Session {
   offer?: Description;
   remoteParty?: string;
   remoteReady: boolean;
+  connected: boolean;
   metadata: StreamMetadata;
   cameraId?: string;
   cameraAnswer?: (accepted: boolean) => void;
@@ -87,12 +89,14 @@ function withNegotiation<T>(session: Session, action: () => Promise<T>) {
 }
 
 function localMetadata(session: Session) {
+  if (!session.version) return {};
   return { sdp_stream_metadata: { "pax-audio": { purpose: "m.usermedia", video_muted: !session.cameraId } } };
 }
 
 function openMedia(session: Session) {
   return invoke<Description>("open_matrix_voip_media", {
-    roomId: session.call.roomId, callId: session.call.callId, peerUserId: session.call.peerUserId, offer: session.offer,
+    roomId: session.call.roomId, callId: session.call.callId, peerUserId: session.call.peerUserId,
+    offer: session.offer, video: !!session.call.video,
   });
 }
 
@@ -115,7 +119,7 @@ function candidatesFrom(value: Candidate[] | undefined): Candidate[] {
 
 function newSession(call: DirectCall, wireId: string, version: 0 | 1, offer?: Description, remoteParty?: string): Session {
   return {
-    call, wireId, version, fromInvite: !!offer, offer, remoteParty, remoteReady: false,
+    call, wireId, version, fromInvite: !!offer, offer, remoteParty, remoteReady: false, connected: false,
     remoteCandidates: new Map(), localCandidates: [], published: false, metadata: {}, negotiation: Promise.resolve(),
   };
 }
@@ -147,7 +151,7 @@ export function useMatrixVoip(
     async start(callId, cameraId, width, height, jpeg, abort) {
       const session = active.current;
       if (!session || session.call.callId !== callId) throw new Error("The call ended.");
-      if (!session.version) throw new Error("This peer uses an older Matrix call protocol that cannot upgrade a voice call to video.");
+      if (!session.version && !session.call.video) throw new Error("This peer uses an older Matrix call protocol that cannot upgrade a voice call to video.");
       let settle!: (accepted: boolean) => void;
       const answer = new Promise<boolean>((resolve) => { settle = resolve; });
       const cancel = () => settle(false);
@@ -160,9 +164,10 @@ export function useMatrixVoip(
           const offer = await invoke<Description | null>("start_matrix_voip_camera", { callId, cameraId, width, height, jpeg });
           if (active.current !== session || abort.aborted) return false;
           if (!offer) {
-            await signal(session, "m.call.sdp_stream_metadata_changed", localMetadata(session));
+            if (session.version) await signal(session, "m.call.sdp_stream_metadata_changed", localMetadata(session));
             return false;
           }
+          if (!session.version) throw new Error("The other device could not accept camera video.");
           session.cameraAnswer = settle;
           await signal(session, "m.call.negotiate", { description: offer, lifetime: CONNECTION_TIMEOUT, ...localMetadata(session) });
           return true;
@@ -186,7 +191,7 @@ export function useMatrixVoip(
         await stopCamera();
         if (active.current !== session || session.cameraId !== cameraId) return;
         session.cameraId = undefined;
-        await signal(session, "m.call.sdp_stream_metadata_changed", localMetadata(session));
+        if (session.version) await signal(session, "m.call.sdp_stream_metadata_changed", localMetadata(session));
       });
     },
   }), []);
@@ -200,6 +205,13 @@ export function useMatrixVoip(
     };
     update(session.call);
   }, [update]);
+
+  const activateWhenReady = useCallback((session: Session) => {
+    if (active.current === session && session.connected && session.remoteReady && session.published) {
+      clearTimeout(session.deadline);
+      if (session.call.phase !== "active") setPhase(session, "active");
+    }
+  }, [setPhase]);
 
   const finish = useCallback((notifyPeer: boolean, reason = "user_hangup", declined = false) => {
     const session = active.current;
@@ -296,9 +308,10 @@ export function useMatrixVoip(
       session.publication = signal(session, "m.call.answer", { answer, ...localMetadata(session) });
       await session.publication;
       session.published = true;
+      activateWhenReady(session);
       flushIce(session);
     })().catch((error) => fail(session, error));
-  }, [connectionDeadline, enableMedia, fail, flushIce, setPhase, syncVideo, voiceBusy]);
+  }, [activateWhenReady, connectionDeadline, enableMedia, fail, flushIce, setPhase, syncVideo, voiceBusy]);
 
   const start = useCallback((call: DirectCall) => {
     const session = newSession(call, call.callId, 1);
@@ -317,6 +330,7 @@ export function useMatrixVoip(
       await session.publication;
       if (active.current !== session) return;
       session.published = true;
+      activateWhenReady(session);
       flushIce(session);
       if (session.call.phase === "dialing") {
         setPhase(session, "dialing", Date.now() + INVITE_LIFETIME);
@@ -327,7 +341,7 @@ export function useMatrixVoip(
         }, INVITE_LIFETIME);
       }
     })().catch((error) => fail(session, error));
-  }, [fail, finish, flushIce, setError, setPhase]);
+  }, [activateWhenReady, fail, finish, flushIce, setError, setPhase]);
 
   const receive = useCallback(async (event: WireSignal) => {
     const { content, kind } = event;
@@ -345,6 +359,7 @@ export function useMatrixVoip(
         && current.current.roomId === event.roomId && current.current.peerUserId === event.sender;
       const crossed = session?.call.phase === "dialing" && session.call.roomId === event.roomId
         && session.call.peerUserId === event.sender && (!session.publication || session.wireId > content.call_id);
+      const autoAnswer = (crossed || preparing) && (!event.video || current.current?.video);
       if (current.current && !crossed && !preparing) return;
       if (crossed) await finish(true);
       else if (stopping.current) return;
@@ -352,7 +367,7 @@ export function useMatrixVoip(
       const call: DirectCall = {
         callId: event.notificationId, roomId: event.roomId, peerUserId: event.sender,
         peerDeviceId: party || undefined, ringEventId: event.eventId, transport: "matrix",
-        phase: "incoming", silent: event.silent, expiresAt,
+        phase: "incoming", video: event.video, silent: event.silent, expiresAt,
       };
       session = newSession(call, content.call_id, version, content.offer, party);
       session.metadata = content.sdp_stream_metadata ?? {};
@@ -361,7 +376,7 @@ export function useMatrixVoip(
       setConnection("connecting");
       setError(null);
       update(call);
-      if (crossed || preparing) answer();
+      if (autoAnswer) answer();
       return;
     }
     if (!session || session.wireId !== content.call_id || session.call.roomId !== event.roomId) return;
@@ -402,6 +417,7 @@ export function useMatrixVoip(
         if (version === 1) {
           void signal(session, "m.call.select_answer", { selected_party_id: party }).catch((error) => fail(session, error));
         }
+        activateWhenReady(session);
         break;
       }
       case "m.call.select_answer":
@@ -450,7 +466,7 @@ export function useMatrixVoip(
         break;
       }
     }
-  }, [answer, connectionDeadline, current, dismissQuiet, enableMedia, finish, setError, setPhase, syncVideo, update, voiceBusy]);
+  }, [activateWhenReady, answer, connectionDeadline, current, dismissQuiet, enableMedia, finish, setError, setPhase, syncVideo, update, voiceBusy]);
 
   useEffect(() => {
     if (!ready) return;
@@ -503,10 +519,10 @@ export function useMatrixVoip(
       subscribe(listen<{ callId: string; status: string }>("matrix-voip-status", ({ payload }) => {
         const session = active.current;
         if (session?.call.callId !== payload.callId) return;
-        if (payload.status === "connected") {
-          clearTimeout(session.deadline);
+        session.connected = payload.status === "connected";
+        if (session.connected) {
           setConnection("connected");
-          setPhase(session, "active");
+          activateWhenReady(session);
         } else if (payload.status === "failed") {
           void finish(true, session.call.established ? "ice_timeout" : "ice_failed");
           setError("The Matrix call connection failed.");
@@ -520,7 +536,7 @@ export function useMatrixVoip(
       })),
     ]).then(drain).catch((error) => console.warn("Could not listen for Matrix calls:", error));
     return () => { disposed = true; subscriptions.forEach((remove) => remove()); };
-  }, [connectionDeadline, fail, finish, flushIce, ready, receive, setError, setPhase]);
+  }, [activateWhenReady, connectionDeadline, fail, finish, flushIce, ready, receive, setError]);
 
   useEffect(() => () => {
     const session = active.current;
@@ -546,7 +562,8 @@ export function useMatrixVoip(
     update(session.call);
   }, [update]);
 
-  const media = { ...camera, remoteVideo, toggleMic, isMicEnabled: micEnabled, canUpgradeVideo: active.current?.version === 1 };
+  const media = { ...camera, remoteVideo, toggleMic, isMicEnabled: micEnabled,
+    canShareCamera: active.current?.version === 1 || !!active.current?.call.video };
   return { start, answer, finish, toggleMic, micEnabled, connection, silence, media };
 }
 

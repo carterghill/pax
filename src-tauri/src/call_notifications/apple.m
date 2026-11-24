@@ -36,6 +36,7 @@ extern void pax_ios_voip_token(const char *token);
 #pragma clang diagnostic pop
     }
     configuration.maximumCallGroups = 1;
+    configuration.supportsVideo = YES;
     configuration.maximumCallsPerCallGroup = 1;
     configuration.includesCallsInRecents = NO;
     configuration.supportedHandleTypes = [NSSet setWithObject:@(CXHandleTypeGeneric)];
@@ -45,10 +46,15 @@ extern void pax_ios_voip_token(const char *token);
     return self;
 }
 
-- (void)present:(NSUUID *)callID caller:(NSString *)name remaining:(uint64_t)remaining
+- (void)present:(NSUUID *)callID caller:(NSString *)name video:(BOOL)video remaining:(uint64_t)remaining
      fromPush:(BOOL)fromPush completion:(void (^)(void))completion {
     BOOL duplicate = [self.callID isEqual:callID];
+    CXCallUpdate *update = [[CXCallUpdate alloc] init];
+    update.remoteHandle = [[CXHandle alloc] initWithType:CXHandleTypeGeneric value:name];
+    update.localizedCallerName = name;
+    update.hasVideo = video;
     if (duplicate && !fromPush) {
+        [self.provider reportCallWithUUID:callID updated:update];
         completion();
         return;
     }
@@ -61,9 +67,6 @@ extern void pax_ios_voip_token(const char *token);
         if (self.callID) [self end:self.callID reason:CXCallEndedReasonRemoteEnded];
         self.callID = callID;
     }
-    CXCallUpdate *update = [[CXCallUpdate alloc] init];
-    update.remoteHandle = [[CXHandle alloc] initWithType:CXHandleTypeGeneric value:name];
-    update.localizedCallerName = name;
     [self.provider reportNewIncomingCallWithUUID:callID update:update completion:^(NSError *error) {
         if (error && !duplicate) NSLog(@"Pax could not report an incoming call: %@", error);
         if (!error && discard) [self.provider reportCallWithUUID:callID endedAtDate:nil reason:CXCallEndedReasonUnanswered];
@@ -163,7 +166,7 @@ extern void pax_ios_voip_token(const char *token);
         remaining = 0;
     }
     // PushKit requires each delivered VoIP push to be reported, even if it arrived late.
-    [self present:callID ?: NSUUID.UUID caller:name remaining:callID ? (uint64_t)MIN(150000.0, MAX(0.0, remaining)) : 0
+    [self present:callID ?: NSUUID.UUID caller:name video:[data[@"video"] isEqual:@YES] remaining:callID ? (uint64_t)MIN(150000.0, MAX(0.0, remaining)) : 0
           fromPush:YES completion:completion];
 }
 @end
@@ -184,12 +187,12 @@ void pax_ios_voip_enable(void) {
     });
 }
 
-void pax_apple_call_show(const char *id, const char *caller, uint64_t remaining) {
+void pax_apple_call_show(const char *id, const char *caller, uint64_t remaining, bool video) {
     NSUUID *callID = [[NSUUID alloc] initWithUUIDString:@(id)];
     NSString *name = @(caller);
     dispatch_async(dispatch_get_main_queue(), ^{
         if (!calls) calls = [[PaxCallProvider alloc] init];
-        [calls present:callID caller:name remaining:remaining fromPush:NO completion:^{}];
+        [calls present:callID caller:name video:video remaining:remaining fromPush:NO completion:^{}];
     });
 }
 
@@ -238,11 +241,11 @@ static NSString * const PaxCallCategory = @"pax.incoming-call";
 @interface PaxDevelopmentCallAlert : NSObject
 @property(nonatomic, strong) NSPanel *panel;
 @property(nonatomic, copy) NSString *callID;
-- (instancetype)initWithCallID:(NSString *)callID caller:(NSString *)name;
+- (instancetype)initWithCallID:(NSString *)callID caller:(NSString *)name video:(BOOL)video;
 @end
 
 @implementation PaxDevelopmentCallAlert
-- (instancetype)initWithCallID:(NSString *)callID caller:(NSString *)name {
+- (instancetype)initWithCallID:(NSString *)callID caller:(NSString *)name video:(BOOL)video {
     if (!(self = [super init])) return nil;
     self.callID = callID;
 
@@ -259,7 +262,7 @@ static NSString * const PaxCallCategory = @"pax.incoming-call";
     self.panel.collectionBehavior = NSWindowCollectionBehaviorCanJoinAllSpaces |
         NSWindowCollectionBehaviorFullScreenAuxiliary | NSWindowCollectionBehaviorIgnoresCycle;
 
-    NSTextField *title = [NSTextField labelWithString:@"Incoming call"];
+    NSTextField *title = [NSTextField labelWithString:video ? @"Incoming video call" : @"Incoming call"];
     title.font = [NSFont systemFontOfSize:13 weight:NSFontWeightSemibold];
     NSTextField *caller = [NSTextField labelWithString:name.length ? name : @"Pax contact"];
     caller.lineBreakMode = NSLineBreakByTruncatingTail;
@@ -384,7 +387,7 @@ void pax_macos_call_enable(void) {
     });
 }
 
-static void PaxPostMacCall(NSString *callID, NSString *name) API_AVAILABLE(macos(10.14)) {
+static void PaxPostMacCall(NSString *callID, NSString *name, BOOL video) API_AVAILABLE(macos(10.14)) {
     UNUserNotificationCenter *center = PaxCallNotificationCenter();
     UNNotificationAction *answer = [UNNotificationAction actionWithIdentifier:@"answer" title:@"Answer" options:UNNotificationActionOptionForeground];
     UNNotificationAction *decline = [UNNotificationAction actionWithIdentifier:@"decline" title:@"Decline" options:UNNotificationActionOptionDestructive];
@@ -396,7 +399,7 @@ static void PaxPostMacCall(NSString *callID, NSString *name) API_AVAILABLE(macos
                 if (error) NSLog(@"Pax could not request notification authorization: %@", error);
                 if (!granted || ![pendingCall isEqualToString:callID]) return;
                 UNMutableNotificationContent *content = [[UNMutableNotificationContent alloc] init];
-                content.title = @"Incoming call";
+                content.title = video ? @"Incoming video call" : @"Incoming call";
                 content.body = name;
                 content.categoryIdentifier = PaxCallCategory;
                 UNNotificationRequest *request = [UNNotificationRequest requestWithIdentifier:callID content:content trigger:nil];
@@ -411,7 +414,7 @@ static void PaxPostMacCall(NSString *callID, NSString *name) API_AVAILABLE(macos
     }];
 }
 
-void pax_apple_call_show(const char *id, const char *caller, uint64_t remaining) {
+void pax_apple_call_show(const char *id, const char *caller, uint64_t remaining, bool video) {
     NSString *callID = @(id);
     NSString *name = @(caller);
     dispatch_async(dispatch_get_main_queue(), ^{
@@ -422,11 +425,11 @@ void pax_apple_call_show(const char *id, const char *caller, uint64_t remaining)
         });
         if (@available(macOS 10.14, *)) {
             if (PaxUsesNotificationCenter()) {
-                PaxPostMacCall(callID, name);
+                PaxPostMacCall(callID, name, video);
                 return;
             }
         }
-        developmentAlert = [[PaxDevelopmentCallAlert alloc] initWithCallID:callID caller:name];
+        developmentAlert = [[PaxDevelopmentCallAlert alloc] initWithCallID:callID caller:name video:video];
         [developmentAlert.panel orderFrontRegardless];
     });
 }

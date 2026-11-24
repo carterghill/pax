@@ -59,6 +59,7 @@ pub(crate) async fn ring_group_call(
     state: State<'_, Arc<AppState>>,
     room_id: String,
     membership_event_id: OwnedEventId,
+    video: Option<bool>,
 ) -> Result<Ring, String> {
     let client = super::get_client(&state).await?;
     let room = super::resolve_room(&client, &room_id)?;
@@ -78,7 +79,7 @@ pub(crate) async fn ring_group_call(
         .send_raw(
             RING,
             json!({
-                "slot_id": SLOT, "notification_type": "ring", "m.call.intent": "audio",
+                "slot_id": SLOT, "notification_type": "ring", "m.call.intent": if video.unwrap_or(false) { "video" } else { "audio" },
                 "sender_ts": now_ms(), "lifetime": LIFETIME, "m.mentions": { "user_ids": invitees },
                 "m.relates_to": { "rel_type": "m.reference", "event_id": membership_event_id }
             }),
@@ -132,6 +133,7 @@ pub(crate) async fn respond_to_group_call(
 #[serde(rename_all = "camelCase")]
 pub(crate) struct GroupSignal {
     kind: &'static str,
+    video: bool,
     silent: bool,
     room_id: String,
     sender: OwnedUserId,
@@ -265,6 +267,7 @@ async fn parse(
     };
     Some(GroupSignal {
         silent: false,
+        video: kind == "ring" && content["m.call.intent"] == "video",
         kind,
         room_id: room.room_id().to_string(),
         sender,
@@ -379,7 +382,7 @@ pub(crate) async fn push_event(
         .unwrap_or_else(|| signal.sender.to_string());
     Some(
         json!({"kind":kind, "roomId":signal.room_id, "callId":signal.call_id, "caller":caller,
-        "matrixVoip":true, "expiresAt":signal.expires_at}),
+        "matrixVoip":true, "video":signal.video, "expiresAt":signal.expires_at}),
     )
 }
 
@@ -430,6 +433,11 @@ mod tests {
         let valid = ring(bob, &[USER, carol], "$rtc", now);
         let incoming = parse(&room, &valid, None).await.unwrap();
         assert_eq!(incoming.kind, "ring");
+        assert!(!incoming.video);
+        let mut video: Value = serde_json::from_str(valid.raw().json().get()).unwrap();
+        video["content"]["m.call.intent"] = json!("video");
+        let video = TimelineEvent::from_plaintext(Raw::from_json_string(video.to_string()).unwrap());
+        assert!(parse(&room, &video, None).await.unwrap().video);
         assert_eq!(incoming.sender.as_str(), bob);
         assert_eq!(incoming.ring_event_id.as_str(), "$ring");
         assert!(parse(&room, &ring(bob, &[carol], "$rtc", now), None)

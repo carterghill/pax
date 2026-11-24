@@ -178,8 +178,8 @@ class MainActivity : TauriActivity() {
     }
 
     @JavascriptInterface
-    fun showIncomingCall(id: String, roomId: String, caller: String, expiresAt: Long, eventId: String, matrixVoip: Boolean) {
-      PaxCallNotifications.show(this@MainActivity, PaxCallNotifications.Call(id, roomId, caller, expiresAt, matrixVoip), eventId)
+    fun showIncomingCall(id: String, roomId: String, caller: String, expiresAt: Long, eventId: String, matrixVoip: Boolean, video: Boolean) {
+      PaxCallNotifications.show(this@MainActivity, PaxCallNotifications.Call(id, roomId, caller, expiresAt, matrixVoip, video = video), eventId)
     }
 
     @JavascriptInterface

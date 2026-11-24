@@ -46,10 +46,11 @@ internal object PaxCallNotifications {
 
     data class Call(
         val id: String, val roomId: String, val caller: String, val expiresAt: Long,
-        val matrixVoip: Boolean = false, val ringEventId: String = "",
+        val matrixVoip: Boolean = false, val ringEventId: String = "", val video: Boolean = false,
     ) {
         fun json() = JSONObject().put("callId", id).put("roomId", roomId)
             .put("expiresAt", expiresAt).put("matrixVoip", matrixVoip).put("ringEventId", ringEventId)
+            .put("video", video)
     }
 
     private fun prefs(context: Context) = context.getSharedPreferences("pax_calls", Context.MODE_PRIVATE)
@@ -58,7 +59,7 @@ internal object PaxCallNotifications {
     fun createChannel(context: Context) {
         if (Build.VERSION.SDK_INT < Build.VERSION_CODES.O) return
         val channel = NotificationChannel(CHANNEL, "Incoming calls", NotificationManager.IMPORTANCE_HIGH)
-        channel.description = "Incoming Pax voice calls"
+        channel.description = "Incoming Pax calls"
         channel.setSound(
             RingtoneManager.getDefaultUri(RingtoneManager.TYPE_RINGTONE),
             AudioAttributes.Builder().setUsage(AudioAttributes.USAGE_NOTIFICATION_RINGTONE).build(),
@@ -82,7 +83,7 @@ internal object PaxCallNotifications {
         val room = value.optString("roomId")
         if (!validId(id) || room.isBlank()) return null
         return Call(id, room, value.optString("caller"), value.optLong("expiresAt"),
-            value.optBoolean("matrixVoip"), value.optString("ringEventId"))
+            value.optBoolean("matrixVoip"), value.optString("ringEventId"), value.optBoolean("video"))
     }
 
     private fun current(context: Context): Call? = prefs(context).getString(ACTIVE, null)?.let {
@@ -117,7 +118,7 @@ internal object PaxCallNotifications {
             return
         }
         val caller = call.caller.ifBlank { "Pax contact" }
-        val heading = context.getString(R.string.pax_incoming_call_from, caller)
+        val heading = context.getString(if (call.video) R.string.pax_incoming_video_call_from else R.string.pax_incoming_call_from, caller)
         val controls = RemoteViews(context.packageName, R.layout.notification_incoming_call).apply {
             setTextViewText(R.id.pax_call_heading, heading)
             setOnClickPendingIntent(R.id.pax_call_decline, intent(context, call.id, DECLINE))

@@ -13,7 +13,7 @@ use libwebrtc::{
     rtp_sender::RtpSender,
     rtp_transceiver::RtpTransceiverDirection,
     session_description::{SdpType, SessionDescription},
-    video_source::native::NativeVideoSource,
+    video_source::{native::NativeVideoSource, VideoResolution},
 };
 use serde::{Deserialize, Serialize};
 
@@ -203,10 +203,25 @@ impl PeerMedia {
         })
     }
 
-    pub async fn setup(&self, offer: Option<Description>) -> Result<Description, String> {
+    pub async fn setup(
+        &mut self,
+        offer: Option<Description>,
+        video: bool,
+    ) -> Result<Description, String> {
         self.pc
             .add_track(MediaStreamTrack::Audio(self.track.clone()), &["pax-audio"])
             .map_err(|error| error.to_string())?;
+        if video {
+            // Negotiate a camera sender in the initial SDP. It receives no device
+            // frames until the video call is accepted and local capture starts.
+            self.attach_camera(NativeVideoSource::new(
+                VideoResolution {
+                    width: 640,
+                    height: 480,
+                },
+                false,
+            ))?;
+        }
         let local = if let Some(offer) = &offer {
             self.remote_description(offer).await?;
             self.pc.create_answer(AnswerOptions::default()).await
@@ -214,6 +229,7 @@ impl PeerMedia {
             self.pc
                 .create_offer(OfferOptions {
                     offer_to_receive_audio: true,
+                    offer_to_receive_video: video,
                     ..Default::default()
                 })
                 .await
@@ -404,11 +420,7 @@ impl PeerMedia {
 
     // Snapshot negotiated receivers after SDP or metadata changes. A streamless
     // track or a muted camera should never occupy a participant's video tile.
-    pub fn sync_video(
-        &mut self,
-        app: &AppHandle,
-        metadata: &serde_json::Value,
-    ) -> Vec<CallVideo> {
+    pub fn sync_video(&mut self, app: &AppHandle, metadata: &serde_json::Value) -> Vec<CallVideo> {
         let mut tracks = Vec::new();
         for t in self.pc.transceivers() {
             if !matches!(
@@ -540,13 +552,110 @@ mod tests {
         .unwrap()
     }
 
+    async fn connect_ice(
+        caller: &PeerMedia,
+        callee: &PeerMedia,
+        caller_ice: &mut mpsc::UnboundedReceiver<Candidate>,
+        callee_ice: &mut mpsc::UnboundedReceiver<Candidate>,
+    ) {
+        tokio::time::timeout(Duration::from_secs(10), async {
+            while caller.pc.connection_state() != PeerConnectionState::Connected
+                || callee.pc.connection_state() != PeerConnectionState::Connected
+            {
+                tokio::select! {
+                    Some(mut candidate) = caller_ice.recv() => {
+                        candidate.line = None;
+                        callee.add_candidates(vec![candidate]).await;
+                    },
+                    Some(mut candidate) = callee_ice.recv() => {
+                        candidate.mid = None;
+                        caller.add_candidates(vec![candidate]).await;
+                    },
+                    _ = tokio::time::sleep(Duration::from_millis(10)) => {},
+                }
+            }
+        })
+        .await
+        .expect("WebRTC connected with exchanged ICE candidates");
+    }
+
+    async fn expect_red_camera(sender: &PeerMedia, recipient: &PeerMedia, id: &str) {
+        let receiver = recipient
+            .pc
+            .transceivers()
+            .into_iter()
+            .map(|t| t.receiver())
+            .find(|r| matches!(r.track(), Some(MediaStreamTrack::Video(_))))
+            .unwrap();
+        assert_eq!(receiver.stream_ids(), ["pax-audio"]);
+        let Some(MediaStreamTrack::Video(track)) = receiver.track() else {
+            unreachable!()
+        };
+        let mut video = libwebrtc::video_stream::native::NativeVideoStream::new(track);
+        let mut tick = tokio::time::interval(Duration::from_millis(65));
+        tokio::time::timeout(Duration::from_secs(8), async {
+            loop {
+                tokio::select! {
+                    _ = tick.tick() => sender.camera_frame(id, RED_JPEG).unwrap(),
+                    frame = video.next() => {
+                        let image = frame.unwrap().buffer.to_i420();
+                        let (_, u, v) = image.data();
+                        if u[0] < 120 && v[0] > 190 { break; }
+                    }
+                }
+            }
+        })
+        .await
+        .expect("the peer should receive red camera frames");
+    }
+
+    #[tokio::test]
+    async fn video_invite_negotiates_both_cameras_before_capture_starts() {
+        let mut caller = new_peer("caller");
+        let mut callee = new_peer("callee");
+        let mut caller_ice = watch_candidates(&caller);
+        let mut callee_ice = watch_candidates(&callee);
+        let offer = caller.setup(None, true).await.unwrap();
+        assert!(offer
+            .sdp
+            .split("\nm=video ")
+            .nth(1)
+            .unwrap()
+            .contains("a=sendrecv"));
+        let answer = callee.setup(Some(offer), true).await.unwrap();
+        assert!(answer
+            .sdp
+            .split("\nm=video ")
+            .nth(1)
+            .unwrap()
+            .contains("a=sendrecv"));
+        caller.remote_description(&answer).await.unwrap();
+        connect_ice(&caller, &callee, &mut caller_ice, &mut callee_ice).await;
+        for peer in [&mut caller, &mut callee] {
+            assert!(peer.camera.is_none());
+            assert!(peer
+                .start_camera(camera("initial"))
+                .await
+                .unwrap()
+                .is_none());
+        }
+        tokio::join!(
+            expect_red_camera(&caller, &callee, "initial"),
+            expect_red_camera(&callee, &caller, "initial"),
+        );
+        for peer in [&mut caller, &mut callee] {
+            peer.stop_camera("initial").await.unwrap();
+            assert!(peer.start_camera(camera("again")).await.unwrap().is_none());
+        }
+    }
+
     #[tokio::test]
     async fn simultaneous_camera_upgrades_converge_and_allow_camera_restart() {
         let mut caller = new_peer("caller");
         let mut callee = new_peer("callee");
-        let audio = caller.setup(None).await.unwrap();
+        let audio = caller.setup(None, false).await.unwrap();
         assert!(!audio.sdp.contains("m=video"));
-        let answer = callee.setup(Some(audio)).await.unwrap();
+        let answer = callee.setup(Some(audio), false).await.unwrap();
         caller.remote_description(&answer).await.unwrap();
 
         let first = caller.start_camera(camera("first")).await.unwrap().unwrap();
@@ -571,11 +680,11 @@ mod tests {
     #[tokio::test]
     async fn matrix_web_rtc_carries_two_way_audio_and_upgrades_to_camera_video() {
         let mut caller = new_peer("caller");
-        let callee = new_peer("callee");
+        let mut callee = new_peer("callee");
         let mut caller_ice = watch_candidates(&caller);
         let mut callee_ice = watch_candidates(&callee);
-        let offer = caller.setup(None).await.unwrap();
-        let answer = callee.setup(Some(offer)).await.unwrap();
+        let offer = caller.setup(None, false).await.unwrap();
+        let answer = callee.setup(Some(offer), false).await.unwrap();
         assert!(
             answer.sdp.contains("a=sendrecv"),
             "answer negotiates two-way audio"
@@ -586,25 +695,7 @@ mod tests {
         );
         caller.remote_description(&answer).await.unwrap();
 
-        tokio::time::timeout(Duration::from_secs(10), async {
-            while caller.pc.connection_state() != PeerConnectionState::Connected
-                || callee.pc.connection_state() != PeerConnectionState::Connected
-            {
-                tokio::select! {
-                    Some(mut candidate) = caller_ice.recv() => {
-                        candidate.line = None;
-                        callee.add_candidates(vec![candidate]).await;
-                    },
-                    Some(mut candidate) = callee_ice.recv() => {
-                        candidate.mid = None;
-                        caller.add_candidates(vec![candidate]).await;
-                    },
-                    _ = tokio::time::sleep(Duration::from_millis(10)) => {},
-                }
-            }
-        })
-        .await
-        .expect("WebRTC connected with exchanged ICE candidates");
+        connect_ice(&caller, &callee, &mut caller_ice, &mut callee_ice).await;
 
         let frame = AudioFrame {
             sample_rate: SAMPLE_RATE,
@@ -661,33 +752,7 @@ mod tests {
         let answer = callee.renegotiate(&offer, true).await.unwrap().unwrap();
         caller.renegotiate(&answer, false).await.unwrap();
         assert!(caller.camera_negotiated());
-        let receiver = callee
-            .pc
-            .transceivers()
-            .into_iter()
-            .map(|t| t.receiver())
-            .find(|r| matches!(r.track(), Some(MediaStreamTrack::Video(_))))
-            .unwrap();
-        assert_eq!(receiver.stream_ids(), ["pax-audio"]);
-        let Some(MediaStreamTrack::Video(track)) = receiver.track() else {
-            unreachable!()
-        };
-        let mut video = libwebrtc::video_stream::native::NativeVideoStream::new(track);
-        let mut tick = tokio::time::interval(Duration::from_millis(65));
-        tokio::time::timeout(Duration::from_secs(8), async {
-            loop {
-                tokio::select! {
-                    _ = tick.tick() => caller.camera_frame("color", RED_JPEG).unwrap(),
-                    frame = video.next() => {
-                        let image = frame.unwrap().buffer.to_i420();
-                        let (_, u, v) = image.data();
-                        if u[0] < 120 && v[0] > 190 { break; }
-                    }
-                }
-            }
-        })
-        .await
-        .expect("the peer should receive red camera frames");
+        expect_red_camera(&caller, &callee, "color").await;
         caller.stop_camera("color").await.unwrap();
     }
 }

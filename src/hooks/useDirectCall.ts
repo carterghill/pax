@@ -19,6 +19,7 @@ interface CallId {
 }
 
 interface CallSignal extends CallId {
+  video?: boolean;
   silent: boolean;
   eventId: string;
   kind: SignalKind;
@@ -31,6 +32,7 @@ interface CallSignal extends CallId {
 }
 
 export interface DirectCall extends CallId {
+  video?: boolean;
   silent?: boolean;
   transport?: "matrix" | "selecting" | "group";
   phase: "dialing" | "incoming" | "answering" | "connecting" | "active" | "interrupted" | "resuming";
@@ -51,6 +53,7 @@ const RECONNECT_MS = 90_000;
 const RESUME_RESPONSE_MS = 12_000;
 
 function sendSignal(call: CallId, kind: SignalKind, options?: {
+  video?: boolean;
   answerDeviceId?: string;
   targetDeviceId?: string;
   requestId?: string;
@@ -103,6 +106,16 @@ export function useDirectCall(
 
   const { start: startGroup, answer: answerGroup, finish: finishGroup, silence: silenceGroup } =
     useGroupCall(voice, current, voiceBusy, update, setError, recoveryReady, dismissQuiet);
+
+  const cameraStartedFor = useRef<string | null>(null);
+  const startCamera = call?.transport === "matrix" ? matrixMedia.startCamera : voice.startCamera;
+  const mediaReady = call?.transport === "matrix" || (voice.connectedRoomId === call?.roomId && !voice.isConnecting);
+  useEffect(() => {
+    if (!call?.video || call.phase !== "active" || current.current?.callId !== call.callId || !mediaReady
+        || cameraStartedFor.current === call.callId) return;
+    cameraStartedFor.current = call.callId;
+    void startCamera();
+  }, [call, mediaReady, startCamera]);
 
   const finish = useCallback((notifyPeer: boolean, options: {
     connectionLost?: boolean;
@@ -288,6 +301,7 @@ export function useDirectCall(
         peerDeviceId: signal.deviceId,
         ringEventId: signal.eventId,
         phase: "incoming",
+        video: signal.video,
         silent: signal.silent,
         expiresAt: signal.expiresAt,
       });
@@ -430,12 +444,12 @@ export function useDirectCall(
     }
   }, [call, finish, voice.endedRoomId]);
 
-  const start = useCallback((roomId: string, peerUserId: string, memberCall = false) => {
+  const start = useCallback((roomId: string, peerUserId: string, { memberCall = false, video = false } = {}) => {
     dismissQuiet.current();
     if (current.current || voiceBusy.current || mediaStop.current) return;
     const pending: DirectCall = {
       roomId, peerUserId, callId: crypto.randomUUID(), phase: "dialing", expiresAt: Date.now() + RING_MS,
-      transport: "selecting",
+      transport: "selecting", video,
     };
     setError(null);
     update(pending);
@@ -451,7 +465,7 @@ export function useDirectCall(
       }
       const ringing = { ...pending, expiresAt: Date.now() + RING_MS, transport: undefined };
       update(ringing);
-      const sending = sendSignal(ringing, "ring");
+      const sending = sendSignal(ringing, "ring", { video });
       offer.current = { callId: ringing.callId, sending };
       try {
         await sending;

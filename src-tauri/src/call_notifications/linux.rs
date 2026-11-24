@@ -61,7 +61,7 @@ impl Notification {
                     "Pax",
                     0u32,
                     config.identifier.as_str(),
-                    "Incoming call",
+                    if call.video { "Incoming video call" } else { "Incoming call" },
                     call.caller.as_str(),
                     actions,
                     hints,

@@ -863,9 +863,9 @@ export default function MainLayout({
     void disconnectVoice(roomId);
   }, [disconnectVoice, eligibleRecovery?.roomId, forgetVoice, getRoom, targetVoiceRoomId]);
 
-  const placeDirectCall = useCallback((roomId: string, peerUserId: string, memberCall = false) => {
+  const placeDirectCall = useCallback((roomId: string, peerUserId: string, options?: { memberCall?: boolean; video?: boolean }) => {
     abandonVoiceChannel();
-    startDirectCall(roomId, peerUserId, memberCall);
+    startDirectCall(roomId, peerUserId, options);
   }, [abandonVoiceChannel, startDirectCall]);
 
   const answerDirectCall = useCallback((callId?: string) => {
@@ -1632,10 +1632,10 @@ export default function MainLayout({
                   setUserMenuWidth(clamped);
                 }}
                 onStartDirectMessage={handleStartDirectMessage}
-                onCallMember={callUnavailable || !callPermissions?.member ? undefined : (user) => placeDirectCall(activeRoom.id, user, true)}
-                onStartCall={headerCallUnavailable || !activeRoom.isDirect ? undefined : () => {
-                  if (activeDmPeer) placeDirectCall(activeRoom.id, activeDmPeer);
-                  else { abandonVoiceChannel(); startGroupCall(activeRoom.id, userId); }
+                onCallMember={callUnavailable || !callPermissions?.member ? undefined : (user) => placeDirectCall(activeRoom.id, user, { memberCall: true })}
+                onStartCall={headerCallUnavailable || !activeRoom.isDirect ? undefined : (video) => {
+                  if (activeDmPeer) placeDirectCall(activeRoom.id, activeDmPeer, { video });
+                  else { abandonVoiceChannel(); startGroupCall(activeRoom.id, userId, video); }
                 }}
                 callUnavailable={headerCallUnavailable}
                 callContent={inlineCallContent}

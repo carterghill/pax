@@ -117,7 +117,7 @@ export function VoiceCallPanel({
   const { getVolume, setVolume } = useUserVolume();
   const media = matrixMedia ?? callState;
   const isMatrixCall = !!matrixMedia;
-  const cameraUnavailable = matrixMedia?.canUpgradeVideo === false;
+  const cameraUnavailable = matrixMedia?.canShareCamera === false;
   const cameraLabel = cameraUnavailable ? "This Matrix peer cannot add video to a voice call"
     : media.cameraPending ? "Cancel camera startup" : media.localCamera ? "Turn camera off" : "Turn camera on";
   const isConnected = isMatrixCall || (callState.connectedRoomId === roomId && !callState.isConnecting);
@@ -724,7 +724,7 @@ export function VoiceCallPanel({
             aria-pressed={!!media.localCamera}
             aria-busy={media.cameraPending}
             style={{
-              marginInlineStart: spacing.unit * 2,
+              marginInlineStart: spacing.unit * 2, position: "relative",
               opacity: cameraUnavailable ? 0.5 : 1,
               width: 48, height: 48, borderRadius: "50%", border: "none", cursor: cameraUnavailable ? "default" : "pointer",
               display: "grid", placeItems: "center",
@@ -732,6 +732,11 @@ export function VoiceCallPanel({
               color: media.localCamera ? palette.bgPrimary : palette.textPrimary,
             }}
           >
+            {!matrixMedia && <span aria-hidden="true" style={{
+              position: "absolute", insetInlineStart: -(spacing.unit * (inChat ? 2 : 2.5)),
+              top: "50%", transform: "translateY(-50%)", width: 1, height: 16,
+              backgroundColor: palette.textSecondary, opacity: 0.3, pointerEvents: "none",
+            }} />}
             {media.cameraPending ? <Loader2 size={20} style={{ animation: "spin 1s linear infinite" }} />
               : media.localCamera ? <Video size={20} /> : <VideoOff size={20} />}
           </button>

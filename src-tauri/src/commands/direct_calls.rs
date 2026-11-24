@@ -35,6 +35,8 @@ const MAX_PENDING_SIGNALS: usize = 128;
 #[serde(rename_all = "camelCase")]
 struct SignalContent {
     kind: SignalKind,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    video: bool,
     call_id: String,
     device_id: String,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -203,6 +205,7 @@ pub(crate) async fn call_push_event(
         "kind": kind,
         "callId": call.content.call_id,
         "caller": caller,
+        "video": call.content.video,
         "roomId": room.room_id(),
         "expiresAt": expires_at,
         "ringEventId": ring_event_id,
@@ -297,6 +300,7 @@ pub(crate) async fn decline_pushed_call(
     }
     let content = SignalContent {
         kind: SignalKind::End,
+        video: false,
         call_id,
         device_id: device_id.to_string(),
         answer_device_id: None,
@@ -320,6 +324,7 @@ pub(crate) async fn send_direct_call_signal(
     room_id: String,
     call_id: String,
     kind: SignalKind,
+    video: Option<bool>,
     answer_device_id: Option<String>,
     target_device_id: Option<String>,
     request_id: Option<String>,
@@ -332,6 +337,7 @@ pub(crate) async fn send_direct_call_signal(
     let room = super::resolve_room(&client, &room_id)?;
     let content = SignalContent {
         kind,
+        video: kind == SignalKind::Ring && video.unwrap_or(false),
         call_id,
         device_id: client.device_id().ok_or("No device ID")?.to_string(),
         answer_device_id,
@@ -599,6 +605,18 @@ mod tests {
         assert!(fresh_call_event(&event(now + RING_MS + 1, "ring", None), now).is_none());
         let (_, expiry, _) = fresh_call_event(&event(now + 1000, "ring", None), now).unwrap();
         assert_eq!(expiry, now + RING_MS);
+    }
+
+    #[test]
+    fn video_rings_and_older_voice_rings_preserve_their_call_type() {
+        let ring = event(500_000, "ring", None);
+        let mut content = parse_call_event(ring.raw()).unwrap().content;
+        assert!(!content.video);
+        assert!(serde_json::to_value(&content).unwrap().get("video").is_none());
+        content.video = true;
+        let wire = serde_json::to_value(&content).unwrap();
+        assert_eq!(wire["video"], true);
+        assert!(serde_json::from_value::<SignalContent>(wire).unwrap().video);
     }
 
     #[test]

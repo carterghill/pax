@@ -1,6 +1,6 @@
 import { useEffect, type CSSProperties } from "react";
 import { isTauri } from "@tauri-apps/api/core";
-import { Mic, MicOff, Phone, PhoneOff, X } from "lucide-react";
+import { Mic, MicOff, Phone, PhoneOff, Video, X } from "lucide-react";
 import Dialog from "./Dialog";
 import UserAvatar from "./UserAvatar";
 import type { DirectCall, DirectCallPeerConnection } from "../hooks/useDirectCall";
@@ -28,6 +28,9 @@ export default function DirectCallControls({
 }: DirectCallControlsProps) {
   const { palette, spacing, typography } = useTheme();
   const incoming = call.phase === "incoming";
+  const CallIcon = call.video ? Video : Phone;
+  const incomingLabel = call.video ? "Incoming video call" : "Incoming voice call";
+  const answerLabel = call.video ? "Answer with video" : "Answer";
   useEffect(() => {
     if (!incoming || call.silent) return;
     const appleMobile = /iPhone|iPad|iPod/.test(navigator.userAgent)
@@ -66,17 +69,18 @@ export default function DirectCallControls({
 
   if (incoming && !call.silent) {
     return (
-      <Dialog onClose={onEnd} aria-label="Incoming voice call" style={{ width: 340 }}>
+      <Dialog onClose={onEnd} aria-label={incomingLabel} style={{ width: 340 }}>
         <div style={{ display: "grid", justifyItems: "center", gap: spacing.unit * 2, padding: spacing.unit * 4 }}>
           <UserAvatar userId={call.peerUserId} displayName={groupCaller ?? name} avatarUrlHint={avatarUrl} size={56} />
           <div style={{ textAlign: "center", overflowWrap: "anywhere", minWidth: 0 }}>
-            <div style={{ color: palette.textSecondary, fontSize: typography.fontSizeSmall }}>{groupCaller ? `${groupCaller} is calling the group` : "Incoming voice call"}</div>
+            <div style={{ color: palette.textSecondary, fontSize: typography.fontSizeSmall }}>{groupCaller
+              ? `${groupCaller} is ${call.video ? "video calling" : "calling"} the group` : incomingLabel}</div>
             <div style={{ fontSize: typography.fontSizeBase, fontWeight: typography.fontWeightBold }}>{name}</div>
           </div>
           <div style={{ display: "flex", gap: spacing.unit * 2, flexWrap: "wrap", justifyContent: "center" }}>
             <button type="button" onClick={onDecline} style={endStyle}><PhoneOff size={17} aria-hidden="true" /> Decline</button>
             <button type="button" onClick={onAnswer} style={{ ...buttonStyle, background: "#167343", color: "#fff" }}>
-              <Phone size={17} aria-hidden="true" /> Answer
+              <CallIcon size={17} aria-hidden="true" /> {answerLabel}
             </button>
           </div>
         </div>
@@ -85,7 +89,7 @@ export default function DirectCallControls({
   }
 
   const active = call.phase === "active";
-  const status = incoming ? `Silent call from ${groupCaller ?? name}` : call.phase === "dialing" ? `Calling ${name}…`
+  const status = incoming ? `Silent ${call.video ? "video call" : "call"} from ${groupCaller ?? name}` : call.phase === "dialing" ? `${call.video ? "Video calling" : "Calling"} ${name}…`
     : peerConnection === "lost" ? `${name} lost connection and may reconnect.`
     : peerConnection === "interrupted" ? `${name}’s connection was interrupted.`
     : call.phase === "resuming" || isReconnecting ? "Reconnecting…"
@@ -100,7 +104,7 @@ export default function DirectCallControls({
       padding: `${spacing.unit}px ${spacing.unit * 2}px`, background: palette.bgSecondary,
       borderBottom: `1px solid ${palette.border}`, fontSize: typography.fontSizeSmall,
     }}>
-      <Phone size={17} aria-hidden="true" style={{ flexShrink: 0 }} />
+      <CallIcon size={17} aria-hidden="true" style={{ flexShrink: 0 }} />
       <span role="status" style={{ flex: 1, minWidth: 0, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
         {status}
       </span>
@@ -111,7 +115,7 @@ export default function DirectCallControls({
       )}
       {incoming && <>
         <button type="button" onClick={onDecline} style={buttonStyle}>Decline</button>
-        <button type="button" onClick={onAnswer} style={buttonStyle}>Answer</button>
+        <button type="button" onClick={onAnswer} style={buttonStyle}>{answerLabel}</button>
       </>}
       {showActions && !incoming && (
         <button type="button" aria-label={endLabel} title={endLabel} onClick={onEnd} style={endStyle}>

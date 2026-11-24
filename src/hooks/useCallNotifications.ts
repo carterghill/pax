@@ -10,7 +10,7 @@ type CallNotificationAction = {
 };
 
 type AndroidCallNotifications = {
-  showIncomingCall(callId: string, roomId: string, caller: string, expiresAt: number, eventId: string, matrixVoip: boolean): void;
+  showIncomingCall(callId: string, roomId: string, caller: string, expiresAt: number, eventId: string, matrixVoip: boolean, video: boolean): void;
   closeIncomingCall(callId: string, ended: boolean): void;
   takeCallNotificationAction(): string;
   setCallNotificationBusy(busy: boolean): void;
@@ -73,6 +73,7 @@ export function useCallNotifications(
 
   const callId = call?.callId;
   const phase = call?.phase;
+  const video = !!call?.video;
   const roomId = call?.roomId;
   const expiresAt = call?.expiresAt;
   const ringEventId = call?.ringEventId;
@@ -99,7 +100,7 @@ export function useCallNotifications(
         systemCallId.current = null;
       }
       if (phase === "incoming" && callId && roomId && expiresAt) {
-        const show = () => android.showIncomingCall(callId, roomId, caller, expiresAt, ringEventId ?? "", matrixVoip);
+        const show = () => android.showIncomingCall(callId, roomId, caller, expiresAt, ringEventId ?? "", matrixVoip, video);
         systemCallId.current = callId;
         show();
         window.addEventListener("pax-notification-permission-granted", show);
@@ -111,11 +112,11 @@ export function useCallNotifications(
       : phase === "answering" || phase === "connecting" ? "answering"
       : phase === "active" || phase === "interrupted" || phase === "resuming" ? "active"
       : null;
-    const payload = callId && systemPhase ? { callId, caller, expiresAt, phase: systemPhase } : null;
+    const payload = callId && systemPhase ? { callId, caller, expiresAt, phase: systemPhase, video } : null;
     commands.current = commands.current
       .then(() => invoke<void>("sync_call_notification", { call: payload, busy }))
       .catch((error) => console.warn("Could not update the call notification:", error));
-  }, [android, busy, callId, caller, expiresAt, matrixVoip, phase, ringEventId, roomId]);
+  }, [android, busy, callId, caller, expiresAt, matrixVoip, phase, ringEventId, roomId, video]);
 
   useEffect(() => () => {
     if (!isTauri()) return;

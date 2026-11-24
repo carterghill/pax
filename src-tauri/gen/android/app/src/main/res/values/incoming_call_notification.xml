@@ -1,6 +1,7 @@
 <?xml version="1.0" encoding="utf-8"?>
 <resources>
     <string name="pax_incoming_call_from">Call from %1$s</string>
+    <string name="pax_incoming_video_call_from">Video call from %1$s</string>
     <string name="pax_missed_call">Missed call</string>
     <string name="pax_call_answer">Answer</string>
     <string name="pax_call_decline">Decline</string>

@@ -31,12 +31,14 @@ impl Notification {
         let xml = XmlDocument::new()?;
         xml.LoadXml(&HSTRING::from(concat!(
             r#"<toast scenario="incomingCall" launch="open">"#,
-            r#"<visual><binding template="ToastGeneric"><text>Incoming call</text><text/></binding></visual>"#,
+            r#"<visual><binding template="ToastGeneric"><text/><text/></binding></visual>"#,
             r#"<actions><action content="Answer" arguments="answer"/>"#,
             r#"<action content="Decline" arguments="decline"/></actions><audio silent="true"/></toast>"#,
         )))?;
-        xml.GetElementsByTagName(&HSTRING::from("text"))?
-            .Item(1)?
+        let lines = xml.GetElementsByTagName(&HSTRING::from("text"))?;
+        let title = if call.video { "Incoming video call" } else { "Incoming call" };
+        lines.Item(0)?.AppendChild(&xml.CreateTextNode(&HSTRING::from(title))?)?;
+        lines.Item(1)?
             .AppendChild(&xml.CreateTextNode(&HSTRING::from(&call.caller))?)?;
 
         let toast = ToastNotification::CreateToastNotification(&xml)?;
