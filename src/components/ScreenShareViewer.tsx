@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from "react";
-import { invoke } from "@tauri-apps/api/core";
+import { convertFileSrc, invoke } from "@tauri-apps/api/core";
 import { listen, UnlistenFn } from "@tauri-apps/api/event";
 import { Monitor, Loader2 } from "lucide-react";
 import { useTheme } from "../theme/ThemeContext";
@@ -20,12 +20,10 @@ import { registerOverlay, unregisterOverlay } from "../hooks/useOverlayObstructi
 
 interface ScreenShareViewerProps {
   active: boolean;
+  camera?: boolean;
+  avatar?: boolean;
   identity: string;
 }
-
-const URL_PREFIX = navigator.userAgent.includes("Windows")
-  ? "http://paxvideo.localhost"
-  : "paxvideo://localhost";
 
 /** Match `backgroundColor: palette.bgPrimary` for the native GPU letterbox clear (DX12 is opaque-only). */
 function bgPrimaryToRgb01(hex: string): { r: number; g: number; b: number } {
@@ -212,22 +210,23 @@ function uploadAndDraw(state: GlState, buf: ArrayBuffer, width: number, height: 
 
 // ─── Component ──────────────────────────────────────────────────────────────
 
-export default function ScreenShareViewer({ active, identity }: ScreenShareViewerProps) {
+export default function ScreenShareViewer({ active, identity, camera = false, avatar = false }: ScreenShareViewerProps) {
   const { palette, spacing, typography } = useTheme();
   const containerRef = useRef<HTMLDivElement>(null);
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const glStateRef = useRef<GlState | null>(null);
   const [loading, setLoading] = useState(true);
-  const [useNative, setUseNative] = useState<boolean | null>(null); // null = detecting
+  const [useNative, setUseNative] = useState<boolean | null>(camera ? false : null); // null = detecting
   const loadingRef = useRef(true);
 
   // ── Detect native overlay support ────────────────────────────────
   useEffect(() => {
+    if (camera) return;
     isNativeOverlaySupported().then((supported) => {
       console.log("[ScreenShareViewer] Native overlay supported:", supported);
       setUseNative(supported);
     });
-  }, []);
+  }, [camera]);
 
   // ── Native overlay: letterbox color (theme) — cheap, not on every resize tick ──
   useEffect(() => {
@@ -357,6 +356,8 @@ export default function ScreenShareViewer({ active, identity }: ScreenShareViewe
     let rafId = 0;
     let unlisten: UnlistenFn | null = null;
     const encodedId = encodeURIComponent(identity);
+    const frameUrl = convertFileSrc("frame", "paxvideo");
+    const resizeUrl = convertFileSrc("resize", "paxvideo");
 
     // Debounced resize reporting for protocol path
     const reportSize = () => {
@@ -367,7 +368,7 @@ export default function ScreenShareViewer({ active, identity }: ScreenShareViewe
       const w = Math.round(rect.width * dpr);
       const h = Math.round(rect.height * dpr);
       if (w > 0 && h > 0) {
-        fetch(`${URL_PREFIX}/resize?id=${encodedId}&w=${w}&h=${h}`).catch(() => {});
+        fetch(`${resizeUrl}?id=${encodedId}&w=${w}&h=${h}`).catch(() => {});
       }
     };
     reportSize();
@@ -392,7 +393,7 @@ export default function ScreenShareViewer({ active, identity }: ScreenShareViewe
 
       (async () => {
         try {
-          const resp = await fetch(`${URL_PREFIX}/frame?id=${encodedId}`);
+          const resp = await fetch(`${frameUrl}?id=${encodedId}`);
           if (!mounted) { resp.body?.cancel(); return; }
           if (resp.status === 204 || !resp.ok) { resp.body?.cancel(); return; }
 
@@ -452,7 +453,7 @@ export default function ScreenShareViewer({ active, identity }: ScreenShareViewe
       if (glStateRef.current) destroyGl(glStateRef.current);
       glStateRef.current = null;
       loadingRef.current = true;
-      fetch(`${URL_PREFIX}/resize?id=${encodeURIComponent(identity)}&w=0&h=0`).catch(() => {});
+      fetch(`${resizeUrl}?id=${encodeURIComponent(identity)}&w=0&h=0`).catch(() => {});
     };
   }, [active, identity, useNative]);
 
@@ -489,13 +490,13 @@ export default function ScreenShareViewer({ active, identity }: ScreenShareViewe
             color={palette.textSecondary}
             style={{ animation: "spin 1s linear infinite" }}
           />
-          <span style={{ fontSize: typography.fontSizeSmall }}>
+          {!avatar && <span style={{ fontSize: typography.fontSizeSmall }}>
             {useNative === null
               ? "Initializing..."
               : useNative
                 ? "Waiting for native video..."
-                : "Waiting for screen share frames..."}
-          </span>
+                : "Waiting for video..."}
+          </span>}
         </div>
       )}
 
@@ -511,14 +512,16 @@ export default function ScreenShareViewer({ active, identity }: ScreenShareViewe
           style={{
             maxWidth: "100%",
             maxHeight: "100%",
-            objectFit: "contain",
+            width: camera ? "100%" : undefined,
+            height: camera ? "100%" : undefined,
+            objectFit: avatar ? "cover" : "contain",
             display: loading ? "none" : "block",
           }}
         />
       )}
 
       {/* Resolution/mode badge */}
-      {!loading && (
+      {!loading && !camera && (
         <div
           style={{
             position: "absolute",

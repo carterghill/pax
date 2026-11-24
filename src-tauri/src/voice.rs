@@ -29,6 +29,7 @@ use tauri::{AppHandle, Emitter};
 use tokio::sync::mpsc;
 use tokio::time::{interval_at, Instant as TokioInstant, MissedTickBehavior};
 
+pub(crate) mod camera;
 pub(crate) mod peer;
 pub(crate) mod recording;
 
@@ -125,12 +126,69 @@ pub struct VoiceStateEvent {
     pub is_mic_enabled: bool,
     pub is_deafened: bool,
     pub is_noise_suppressed: bool,
-    /// Identities of participants currently sharing their screens
-    pub screen_sharing_owners: Vec<String>,
+    pub remote_video: Vec<CallVideo>,
     /// Whether this client is currently sharing its own screen
     pub is_local_screen_sharing: bool,
     pub error: Option<String>,
     pub participants: Vec<VoiceParticipantInfo>,
+}
+
+#[derive(Clone, Serialize, Debug, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct CallVideo {
+    identity: String,
+    stream_id: String,
+    source: CallVideoSource,
+}
+
+#[derive(Clone, Copy, Serialize, Debug, PartialEq)]
+#[serde(rename_all = "camelCase")]
+enum CallVideoSource {
+    Screen,
+    Camera,
+}
+
+impl CallVideoSource {
+    fn from_track(source: TrackSource) -> Option<Self> {
+        match source {
+            TrackSource::Camera => Some(Self::Camera),
+            TrackSource::Screenshare => Some(Self::Screen),
+            _ => None,
+        }
+    }
+}
+
+struct VideoReceiver {
+    video: CallVideo,
+    track_id: String,
+    muted: bool,
+    stop: tokio_util::sync::CancellationToken,
+}
+
+impl VideoReceiver {
+    fn start(
+        identity: String, source: CallVideoSource, track_id: String, muted: bool,
+        track: libwebrtc::video_track::RtcVideoTrack, app: Arc<AppHandle>,
+    ) -> Self {
+        // Each subscription gets its own renderer, even when resubscribing to the same track.
+        let stream_id = uuid::Uuid::new_v4().to_string();
+        let stop = tokio_util::sync::CancellationToken::new();
+        // A camera can move into a clipped avatar. Use the DOM renderer for both positions.
+        let parent = match source {
+            CallVideoSource::Screen => get_parent_hwnd_for_overlay(&app),
+            CallVideoSource::Camera => None,
+        };
+        crate::video_recv::spawn_video_receiver(stream_id.clone(), track, stop.clone(), app, parent);
+        Self { video: CallVideo { identity, stream_id, source }, track_id, muted, stop }
+    }
+}
+
+impl Drop for VideoReceiver {
+    fn drop(&mut self) {
+        self.stop.cancel();
+        crate::video_recv::clear_frame_buffer_for(&self.video.stream_id);
+        crate::native_overlay::destroy_overlay(&self.video.stream_id);
+    }
 }
 
 #[derive(Clone, Serialize, Debug)]
@@ -182,12 +240,9 @@ struct AudioState {
     deafened: bool,
     /// Whether mic noise suppression is enabled
     noise_suppression_enabled: bool,
-    /// Identities of participants currently sharing their screens
-    screen_sharing_owners: Vec<String>,
+    video_receivers: Vec<VideoReceiver>,
     /// Whether this client is currently sharing its own screen
     is_local_screen_sharing: bool,
-    /// Per-identity shutdown flags for remote screen share video receiver tasks
-    video_recv_shutdowns: HashMap<String, Arc<AtomicBool>>,
 }
 impl Default for AudioState {
     fn default() -> Self {
@@ -209,9 +264,8 @@ impl Default for AudioState {
             mic_enabled: true,
             deafened: false,
             noise_suppression_enabled: true,
-            screen_sharing_owners: Vec::new(),
+            video_receivers: Vec::new(),
             is_local_screen_sharing: false,
-            video_recv_shutdowns: HashMap::new(),
         }
     }
 }
@@ -227,6 +281,7 @@ pub struct VoiceSession {
     _output_stream: Option<AudioStream>,
     /// Cancellation handle for the event loop
     shutdown_tx: mpsc::Sender<()>,
+    camera: Arc<tokio::sync::Mutex<Option<camera::CameraPublication>>>,
     /// Screen share handle (track + capture shutdown); cleared on stop.
     screen_handle: Arc<Mutex<Option<crate::screen::ScreenShareHandle>>>,
     /// Monotonic token used to invalidate stale auto-stop monitors.
@@ -293,7 +348,7 @@ impl VoiceManager {
                 is_mic_enabled: false,
                 is_deafened: false,
                 is_noise_suppressed: true,
-                screen_sharing_owners: vec![],
+                remote_video: vec![],
                 is_local_screen_sharing: false,
                 error: None,
                 participants: vec![],
@@ -381,6 +436,7 @@ impl VoiceManager {
                 _input_stream: Some(input_stream),
                 _output_stream: Some(output_stream),
                 shutdown_tx,
+                camera: Default::default(),
                 screen_handle: Arc::new(Mutex::new(None)),
                 screen_share_generation: Arc::new(AtomicU64::new(0)),
                 noise_proc,
@@ -425,13 +481,7 @@ impl VoiceManager {
             if let Some(mut handle) = session.screen_handle.lock().take() {
                 handle.stop();
             }
-            // Stop all video receivers
-            {
-                let mut st = session.audio_state.lock();
-                for (_, shutdown) in st.video_recv_shutdowns.drain() {
-                    shutdown.store(true, Ordering::Relaxed);
-                }
-            }
+            session.audio_state.lock().video_receivers.clear();
             crate::video_recv::clear_all_frame_buffers();
             crate::native_overlay::destroy_all_overlays();
 
@@ -1047,44 +1097,14 @@ async fn run_event_loop(
                             });
                             emit_state(app_handle.as_ref(), &room_id, &local_identity, &audio_state, false, true, None);
                         } else if let RemoteTrack::Video(video_track) = track {
-                            if source == TrackSource::Screenshare {
-                                let identity_clone = identity.clone();
-                                log::info!("TrackSubscribed: Video/Screenshare from '{}' (local='{}')", identity_clone, local_identity);
-                                let mut st = audio_state.lock();
-
-                                // Add to owners list (if not already present)
-                                if !st.screen_sharing_owners.contains(&identity) {
-                                    st.screen_sharing_owners.push(identity.clone());
+                            if let Some(source) = CallVideoSource::from_track(source) {
+                                let receiver = VideoReceiver::start(identity.clone(), source, publication.sid().to_string(),
+                                    publication.is_muted(), video_track.rtc_track(), app_handle.clone());
+                                {
+                                    let mut st = audio_state.lock();
+                                    st.video_receivers.retain(|r| r.video.identity != identity || r.video.source != source);
+                                    st.video_receivers.push(receiver);
                                 }
-
-                                // Only receive if WE are not the one sharing
-                                if identity_clone != local_identity {
-                                    // Stop any existing receiver for this specific identity
-                                    if let Some(old_shutdown) = st.video_recv_shutdowns.remove(&identity_clone) {
-                                        old_shutdown.store(true, Ordering::Relaxed);
-                                    }
-                                    crate::native_overlay::destroy_overlay(&identity_clone);
-
-                                    log::info!("Spawning video receiver for '{}'", identity_clone);
-                                    let shutdown = Arc::new(AtomicBool::new(false));
-                                    st.video_recv_shutdowns.insert(identity_clone.clone(), shutdown.clone());
-                                    drop(st);
-
-                                    // Get parent HWND for native overlay (child HWND created on video thread)
-                                    let parent_hwnd = get_parent_hwnd_for_overlay(app_handle.as_ref());
-
-                                    crate::video_recv::spawn_video_receiver(
-                                        identity_clone,
-                                        video_track,
-                                        shutdown,
-                                        Arc::clone(&app_handle),
-                                        parent_hwnd,
-                                    );
-                                } else {
-                                    log::info!("Skipping video receiver (local screen share)");
-                                    drop(st);
-                                }
-
                                 emit_state(app_handle.as_ref(), &room_id, &local_identity, &audio_state, false, true, None);
                             }
                         }
@@ -1092,16 +1112,8 @@ async fn run_event_loop(
                     Some(RoomEvent::TrackUnsubscribed { publication, participant, .. }) => {
                         let identity = participant.identity().to_string();
                         let source = publication.source();
-                        if source == TrackSource::Screenshare {
-                            let mut st = audio_state.lock();
-                            st.screen_sharing_owners.retain(|id| id != &identity);
-                            // Shut down only this identity's receiver
-                            if let Some(shutdown) = st.video_recv_shutdowns.remove(&identity) {
-                                shutdown.store(true, Ordering::Relaxed);
-                            }
-                            drop(st);
-                            crate::video_recv::clear_frame_buffer_for(&identity);
-                            crate::native_overlay::destroy_overlay(&identity);
+                        if publication.kind() == TrackKind::Video {
+                            audio_state.lock().video_receivers.retain(|r| r.track_id != publication.sid().as_str());
                             emit_state(app_handle.as_ref(), &room_id, &local_identity, &audio_state, false, true, None);
                         } else if publication.kind() == TrackKind::Audio {
                             let track_key = format!("{}::{:?}", identity, source);
@@ -1128,6 +1140,12 @@ async fn run_event_loop(
                         }
                     }
                     Some(RoomEvent::TrackMuted { participant, publication }) => {
+                        if publication.kind() == TrackKind::Video {
+                            if let Some(r) = audio_state.lock().video_receivers.iter_mut().find(|r| r.track_id == publication.sid().as_str()) {
+                                r.muted = true;
+                            }
+                            emit_state(app_handle.as_ref(), &room_id, &local_identity, &audio_state, false, true, None);
+                        }
                         if publication.source() == TrackSource::Microphone {
                             let identity = participant.identity().to_string();
                             let mut st = audio_state.lock();
@@ -1138,6 +1156,12 @@ async fn run_event_loop(
                         }
                     }
                     Some(RoomEvent::TrackUnmuted { participant, publication }) => {
+                        if publication.kind() == TrackKind::Video {
+                            if let Some(r) = audio_state.lock().video_receivers.iter_mut().find(|r| r.track_id == publication.sid().as_str()) {
+                                r.muted = false;
+                            }
+                            emit_state(app_handle.as_ref(), &room_id, &local_identity, &audio_state, false, true, None);
+                        }
                         if publication.source() == TrackSource::Microphone {
                             let identity = participant.identity().to_string();
                             let mut st = audio_state.lock();
@@ -1190,14 +1214,7 @@ async fn run_event_loop(
                             // Remove all per-track playback buffers for this participant
                             let prefix = format!("{}::", identity);
                             st.playback_buffers.retain(|k, _| !k.starts_with(&prefix));
-                            if st.screen_sharing_owners.contains(&identity) {
-                                st.screen_sharing_owners.retain(|id| id != &identity);
-                                if let Some(shutdown) = st.video_recv_shutdowns.remove(&identity) {
-                                    shutdown.store(true, Ordering::Relaxed);
-                                }
-                                crate::video_recv::clear_frame_buffer_for(&identity);
-                                crate::native_overlay::destroy_overlay(&identity);
-                            }
+                            st.video_receivers.retain(|r| r.video.identity != identity);
                         }
                         emit_state(app_handle.as_ref(), &room_id, &local_identity, &audio_state, false, true, None);
                     }
@@ -1530,7 +1547,7 @@ fn emit_state(
         is_mic_enabled: st.mic_enabled,
         is_deafened: st.deafened,
         is_noise_suppressed: st.noise_suppression_enabled,
-        screen_sharing_owners: st.screen_sharing_owners.clone(),
+        remote_video: st.video_receivers.iter().filter(|r| !r.muted).map(|r| r.video.clone()).collect(),
         is_local_screen_sharing: st.is_local_screen_sharing,
         error,
         participants: if is_connected {

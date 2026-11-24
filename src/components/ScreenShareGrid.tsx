@@ -1,7 +1,8 @@
 import { useState, useMemo, useCallback, useRef, useEffect, type MouseEvent } from "react";
-import { Grid2x2 } from "lucide-react";
+import { Grid2x2, PanelsTopLeft } from "lucide-react";
 import { useTheme } from "../theme/ThemeContext";
-import ScreenShareViewer from "./ScreenShareViewer";
+import CallVideo from "./CallVideo";
+import type { CallStream } from "../utils/callVideoLayout";
 import { useOverlayHover, useOverlayObstruction } from "../hooks/useOverlayObstruction";
 import { localpartFromUserId } from "../utils/matrix";
 import StreamVolumeControl from "./StreamVolumeControl";
@@ -13,32 +14,29 @@ import StreamVolumeControl from "./StreamVolumeControl";
  *   Grid:  All streams displayed as equal tiles (auto-arranges 1, 2×1, 2×2, etc.)
  *   Focus: One stream large, others as small previews in a strip below.
  *
- * Click a tile in grid mode to focus it. Click "Grid" button to return.
+ * Switch layouts in the toolbar or select a tile to focus it.
  * Resolution adapts per-tile via ScreenShareViewer's ResizeObserver.
  */
 
 interface ScreenShareGridProps {
-  /** Identities of remote participants sharing their screens */
-  remoteSharers: string[];
-  /** Whether the local user is sharing */
-  isLocalScreenSharing: boolean;
+  streams: CallStream[];
   /** Right-click a remote stream tile (e.g. volume menu over native overlay) */
   onStreamContextMenu?: (e: MouseEvent, identity: string, displayName: string) => void;
   /** Get the current volume for a participant (0–2) */
   getVolume: (identity: string) => number;
   /** Set volume for a participant (persists + applies to audio) */
-  onVolumeChange: (identity: string, volume: number) => void;
+  onVolumeChange?: (identity: string, volume: number) => void;
 }
 
 export default function ScreenShareGrid({
-  remoteSharers,
-  isLocalScreenSharing,
+  streams,
   onStreamContextMenu,
   getVolume,
   onVolumeChange,
 }: ScreenShareGridProps) {
   const { palette, spacing, typography } = useTheme();
-  const [focusedId, setFocusedId] = useState<string | null>(null);
+  const [view, setView] = useState<"grid" | "focus">("grid");
+  const [selectedId, setSelectedId] = useState<string | null>(null);
   const gridRef = useRef<HTMLDivElement>(null);
   const [containerSize, setContainerSize] = useState<{ w: number; h: number }>({ w: 800, h: 600 });
 
@@ -57,34 +55,12 @@ export default function ScreenShareGrid({
     return () => observer.disconnect();
   }, []);
 
-  // If the focused stream disappears, fall back to grid
-  const effectiveFocusId = focusedId && remoteSharers.includes(focusedId) ? focusedId : null;
-
-  // Hover tracking for the focused stream (hooks must be unconditional)
-  const focusedNativeHover = useOverlayHover(effectiveFocusId ?? "");
-  const [focusedDomHover, setFocusedDomHover] = useState(false);
-  const focusedHover = focusedNativeHover || focusedDomHover;
-  const handleFocusedVolumeChange = useCallback(
-    (vol: number) => {
-      if (effectiveFocusId) onVolumeChange(effectiveFocusId, vol);
-    },
-    [effectiveFocusId, onVolumeChange],
-  );
-
-  // All streams to display (remote streams only — local shows a placeholder)
-  const allStreams = useMemo(() => {
-    const streams: Array<{ identity: string; isLocal: boolean }> = [];
-    for (const id of remoteSharers) {
-      streams.push({ identity: id, isLocal: false });
-    }
-    if (isLocalScreenSharing) {
-      streams.push({ identity: "__local__", isLocal: true });
-    }
-    return streams;
-  }, [remoteSharers, isLocalScreenSharing]);
-
-  const isGridMode = effectiveFocusId === null;
-  const streamCount = allStreams.length;
+  // Prefer a live feed over our own screen-share placeholder when choosing an initial focus.
+  const selectedStream = streams.find((s) => s.identity === selectedId)
+    ?? streams.find((s) => !s.local || s.source === "camera")
+    ?? streams[0];
+  const focusedStream = view === "focus" ? selectedStream : undefined;
+  const streamCount = streams.length;
 
   // Compute CSS grid dimensions for grid mode.
   // Picks the arrangement where tiles are closest to 16:9 aspect ratio.
@@ -117,82 +93,55 @@ export default function ScreenShareGrid({
     return best;
   }, [streamCount, containerSize]);
 
-  const handleTileClick = useCallback((identity: string) => {
-    if (identity === "__local__") return; // Can't focus local placeholder
-    setFocusedId((prev) => (prev === identity ? null : identity));
-  }, []);
+  function focusTile(identity: string) {
+    setSelectedId(identity);
+    setView("focus");
+  }
 
   if (streamCount === 0) return null;
 
-  // ── Focus mode ──────────────────────────────────────────────────────
-  if (!isGridMode && effectiveFocusId) {
-    const focusedStream = allStreams.find((s) => s.identity === effectiveFocusId);
-    const otherStreams = allStreams.filter((s) => s.identity !== effectiveFocusId);
-
-    return (
-      <div ref={gridRef} style={{ flex: 1, display: "flex", flexDirection: "column", overflow: "hidden" }}>
-        {/* Controls bar */}
-        <div style={{
-          display: "flex",
-          alignItems: "center",
-          padding: `${spacing.unit}px ${spacing.unit * 2}px`,
-          gap: spacing.unit * 2,
-          borderBottom: `1px solid ${palette.border}`,
-          flexShrink: 0,
-        }}>
-          <button
-            onClick={() => setFocusedId(null)}
-            title="Back to grid"
+  const otherStreams = focusedStream ? streams.filter((s) => s.identity !== focusedStream.identity) : [];
+  return (
+    <div ref={gridRef} style={{ flex: 1, minWidth: 0, minHeight: 0, display: "flex", flexDirection: "column", overflow: "hidden" }}>
+      <div role="group" aria-label="Video layout" style={{
+        display: "flex", alignItems: "center", flexShrink: 0, gap: spacing.unit,
+        padding: `${spacing.unit}px ${spacing.unit * 2}px`, borderBottom: `1px solid ${palette.border}`,
+      }}>
+        {(["grid", "focus"] as const).map((mode) => {
+          const label = mode === "grid" ? "Grid view" : "Focused view";
+          const Icon = mode === "grid" ? Grid2x2 : PanelsTopLeft;
+          return <button
+            key={mode}
+            type="button"
+            aria-label={label}
+            aria-pressed={view === mode}
+            title={label}
+            onClick={() => mode === "focus" ? focusTile(selectedStream.identity) : setView("grid")}
             style={{
-              display: "flex",
-              alignItems: "center",
-              gap: spacing.unit,
+              display: "flex", alignItems: "center", gap: spacing.unit, flexShrink: 0,
               padding: `${spacing.unit}px ${spacing.unit * 2}px`,
-              border: `1px solid ${palette.border}`,
-              borderRadius: spacing.unit,
-              backgroundColor: palette.bgTertiary,
-              color: palette.textPrimary,
-              cursor: "pointer",
-              fontSize: typography.fontSizeSmall,
+              border: `1px solid ${view === mode ? palette.accent : palette.border}`, borderRadius: spacing.unit,
+              backgroundColor: view === mode ? palette.bgActive : palette.bgTertiary,
+              color: palette.textPrimary, cursor: "pointer", fontSize: typography.fontSizeSmall,
             }}
           >
-            <Grid2x2 size={14} />
-            Grid
-          </button>
-          <span style={{ fontSize: typography.fontSizeSmall, color: palette.textSecondary }}>
-            {localpartFromUserId(effectiveFocusId)}'s screen
-          </span>
-        </div>
-
+            <Icon size={14} aria-hidden="true" />
+            {mode === "grid" ? "Grid" : "Focus"}
+          </button>;
+        })}
+        {focusedStream && <span style={{
+          fontSize: typography.fontSizeSmall, color: palette.textSecondary,
+          overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap",
+        }}>
+          {focusedStream.local ? "Your" : `${localpartFromUserId(focusedStream.identity)}'s`} {focusedStream.source}
+        </span>}
+      </div>
+      {focusedStream ? <>
         {/* Focused stream — takes most of the space */}
-        <div
-          style={{ flex: 1, position: "relative", overflow: "visible" }}
-          onMouseEnter={() => setFocusedDomHover(true)}
-          onMouseLeave={() => setFocusedDomHover(false)}
-        >
-          {focusedStream && !focusedStream.isLocal && (
-            <>
-              <ScreenShareViewer
-                active={true}
-                identity={focusedStream.identity}
-              />
-              <TileBottomBar
-                name={localpartFromUserId(focusedStream.identity)}
-                typography={typography}
-                spacing={spacing}
-                volumeControl={
-                  <StreamVolumeControl
-                    visible={focusedHover}
-                    volume={getVolume(focusedStream.identity)}
-                    onVolumeChange={handleFocusedVolumeChange}
-                  />
-                }
-              />
-            </>
-          )}
-          {focusedStream && focusedStream.isLocal && (
-            <LocalSharePlaceholder palette={palette} />
-          )}
+        <div style={{ flex: 1, minHeight: 0, position: "relative" }}>
+          <StreamTile stream={focusedStream} onStreamContextMenu={onStreamContextMenu}
+            getVolume={getVolume} onVolumeChange={onVolumeChange}
+            palette={palette} spacing={spacing} typography={typography} />
         </div>
 
         {/* Preview strip — small tiles for other streams */}
@@ -204,8 +153,8 @@ export default function ScreenShareGrid({
             borderTop: `1px solid ${palette.border}`,
             overflowX: "auto",
             flexShrink: 0,
-            height: 120,
-            minHeight: 120,
+            height: "min(30%, 120px)",
+            minHeight: 0,
             backgroundColor: palette.bgSecondary,
           }}>
             {otherStreams.map((stream) => (
@@ -219,7 +168,7 @@ export default function ScreenShareGrid({
               >
                 <StreamTile
                   stream={stream}
-                  onClick={() => handleTileClick(stream.identity)}
+                  onClick={() => focusTile(stream.identity)}
                   onStreamContextMenu={onStreamContextMenu}
                   getVolume={getVolume}
                   onVolumeChange={onVolumeChange}
@@ -232,34 +181,27 @@ export default function ScreenShareGrid({
             ))}
           </div>
         )}
-      </div>
-    );
-  }
-
-  // ── Grid mode ───────────────────────────────────────────────────────
-  return (
-    <div ref={gridRef} style={{
-      flex: 1,
-      display: "grid",
-      gridTemplateColumns: `repeat(${cols}, 1fr)`,
-      gridTemplateRows: `repeat(${rows}, 1fr)`,
-      gap: spacing.unit,
-      padding: spacing.unit,
-      overflow: "hidden",
-    }}>
-      {allStreams.map((stream) => (
-        <StreamTile
-          key={stream.identity}
-          stream={stream}
-          onClick={() => handleTileClick(stream.identity)}
-          onStreamContextMenu={onStreamContextMenu}
-          getVolume={getVolume}
-          onVolumeChange={onVolumeChange}
-          palette={palette}
-          spacing={spacing}
-          typography={typography}
-        />
-      ))}
+      </> : (
+        <div style={{
+          flex: 1, minHeight: 0, display: "grid",
+          gridTemplateColumns: `repeat(${cols}, 1fr)`, gridTemplateRows: `repeat(${rows}, 1fr)`,
+          gap: spacing.unit, padding: spacing.unit, overflow: "hidden",
+        }}>
+          {streams.map((stream) => (
+            <StreamTile
+              key={stream.identity}
+              stream={stream}
+              onClick={() => focusTile(stream.identity)}
+              onStreamContextMenu={onStreamContextMenu}
+              getVolume={getVolume}
+              onVolumeChange={onVolumeChange}
+              palette={palette}
+              spacing={spacing}
+              typography={typography}
+            />
+          ))}
+        </div>
+      )}
     </div>
   );
 }
@@ -278,39 +220,40 @@ function StreamTile({
   typography,
   small,
 }: {
-  stream: { identity: string; isLocal: boolean };
-  onClick: () => void;
+  stream: CallStream;
+  onClick?: () => void;
   onStreamContextMenu?: (e: MouseEvent, identity: string, displayName: string) => void;
   getVolume: (identity: string) => number;
-  onVolumeChange: (identity: string, volume: number) => void;
+  onVolumeChange?: (identity: string, volume: number) => void;
   palette: any;
   spacing: any;
   typography: any;
   small?: boolean;
 }) {
   // Native hover: polled from the HWND (Windows only — always false on Linux)
-  const nativeHover = useOverlayHover(stream.identity);
+  const nativeHover = useOverlayHover(stream.local ? "" : stream.streamId);
   // DOM hover: fallback for Linux where video is a WebGL canvas in the DOM
   const [domHover, setDomHover] = useState(false);
-  const showHover = !stream.isLocal && (nativeHover || domHover);
+  const placeholder = stream.local && stream.source === "screen";
+  const interactive = !!onClick;
+  const showHover = nativeHover || domHover;
 
   const handleVolumeChange = useCallback(
-    (vol: number) => onVolumeChange(stream.identity, vol),
+    (vol: number) => onVolumeChange?.(stream.identity, vol),
     [stream.identity, onVolumeChange],
   );
 
   return (
     <div
-      onClick={onClick}
       onContextMenu={(e) => {
-        if (stream.isLocal || !onStreamContextMenu) return;
+        if (stream.local || !onStreamContextMenu) return;
         onStreamContextMenu(e, stream.identity, localpartFromUserId(stream.identity));
       }}
       style={{
         borderRadius: spacing.unit,
         overflow: "visible",
-        cursor: stream.isLocal ? "default" : "pointer",
-        border: `2px solid ${showHover ? palette.accent : "transparent"}`,
+        cursor: interactive ? "pointer" : "default",
+        border: `2px solid ${interactive && showHover ? palette.accent : "transparent"}`,
         position: "relative",
         backgroundColor: palette.bgPrimary,
         transition: "border-color 0.15s",
@@ -319,26 +262,25 @@ function StreamTile({
         minWidth: 0,
       }}
       onMouseEnter={() => {
-        if (!stream.isLocal) setDomHover(true);
+        setDomHover(true);
       }}
       onMouseLeave={() => {
         setDomHover(false);
       }}
     >
-      {!stream.isLocal ? (
-        <ScreenShareViewer
-          active={true}
-          identity={stream.identity}
-        />
-      ) : (
-        <LocalSharePlaceholder palette={palette} small={small} />
-      )}
+      {placeholder ? <LocalSharePlaceholder palette={palette} small={small} /> : <CallVideo stream={stream} />}
+      {interactive && <button
+        type="button"
+        aria-label={`Focus ${stream.local ? "your" : localpartFromUserId(stream.identity) + "'s"} ${stream.source}`}
+        onClick={onClick}
+        style={{ position: "absolute", inset: 0, width: "100%", height: "100%", border: 0, background: "transparent", cursor: "pointer" }}
+      />}
       <TileBottomBar
-        name={localpartFromUserId(stream.identity)}
+        name={stream.local ? "You" : localpartFromUserId(stream.identity)}
         typography={typography}
         spacing={spacing}
         volumeControl={
-          !stream.isLocal ? (
+          !stream.local && stream.source === "screen" && onVolumeChange ? (
             <StreamVolumeControl
               visible={showHover}
               volume={getVolume(stream.identity)}

@@ -162,7 +162,7 @@ export default function MainLayout({
       ? recoveryRoom.dmPeerUserId === voiceRecovery.direct.peerUserId
       : recoveryRoom.roomType === VOICE_ROOM_TYPE) ? voiceRecovery : null;
   const {
-    call: directCall, error: directCallError, peerConnection: directCallPeerConnection,
+    call: directCall, matrixMedia, error: directCallError, peerConnection: directCallPeerConnection,
     start: startDirectCall, startGroup: startGroupCall, answer: answerIncomingCall,
     end: endDirectCall, decline: declineDirectCall, endFromNotification: endDirectCallFromNotification,
     clearError: clearDirectCallError, reconnect: reconnectDirectCall,
@@ -1464,9 +1464,12 @@ export default function MainLayout({
 
   const viewingCallRoom = directCall && !discoverOpen && !showingDraftDm && activeRoom?.id === directCall.roomId
     && activeRoom.membership === "joined" && !activeRoom.upgradePending;
-  const chatCall = viewingCallRoom && activeRoom.roomType !== VOICE_ROOM_TYPE && (directCall.phase !== "incoming" || quietIncoming)
+  const matrixCallInVoiceRoom = viewingCallRoom && activeRoom.roomType === VOICE_ROOM_TYPE
+    && directCall.transport === "matrix" && directCall.phase === "active";
+  const inlineCall = viewingCallRoom && (activeRoom.roomType !== VOICE_ROOM_TYPE || matrixCallInVoiceRoom)
+    && (directCall.phase !== "incoming" || quietIncoming)
     ? directCall : null;
-  const showCallPanel = chatCall?.phase === "active" && connectedVoiceRoomId === chatCall.roomId;
+  const showCallPanel = inlineCall?.phase === "active" && (inlineCall.transport === "matrix" || connectedVoiceRoomId === inlineCall.roomId);
   const directCallStatus = directCall && (
     <DirectCallControls
       call={directCall}
@@ -1483,6 +1486,33 @@ export default function MainLayout({
       onEnd={endDirectCall}
       onToggleMic={toggleDirectCallMic}
     />
+  );
+  const inlineCallContent = inlineCall && (
+    <>
+      {showCallPanel && (
+        <VoiceCallPanel
+          key={inlineCall.callId}
+          roomId={inlineCall.roomId}
+          voiceCall={voiceCall}
+          matrixMedia={inlineCall.transport === "matrix" ? matrixMedia : undefined}
+          onDisconnect={endDirectCall}
+          userId={userId}
+          groupCall={groupCall}
+          participantStates={groupCall ? voiceParticipantStatesByRoom[inlineCall.roomId] : undefined}
+          voiceParticipants={groupCall ? callMembers : undefined}
+          directCall={groupCall ? undefined : {
+            peer: {
+              userId: inlineCall.peerUserId,
+              displayName: directCallName,
+              avatarUrl: callAvatar ?? null,
+            },
+            peerDeviceId: inlineCall.peerDeviceId,
+            peerConnection: directCallPeerConnection,
+          }}
+        />
+      )}
+      {directCallStatus}
+    </>
   );
   const callUnavailable = (directCall && !quietIncoming) || connectedVoiceRoomId || voiceCall.isConnecting
     ? "End the current call before starting another"
@@ -1542,7 +1572,7 @@ export default function MainLayout({
           flexDirection: "column",
           paddingBottom: isMobile ? "env(safe-area-inset-bottom, 0px)" : 0,
         }}>
-          {!chatCall && (!quietIncoming || viewingCallRoom) && directCallStatus}
+          {!inlineCall && (!quietIncoming || viewingCallRoom) && directCallStatus}
           {directCallError && <DirectCallError message={directCallError} onDismiss={clearDirectCallError} />}
           <div style={{
             flex: 1,
@@ -1575,6 +1605,8 @@ export default function MainLayout({
               />
             ) : activeRoom && activeRoom.membership === "invited" ? (
               <InvitationView room={activeRoom} onJoined={fetchRooms} />
+            ) : matrixCallInVoiceRoom ? (
+              inlineCallContent
             ) : activeRoom && !activeRoom.upgradePending && activeRoom.roomType === VOICE_ROOM_TYPE ? (
               <VoiceRoomView
                 room={activeRoom}
@@ -1606,32 +1638,7 @@ export default function MainLayout({
                   else { abandonVoiceChannel(); startGroupCall(activeRoom.id, userId); }
                 }}
                 callUnavailable={headerCallUnavailable}
-                callContent={chatCall && (
-                  <>
-                    {showCallPanel && (
-                      <VoiceCallPanel
-                        key={chatCall.callId}
-                        roomId={chatCall.roomId}
-                        voiceCall={voiceCall}
-                        onDisconnect={endDirectCall}
-                        userId={userId}
-                        groupCall={groupCall}
-                        participantStates={groupCall ? voiceParticipantStatesByRoom[chatCall.roomId] : undefined}
-                        voiceParticipants={groupCall ? callMembers : undefined}
-                        directCall={groupCall ? undefined : {
-                          peer: {
-                            userId: chatCall.peerUserId,
-                            displayName: directCallName,
-                            avatarUrl: callAvatar ?? null,
-                          },
-                          peerDeviceId: chatCall.peerDeviceId,
-                          peerConnection: directCallPeerConnection,
-                        }}
-                      />
-                    )}
-                    {directCallStatus}
-                  </>
-                )}
+                callContent={inlineCallContent}
                 moderationSpaceTreeRoomIds={moderationSpaceTreeRoomIds}
                 moderationSpaceName={moderationSpaceName}
                 onOpenNavigation={openMobileNavDrawer}

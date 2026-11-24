@@ -2,6 +2,7 @@ use libwebrtc::{
     audio_track::RtcAudioTrack,
     ice_candidate::IceCandidate,
     media_stream_track::MediaStreamTrack,
+    peer_connection::SignalingState,
     peer_connection::{
         AnswerOptions, IceGatheringState, OfferOptions, PeerConnection, PeerConnectionState,
     },
@@ -9,7 +10,10 @@ use libwebrtc::{
         native::PeerConnectionFactoryExt, ContinualGatheringPolicy, PeerConnectionFactory,
         RtcConfiguration,
     },
+    rtp_sender::RtpSender,
+    rtp_transceiver::RtpTransceiverDirection,
     session_description::{SdpType, SessionDescription},
+    video_source::native::NativeVideoSource,
 };
 use serde::{Deserialize, Serialize};
 
@@ -57,7 +61,11 @@ pub(crate) struct PeerMedia {
     pub id: String,
     pub room_id: String,
     pub peer: matrix_sdk::ruma::OwnedUserId,
+    camera: Option<camera::CameraCapture>,
+    camera_sender: Option<RtpSender>,
+    remote_video: Vec<VideoReceiver>,
     pc: PeerConnection,
+    factory: PeerConnectionFactory,
     track: RtcAudioTrack,
     source: NativeAudioSource,
     audio: Arc<Mutex<AudioState>>,
@@ -98,7 +106,10 @@ impl PeerMedia {
         let ice_id = peer.id.clone();
         pc.on_ice_candidate(Some(Box::new(move |candidate| {
             let candidate = Candidate::from(candidate);
-            log::info!("Matrix WebRTC gathered a {} ICE candidate", candidate.kind());
+            log::info!(
+                "Matrix WebRTC gathered a {} ICE candidate",
+                candidate.kind()
+            );
             let _ = app_ice.emit(
                 "matrix-voip-ice",
                 PeerCandidate {
@@ -108,7 +119,10 @@ impl PeerMedia {
             );
         })));
         pc.on_ice_candidate_error(Some(Box::new(|error| {
-            log::warn!("Matrix WebRTC ICE server reported code {}", error.error_code);
+            log::warn!(
+                "Matrix WebRTC ICE server reported code {}",
+                error.error_code
+            );
         })));
         let app_gathering = app.clone();
         let gathering_id = peer.id.clone();
@@ -176,10 +190,14 @@ impl PeerMedia {
             room_id,
             peer,
             pc,
+            factory,
             track,
             source,
             audio,
             remote_mids: Mutex::default(),
+            camera: None,
+            camera_sender: None,
+            remote_video: Vec::new(),
             streams: None,
             stop,
         })
@@ -191,7 +209,7 @@ impl PeerMedia {
             .map_err(|error| error.to_string())?;
         let local = if let Some(offer) = &offer {
             self.remote_description(offer).await?;
-            self.answer_offer().await
+            self.pc.create_answer(AnswerOptions::default()).await
         } else {
             self.pc
                 .create_offer(OfferOptions {
@@ -202,18 +220,6 @@ impl PeerMedia {
         }
         .map_err(|error| error.to_string())?;
         self.publish_description(local).await
-    }
-
-    async fn answer_offer(&self) -> Result<SessionDescription, libwebrtc::RtcError> {
-        for transceiver in self.pc.transceivers() {
-            if matches!(
-                transceiver.receiver().track(),
-                Some(MediaStreamTrack::Video(_))
-            ) {
-                transceiver.stop()?;
-            }
-        }
-        self.pc.create_answer(AnswerOptions::default()).await
     }
 
     async fn publish_description(&self, local: SessionDescription) -> Result<Description, String> {
@@ -247,16 +253,43 @@ impl PeerMedia {
         Ok(())
     }
 
+    async fn rollback_offer(&self) -> Result<(), String> {
+        if self.pc.signaling_state() == SignalingState::HaveLocalOffer {
+            let rollback =
+                SessionDescription::parse("", SdpType::Rollback).map_err(|e| e.to_string())?;
+            self.pc
+                .set_local_description(rollback)
+                .await
+                .map_err(|e| e.to_string())?;
+        }
+        Ok(())
+    }
+
     pub async fn renegotiate(
         &self,
         description: &Description,
+        polite: bool,
     ) -> Result<Option<Description>, String> {
+        if description.kind == "offer"
+            && self.pc.signaling_state() == SignalingState::HaveLocalOffer
+        {
+            if !polite {
+                return Ok(None);
+            }
+            self.rollback_offer().await?;
+        }
+        if description.kind == "answer"
+            && self.pc.signaling_state() != SignalingState::HaveLocalOffer
+        {
+            return Ok(None);
+        }
         self.remote_description(description).await?;
         if description.kind == "answer" {
             return Ok(None);
         }
         let answer = self
-            .answer_offer()
+            .pc
+            .create_answer(AnswerOptions::default())
             .await
             .map_err(|error| error.to_string())?;
         self.publish_description(answer).await.map(Some)
@@ -298,6 +331,131 @@ impl PeerMedia {
                 log::warn!("Matrix WebRTC could not parse a remote ICE candidate");
             }
         }
+    }
+
+    fn attach_camera(&mut self, source: NativeVideoSource) -> Result<(), String> {
+        let track = self.factory.create_video_track("camera", source);
+        let media = MediaStreamTrack::Video(track);
+        if let Some(sender) = &self.camera_sender {
+            sender.set_track(Some(media)).map_err(|e| e.to_string())?;
+        } else {
+            self.camera_sender = Some(
+                self.pc
+                    .add_track(media, &["pax-audio"])
+                    .map_err(|e| e.to_string())?,
+            );
+        }
+        Ok(())
+    }
+
+    pub fn camera_negotiated(&self) -> bool {
+        self.pc.transceivers().iter().any(|t| {
+            matches!(t.sender().track(), Some(MediaStreamTrack::Video(_)))
+                && matches!(
+                    t.current_direction(),
+                    Some(RtpTransceiverDirection::SendOnly | RtpTransceiverDirection::SendRecv)
+                )
+        })
+    }
+
+    async fn camera_offer(&self) -> Result<Option<Description>, String> {
+        if self.camera_negotiated() {
+            return Ok(None);
+        }
+        let offer = self
+            .pc
+            .create_offer(OfferOptions {
+                offer_to_receive_audio: true,
+                offer_to_receive_video: true,
+                ..Default::default()
+            })
+            .await
+            .map_err(|e| e.to_string())?;
+        self.publish_description(offer).await.map(Some)
+    }
+
+    pub async fn start_camera(
+        &mut self,
+        capture: camera::CameraCapture,
+    ) -> Result<Option<Description>, String> {
+        self.attach_camera(capture.source.clone())?;
+        self.camera = Some(capture);
+        self.camera_offer().await
+    }
+
+    pub fn camera_frame(&self, id: &str, jpeg: &str) -> Result<(), String> {
+        self.camera
+            .as_ref()
+            .filter(|c| c.id == id)
+            .ok_or("The camera has stopped")?
+            .push(jpeg)
+    }
+
+    pub async fn stop_camera(&mut self, id: &str) -> Result<(), String> {
+        if self.camera.as_ref().is_some_and(|c| c.id == id) {
+            self.camera.take();
+            if let Some(sender) = &self.camera_sender {
+                sender.set_track(None).map_err(|e| e.to_string())?;
+            }
+            self.rollback_offer().await?;
+        }
+        Ok(())
+    }
+
+    // Snapshot negotiated receivers after SDP or metadata changes. A streamless
+    // track or a muted camera should never occupy a participant's video tile.
+    pub fn sync_video(
+        &mut self,
+        app: &AppHandle,
+        metadata: &serde_json::Value,
+    ) -> Vec<CallVideo> {
+        let mut tracks = Vec::new();
+        for t in self.pc.transceivers() {
+            if !matches!(
+                t.current_direction(),
+                Some(RtpTransceiverDirection::RecvOnly | RtpTransceiverDirection::SendRecv)
+            ) {
+                continue;
+            }
+            let receiver = t.receiver();
+            let Some(MediaStreamTrack::Video(track)) = receiver.track() else {
+                continue;
+            };
+            let Some(msid) = receiver.stream_ids().into_iter().next() else {
+                continue;
+            };
+            let media = metadata.get(&msid);
+            if media.and_then(|m| m["video_muted"].as_bool()) == Some(true) {
+                continue;
+            }
+            let source = if media.and_then(|m| m["purpose"].as_str()) == Some("m.screenshare") {
+                CallVideoSource::Screen
+            } else {
+                CallVideoSource::Camera
+            };
+            if !tracks.iter().any(|(_, other)| *other == source) {
+                tracks.push((track, source));
+            }
+        }
+        self.remote_video.retain(|r| {
+            tracks
+                .iter()
+                .any(|(track, source)| track.id() == r.track_id && *source == r.video.source)
+        });
+        for (track, source) in tracks {
+            if self.remote_video.iter().any(|r| r.track_id == track.id()) {
+                continue;
+            }
+            self.remote_video.push(VideoReceiver::start(
+                self.peer.to_string(),
+                source,
+                track.id(),
+                false,
+                track,
+                Arc::new(app.clone()),
+            ));
+        }
+        self.remote_video.iter().map(|r| r.video.clone()).collect()
     }
 
     pub fn start_audio(&mut self, input: Option<&str>, output: Option<&str>) -> Result<(), String> {
@@ -365,10 +523,55 @@ mod tests {
         rx
     }
 
+    // A solid red JPEG made by a synthetic 160 × 120 camera.
+    const RED_JPEG: &str = "/9j/4AAQSkZJRgABAgAAAQABAAD//gAPTGF2YzYzLjEuMTAyAP/bAEMACAQEBAQEBQUFBQUFBgYGBgYGBgYGBgYGBgcHBwgICAcHBwYGBwcICAgICQkJCAgICAkJCgoKDAwLCw4ODhERFP/EAE0AAQEAAAAAAAAAAAAAAAAAAAAGAQEBAQAAAAAAAAAAAAAAAAAABgcQAQAAAAAAAAAAAAAAAAAAAAARAQAAAAAAAAAAAAAAAAAAAAD/wAARCAB4AKADASIAAhEAAxEA/9oADAMBAAIRAxEAPwCLASbfwAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAH/2Q==";
+
+    fn camera(id: &str) -> camera::CameraCapture {
+        camera::CameraCapture::open(id.to_owned(), 160, 120, RED_JPEG).unwrap()
+    }
+
+    fn new_peer(id: &str) -> PeerMedia {
+        PeerMedia::new(
+            id.into(),
+            "room".into(),
+            matrix_sdk::ruma::UserId::parse("@peer:test").unwrap(),
+            vec![],
+        )
+        .unwrap()
+    }
+
     #[tokio::test]
-    async fn matrix_web_rtc_offer_answer_and_trickle_ice_carry_audio_both_ways() {
-        let caller = PeerMedia::new("caller".into(), "room".into(), matrix_sdk::ruma::UserId::parse("@peer:test").unwrap(), vec![]).unwrap();
-        let callee = PeerMedia::new("callee".into(), "room".into(), matrix_sdk::ruma::UserId::parse("@peer:test").unwrap(), vec![]).unwrap();
+    async fn simultaneous_camera_upgrades_converge_and_allow_camera_restart() {
+        let mut caller = new_peer("caller");
+        let mut callee = new_peer("callee");
+        let audio = caller.setup(None).await.unwrap();
+        assert!(!audio.sdp.contains("m=video"));
+        let answer = callee.setup(Some(audio)).await.unwrap();
+        caller.remote_description(&answer).await.unwrap();
+
+        let first = caller.start_camera(camera("first")).await.unwrap().unwrap();
+        let second = callee
+            .start_camera(camera("second"))
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(caller.renegotiate(&second, false).await.unwrap().is_none());
+        let answer = callee.renegotiate(&first, true).await.unwrap().unwrap();
+        caller.renegotiate(&answer, false).await.unwrap();
+        assert!(caller.camera_negotiated() && callee.camera_negotiated());
+
+        caller.stop_camera("first").await.unwrap();
+        assert!(caller.camera_frame("first", RED_JPEG).is_err());
+        assert!(!caller.camera_negotiated());
+        assert!(caller.start_camera(camera("next")).await.unwrap().is_none());
+        assert!(caller.camera_frame("first", RED_JPEG).is_err());
+        assert!(caller.camera_frame("next", RED_JPEG).is_ok());
+    }
+
+    #[tokio::test]
+    async fn matrix_web_rtc_carries_two_way_audio_and_upgrades_to_camera_video() {
+        let mut caller = new_peer("caller");
+        let callee = new_peer("callee");
         let mut caller_ice = watch_candidates(&caller);
         let mut callee_ice = watch_candidates(&callee);
         let offer = caller.setup(None).await.unwrap();
@@ -452,5 +655,39 @@ mod tests {
                 .map(VecDeque::len)
                 .sum::<usize>()
         );
+
+        // Upgrade the established audio-only connection and verify real JPEG → RTP → I420 delivery.
+        let offer = caller.start_camera(camera("color")).await.unwrap().unwrap();
+        let answer = callee.renegotiate(&offer, true).await.unwrap().unwrap();
+        caller.renegotiate(&answer, false).await.unwrap();
+        assert!(caller.camera_negotiated());
+        let receiver = callee
+            .pc
+            .transceivers()
+            .into_iter()
+            .map(|t| t.receiver())
+            .find(|r| matches!(r.track(), Some(MediaStreamTrack::Video(_))))
+            .unwrap();
+        assert_eq!(receiver.stream_ids(), ["pax-audio"]);
+        let Some(MediaStreamTrack::Video(track)) = receiver.track() else {
+            unreachable!()
+        };
+        let mut video = libwebrtc::video_stream::native::NativeVideoStream::new(track);
+        let mut tick = tokio::time::interval(Duration::from_millis(65));
+        tokio::time::timeout(Duration::from_secs(8), async {
+            loop {
+                tokio::select! {
+                    _ = tick.tick() => caller.camera_frame("color", RED_JPEG).unwrap(),
+                    frame = video.next() => {
+                        let image = frame.unwrap().buffer.to_i420();
+                        let (_, u, v) = image.data();
+                        if u[0] < 120 && v[0] > 190 { break; }
+                    }
+                }
+            }
+        })
+        .await
+        .expect("the peer should receive red camera frames");
+        caller.stop_camera("color").await.unwrap();
     }
 }

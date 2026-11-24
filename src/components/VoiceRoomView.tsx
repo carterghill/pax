@@ -1,5 +1,5 @@
 import { useState, useCallback, useEffect, useMemo, useRef } from "react";
-import { Volume2, Mic, MicOff, PhoneOff, Loader2, Monitor, MonitorUp, Headphones, Settings, Slash } from "lucide-react";
+import { Volume2, Mic, MicOff, PhoneOff, Loader2, Monitor, MonitorUp, Video, VideoOff, Headphones, Settings, Slash } from "lucide-react";
 import { createPortal } from "react-dom";
 import { useTheme } from "../theme/ThemeContext";
 import { Room, VoiceParticipant as MatrixVoiceParticipant } from "../types/matrix";
@@ -15,15 +15,19 @@ import { useUserVolume } from "../hooks/useUserVolume";
 import VolumeContextMenu from "./VolumeContextMenu";
 import VoiceAudioSettingsSection from "./VoiceAudioSettingsSection";
 import ScreenShareGrid from "./ScreenShareGrid";
+import CallVideo from "./CallVideo";
+import { callVideoLayout } from "../utils/callVideoLayout";
 import VoiceLinkStatus from "./VoiceLinkStatus";
 import type { VoiceJoinButton } from "./ActiveCallBar";
 import type { VoiceParticipantState } from "../hooks/useVoiceParticipantStates";
+import type { MatrixCallMedia } from "../hooks/useMatrixVoip";
 import type { DirectCallPeerConnection } from "../hooks/useDirectCall";
 import { useOverlayObstruction } from "../hooks/useOverlayObstruction";
 
 interface VoiceCallPanelProps {
   roomId: string;
   voiceCall: VoiceCall;
+  matrixMedia?: MatrixCallMedia;
   onDisconnect: () => void;
   voiceParticipants?: MatrixVoiceParticipant[];
   participantStates?: Record<string, VoiceParticipantState>;
@@ -84,6 +88,7 @@ export default function VoiceRoomView({
 export function VoiceCallPanel({
   roomId,
   voiceCall: callState,
+  matrixMedia,
   onDisconnect,
   voiceParticipants = EMPTY_VOICE_PARTICIPANTS,
   participantStates = EMPTY_PARTICIPANT_STATES,
@@ -96,7 +101,6 @@ export function VoiceCallPanel({
 }: VoiceCallPanelProps) {
   const {
     connect: onConnect,
-    toggleMic: onToggleMic,
     toggleDeafen: onToggleDeafen,
     toggleNoiseSuppression: onToggleNoiseSuppression,
     startScreenShare: onStartScreenShare,
@@ -111,14 +115,22 @@ export function VoiceCallPanel({
   } = callState;
   const { palette, spacing, typography } = useTheme();
   const { getVolume, setVolume } = useUserVolume();
-  const isConnected = callState.connectedRoomId === roomId && !callState.isConnecting;
+  const media = matrixMedia ?? callState;
+  const isMatrixCall = !!matrixMedia;
+  const cameraUnavailable = matrixMedia?.canUpgradeVideo === false;
+  const cameraLabel = cameraUnavailable ? "This Matrix peer cannot add video to a voice call"
+    : media.cameraPending ? "Cancel camera startup" : media.localCamera ? "Turn camera off" : "Turn camera on";
+  const isConnected = isMatrixCall || (callState.connectedRoomId === roomId && !callState.isConnecting);
   const isConnecting = callState.isConnecting && callState.targetRoomId === roomId;
-  const error = callState.targetRoomId === roomId || callState.endedRoomId === roomId ? callState.error : null;
+  const roomError = callState.targetRoomId === roomId || callState.endedRoomId === roomId ? callState.error : null;
+  const error = isConnected ? media.cameraError ?? roomError : roomError;
   const inChat = !!directCall || groupCall;
   const isDirectCall = directCall != null;
-  const hasScreenShare = isConnected && (callState.screenSharingOwners.length > 0 || callState.isLocalScreenSharing);
-  const participantsBesideShare = hasScreenShare && !directCall;
-  const avatarSize = inChat ? (hasScreenShare ? 40 : 64) : 80;
+  const { tiles, avatarCameras } = callVideoLayout(media.remoteVideo, matrixMedia ? userId : callState.localParticipant?.identity ?? userId,
+    media.localCamera, !matrixMedia && callState.isLocalScreenSharing);
+  const hasVideo = isConnected && tiles.length > 0;
+  const participantsBesideShare = hasVideo && !directCall;
+  const avatarSize = inChat ? (hasVideo ? 40 : 64) : 80;
   const peer = directCall?.peer;
   const [screenShareMenuOpen, setScreenShareMenuOpen] = useState(false);
   const [generalSettingsOpen, setGeneralSettingsOpen] = useState(false);
@@ -145,8 +157,9 @@ export function VoiceCallPanel({
   useOverlayObstruction(generalSettingsPopupRef, showGeneralSettings && menuPosition !== null);
 
   useEffect(() => {
+    if (isMatrixCall) return;
     onGetLowBandwidthMode().then(setLowBandwidthMode).catch(() => {});
-  }, [onGetLowBandwidthMode]);
+  }, [isMatrixCall, onGetLowBandwidthMode]);
 
   const reconnectAfterDeviceChange = useCallback(async () => {
     if (isConnected) {
@@ -216,7 +229,7 @@ export function VoiceCallPanel({
       window.removeEventListener("resize", updateMenuPosition);
       window.removeEventListener("scroll", updateMenuPosition, true);
     };
-  }, [showScreenShareMenu, showGeneralSettings, hasScreenShare, isLinux, spacing.unit]);
+  }, [showScreenShareMenu, showGeneralSettings, hasVideo, isLinux, spacing.unit]);
 
   const startShare = useCallback(
     async (mode: "screen" | "window", windowTitle?: string, windowHandle?: string) => {
@@ -316,7 +329,10 @@ export function VoiceCallPanel({
     const rows = new Map<string, VoiceParticipantState>(Object.entries(participantStates));
     if (peerConnection === "lost" && peer) rows.set(peer.userId, { status: "lost" });
 
-    if (isConnected && isDirectCall) {
+    if (matrixMedia && peer) {
+      rows.set(userId, { status: "connected", isMuted: !matrixMedia.isMicEnabled });
+      rows.set(peer.userId, { status: peerConnection ?? "connected" });
+    } else if (isConnected && isDirectCall) {
       for (const participant of callState.participants) {
         const id = participant.isLocal ? userId : peer?.userId;
         if (!id || (!participant.isLocal && !isVoiceParticipantOnDevice(participant.identity, id, peerDeviceId))) continue;
@@ -336,7 +352,7 @@ export function VoiceCallPanel({
         isLocal: id === userId,
       };
     }).sort((a, b) => compareByDisplayThenKey(a.displayName, a.identity, b.displayName, b.identity));
-  }, [callState.participants, isConnected, isDirectCall, participantStates, peer, peerDeviceId, peerConnection, userId, voiceParticipants]);
+  }, [callState.participants, isConnected, isDirectCall, matrixMedia, participantStates, peer, peerDeviceId, peerConnection, userId, voiceParticipants]);
 
   return (
     <section aria-label={inChat ? "Voice call" : undefined} style={{
@@ -345,7 +361,7 @@ export function VoiceCallPanel({
       flexDirection: "column",
       minWidth: 0,
       minHeight: 0,
-      height: inChat ? (hasScreenShare ? "min(55vh, 460px)" : 180) : undefined,
+      height: inChat ? (hasVideo ? "min(55vh, 460px)" : 180) : undefined,
       maxHeight: inChat ? "55%" : undefined,
     }}>
       {/* Main content: screen share (primary) or participant grid */}
@@ -356,13 +372,12 @@ export function VoiceCallPanel({
         flexDirection: participantsBesideShare ? "row" : "column",
         overflow: "hidden",
       }}>
-        {hasScreenShare && (
+        {hasVideo && (
           <ScreenShareGrid
-            remoteSharers={callState.screenSharingOwners}
-            isLocalScreenSharing={callState.isLocalScreenSharing}
+            streams={tiles}
             getVolume={getStreamVolume}
-            onVolumeChange={handleStreamVolumeChange}
-            onStreamContextMenu={(e, identity, displayName) => {
+            onVolumeChange={matrixMedia ? undefined : handleStreamVolumeChange}
+            onStreamContextMenu={matrixMedia ? undefined : (e, identity, displayName) => {
               e.preventDefault();
               setContextMenu({
                 x: e.clientX,
@@ -374,7 +389,7 @@ export function VoiceCallPanel({
           />
         )}
         <div style={{
-          flex: hasScreenShare ? "0 0 auto" : 1,
+          flex: hasVideo ? "0 0 auto" : 1,
           display: "flex",
           flexWrap: "wrap",
           alignContent: participantsBesideShare ? "flex-start" : "safe center",
@@ -504,7 +519,7 @@ export function VoiceCallPanel({
           <div
             key={p.userId}
             onContextMenu={(e) => {
-              if (p.isLocal || (p.status !== "connected" && p.status !== "interrupted")) return;
+              if (matrixMedia || p.isLocal || (p.status !== "connected" && p.status !== "interrupted")) return;
               e.preventDefault();
               setContextMenu({
                 x: e.clientX,
@@ -519,21 +534,30 @@ export function VoiceCallPanel({
               alignItems: "center",
               gap: spacing.unit * 2,
               width: 120,
-              cursor: p.isLocal ? "default" : "context-menu",
+              cursor: matrixMedia || p.isLocal ? "default" : "context-menu",
             }}
           >
             <div style={{ position: "relative", display: "flex" }}>
-              <UserAvatar
-                userId={p.userId}
-                displayName={p.displayName}
-                avatarUrlHint={p.avatarUrl}
-                size={avatarSize}
-                fontSize={28}
-                style={{
+              {avatarCameras.has(p.identity) ? (
+                <div aria-label={`${p.displayName}'s camera`} style={{
+                  width: avatarSize, height: avatarSize, borderRadius: "50%", overflow: "hidden",
                   boxShadow: p.isSpeaking ? "0 0 0 3px #23a55a" : "none",
-                  transition: "box-shadow 0.15s ease",
-                }}
-              />
+                }}>
+                  <CallVideo stream={avatarCameras.get(p.identity)!} avatar />
+                </div>
+              ) : (
+                <UserAvatar
+                  userId={p.userId}
+                  displayName={p.displayName}
+                  avatarUrlHint={p.avatarUrl}
+                  size={avatarSize}
+                  fontSize={28}
+                  style={{
+                    boxShadow: p.isSpeaking ? "0 0 0 3px #23a55a" : "none",
+                    transition: "box-shadow 0.15s ease",
+                  }}
+                />
+              )}
               {isDirectCall && p.userId === peer?.userId && (p.status === "interrupted" || p.status === "lost") && (
                 <span className="voice-peer-reconnect-ring" aria-hidden="true" style={{
                   position: "absolute",
@@ -560,7 +584,7 @@ export function VoiceCallPanel({
             }}>
               {p.displayName}{p.isLocal ? " (you)" : ""}
               <span style={{ marginLeft: spacing.unit, display: "inline-flex", alignItems: "center", gap: spacing.unit }}>
-                {(p.status === "connected" || p.status === "interrupted") && callState.screenSharingOwners.includes(p.identity) && (
+                {(p.status === "connected" || p.status === "interrupted") && tiles.some((tile) => tile.identity === p.identity && tile.source === "screen") && (
                   <Monitor size={12} color="#23a55a" />
                 )}
                 {p.isMuted && <MicOff size={12} color={palette.textSecondary} />}
@@ -576,7 +600,7 @@ export function VoiceCallPanel({
           </div>
         ))}
 
-        {isConnected && participants.length === 0 && !hasScreenShare && (
+        {isConnected && participants.length === 0 && !hasVideo && (
           <div style={{
             color: palette.textSecondary,
             fontSize: typography.fontSizeBase,
@@ -584,7 +608,7 @@ export function VoiceCallPanel({
             No one else is here yet
           </div>
         )}
-        {isConnected && participants.length === 0 && hasScreenShare && (
+        {isConnected && participants.length === 0 && hasVideo && (
           <div style={{
             color: palette.textSecondary,
             fontSize: typography.fontSizeSmall,
@@ -632,15 +656,15 @@ export function VoiceCallPanel({
           borderTop: `1px solid ${palette.border}`,
           display: "flex",
           flexShrink: 0,
-          flexWrap: inChat ? "wrap" : undefined,
+          flexWrap: "wrap",
           justifyContent: "center",
           gap: spacing.unit * (inChat ? 2 : 3),
         }}>
           {/* Mute/Unmute */}
           <button
             type="button"
-            onClick={onToggleMic}
-            title={callState.isMicEnabled ? "Mute" : "Unmute"}
+            onClick={media.toggleMic}
+            title={media.isMicEnabled ? "Mute" : "Unmute"}
             style={{
               width: 48,
               height: 48,
@@ -650,18 +674,18 @@ export function VoiceCallPanel({
               display: "flex",
               alignItems: "center",
               justifyContent: "center",
-              backgroundColor: callState.isMicEnabled
+              backgroundColor: media.isMicEnabled
                 ? palette.bgActive
                 : palette.textPrimary,
-              color: callState.isMicEnabled ? palette.textPrimary : palette.bgPrimary,
+              color: media.isMicEnabled ? palette.textPrimary : palette.bgPrimary,
               transition: "background-color 0.15s ease",
             }}
           >
-            {callState.isMicEnabled ? <Mic size={20} /> : <MicOff size={20} />}
+            {media.isMicEnabled ? <Mic size={20} /> : <MicOff size={20} />}
           </button>
 
           {/* Deafen/Undeafen (local playback mute) */}
-          <button
+          {!matrixMedia && <button
             type="button"
             onClick={onToggleDeafen}
             title={callState.isDeafened ? "Undeafen" : "Deafen"}
@@ -689,8 +713,30 @@ export function VoiceCallPanel({
             ) : (
               <Headphones size={20} />
             )}
+          </button>}
+
+          <button
+            type="button"
+            onClick={media.toggleCamera}
+            title={cameraLabel}
+            aria-label={cameraLabel}
+            disabled={cameraUnavailable}
+            aria-pressed={!!media.localCamera}
+            aria-busy={media.cameraPending}
+            style={{
+              marginInlineStart: spacing.unit * 2,
+              opacity: cameraUnavailable ? 0.5 : 1,
+              width: 48, height: 48, borderRadius: "50%", border: "none", cursor: cameraUnavailable ? "default" : "pointer",
+              display: "grid", placeItems: "center",
+              backgroundColor: media.localCamera ? palette.textPrimary : palette.bgActive,
+              color: media.localCamera ? palette.bgPrimary : palette.textPrimary,
+            }}
+          >
+            {media.cameraPending ? <Loader2 size={20} style={{ animation: "spin 1s linear infinite" }} />
+              : media.localCamera ? <Video size={20} /> : <VideoOff size={20} />}
           </button>
 
+          {!matrixMedia && <>
           {/* Screen Share */}
           <div ref={screenShareMenuRef} style={{ position: "relative", display: "flex", alignItems: "center", gap: 2 }}>
             <button
@@ -1107,6 +1153,8 @@ export function VoiceCallPanel({
               document.body
             )}
           </div>
+
+          </>}
 
           {/* Disconnect */}
           <button

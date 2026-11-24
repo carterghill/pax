@@ -25,6 +25,10 @@ pub struct RtpReceiver {
 }
 
 impl RtpReceiver {
+    pub fn stream_ids(&self) -> Vec<String> {
+        self.handle.stream_ids()
+    }
+
     pub fn track(&self) -> Option<MediaStreamTrack> {
         self.handle.track()
     }

@@ -17,11 +17,11 @@
 //!     Total per frame: 8 + w*h*1.5 bytes (3.1MB for 1080p)
 
 use std::collections::HashMap;
-use std::sync::atomic::{AtomicBool, Ordering};
+use tokio_util::sync::CancellationToken;
 use std::sync::Arc;
 
 use futures_util::StreamExt;
-use livekit::track::RemoteVideoTrack;
+use libwebrtc::video_track::RtcVideoTrack;
 use livekit::webrtc::prelude::VideoBuffer;
 use livekit::webrtc::video_stream::native::NativeVideoStream;
 use once_cell::sync::Lazy;
@@ -67,8 +67,8 @@ static STREAMS: Lazy<Mutex<HashMap<String, StreamState>>> =
 /// If `None` or if GPU init fails, falls back to the protocol-based path.
 pub fn spawn_video_receiver(
     identity: String,
-    video_track: RemoteVideoTrack,
-    shutdown: Arc<AtomicBool>,
+    video_track: RtcVideoTrack,
+    shutdown: CancellationToken,
     app_handle: Arc<AppHandle>,
     parent_hwnd: Option<isize>,
 ) {
@@ -118,8 +118,7 @@ pub fn spawn_video_receiver(
                     id, use_native
                 );
 
-                let rtc_track = video_track.rtc_track();
-                let mut stream = NativeVideoStream::new(rtc_track);
+                let mut stream = NativeVideoStream::new(video_track);
                 let mut clip_rx = if use_native {
                     let (clip_tx, clip_rx) = tokio::sync::mpsc::unbounded_channel();
                     crate::native_overlay::register_overlay_clip_notifier(&id, clip_tx);
@@ -148,7 +147,7 @@ pub fn spawn_video_receiver(
                 );
 
                 loop {
-                    if shutdown.load(Ordering::Relaxed) {
+                    if shutdown.is_cancelled() {
                         log::debug!("Shutdown for '{}'", id);
                         break;
                     }
@@ -182,7 +181,7 @@ pub fn spawn_video_receiver(
                                         break;
                                     };
 
-                                    if shutdown.load(Ordering::Relaxed) {
+                                    if shutdown.is_cancelled() {
                                         log::debug!("Shutdown for '{}'", id);
                                         break;
                                     }
@@ -253,13 +252,16 @@ pub fn spawn_video_receiver(
                             clip_rx = None;
                         }
                     } else {
-                        let first = stream.next().await;
+                        let first = tokio::select! {
+                            _ = shutdown.cancelled() => break,
+                            frame = stream.next() => frame,
+                        };
                         let Some(mut latest_frame) = first else {
                             log::debug!("Stream ended for '{}'", id);
                             break;
                         };
 
-                        if shutdown.load(Ordering::Relaxed) {
+                        if shutdown.is_cancelled() {
                             log::debug!("Shutdown for '{}'", id);
                             break;
                         }

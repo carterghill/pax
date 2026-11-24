@@ -1,6 +1,8 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { listen, UnlistenFn } from "@tauri-apps/api/event";
+import type { RemoteCallVideo } from "../utils/callVideoLayout";
+import { useCallCamera } from "./useCallCamera";
 import { playSound } from "react-sounds";
 import { getStoredVolume } from "./useUserVolume";
 import {
@@ -35,7 +37,7 @@ interface VoiceStateEvent {
   isMicEnabled: boolean;
   isDeafened: boolean;
   isNoiseSuppressed: boolean;
-  screenSharingOwners: string[];
+  remoteVideo: RemoteCallVideo[];
   isLocalScreenSharing: boolean;
   error: string | null;
   participants: VoiceParticipant[];
@@ -51,7 +53,7 @@ export interface VoiceCallState {
   isDeafened: boolean;
   error: string | null;
   isNoiseSuppressed: boolean;
-  screenSharingOwners: string[];
+  remoteVideo: RemoteCallVideo[];
   isLocalScreenSharing: boolean;
   participants: VoiceParticipant[];
   /** Room we're disconnecting from; our name may still appear in the list until Matrix syncs */
@@ -91,7 +93,8 @@ export interface VoiceCallActions {
 }
 
 /** Full return type of useVoiceCall — state + actions. */
-export type VoiceCall = VoiceCallState & VoiceCallActions & {
+export type VoiceCall = VoiceCallState & VoiceCallActions & ReturnType<typeof useCallCamera> & {
+  screenSharingOwners: string[];
   remoteParticipants: VoiceParticipant[];
   localParticipant: VoiceParticipant | null;
 };
@@ -106,7 +109,7 @@ export function useVoiceCall(isVoiceChannel: (roomId: string) => boolean) {
     isMicEnabled: false,
     isDeafened: false,
     isNoiseSuppressed: true,
-    screenSharingOwners: [],
+    remoteVideo: [],
     isLocalScreenSharing: false,
     error: null,
     participants: [],
@@ -117,6 +120,7 @@ export function useVoiceCall(isVoiceChannel: (roomId: string) => boolean) {
   const connectedRoomIdRef = useRef<string | null>(null);
   const revision = useRef(0);
   const transportAttempt = useRef<string | null>(null);
+  const camera = useCallCamera(state.connectedRoomId ? transportAttempt.current : null);
   const pendingConnect = useRef<Promise<boolean> | null>(null);
   const pendingDisconnect = useRef<Promise<void> | null>(null);
   const activeScreenShare = useRef<{
@@ -149,7 +153,7 @@ export function useVoiceCall(isVoiceChannel: (roomId: string) => boolean) {
       isReconnecting: false,
       isMicEnabled: false,
       isDeafened: false,
-      screenSharingOwners: [],
+      remoteVideo: [],
       isLocalScreenSharing: false,
       error: null,
       participants: [],
@@ -189,7 +193,7 @@ export function useVoiceCall(isVoiceChannel: (roomId: string) => boolean) {
         connectedRoomIdRef.current = null;
         setState((prev) => ({
           ...prev, connectedRoomId: null, participants: [], isMicEnabled: false,
-          isDeafened: false, isLocalScreenSharing: false, screenSharingOwners: [],
+          isDeafened: false, isLocalScreenSharing: false, remoteVideo: [],
           error: String(error),
         }));
       }
@@ -212,7 +216,7 @@ export function useVoiceCall(isVoiceChannel: (roomId: string) => boolean) {
     setState((prev) => ({
       ...prev, targetRoomId: roomId, connectedRoomId: null, isConnecting: true,
       isReconnecting: options?.replaceOtherSessions !== "required" && (wasInRoom || !!options?.forceReconnect), endedRoomId: null,
-      error: null, participants: [], screenSharingOwners: [], isLocalScreenSharing: false,
+      error: null, participants: [], remoteVideo: [], isLocalScreenSharing: false,
       disconnectingFromRoomId: null,
     }));
     const joining = connectAttempt(roomId, attempt, options?.replaceOtherSessions ?? !wasInRoom, options?.onJoined)
@@ -245,7 +249,7 @@ export function useVoiceCall(isVoiceChannel: (roomId: string) => boolean) {
           isMicEnabled: connected && event.isMicEnabled,
           isDeafened: connected && (event.isDeafened ?? false),
           isNoiseSuppressed: event.isNoiseSuppressed,
-          screenSharingOwners: connected ? event.screenSharingOwners : [],
+          remoteVideo: connected ? event.remoteVideo : [],
           isLocalScreenSharing: connected && event.isLocalScreenSharing,
           error: event.error,
           participants: connected ? event.participants : [],
@@ -276,7 +280,7 @@ export function useVoiceCall(isVoiceChannel: (roomId: string) => boolean) {
         activeScreenShare.current = null;
         setState((prev) => ({
           ...prev, connectedRoomId: null, isConnecting: true, isReconnecting: true,
-          participants: [], screenSharingOwners: [], isLocalScreenSharing: false,
+          participants: [], remoteVideo: [], isLocalScreenSharing: false,
         }));
 
         for (const delay of [2000, 4000, 8000, 16000, 30000]) {
@@ -482,6 +486,8 @@ export function useVoiceCall(isVoiceChannel: (roomId: string) => boolean) {
 
   return {
     ...state,
+    ...camera,
+    screenSharingOwners: state.remoteVideo.filter((v) => v.source === "screen").map((v) => v.identity),
     // Provide remoteParticipants and localParticipant for compatibility
     // with VoiceRoomView and RoomSidebar
     remoteParticipants: state.participants.filter((p) => !p.isLocal),

@@ -26,7 +26,11 @@ use crate::{
         DirectCallEndReason, DirectCallNotice, DirectCallNoticeDetails, DirectCallSignalKind,
         MessageInfo, JS_MAX_SAFE_INTEGER,
     },
-    voice::peer::{Candidate, Description, PeerMedia},
+    voice::{
+        camera::CameraCapture,
+        peer::{Candidate, Description, PeerMedia},
+        CallVideo,
+    },
     voice_presence::now_ms,
     AppState,
 };
@@ -530,7 +534,8 @@ pub(super) async fn receive_signals(
             if handled_here
                 || (signal.from_peer
                     && signal.kind != "m.call.candidates"
-                    && signal.kind != "m.call.negotiate")
+                    && signal.kind != "m.call.negotiate"
+                    && signal.kind != "m.call.sdp_stream_metadata_changed")
             {
                 state
                     .unread_projection
@@ -723,6 +728,7 @@ pub(crate) async fn send_matrix_voip_signal(
         data.insert(LIVEKIT_SUPPORT.into(), json!(true));
     }
     if version > 0
+        && !data.contains_key("sdp_stream_metadata")
         && matches!(
             kind.as_str(),
             "m.call.invite" | "m.call.answer" | "m.call.negotiate"
@@ -819,6 +825,7 @@ pub(crate) async fn update_matrix_voip_media(
     candidates: Option<Vec<Candidate>>,
     start_audio: Option<bool>,
     renegotiate: Option<bool>,
+    polite: Option<bool>,
     input_device_id: Option<String>,
     output_device_id: Option<String>,
 ) -> Result<Option<Description>, String> {
@@ -830,7 +837,9 @@ pub(crate) async fn update_matrix_voip_media(
     let mut answer = None;
     if let Some(description) = description {
         if renegotiate.unwrap_or(false) {
-            answer = media.renegotiate(&description).await?;
+            answer = media
+                .renegotiate(&description, polite.unwrap_or(false))
+                .await?;
         } else {
             media.remote_description(&description).await?;
         }
@@ -842,6 +851,77 @@ pub(crate) async fn update_matrix_voip_media(
         media.start_audio(input_device_id.as_deref(), output_device_id.as_deref())?;
     }
     Ok(answer)
+}
+
+#[tauri::command]
+pub(crate) async fn start_matrix_voip_camera(
+    state: State<'_, Arc<AppState>>,
+    call_id: String,
+    camera_id: String,
+    width: u32,
+    height: u32,
+    jpeg: String,
+) -> Result<Option<Description>, String> {
+    let mut slot = state.matrix_voip.media.lock().await;
+    let media = slot
+        .as_mut()
+        .filter(|m| m.id == call_id)
+        .ok_or("The call ended")?;
+    media
+        .start_camera(CameraCapture::open(camera_id, width, height, &jpeg)?)
+        .await
+}
+
+#[tauri::command]
+pub(crate) async fn matrix_voip_camera_frame(
+    state: State<'_, Arc<AppState>>,
+    call_id: String,
+    camera_id: String,
+    jpeg: String,
+) -> Result<(), String> {
+    let slot = state.matrix_voip.media.lock().await;
+    slot.as_ref()
+        .filter(|m| m.id == call_id)
+        .ok_or("The call ended")?
+        .camera_frame(&camera_id, &jpeg)
+}
+
+#[tauri::command]
+pub(crate) async fn stop_matrix_voip_camera(
+    state: State<'_, Arc<AppState>>,
+    call_id: String,
+    camera_id: String,
+) -> Result<(), String> {
+    let mut slot = state.matrix_voip.media.lock().await;
+    if let Some(media) = slot.as_mut().filter(|m| m.id == call_id) {
+        media.stop_camera(&camera_id).await?;
+    }
+    Ok(())
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct PeerVideoState {
+    remote_video: Vec<CallVideo>,
+    camera_negotiated: bool,
+}
+
+#[tauri::command]
+pub(crate) async fn sync_matrix_voip_video(
+    state: State<'_, Arc<AppState>>,
+    app: AppHandle,
+    call_id: String,
+    metadata: Value,
+) -> Result<PeerVideoState, String> {
+    let mut slot = state.matrix_voip.media.lock().await;
+    let media = slot
+        .as_mut()
+        .filter(|m| m.id == call_id)
+        .ok_or("The call ended")?;
+    Ok(PeerVideoState {
+        remote_video: media.sync_video(&app, &metadata),
+        camera_negotiated: media.camera_negotiated(),
+    })
 }
 
 #[tauri::command]

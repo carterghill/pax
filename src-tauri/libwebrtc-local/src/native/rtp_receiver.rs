@@ -27,6 +27,10 @@ pub struct RtpReceiver {
 }
 
 impl RtpReceiver {
+    pub fn stream_ids(&self) -> Vec<String> {
+        self.sys_handle.stream_ids()
+    }
+
     pub fn track(&self) -> Option<MediaStreamTrack> {
         let track_handle = self.sys_handle.track();
         if track_handle.is_null() {

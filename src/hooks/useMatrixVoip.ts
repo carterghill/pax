@@ -1,8 +1,10 @@
-import { useCallback, useEffect, useRef, useState, type RefObject } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState, type RefObject } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 import type { DirectCall, DirectCallPeerConnection } from "./useDirectCall";
 import { getStoredAudioDevicePreferences, requestMicrophonePermission } from "./useVoiceAudioDevices";
+import { useCallCamera, type CameraTransport } from "./useCallCamera";
+import type { RemoteCallVideo } from "../utils/callVideoLayout";
 import { getCallDuration } from "../features/chat/messages/callHistory";
 
 const INVITE_LIFETIME = 90_000;
@@ -22,7 +24,9 @@ interface Candidate {
 
 type SignalKind =
   | "m.call.invite" | "m.call.answer" | "m.call.candidates" | "m.call.select_answer"
-  | "m.call.reject" | "m.call.hangup" | "m.call.negotiate";
+  | "m.call.reject" | "m.call.hangup" | "m.call.negotiate" | "m.call.sdp_stream_metadata_changed";
+
+type StreamMetadata = Record<string, { purpose?: string; video_muted?: boolean }>;
 
 interface WireSignal {
   silent: boolean;
@@ -43,6 +47,7 @@ interface WireSignal {
     description?: Description;
     candidates?: Candidate[];
     selected_party_id?: string;
+    sdp_stream_metadata?: StreamMetadata;
   };
 }
 
@@ -54,6 +59,10 @@ interface Session {
   offer?: Description;
   remoteParty?: string;
   remoteReady: boolean;
+  metadata: StreamMetadata;
+  cameraId?: string;
+  cameraAnswer?: (accepted: boolean) => void;
+  negotiation: Promise<void>;
   remoteCandidates: Map<string, Candidate[]>;
   localCandidates: Candidate[];
   published: boolean;
@@ -68,6 +77,17 @@ function signal(session: Session, kind: SignalKind, content: object = {}) {
     roomId: session.call.roomId, callId: session.wireId, version: session.version,
     kind, content, peerUserId: session.call.peerUserId,
   });
+}
+
+// Keep applying SDP and sending the corresponding signal in the same order.
+function withNegotiation<T>(session: Session, action: () => Promise<T>) {
+  const result = session.negotiation.then(action);
+  session.negotiation = result.then(() => {}, () => {});
+  return result;
+}
+
+function localMetadata(session: Session) {
+  return { sdp_stream_metadata: { "pax-audio": { purpose: "m.usermedia", video_muted: !session.cameraId } } };
 }
 
 function openMedia(session: Session) {
@@ -96,7 +116,7 @@ function candidatesFrom(value: Candidate[] | undefined): Candidate[] {
 function newSession(call: DirectCall, wireId: string, version: 0 | 1, offer?: Description, remoteParty?: string): Session {
   return {
     call, wireId, version, fromInvite: !!offer, offer, remoteParty, remoteReady: false,
-    remoteCandidates: new Map(), localCandidates: [], published: false,
+    remoteCandidates: new Map(), localCandidates: [], published: false, metadata: {}, negotiation: Promise.resolve(),
   };
 }
 
@@ -114,6 +134,65 @@ export function useMatrixVoip(
   const [micEnabled, setMicEnabled] = useState(true);
   const [connection, setConnection] = useState<DirectCallPeerConnection>("connecting");
 
+  const [remoteVideo, setRemoteVideo] = useState<RemoteCallVideo[]>([]);
+  const syncVideo = useCallback(async (session: Session) => {
+    const state = await invoke<{ remoteVideo: RemoteCallVideo[]; cameraNegotiated: boolean }>("sync_matrix_voip_video", {
+      callId: session.call.callId, metadata: session.metadata,
+    });
+    if (active.current === session) setRemoteVideo(state.remoteVideo);
+    return state.cameraNegotiated;
+  }, []);
+
+  const cameraTransport = useMemo<CameraTransport>(() => ({
+    async start(callId, cameraId, width, height, jpeg, abort) {
+      const session = active.current;
+      if (!session || session.call.callId !== callId) throw new Error("The call ended.");
+      if (!session.version) throw new Error("This peer uses an older Matrix call protocol that cannot upgrade a voice call to video.");
+      let settle!: (accepted: boolean) => void;
+      const answer = new Promise<boolean>((resolve) => { settle = resolve; });
+      const cancel = () => settle(false);
+      const timeout = setTimeout(cancel, CONNECTION_TIMEOUT);
+      abort.addEventListener("abort", cancel, { once: true });
+      try {
+        const needsAnswer = await withNegotiation(session, async () => {
+          if (active.current !== session || abort.aborted) return false;
+          session.cameraId = cameraId;
+          const offer = await invoke<Description | null>("start_matrix_voip_camera", { callId, cameraId, width, height, jpeg });
+          if (active.current !== session || abort.aborted) return false;
+          if (!offer) {
+            await signal(session, "m.call.sdp_stream_metadata_changed", localMetadata(session));
+            return false;
+          }
+          session.cameraAnswer = settle;
+          await signal(session, "m.call.negotiate", { description: offer, lifetime: CONNECTION_TIMEOUT, ...localMetadata(session) });
+          return true;
+        });
+        if (needsAnswer && !await answer) throw new Error("The other device could not accept camera video.");
+      } finally {
+        clearTimeout(timeout);
+        abort.removeEventListener("abort", cancel);
+        session.cameraAnswer = undefined;
+      }
+    },
+    frame: (callId, cameraId, jpeg) => invoke("matrix_voip_camera_frame", { callId, cameraId, jpeg }),
+    async stop(callId, cameraId) {
+      const session = active.current;
+      const stopCamera = () => invoke<void>("stop_matrix_voip_camera", { callId, cameraId });
+      if (session?.call.callId !== callId) {
+        await stopCamera();
+        return;
+      }
+      await withNegotiation(session, async () => {
+        await stopCamera();
+        if (active.current !== session || session.cameraId !== cameraId) return;
+        session.cameraId = undefined;
+        await signal(session, "m.call.sdp_stream_metadata_changed", localMetadata(session));
+      });
+    },
+  }), []);
+  const camera = useCallCamera(current.current?.transport === "matrix" && current.current.phase === "active"
+    ? current.current.callId : null, cameraTransport);
+
   const setPhase = useCallback((session: Session, phase: DirectCall["phase"], expiresAt = session.call.expiresAt) => {
     session.call = {
       ...session.call, phase, expiresAt, established: session.call.established || phase === "active",
@@ -126,6 +205,8 @@ export function useMatrixVoip(
     const session = active.current;
     if (!session) return stopping.current ?? Promise.resolve();
     active.current = null;
+    session.cameraAnswer?.(false);
+    setRemoteVideo([]);
     clearTimeout(session.deadline);
     clearTimeout(session.iceTimer);
     update(null);
@@ -210,12 +291,14 @@ export function useMatrixVoip(
       if (active.current !== session) { await closeMedia(session); return; }
       await enableMedia(session);
       if (active.current !== session) return;
-      session.publication = signal(session, "m.call.answer", { answer });
+      await syncVideo(session);
+      if (active.current !== session) return;
+      session.publication = signal(session, "m.call.answer", { answer, ...localMetadata(session) });
       await session.publication;
       session.published = true;
       flushIce(session);
     })().catch((error) => fail(session, error));
-  }, [connectionDeadline, enableMedia, fail, flushIce, setPhase, voiceBusy]);
+  }, [connectionDeadline, enableMedia, fail, flushIce, setPhase, syncVideo, voiceBusy]);
 
   const start = useCallback((call: DirectCall) => {
     const session = newSession(call, call.callId, 1);
@@ -230,7 +313,7 @@ export function useMatrixVoip(
       if (active.current !== session) return;
       const offer = await openMedia(session);
       if (active.current !== session) { await closeMedia(session); return; }
-      session.publication = signal(session, "m.call.invite", { offer, lifetime: INVITE_LIFETIME });
+      session.publication = signal(session, "m.call.invite", { offer, lifetime: INVITE_LIFETIME, ...localMetadata(session) });
       await session.publication;
       if (active.current !== session) return;
       session.published = true;
@@ -272,6 +355,7 @@ export function useMatrixVoip(
         phase: "incoming", silent: event.silent, expiresAt,
       };
       session = newSession(call, content.call_id, version, content.offer, party);
+      session.metadata = content.sdp_stream_metadata ?? {};
       active.current = session;
       setMicEnabled(true);
       setConnection("connecting");
@@ -308,9 +392,12 @@ export function useMatrixVoip(
         if (session.fromInvite || session.call.phase !== "dialing" || !validDescription(content.answer)
             || content.answer.type !== "answer") break;
         session.remoteParty = party;
+        session.version = version;
+        session.metadata = content.sdp_stream_metadata ?? {};
         setPhase(session, "connecting", Date.now() + CONNECTION_TIMEOUT);
         connectionDeadline(session);
         await enableMedia(session, content.answer);
+        await syncVideo(session);
         if (active.current !== session) return;
         if (version === 1) {
           void signal(session, "m.call.select_answer", { selected_party_id: party }).catch((error) => fail(session, error));
@@ -333,18 +420,37 @@ export function useMatrixVoip(
         void finish(false);
         if (session.call.phase === "dialing") setError("Call ended before it was answered.");
         break;
+      case "m.call.sdp_stream_metadata_changed": {
+        if (!session.remoteReady || !content.sdp_stream_metadata) break;
+        const previous = session.metadata;
+        const updates = Object.entries(content.sdp_stream_metadata).map(([id, change]) => [id, { ...previous[id], ...change }]);
+        session.metadata = { ...previous, ...Object.fromEntries(updates) };
+        await syncVideo(session);
+        break;
+      }
       case "m.call.negotiate": {
-        if (!session.remoteReady || !validDescription(content.description)) break;
-        const reply = await invoke<Description | null>("update_matrix_voip_media", {
-          callId: session.call.callId, description: content.description, renegotiate: true,
+        if (!session.remoteReady || !session.version || !validDescription(content.description)) break;
+        const description = content.description;
+        const peerSession = session;
+        await withNegotiation(peerSession, async () => {
+          if (active.current !== peerSession) return;
+          const reply = await invoke<Description | null>("update_matrix_voip_media", {
+            callId: peerSession.call.callId, description, renegotiate: true, polite: peerSession.fromInvite,
+          });
+          // The impolite caller ignores a colliding offer and waits for its own answer.
+          if (description.type === "offer" && !reply) return;
+          if (active.current !== peerSession) return;
+          if (content.sdp_stream_metadata) peerSession.metadata = content.sdp_stream_metadata;
+          if (reply) {
+            await signal(peerSession, "m.call.negotiate", { description: reply, lifetime: INVITE_LIFETIME, ...localMetadata(peerSession) });
+          }
+          const accepted = await syncVideo(peerSession);
+          peerSession.cameraAnswer?.(accepted);
         });
-        if (reply && active.current === session) {
-          await signal(session, "m.call.negotiate", { description: reply, lifetime: INVITE_LIFETIME });
-        }
         break;
       }
     }
-  }, [answer, connectionDeadline, current, dismissQuiet, enableMedia, finish, setError, setPhase, update, voiceBusy]);
+  }, [answer, connectionDeadline, current, dismissQuiet, enableMedia, finish, setError, setPhase, syncVideo, update, voiceBusy]);
 
   useEffect(() => {
     if (!ready) return;
@@ -369,7 +475,12 @@ export function useMatrixVoip(
               await receive(event);
             } catch (error) {
               const session = active.current;
-              if (session?.call.roomId === event.roomId && session.wireId === event.content.call_id) fail(session, error);
+              if (session?.call.roomId === event.roomId && session.wireId === event.content.call_id) {
+                if (event.kind === "m.call.negotiate" || event.kind === "m.call.sdp_stream_metadata_changed") {
+                  session.cameraAnswer?.(false);
+                  setError(String(error));
+                } else fail(session, error);
+              }
             }
           }
         }
@@ -435,5 +546,8 @@ export function useMatrixVoip(
     update(session.call);
   }, [update]);
 
-  return { start, answer, finish, toggleMic, micEnabled, connection, silence };
+  const media = { ...camera, remoteVideo, toggleMic, isMicEnabled: micEnabled, canUpgradeVideo: active.current?.version === 1 };
+  return { start, answer, finish, toggleMic, micEnabled, connection, silence, media };
 }
+
+export type MatrixCallMedia = ReturnType<typeof useMatrixVoip>["media"];

@@ -98,7 +98,7 @@ export function useDirectCall(
   const dismissQuiet = useRef<() => void>(() => {});
   const {
     finish: finishMatrix, silence: silenceMatrix, start: startMatrix, answer: answerMatrix,
-    connection: matrixConnection, micEnabled: matrixMicEnabled, toggleMic: toggleMatrixMic,
+    media: matrixMedia, connection: matrixConnection, micEnabled: matrixMicEnabled, toggleMic: toggleMatrixMic,
   } = useMatrixVoip(current, voiceBusy, update, setError, recoveryReady, dismissQuiet);
 
   const { start: startGroup, answer: answerGroup, finish: finishGroup, silence: silenceGroup } =
@@ -504,7 +504,7 @@ export function useDirectCall(
     ? peer.connectionInterrupted && call?.established ? "interrupted" : "connected"
     : inCall && call.established ? "lost" : "connecting";
   return {
-    call, error, peerConnection, reconnect, start, startGroup, answer, end, decline, endFromNotification, clearError,
+    call, error, peerConnection, matrixMedia, reconnect, start, startGroup, answer, end, decline, endFromNotification, clearError,
     isMicEnabled: call?.transport === "matrix" ? matrixMicEnabled : voice.isMicEnabled,
     toggleMic: call?.transport === "matrix" ? toggleMatrixMic : voice.toggleMic,
   };
