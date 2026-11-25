@@ -20,7 +20,6 @@ class MainActivity : TauriActivity() {
   /** Cold start: intent arrives before the WebView exists — flush after first page load. */
   private var pendingNotificationOpen: Pair<String, String?>? = null
   private val notificationPermission = registerForActivityResult(ActivityResultContracts.RequestPermission()) { granted ->
-    if (granted) PaxNotificationBadge.refresh(this)
     if (granted && PaxCallNotifications.canPost(this)) {
       webViewRef?.evaluateJavascript("window.dispatchEvent(new Event('pax-notification-permission-granted'))", null)
     }
@@ -37,7 +36,7 @@ class MainActivity : TauriActivity() {
     enableEdgeToEdge()
     super.onCreate(savedInstanceState)
     PaxCallNotifications.createChannel(this)
-    PaxNotificationBadge.createChannels(this)
+    PaxMessageNotifications.createChannel(this)
     PaxCallNotifications.activity = WeakReference(this)
     handleNotificationIntent(intent)
   }
@@ -151,11 +150,8 @@ class MainActivity : TauriActivity() {
     }
 
     @JavascriptInterface
-    fun setBadgeCount(count: Int) = PaxNotificationBadge.sync(this@MainActivity, count)
-
-    @JavascriptInterface
     fun setBadgeSessionActive(active: Boolean) {
-      PaxNotificationBadge.setSessionActive(this@MainActivity, active)
+      PaxMessageNotifications.setSessionActive(this@MainActivity, active)
       if (active) {
         PaxPushJob.schedule(this@MainActivity, replacePending = true)
       } else {

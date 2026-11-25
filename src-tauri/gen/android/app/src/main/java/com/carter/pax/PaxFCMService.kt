@@ -25,7 +25,7 @@ class PaxFCMService : FirebaseMessagingService() {
 
     override fun onCreate() {
         super.onCreate()
-        PaxNotificationBadge.createChannels(this)
+        PaxMessageNotifications.createChannel(this)
     }
 
     override fun onNewToken(token: String) {
@@ -49,7 +49,7 @@ class PaxFCMService : FirebaseMessagingService() {
     override fun onMessageReceived(message: RemoteMessage) {
         super.onMessageReceived(message)
         val data = message.data
-        if (data.isEmpty() || !PaxNotificationBadge.sessionActive(this)) return
+        if (data.isEmpty() || !PaxMessageNotifications.sessionActive(this)) return
 
         var roomName = data["room_name"]?.trim()?.takeIf { it.isNotEmpty() }
         val roomAlias = data["room_alias"]?.trim()?.takeIf { it.isNotEmpty() }
@@ -59,10 +59,7 @@ class PaxFCMService : FirebaseMessagingService() {
         val roomId = data["room_id"] ?: ""
         val eventId = data["event_id"]?.trim()?.takeIf { it.isNotEmpty() } ?: ""
         val type = data["type"]
-        val unreadCount = data["unread"]?.toLongOrNull()?.takeIf { it >= 0 }
-            ?.coerceAtMost(Int.MAX_VALUE.toLong())?.toInt()
         if (eventId.isEmpty() && type.isNullOrBlank() && ("unread" in data || "missed_calls" in data)) {
-            unreadCount?.let { PaxNotificationBadge.sync(this, it) }
             return
         }
 
@@ -70,52 +67,50 @@ class PaxFCMService : FirebaseMessagingService() {
             type in setOf("org.matrix.msc4075.rtc.notification", "m.rtc.notification", "org.matrix.msc4310.rtc.decline", "m.rtc.decline", "com.carter.pax.rtc.answer")
         val payloadPreview = PaxMessagePreview.payloadBody(data)
         var resolvedPreview: String? = null
-        // An unresolved encrypted event could be a call the recipient silenced.
-        var silent = type == "m.room.encrypted" || type == null
-        val inspectEvent = directCallEvent || silent || (type == "m.room.message" && payloadPreview == null)
-        if (roomId.isNotEmpty() && (inspectEvent || type == "m.room.message")) {
-            val resolved = runCatching {
+        val inspectEvent = directCallEvent || type == "m.room.encrypted" || type == null ||
+            (type == "m.room.message" && payloadPreview == null)
+        val resolved = if (roomId.isNotEmpty() && (inspectEvent || type == "m.room.message")) {
+            runCatching {
                 val targetEvent = eventId.takeIf { inspectEvent && it.isNotEmpty() }
                 PaxCallPush.resolve(applicationInfo.dataDir, roomId, targetEvent)?.let { JSONObject(it) }
             }.getOrNull()
-            if (resolved != null) {
-                when (resolved.optString("kind")) {
-                    "ring" -> {
-                        PaxCallNotifications.parse(resolved)?.let { PaxCallNotifications.show(this, it, eventId) }
-                        return
-                    }
-                    "ended" -> {
-                        PaxCallNotifications.parse(resolved)?.let { PaxCallNotifications.close(this, it.id, true) }
-                        return
-                    }
-                    "missed" -> {
-                        val call = PaxCallNotifications.parse(resolved) ?: return
-                        val ringEventId = resolved.optString("ringEventId").ifBlank { eventId }
-                        PaxCallNotifications.close(this, call.id, true)
-                        val manager = getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager
-                        manager.cancel(eventId, 0)
-                        manager.cancel(ringEventId, 0)
-                        val tag = "missed:${call.id}"
-                        PaxNotificationBadge.onMessage(this, unreadCount, tag)
-                        PaxMessageNotifications.post(
-                            this,
-                            call.roomId,
-                            ringEventId,
-                            getString(R.string.pax_missed_call),
-                            call.caller,
-                            tag = tag,
-                            missedCall = true,
-                        )
-                        return
-                    }
-                    "ignore" -> return
-                    "message", "room" -> {
-                        isDirect = resolved.opt("isDirect") as? Boolean ?: isDirect
-                        roomName = resolved.optString("roomName", "").trim().takeIf { it.isNotEmpty() } ?: roomName
-                        senderName = resolved.optString("sender", "").trim().takeIf { it.isNotEmpty() } ?: senderName
-                        resolvedPreview = resolved.opt("preview") as? String
-                        silent = resolved.optBoolean("silent", silent)
-                    }
+        } else null
+        val kind = resolved?.optString("kind")
+        if (resolved != null) {
+            when (kind) {
+                "ring" -> {
+                    PaxCallNotifications.parse(resolved)?.let { PaxCallNotifications.show(this, it, eventId) }
+                    return
+                }
+                "ended" -> {
+                    PaxCallNotifications.parse(resolved)?.let { PaxCallNotifications.close(this, it.id, true) }
+                    return
+                }
+                "missed" -> {
+                    val call = PaxCallNotifications.parse(resolved) ?: return
+                    val ringEventId = resolved.optString("ringEventId").ifBlank { eventId }
+                    PaxCallNotifications.close(this, call.id, true)
+                    val manager = getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager
+                    manager.cancel(eventId, 0)
+                    manager.cancel(ringEventId, 0)
+                    val tag = "missed:${call.id}"
+                    PaxMessageNotifications.post(
+                        this,
+                        call.roomId,
+                        ringEventId,
+                        getString(R.string.pax_missed_call),
+                        call.caller,
+                        tag = tag,
+                        missedCall = true,
+                    )
+                    return
+                }
+                "ignore" -> return
+                "message", "event", "room" -> {
+                    isDirect = resolved.opt("isDirect") as? Boolean ?: isDirect
+                    roomName = resolved.optString("roomName", "").trim().takeIf { it.isNotEmpty() } ?: roomName
+                    senderName = resolved.optString("sender", "").trim().takeIf { it.isNotEmpty() } ?: senderName
+                    resolvedPreview = resolved.opt("preview") as? String
                 }
             }
         }
@@ -126,7 +121,17 @@ class PaxFCMService : FirebaseMessagingService() {
             PaxMessagePreview.enabled(this), resolvedPreview, payloadPreview,
         )
 
-        PaxNotificationBadge.onMessage(this, unreadCount, eventId.takeIf { it.isNotEmpty() })
+        val silent = shouldPostSilently(type, kind, resolved?.optBoolean("sound") == true)
         PaxMessageNotifications.post(this, roomId, eventId, header.title, body, subText = header.subText, silent = silent)
     }
 }
+
+// setSilent(true) also suppresses Android's heads-up banner. Once the resolver
+// confirms a notifiable chat message, its preview and Matrix sound tweak are irrelevant.
+internal fun shouldPostSilently(pushType: String?, resolvedKind: String?, soundRequested: Boolean): Boolean =
+    when (resolvedKind) {
+        "message" -> false
+        "event" -> !soundRequested
+        // An unresolved encrypted event could still be a call the recipient silenced.
+        else -> pushType == null || pushType == "m.room.encrypted"
+    }

@@ -295,6 +295,8 @@ export function useDesktopNotifications({
             : truncate(message.body ?? "", 200);
           await invoke("notify_send", { title: truncate(title, 80), body, iconPath: null });
         }
+        // Android's notification channel handles sound and vibration in the current ringer mode.
+        if (previews) return;
         void playNotificationRef.current()
           .catch((err) =>
             console.warn(

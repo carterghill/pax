@@ -1,7 +1,0 @@
-<?xml version="1.0" encoding="utf-8"?>
-<resources>
-    <plurals name="pax_unread_notifications">
-        <item quantity="one">%d unread notification</item>
-        <item quantity="other">%d unread notifications</item>
-    </plurals>
-</resources>

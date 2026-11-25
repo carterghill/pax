@@ -129,7 +129,7 @@ async fn resolve_push(base: PathBuf, room_id: String, event_id: Option<String>) 
         None => None,
     };
     let mut outcome = outcome.unwrap_or_else(|| json!({ "kind": "room" }));
-    if matches!(outcome["kind"].as_str(), Some("message" | "room")) {
+    if matches!(outcome["kind"].as_str(), Some("message" | "event" | "room")) {
         outcome["isDirect"] = json!(is_direct);
         let label = room.name()
             .or_else(|| room.cached_display_name().map(|name| name.to_string()))
@@ -214,7 +214,8 @@ async fn message_push_event(room: &Room, event: &TimelineEvent) -> Option<Value>
     if !actions.iter().any(|action| action.should_notify()) {
         return Some(json!({ "kind": "ignore" }));
     }
-    if raw.get_field::<&str>("type").ok()?? == "m.room.encrypted" {
+    let event_type = raw.get_field::<&str>("type").ok()??;
+    if event_type == "m.room.encrypted" {
         return None;
     }
 
@@ -229,10 +230,10 @@ async fn message_push_event(room: &Room, event: &TimelineEvent) -> Option<Value>
         .flatten()
         .and_then(|member| member.display_name().map(str::to_owned));
     Some(json!({
-        "kind": "message",
+        "kind": if matches!(event_type, "m.room.message" | "m.sticker") { "message" } else { "event" },
         "sender": sender_name.as_deref().unwrap_or(sender.as_str()),
         "preview": preview.unwrap_or_default(),
-        "silent": !actions.iter().any(|action| action.sound().is_some()),
+        "sound": actions.iter().any(|action| action.sound().is_some()),
     }))
 }
 

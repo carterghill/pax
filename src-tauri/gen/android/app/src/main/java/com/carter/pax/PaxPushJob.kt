@@ -21,7 +21,7 @@ class PaxPushJob : JobService() {
         private val executor = Executors.newSingleThreadExecutor()
 
         fun schedule(context: Context, replacePending: Boolean = false) {
-            if (!PaxNotificationBadge.pushRegistrationActive(context)) return
+            if (!PaxMessageNotifications.pushRegistrationActive(context)) return
             val scheduler = context.getSystemService(JobScheduler::class.java)
             if (!replacePending && scheduler.getPendingJob(JOB_ID) != null) return
             val job = JobInfo.Builder(JOB_ID, ComponentName(context, PaxPushJob::class.java))
@@ -44,10 +44,10 @@ class PaxPushJob : JobService() {
     override fun onStartJob(params: JobParameters): Boolean {
         running = params
         executor.execute {
-            val retry = if (running === params && PaxNotificationBadge.pushRegistrationActive(this)) {
+            val retry = if (running === params && PaxMessageNotifications.pushRegistrationActive(this)) {
                 runCatching {
                     val token = currentToken()
-                    if (running !== params || !PaxNotificationBadge.pushRegistrationActive(this)) false
+                    if (running !== params || !PaxMessageNotifications.pushRegistrationActive(this)) false
                     else {
                         System.loadLibrary("pax_lib")
                         reconcile(applicationInfo.dataDir, token)
@@ -69,7 +69,7 @@ class PaxPushJob : JobService() {
 
     override fun onStopJob(params: JobParameters): Boolean {
         if (running === params) running = null
-        return PaxNotificationBadge.pushRegistrationActive(this)
+        return PaxMessageNotifications.pushRegistrationActive(this)
     }
 
     private fun currentToken(): String {

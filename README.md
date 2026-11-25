@@ -102,6 +102,6 @@ For a standard `m.call.invite`, derive the CallKit `callId` with UUIDv5 in the O
 
 ### App icon badges
 
-While Pax is running, the icon badge follows the unread notification count from Matrix sync. Linux needs a dock that supports Unity LauncherEntry updates and associates Pax with `pax.desktop`. Android’s launcher chooses whether to render a number or a dot, and its notification permission and badge settings apply.
+While Pax is running on desktop or iOS, the icon badge follows the unread notification count from Matrix sync. Linux needs a dock that supports Unity LauncherEntry updates and associates Pax with `pax.desktop`. On Android, launcher badges follow active notifications and the device’s badge settings.
 
 To update the iOS badge while Pax is suspended, set `PAX_IOS_BADGE_PUSH_GATEWAY_URL` for a gateway that accepts the `com.carter.pax.badge` Matrix pusher. Pax registers a regular APNs token for this pusher with `event_id_only` format. For both event pushes and count-only updates, send `{"aps":{"badge":<notification.counts.unread>}}` to that token using APNs push type `alert` and topic `com.carter.pax`. Forward zero to clear the badge and skip payloads that omit the count. This badge route uses the standard APNs token and runs alongside the VoIP gateway.
