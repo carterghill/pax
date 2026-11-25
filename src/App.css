@@ -55,6 +55,8 @@ html, body {
   gap: 8px;
   width: 100%;
   min-height: 0;
+  /* Keep the badge above the first icon inside the scrollable area. */
+  padding-top: 12px;
   overflow-y: auto;
 }
 

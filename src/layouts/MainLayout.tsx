@@ -124,7 +124,7 @@ interface MainLayoutProps {
 export default function MainLayout({
   userId,
   onSignOut,
-  rooms: { rooms, spaces, roomsBySpace, getRoom, fetchRooms, upsertOptimisticRoom },
+  rooms: { rooms, spaces, roomsBySpace, getRoom, fetchRooms, markInviteSeen, upsertOptimisticRoom },
   joinedInviteRoomId,
   onInviteRoomOpened,
 }: MainLayoutProps) {
@@ -190,7 +190,7 @@ export default function MainLayout({
   const {
     isSpaceUnread,
     isHomeUnread,
-    effectiveMentionCount,
+    roomBadgeCount,
     effectiveSpaceMentionCount,
     effectiveHomeMentionCount,
   } = useSpaceUnreadRollup(spaces, roomsBySpace, roomUnread, isRoomEffectivelyMuted);
@@ -1430,7 +1430,8 @@ export default function MainLayout({
         onReorderSpaceChildren={handleReorderSpaceChildren}
         pendingReorderIds={pendingReorderIds}
         isUnread={isUnread}
-        mentionCount={effectiveMentionCount}
+        roomBadgeCount={roomBadgeCount}
+        onClearInvite={markInviteSeen}
         discoverMode={discoverOpen}
         activeDiscoverServer={activeDiscoverServer}
         discoverHomeserver={currentHomeserver}
@@ -1604,7 +1605,8 @@ export default function MainLayout({
                 onOpenNavigation={openMobileNavDrawer}
               />
             ) : activeRoom && activeRoom.membership === "invited" ? (
-              <InvitationView room={activeRoom} onJoined={fetchRooms} />
+              <InvitationView room={activeRoom} onJoined={fetchRooms}
+                onViewed={mobileNavDrawerOpen || settingsOpen ? undefined : markInviteSeen} />
             ) : matrixCallInVoiceRoom ? (
               inlineCallContent
             ) : activeRoom && !activeRoom.upgradePending && activeRoom.roomType === VOICE_ROOM_TYPE ? (

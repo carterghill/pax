@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { useTheme } from "../theme/ThemeContext";
 import { Room } from "../types/matrix";
@@ -8,12 +8,27 @@ import { avatarSrc } from "../utils/avatarSrc";
 interface InvitationViewProps {
   room: Room;
   onJoined: () => void;
+  onViewed?: (roomId: string) => void;
 }
 
-export default function InvitationView({ room, onJoined }: InvitationViewProps) {
+export default function InvitationView({ room, onJoined, onViewed }: InvitationViewProps) {
   const { palette, typography, spacing, resolvedColorScheme } = useTheme();
   const [joining, setJoining] = useState(false);
   const [error, setError] = useState<string | null>(null);
+
+  useEffect(() => {
+    if (!onViewed || room.inviteSeen) return;
+    const acknowledge = () => {
+      if (document.visibilityState === "visible" && document.hasFocus()) onViewed(room.id);
+    };
+    acknowledge();
+    window.addEventListener("focus", acknowledge);
+    document.addEventListener("visibilitychange", acknowledge);
+    return () => {
+      window.removeEventListener("focus", acknowledge);
+      document.removeEventListener("visibilitychange", acknowledge);
+    };
+  }, [room.id, room.inviteSeen, onViewed]);
 
   const initials = room.name
     .split(" ")

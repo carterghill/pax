@@ -146,9 +146,13 @@ function mergeFetchedRoomsPreserveNames(
   incomingList: Room[]
 ): Room[] {
   const prevById = new Map(previousList.map((r) => [r.id, r]));
-  return incomingList.map((room) =>
-    withStableRoomDisplayNameAndTopology(prevById.get(room.id), room)
-  );
+  return incomingList.map((room) => {
+    const previous = prevById.get(room.id);
+    const merged = withStableRoomDisplayNameAndTopology(previous, room);
+    return room.membership === "invited" && previous?.membership === "invited" && previous.inviteSeen
+      ? { ...merged, inviteSeen: true }
+      : merged;
+  });
 }
 
 export type RoomsForLayout = {
@@ -157,6 +161,7 @@ export type RoomsForLayout = {
   roomsBySpace: (spaceId: string | null) => Room[];
   getRoom: (roomId: string, includeHistory?: boolean) => Room | null;
   fetchRooms: () => Promise<Room[]>;
+  markInviteSeen: (roomId: string) => void;
   upsertOptimisticRoom: (room: Room) => void;
 };
 
@@ -236,6 +241,17 @@ export function useRooms(userId: string | null) {
   const upsertOptimisticRoom = useCallback((room: Room) => {
     setOptimisticRooms((prev) => [room, ...prev.filter((existing) => existing.id !== room.id)]);
   }, []);
+
+  const markInviteSeen = useCallback((roomId: string) => {
+    if (!userId) return;
+    setFetchedRooms((prev) => {
+      const invite = prev.find((room) => room.id === roomId);
+      if (invite?.membership !== "invited" || invite.inviteSeen) return prev;
+      const next = prev.map((room) => room === invite ? { ...room, inviteSeen: true } : room);
+      savePersistedRooms(userId, next);
+      return next;
+    });
+  }, [userId]);
 
   // Hydrate from disk so "Loading rooms…" can skip when we have a
   // prior snapshot for this user. On warm restart, `UserAvatarStore`
@@ -423,6 +439,7 @@ export function useRooms(userId: string | null) {
     roomsBySpace,
     getRoom,
     fetchRooms,
+    markInviteSeen,
     upsertOptimisticRoom,
     initialLoadComplete,
   };

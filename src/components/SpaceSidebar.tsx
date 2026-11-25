@@ -255,7 +255,7 @@ function SpaceIconRow({
       />
       {mentions > 0 && (
         <span
-          aria-label={`${mentions} unread mention${mentions === 1 ? "" : "s"}`}
+          aria-label={`${mentions} unread notification${mentions === 1 ? "" : "s"}`}
           style={{
             position: "absolute",
             top: -2,
@@ -711,7 +711,7 @@ export default function SpaceSidebar({
           display: "flex",
           flexDirection: "column",
           alignItems: "center",
-          padding: "12px 0",
+          paddingBottom: 12,
           gap: 8,
           height: "100%",
           minHeight: 0,

@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
+import type { Room } from "../types/matrix";
 
 /**
  * Backend-surfaced unread state for one room.
@@ -197,18 +198,7 @@ export const EMPTY_UNREAD_STATE: Readonly<RoomUnreadState> = EMPTY;
 
 /** Minimal room shape the space rollup needs — decoupled from the full Room type
  *  so the hook can be tested / reused without dragging in Matrix-specific fields. */
-export interface RoomForRollup {
-  id: string;
-  isSpace: boolean;
-  parentSpaceIds: string[];
-  /**
-   * True for rooms marked as direct chats. Used by the rollup's
-   * "effective" counters to promote unread DM messages into the red
-   * mention-badge bucket (they don't produce server-side highlights so
-   * they'd otherwise be invisible on the icons).
-   */
-  isDirect?: boolean;
-}
+export type RoomForRollup = Pick<Room, "id" | "isSpace" | "parentSpaceIds" | "isDirect" | "membership" | "inviteSeen">;
 
 export interface SpaceUnreadRollupApi {
   /** True when the space (or any descendant space/room) has unread activity. */
@@ -220,16 +210,12 @@ export interface SpaceUnreadRollupApi {
   isHomeUnread: () => boolean;
   /** Sum of raw mentions across rooms outside every joined space. */
   homeMentionCount: () => number;
-  /**
-   * Per-room badge count. Equals `mentionCount(roomId)` for regular rooms.
-   * For direct chats it falls back to the unread message count when the room's
-   * effective notification level is anything other than `none`. A muted room has no badge.
-   */
-  effectiveMentionCount: (roomId: string) => number;
-  /** Sum of `effectiveMentionCount` across the space's descendant rooms.
+  /** Counts an unseen invitation, unread DM messages, or room mentions, subject to mute settings. */
+  roomBadgeCount: (room: RoomForRollup) => number;
+  /** Sum of `roomBadgeCount` across the space's descendant rooms.
    *  Use this for the space-icon badge. */
   effectiveSpaceMentionCount: (spaceId: string) => number;
-  /** Sum of `effectiveMentionCount` across home rooms.  Use for the Home icon. */
+  /** Sum of `roomBadgeCount` across home rooms.  Use for the Home icon. */
   effectiveHomeMentionCount: () => number;
 }
 
@@ -266,7 +252,7 @@ export function useSpaceUnreadRollup(
   roomUnread: UnreadRoomsApi,
   /**
    * Which rooms are effectively muted.  Called per-room during rollup;
-   * if a room returns `true`, it's excluded from `effectiveMentionCount`
+   * if a room returns `true`, it's excluded from `roomBadgeCount`
    * (i.e. unread DM messages don't bump the red badge for muted DMs).
    * Callers that don't care about DM promotion can pass `() => false`.
    */
@@ -279,23 +265,6 @@ export function useSpaceUnreadRollup(
     for (const sp of spaces) s.add(sp.id);
     return s;
   }, [spaces]);
-
-  // Direct-room lookup table.  Built from every room we've seen in
-  // `spaces` + `roomsBySpace` rather than a separate `getRoom` prop so
-  // the hook can stay narrow-waist.  Rebuilt whenever the inputs change.
-  const dmIdSet = useMemo(() => {
-    const s = new Set<string>();
-    const visit = (list: readonly RoomForRollup[]) => {
-      for (const r of list) {
-        if (!r.isSpace && r.isDirect) s.add(r.id);
-      }
-    };
-    // Home-scoped rooms.
-    visit(roomsBySpace(null));
-    // Space-scoped rooms.
-    for (const sp of spaces) visit(roomsBySpace(sp.id));
-    return s;
-  }, [spaces, roomsBySpace]);
 
   const isSpaceUnread = useCallback(
     (spaceId: string): boolean => {
@@ -333,14 +302,14 @@ export function useSpaceUnreadRollup(
    * is that every message is addressed to you, so every unread message
    * should contribute to the badge.
    */
-  const effectiveMentionCount = useCallback(
-    (roomId: string): number => {
-      if (isRoomEffectivelyMuted(roomId)) return 0;
-      const base = mentionCount(roomId);
-      if (!dmIdSet.has(roomId)) return base;
-      return Math.max(base, messageCount(roomId));
+  const roomBadgeCount = useCallback(
+    (room: RoomForRollup): number => {
+      if (isRoomEffectivelyMuted(room.id)) return 0;
+      if (room.membership === "invited") return room.inviteSeen ? 0 : 1;
+      const base = mentionCount(room.id);
+      return room.isDirect ? Math.max(base, messageCount(room.id)) : base;
     },
-    [mentionCount, messageCount, dmIdSet, isRoomEffectivelyMuted],
+    [mentionCount, messageCount, isRoomEffectivelyMuted],
   );
 
   const spaceMentionCount = useCallback(
@@ -375,28 +344,28 @@ export function useSpaceUnreadRollup(
           if (child.isSpace) {
             walk(child.id);
           } else {
-            total += effectiveMentionCount(child.id);
+            total += roomBadgeCount(child);
           }
         }
       };
       walk(spaceId);
       return total;
     },
-    [roomsBySpace, effectiveMentionCount],
+    [roomsBySpace, roomBadgeCount],
   );
 
   // "Home rooms" are rooms with no joined-space parent.  `roomsBySpace(null)`
   // returns rooms with an empty `parentSpaceIds`; to catch rooms that have
   // parents pointing only at unjoined spaces, we also include rooms whose
   // every declared parent is outside our joined-space set.
-  const homeRoomIds = useMemo(() => {
+  const homeRooms = useMemo(() => {
     const seen = new Set<string>();
-    const ids: string[] = [];
+    const rooms: RoomForRollup[] = [];
     const add = (r: RoomForRollup) => {
       if (r.isSpace) return;
       if (seen.has(r.id)) return;
       seen.add(r.id);
-      ids.push(r.id);
+      rooms.push(r);
     };
     for (const r of roomsBySpace(null)) add(r);
     // Catch rooms orphaned from the user's joined spaces (parents point at
@@ -411,32 +380,32 @@ export function useSpaceUnreadRollup(
         if (!hasJoinedParent) add(r);
       }
     }
-    return ids;
+    return rooms;
   }, [roomsBySpace, spaces, joinedSpaceIdSet]);
 
   const isHomeUnread = useCallback(() => {
-    for (const id of homeRoomIds) if (isUnread(id)) return true;
+    for (const room of homeRooms) if (isUnread(room.id)) return true;
     return false;
-  }, [homeRoomIds, isUnread]);
+  }, [homeRooms, isUnread]);
 
   const homeMentionCount = useCallback(() => {
     let total = 0;
-    for (const id of homeRoomIds) total += mentionCount(id);
+    for (const room of homeRooms) total += mentionCount(room.id);
     return total;
-  }, [homeRoomIds, mentionCount]);
+  }, [homeRooms, mentionCount]);
 
   const effectiveHomeMentionCount = useCallback(() => {
     let total = 0;
-    for (const id of homeRoomIds) total += effectiveMentionCount(id);
+    for (const room of homeRooms) total += roomBadgeCount(room);
     return total;
-  }, [homeRoomIds, effectiveMentionCount]);
+  }, [homeRooms, roomBadgeCount]);
 
   return {
     isSpaceUnread,
     spaceMentionCount,
     isHomeUnread,
     homeMentionCount,
-    effectiveMentionCount,
+    roomBadgeCount,
     effectiveSpaceMentionCount,
     effectiveHomeMentionCount,
   };

@@ -39,6 +39,8 @@ export interface Room {
   topic?: string | null;
   /** "joined" or "invited" */
   membership: string;
+  /** Local acknowledgement of the current invitation, stored with the room list. */
+  inviteSeen?: boolean;
   replacementRoomId?: string;
   /** Joined predecessor room IDs, from newest to oldest. */
   historyRoomIds?: string[];

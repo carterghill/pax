@@ -786,6 +786,7 @@ function AuthedApp({
     roomsBySpace,
     getRoom,
     fetchRooms,
+    markInviteSeen,
     upsertOptimisticRoom,
     initialLoadComplete,
   } = useRooms(userId);
@@ -830,7 +831,7 @@ function AuthedApp({
       <MainLayout
         userId={userId}
         onSignOut={() => setSignOutRequested(true)}
-        rooms={{ rooms, spaces, roomsBySpace, getRoom, fetchRooms, upsertOptimisticRoom }}
+        rooms={{ rooms, spaces, roomsBySpace, getRoom, fetchRooms, markInviteSeen, upsertOptimisticRoom }}
         joinedInviteRoomId={joinedInviteRoomId}
         onInviteRoomOpened={onInviteRoomOpened}
       />

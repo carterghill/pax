@@ -219,11 +219,9 @@ interface RoomSidebarProps {
    * come from `useUnreadRooms` (mounted in `MainLayout`).
    */
   isUnread: (roomId: string) => boolean;
-  /**
-   * Highlight / mention count for the room.  When > 0 we render a small red
-   * pill next to the room name (Discord-style).
-   */
-  mentionCount: (roomId: string) => number;
+  /** Count shown in the red badge beside the room name. */
+  roomBadgeCount: (room: Room) => number;
+  onClearInvite: (roomId: string) => void;
   /**
    * Whether the current user may rewrite `m.space.child` state events in the
    * currently-active space (pre-resolved in `MainLayout`).  Used to gate
@@ -368,7 +366,7 @@ function ChannelBlock({
   typography,
   indent = false,
   isUnread,
-  mentionCount,
+  roomBadgeCount,
 }: {
   room: Room;
   activeRoomId: string | null;
@@ -396,7 +394,7 @@ function ChannelBlock({
   typography: ReturnType<typeof useTheme>["typography"];
   indent?: boolean;
   isUnread: (roomId: string) => boolean;
-  mentionCount: (roomId: string) => number;
+  roomBadgeCount: (room: Room) => number;
 }) {
   const isVoice = room.roomType === VOICE_ROOM_TYPE;
   const isDraftDmRow = isPendingDmRoomId(room.id);
@@ -423,8 +421,11 @@ function ChannelBlock({
   // bgActive background so you can still tell which one you're looking at.
   const isActive = activeRoomId === room.id;
   const hasUnread = isUnread(room.id);
-  const isHighlighted = isActive || hasUnread;
-  const unreadMentions = mentionCount(room.id);
+  const badgeCount = roomBadgeCount(room);
+  const isHighlighted = isActive || hasUnread || badgeCount > 0;
+  const badgeLabel = room.membership === "invited"
+    ? "Unread invitation"
+    : `${badgeCount} unread notification${badgeCount === 1 ? "" : "s"}`;
   const labelColor = isHighlighted ? palette.textHeading : palette.textSecondary;
 
   return (
@@ -539,9 +540,10 @@ function ChannelBlock({
               </div>
             )}
           </div>
-          {unreadMentions > 0 && (
+          {badgeCount > 0 && (
             <span
-              aria-label={`${unreadMentions} unread mention${unreadMentions === 1 ? "" : "s"}`}
+              aria-label={badgeLabel}
+              title={badgeLabel}
               style={{
                 flexShrink: 0,
                 minWidth: 18,
@@ -557,7 +559,7 @@ function ChannelBlock({
                 boxSizing: "border-box",
               }}
             >
-              {unreadMentions > 99 ? "99+" : unreadMentions}
+              {badgeCount > 99 ? "99+" : badgeCount}
             </span>
           )}
         </span>
@@ -675,7 +677,8 @@ export default function RoomSidebar({
   parentSpace = null,
   onNavigateToParentSpace,
   isUnread,
-  mentionCount,
+  roomBadgeCount,
+  onClearInvite,
   canManageActiveSpaceChildren = false,
   onReorderSpaceChildren,
   pendingReorderIds,
@@ -1701,7 +1704,7 @@ export default function RoomSidebar({
                           spacing={spacing}
                           typography={typography}
                           isUnread={isUnread}
-                          mentionCount={mentionCount}
+                          roomBadgeCount={roomBadgeCount}
                           indent
                         />
                       </DraggableRow>
@@ -1773,7 +1776,7 @@ export default function RoomSidebar({
                 spacing={spacing}
                 typography={typography}
                 isUnread={isUnread}
-                mentionCount={mentionCount}
+                roomBadgeCount={roomBadgeCount}
               />
             </DraggableRow>
           );
@@ -1823,6 +1826,10 @@ export default function RoomSidebar({
           y={roomContextMenu.y}
           roomName={roomContextMenu.roomName}
           onClearNotification={async () => {
+            if (getRoom(roomContextMenu.roomId, true)?.membership === "invited") {
+              onClearInvite(roomContextMenu.roomId);
+              return;
+            }
             await invoke("clear_room_notification", { roomId: roomContextMenu.roomId, expectedUserId: userId });
           }}
           onInvite={() => {

@@ -13,7 +13,7 @@
     "test:unavailable-messages": "node --test src/features/chat/messages/unavailableMessages.test.mjs",
     "test:timeline": "node --test src/features/chat/messages/callHistory.test.mjs src/features/chat/messages/timelinePagination.test.mjs",
     "test:avatars": "node --test src/data/AvatarStore.test.mjs",
-    "test:notifications": "node --test src/data/NotificationStore.test.mjs",
+    "test:notifications": "node --test src/data/NotificationStore.test.mjs src/hooks/useUnreadRooms.test.mjs",
     "test:voice-presence": "node --test src/data/VoicePresenceStore.test.mjs",
     "test:members": "node --test src/data/RoomMemberStore.test.mjs",
     "android:icons": "python scripts/gen_android_icons.py",
