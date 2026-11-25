@@ -9,7 +9,7 @@ import {
 import { invoke } from "@tauri-apps/api/core";
 import { Picker } from "emoji-mart";
 import data from "@emoji-mart/data";
-import { hrefLooksLikeDirectImageUrl } from "../../../utils/directImageUrl";
+import { hrefLooksLikeDirectImageUrl, type ImageDimensions } from "../../../utils/directImageUrl";
 import { insertImageAtSelection } from "../../../utils/composerEditorDom";
 import type { ComposerPickerTab } from "./ComposerMediaPickerPopover";
 
@@ -125,12 +125,12 @@ export function useComposerPicker({
   }, [pickerOpen, pickerTab, popoverPos, resolvedColorScheme]);
 
   const handleGifSelect = useCallback(
-    (gifUrl: string) => {
+    (gifUrl: string, dimensions?: ImageDimensions) => {
       const el = editorRef.current;
       if (!el) return;
       el.focus();
       if (hrefLooksLikeDirectImageUrl(gifUrl)) {
-        insertImageAtSelection(el, gifUrl, composerImgStyle, () => syncHeight());
+        insertImageAtSelection(el, gifUrl, composerImgStyle, syncHeight, dimensions);
       } else {
         document.execCommand("insertText", false, gifUrl);
       }

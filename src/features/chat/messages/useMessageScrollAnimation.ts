@@ -23,6 +23,11 @@ export function useMessageScrollAnimation(
     if (!container) return;
 
     const target = Math.max(0, container.scrollHeight - container.clientHeight);
+    const start = container.scrollTop;
+    if (Math.abs(target - start) < 1) {
+      cancelScrollAnimation();
+      return;
+    }
     const reducedMotion = window.matchMedia("(prefers-reduced-motion: reduce)").matches;
     if (!animate || reducedMotion) {
       cancelScrollAnimation();
@@ -35,19 +40,16 @@ export function useMessageScrollAnimation(
     if (animationRef.current?.target === target) return;
     cancelScrollAnimation();
 
-    const start = container.scrollTop;
-    if (Math.abs(target - start) < 1) {
-      container.scrollTop = target;
-      return;
-    }
-
     const startedAt = performance.now();
     const animation = { frame: 0, target };
     animationRef.current = animation;
     const step = (now: number) => {
       const progress = Math.min(1, (now - startedAt) / SCROLL_DURATION_MS);
       const eased = 1 - (1 - progress) ** 3;
-      container.scrollTop = start + (target - start) * eased;
+      // Native scroll anchoring can move ahead of the animation during layout.
+      // Only advance the viewport from its current position.
+      const next = start + (target - start) * eased;
+      if (container.scrollTop < next) container.scrollTop = next;
       if (progress < 1) {
         animation.frame = requestAnimationFrame(step);
       } else {

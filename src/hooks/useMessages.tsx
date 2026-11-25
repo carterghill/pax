@@ -150,15 +150,27 @@ function trySaveRoomMessagesCache(
 /*  Pure helpers                                                       */
 /* ------------------------------------------------------------------ */
 
+// History and sync deliver fresh JSON objects even for an unchanged Matrix event.
+function reuseMessage(previous: Message | undefined, incoming: Message): Message {
+  return previous && JSON.stringify(previous) === JSON.stringify(incoming) ? previous : incoming;
+}
+
 function mergeTimelineUpdates(current: Message[], updates: Message[]): Message[] {
   const byId = new Map(current.map((message) => [message.eventId, message]));
+  let changed = false;
   for (const message of updates) {
     const previous = byId.get(message.eventId);
     if (!message.decryptionFailed || !previous || previous.decryptionFailed) {
-      byId.set(message.eventId, message);
+      const next = reuseMessage(previous, message);
+      if (next !== previous) {
+        byId.set(message.eventId, next);
+        changed = true;
+      }
     }
   }
-  return trimTimelineWindow([...byId.values()].sort((a, b) => a.timestamp - b.timestamp), WINDOW_SIZE, "latest");
+  return changed
+    ? trimTimelineWindow([...byId.values()].sort((a, b) => a.timestamp - b.timestamp), WINDOW_SIZE, "latest")
+    : current;
 }
 
 function revokeLocalPreviewIfNeeded(m: Message) {
@@ -635,14 +647,19 @@ export function useMessages(roomId: string | null, currentUserId: string | null 
 
       let next: Message[];
       if (idx !== -1) {
-        next = prev.slice();
-        const old = next[idx];
-        revokeLocalPreviewIfNeeded(old);
-        next[idx] = {
+        const old = prev[idx];
+        const replacement = reuseMessage(old, {
           ...message,
           senderName: isNotice ? message.senderName ?? old.senderName : message.senderName,
           reactions: message.reactions ?? old.reactions,
-        };
+        });
+        if (replacement === old && prev === messagesRef.current) return;
+        next = prev;
+        if (replacement !== old) {
+          revokeLocalPreviewIfNeeded(old);
+          next = prev.slice();
+          next[idx] = replacement;
+        }
       } else {
         next = [...prev, message];
         if (

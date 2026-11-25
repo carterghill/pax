@@ -248,6 +248,10 @@ export default function ChatView({
   const getRssSubscriptions = useCallback(() => recentRssList(rssRoomId, rssBot), [rssRoomId, rssBot]);
   const rssSubscriptions = useSyncExternalStore(subscribeToRssLists, getRssSubscriptions);
   const rssThreads = useRssThreads(rssRoomId, rssProvider, messages, rssSubscriptions);
+  const timeline = useMemo(
+    () => history.messages.length ? history.messages.concat(rssThreads.visibleMessages) : rssThreads.visibleMessages,
+    [history.messages, rssThreads.visibleMessages],
+  );
   const rssPanelId = useId();
   const rssButtonRef = useRef<HTMLButtonElement>(null);
   const selfProfile = useMatrixUserProfile(isDraft ? null : userId);
@@ -359,7 +363,10 @@ export default function ChatView({
   const threadSnapshotRef = useRef(rssThreads);
   threadSnapshotRef.current = rssThreads;
   const messagesSnapshotRef = useRef<Message[]>([]);
-  messagesSnapshotRef.current = [...history.messages, ...messages];
+  messagesSnapshotRef.current = useMemo(
+    () => history.messages.length ? history.messages.concat(messages) : messages,
+    [history.messages, messages],
+  );
   const userMenuResize = useResizeHandle({
     width: userMenuWidth,
     onWidthChange: onUserMenuWidthChange,
@@ -432,7 +439,7 @@ export default function ChatView({
 
   const handleReplyPreviewClick = useCallback(
     (eventId: string, sourceRoomId?: string) => {
-      if (isDraft || !activeRoom) return;
+      if (isDraft || !activeRoom?.id) return;
       const inWindow = messagesSnapshotRef.current.some((m) => m.eventId === eventId);
       if (inWindow) {
         scrollToMessage(eventId, true);
@@ -451,7 +458,7 @@ export default function ChatView({
         }
       })();
     },
-    [isDraft, activeRoom, loadMessagesAroundEvent, loadHistoryAround, scrollToMessage],
+    [isDraft, activeRoom?.id, loadMessagesAroundEvent, loadHistoryAround, scrollToMessage],
   );
 
   const handleCancelEdit = useCallback(() => {
@@ -816,9 +823,8 @@ export default function ChatView({
           )}
           <MessageList
             ref={messageListRef}
-            messages={[...history.messages, ...rssThreads.visibleMessages]}
-            rssProvider={rssProvider}
-            rssSubscriptions={rssSubscriptions}
+            messages={timeline}
+            rssArticles={rssRoomId ? rssThreads.articles : undefined}
             rssReplies={rssThreads.replies}
             rssReplyCounts={replyCounts}
             activeRssThreadId={activeThread?.root.eventId}

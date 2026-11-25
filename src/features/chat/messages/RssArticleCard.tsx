@@ -1,22 +1,32 @@
-import { memo, useEffect, useRef, useState, type SyntheticEvent } from "react";
+import { memo, useEffect, useMemo, useRef, useState, type SyntheticEvent } from "react";
 import { ExternalLink, Rss } from "lucide-react";
 import { useTheme } from "../../../theme/ThemeContext";
 import { formatRssPublication, type RssArticleCandidate } from "./rssArticle";
-import { loadRssArticlePreview, type RssArticlePreview } from "./rssPreview";
+import { cachedRssArticlePreview, loadRssArticlePreview, type RssArticlePreview } from "./rssPreview";
 
 export function useRssArticlePreview(candidate: RssArticleCandidate | null) {
   const rowRef = useRef<HTMLDivElement>(null);
   const feedUrl = candidate?.previewFeedUrl ?? null;
   const articleUrl = candidate?.url;
   const key = articleUrl ? JSON.stringify([feedUrl, articleUrl]) : null;
-  const [result, setResult] = useState<{ key: string; preview: RssArticlePreview } | null>(null);
+  const cached = useMemo(() => key ? cachedRssArticlePreview(key) : null, [key]);
+  const [result, setResult] = useState<{ articleUrl: string; preview: RssArticlePreview } | null>(null);
 
   useEffect(() => {
     if (!key || !articleUrl || !rowRef.current) return;
 
     const load = () =>
       loadRssArticlePreview(key, feedUrl, articleUrl, (preview) => {
-        setResult({ key, preview });
+        setResult((previous) => {
+          if (previous?.articleUrl !== articleUrl) return { articleUrl, preview };
+          const images = { ...preview.images };
+          for (const field of ["authorImage", "siteImage", "image"] as const) {
+            if (preview.article[field] === previous.preview.article[field]) {
+              images[field] ??= previous.preview.images[field];
+            }
+          }
+          return { articleUrl, preview: { ...preview, images } };
+        });
       });
 
     if (typeof IntersectionObserver === "undefined") return load();
@@ -36,7 +46,9 @@ export function useRssArticlePreview(candidate: RssArticleCandidate | null) {
     };
   }, [articleUrl, feedUrl, key]);
 
-  return { rowRef, preview: result?.key === key ? result.preview : null };
+  // A subscription lookup may refine the feed URL for the same article.
+  // Keep the displayed article while that lookup's preview is loading.
+  return { rowRef, preview: result && result.articleUrl === articleUrl ? result.preview : cached };
 }
 
 const headlineLines = 2;

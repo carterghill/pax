@@ -1,4 +1,4 @@
-import React, { useMemo, useCallback, useState, isValidElement, memo, type MouseEvent, type ReactNode } from "react";
+import React, { createContext, useContext, useMemo, useCallback, useState, isValidElement, memo, type MouseEvent, type ReactNode } from "react";
 import ReactMarkdown, { defaultUrlTransform } from "react-markdown";
 import type { Element, ElementContent, Root } from "hast";
 import remarkGfm from "remark-gfm";
@@ -29,7 +29,10 @@ import { useTheme } from "../theme/ThemeContext";
 import {
   fileNameFromImageUrl,
   hrefLooksLikeDirectImageUrl,
+  imageDimensions,
+  measuredImageDimensions,
   normalizeImageSrcHref,
+  rememberImageDimensions,
 } from "../utils/directImageUrl";
 import { MATRIX_BODY_MXID_RE_GLOBAL, mentionDisplayName, mentionPillLabel } from "../utils/matrixBodyMxid";
 import { appendRoomLinkPreviews, roomLinkTarget } from "../utils/roomLinks";
@@ -59,6 +62,30 @@ interface MessageMarkdownProps {
   resolveMemberLabel?: (userId: string) => string;
   /** Called when a mention pill is clicked (opens the user's profile). */
   onMentionClick?: (userId: string) => void;
+}
+
+type MarkdownRenderOptions = Pick<MessageMarkdownProps, "edited" | "formattedBody" | "onOpenDirectImage" | "onMentionClick" | "resolveMemberLabel"> & {
+  formatted: DocumentFragment | null;
+  mentionSet: ReadonlySet<string>;
+  legacyMentions: boolean;
+  renderMention: (userId: string | null, label: string) => ReactNode;
+};
+
+const MarkdownOptions = createContext<MarkdownRenderOptions | null>(null);
+
+function DirectImagePreview({ src, width, height, ...props }: React.ComponentProps<"img"> & { src: string }) {
+  const size = imageDimensions(width, height) ?? measuredImageDimensions(src);
+  return (
+    <img
+      {...props}
+      src={src}
+      width={size?.width}
+      height={size?.height}
+      loading="lazy"
+      decoding="async"
+      onLoad={(event) => rememberImageDimensions(event.currentTarget)}
+    />
+  );
 }
 
 function flattenTextNode(value: ReactNode): string {
@@ -269,6 +296,12 @@ export default memo(function MessageMarkdown({
 
   const emojiOnlyBody = useMemo(() => !formatted && isOnlyEmojisAndWhitespace(children), [children, formatted]);
 
+  // Changing message data must not replace the component types ReactMarkdown
+  // uses for existing links, images and their containing paragraphs.
+  const options = useMemo(() => ({
+    edited, formatted, formattedBody, onOpenDirectImage, onMentionClick, legacyMentions, mentionSet, renderMention, resolveMemberLabel,
+  }), [edited, formatted, formattedBody, onOpenDirectImage, onMentionClick, legacyMentions, mentionSet, renderMention, resolveMemberLabel]);
+
   const components = useMemo<Components>(
     () => {
       const E = ({ children: c }: { children: ReactNode }) => (
@@ -280,7 +313,8 @@ export default memo(function MessageMarkdown({
         const url = node?.properties.dataRoomLinkPreview;
         return typeof url === "string" ? <RoomLinkPreview url={url} /> : <div>{c}</div>;
       },
-      span: ({ node, children: c }) => {
+      span: function MessageSpan({ node, children: c }) {
+        const { legacyMentions, mentionSet, renderMention, resolveMemberLabel } = useContext(MarkdownOptions)!;
         const id = node?.properties.dataMentionId;
         if (id === "@room") return renderMention(null, id);
         if (typeof id === "string" && (legacyMentions || mentionSet.has(id))) {
@@ -314,7 +348,8 @@ export default memo(function MessageMarkdown({
           <E>{c}</E>
         </strong>
       ),
-      em: ({ children: c }) => {
+      em: function MessageEmphasis({ children: c }) {
+        const { edited } = useContext(MarkdownOptions)!;
         if (edited && isEditedEmphasisContent(c)) {
           return (
             <span
@@ -340,7 +375,8 @@ export default memo(function MessageMarkdown({
           <E>{c}</E>
         </del>
       ),
-      a: ({ href, children: c }) => {
+      a: function MessageLink({ node, href, children: c }) {
+        const { formattedBody, formatted, mentionSet, resolveMemberLabel, onMentionClick, renderMention, onOpenDirectImage } = useContext(MarkdownOptions)!;
         if (!href) return <E>{c}</E>;
         const userId = matrixUserIdFromHref(href);
         if (userId && mentionSet.has(userId)) {
@@ -354,6 +390,7 @@ export default memo(function MessageMarkdown({
         const canPreviewImage = !formattedBody || (formatted && flattenTextNode(c).trim() === href);
         if (src && canPreviewImage && hrefLooksLikeDirectImageUrl(href)) {
           const alt = flattenTextNode(c).trim() || "Image";
+          const size = imageDimensions(node?.properties.dataPaxWidth, node?.properties.dataPaxHeight);
           const imgStyle = {
             maxWidth: "100%",
             height: "auto" as const,
@@ -385,7 +422,7 @@ export default memo(function MessageMarkdown({
                 ...(onOpenDirectImage ? { cursor: "pointer" } : {}),
               }}
             >
-              <img src={src} alt={alt} loading="lazy" decoding="async" draggable={false} style={imgStyle} />
+              <DirectImagePreview src={src} alt={alt} {...size} draggable={false} style={imgStyle} />
             </a>
           );
         }
@@ -773,7 +810,8 @@ export default memo(function MessageMarkdown({
           <E>{c}</E>
         </td>
       ),
-      img: ({ src, alt, title, width, height }) => {
+      img: function MessageImage({ src, alt, title, width, height }) {
+        const { formattedBody, onOpenDirectImage } = useContext(MarkdownOptions)!;
         const s = src?.trim() ?? "";
         if (isMatrixMediaUri(s)) {
           return (
@@ -826,11 +864,11 @@ export default memo(function MessageMarkdown({
                 outline: "none",
               }}
             >
-              <img
-                src={src}
+              <DirectImagePreview
+                src={s}
+                width={width}
+                height={height}
                 alt={alt ?? ""}
-                loading="lazy"
-                decoding="async"
                 draggable={false}
                 style={{ ...imgStyle, marginTop: 0, marginBottom: 0 }}
               />
@@ -838,18 +876,12 @@ export default memo(function MessageMarkdown({
           );
         }
         return (
-          <img
-            src={src}
-            alt={alt ?? ""}
-            loading="lazy"
-            decoding="async"
-            style={imgStyle}
-          />
+          <DirectImagePreview src={s} width={width} height={height} alt={alt ?? ""} style={imgStyle} />
         );
       },
     };
     },
-    [palette, typography, spacing, resolvedColorScheme, edited, formatted, formattedBody, onOpenDirectImage, onMentionClick, legacyMentions, mentionSet, renderMention, resolveMemberLabel],
+    [palette, typography, spacing, resolvedColorScheme],
   );
 
   // Keep embeds outside the message paragraphs and leave concealed links inside their disclosure.
@@ -879,18 +911,20 @@ export default memo(function MessageMarkdown({
         ...(emojiOnlyBody ? { zoom: EMOJI_ONLY_DISPLAY_SCALE } : {}),
       }}
     >
-      <ReactMarkdown
-        remarkPlugins={[remarkGfm]}
-        rehypePlugins={messagePlugins}
-        urlTransform={(url, key) => {
-          if (key === "src" && isMatrixMediaUri(url)) return url;
-          if (formatted) return key === "href" && isMatrixMessageLink(url) ? url : "";
-          return key === "href" && (matrixUserIdFromHref(url) || roomLinkTarget(url)) ? url : defaultUrlTransform(url);
-        }}
-        components={components}
-      >
-        {markdownSource}
-      </ReactMarkdown>
+      <MarkdownOptions.Provider value={options}>
+        <ReactMarkdown
+          remarkPlugins={[remarkGfm]}
+          rehypePlugins={messagePlugins}
+          urlTransform={(url, key) => {
+            if (key === "src" && isMatrixMediaUri(url)) return url;
+            if (formatted) return key === "href" && isMatrixMessageLink(url) ? url : "";
+            return key === "href" && (matrixUserIdFromHref(url) || roomLinkTarget(url)) ? url : defaultUrlTransform(url);
+          }}
+          components={components}
+        >
+          {markdownSource}
+        </ReactMarkdown>
+      </MarkdownOptions.Provider>
       {embeds.map(({ href, embed }) => (
         <LinkEmbed key={href} embed={embed} href={href} />
       ))}

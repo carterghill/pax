@@ -153,10 +153,10 @@ export function useComposerSubmit({
       snapshot: PendingAttachment,
       caption: ComposerMessageContent,
       bridge: MessageFileSendBridge,
-      prepared?: AttachmentPreparation["result"],
+      preparation?: AttachmentPreparation,
     ) => {
       try {
-        const uploaded = snapshot.contentUri ? null : await prepared;
+        const uploaded = snapshot.contentUri ? null : await preparation?.result;
         let contentUri = snapshot.contentUri ?? uploaded?.[0];
         let byteSize = snapshot.byteSize ?? uploaded?.[1];
         let encryptedFile = snapshot.encryptedFile ?? uploaded?.[2];
@@ -184,8 +184,13 @@ export function useComposerSubmit({
           [contentUri, byteSize, encryptedFile] = res;
         }
 
+        const meta = await preparation?.imageMeta;
+        const imageWidth = meta?.width ?? snapshot.imageWidth;
+        const imageHeight = meta?.height ?? snapshot.imageHeight;
         bridge.patchMessage(localEventId, {
           localFileUpload: { phase: "sending", progress: 0.92 },
+          imageWidth: imageWidth ?? undefined,
+          imageHeight: imageHeight ?? undefined,
         });
 
         const serverEventId = await sendFileMessage({
@@ -198,9 +203,9 @@ export function useComposerSubmit({
           caption: caption.body || null,
           formattedBody: caption.formattedBody,
           mentions: caption.mentions,
-          blurhash: snapshot.blurhash,
-          imageWidth: snapshot.imageWidth,
-          imageHeight: snapshot.imageHeight,
+          blurhash: meta?.blurhash ?? snapshot.blurhash,
+          imageWidth,
+          imageHeight,
           audioDurationMs: snapshot.audioDurationMs,
           thread,
         });
@@ -289,6 +294,8 @@ export function useComposerSubmit({
             progress: Math.min(1, snap.progress01),
           },
           localImagePreviewObjectUrl: snap.mimeType.startsWith("image/") ? snap.previewUrl : null,
+          imageWidth: snap.imageWidth ?? undefined,
+          imageHeight: snap.imageHeight ?? undefined,
           threadRootId: thread?.rootEventId,
         });
 
@@ -299,8 +306,8 @@ export function useComposerSubmit({
         const prevFormats = clearEditorAfterSend(el, setPlainText, setHasComposerMedia);
         restoreEditorAfterSend(el, prevFormats, refreshFormats, syncHeight);
 
-        const prepared = preparation?.uploadId === snap.uploadId ? preparation.result : undefined;
-        void runFileSendPipeline(localEventId, snap, content, fileSendBridge, prepared).finally(() => {
+        void runFileSendPipeline(localEventId, snap, content, fileSendBridge,
+          preparation?.uploadId === snap.uploadId ? preparation : undefined).finally(() => {
           onMessageSent();
         });
 

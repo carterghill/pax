@@ -32,6 +32,7 @@ export type AttachmentPreparation = {
   uploadId: string;
   controller: AbortController;
   result: Promise<UploadRoomFileResult | null>;
+  imageMeta?: Promise<ImagePreviewMeta | null>;
 };
 
 /** Human-readable size (binary units) for upload limit messaging. */

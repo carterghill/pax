@@ -2,6 +2,7 @@ import type { Element, ElementContent, Root } from "hast";
 import { micromark } from "micromark";
 import { gfm, gfmHtml } from "micromark-extension-gfm";
 import { roomLinkTarget } from "./roomLinks.ts";
+import { hrefLooksLikeDirectImageUrl, imageDimensions, type ImageDimensions } from "./directImageUrl.ts";
 
 /** Matrix user permalinks, including the native matrix: URI form. */
 export function matrixUserIdFromHref(href: string): string | null {
@@ -99,6 +100,11 @@ export function parseMatrixMessageHtml(html: string, { forSending = false } = {}
     if (tag === "a") {
       const href = source.getAttribute("href")?.trim() ?? "";
       if (isMatrixMessageLink(href)) el.setAttribute("href", href);
+      const size = imageDimensions(source.getAttribute("data-pax-width"), source.getAttribute("data-pax-height"));
+      if (size && hrefLooksLikeDirectImageUrl(href)) {
+        el.dataset.paxWidth = String(size.width);
+        el.dataset.paxHeight = String(size.height);
+      }
     } else if (tag === "img") {
       const src = source.getAttribute("src")?.trim() ?? "";
       const alt = source.getAttribute("alt") ?? "";
@@ -145,7 +151,7 @@ export function parseMatrixMessageHtml(html: string, { forSending = false } = {}
   return fragment;
 }
 
-export function formatMatrixMarkdown(body: string, markdown = body): string | undefined {
+export function formatMatrixMarkdown(body: string, markdown = body, imageSizes?: ReadonlyMap<string, ImageDimensions>): string | undefined {
   const html = micromark(markdown, {
     // The Matrix allowlist below also recognizes native Matrix links and mxc images.
     allowDangerousProtocol: true,
@@ -153,6 +159,15 @@ export function formatMatrixMarkdown(body: string, markdown = body): string | un
     htmlExtensions: [gfmHtml()],
   });
   const fragment = parseMatrixMessageHtml(html, { forSending: true });
+  if (imageSizes?.size) {
+    for (const link of fragment.querySelectorAll<HTMLAnchorElement>("a[href]")) {
+      const size = imageSizes.get(link.getAttribute("href")!);
+      if (size) {
+        link.dataset.paxWidth = String(size.width);
+        link.dataset.paxHeight = String(size.height);
+      }
+    }
+  }
   const nodes = Array.from(fragment.childNodes).filter((node) => node.nodeType !== Node.TEXT_NODE || node.textContent?.trim());
   const paragraph = nodes.length === 1 && nodes[0] instanceof HTMLElement && nodes[0].localName === "p" ? nodes[0] : null;
   if (paragraph) {

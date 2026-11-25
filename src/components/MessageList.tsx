@@ -6,6 +6,7 @@ import {
   useState,
   useCallback,
   forwardRef,
+  memo,
   useImperativeHandle,
   Fragment,
 } from "react";
@@ -14,7 +15,7 @@ import { invoke } from "@tauri-apps/api/core";
 import { Picker } from "emoji-mart";
 import data from "@emoji-mart/data";
 import { ArrowDown, Phone } from "lucide-react";
-import { Message, MessageReaction, RoomRedactionPolicy, type RssProvider } from "../types/matrix";
+import { Message, MessageReaction, RoomRedactionPolicy } from "../types/matrix";
 import { useResolveMemberLabel } from "../hooks/useResolveMemberLabel";
 import { useTheme } from "../theme/ThemeContext";
 import MediaViewerModal, {
@@ -32,9 +33,8 @@ import MessageRow, {
 } from "../features/chat/messages/MessageRow";
 import { useIgnoredUsers } from "../context/IgnoredUsersContext";
 import TimelineNoticeRow from "../features/chat/messages/TimelineNoticeRow";
-import { rssArticleCandidate, type RssArticleCandidate } from "../features/chat/messages/rssArticle";
-import { rssThreadReplyCount } from "../features/chat/messages/rssThreads";
-import type { RoomFeedSubscription } from "../features/rss/api";
+import type { RssArticleCandidate } from "../features/chat/messages/rssArticle";
+import { rssThreadReplyCount, type RssThread } from "../features/chat/messages/rssThreads";
 import {
   shouldShowHeader,
   getReplyThreadPreview,
@@ -58,8 +58,7 @@ export type MessageListHandle = {
 
 interface MessageListProps {
   messages: Message[];
-  rssProvider?: RssProvider;
-  rssSubscriptions?: readonly RoomFeedSubscription[];
+  rssArticles?: ReadonlyMap<string, RssThread>;
   rssReplies?: ReadonlyMap<string, Message[]>;
   activeRssThreadId?: string;
   onOpenRssThread?: (root: Message, article: RssArticleCandidate) => void;
@@ -125,8 +124,7 @@ const REACTION_POPOVER_IGNORE = ["[data-message-reaction-popover]"];
 const MessageList = forwardRef<MessageListHandle, MessageListProps>(function MessageList(
   {
     messages: timeline,
-    rssProvider,
-    rssSubscriptions,
+    rssArticles,
     rssReplies,
     activeRssThreadId,
     onOpenRssThread,
@@ -183,10 +181,6 @@ const MessageList = forwardRef<MessageListHandle, MessageListProps>(function Mes
     () => new Set(pinnedEventIds),
     [pinnedEventIds],
   );
-  const rssArticles = useMemo(() => {
-    if (!rssProvider) return [];
-    return messages.map((message) => rssArticleCandidate(message, rssProvider, rssSubscriptions));
-  }, [rssProvider, rssSubscriptions, messages]);
 
   const { resolveMemberLabel } = useResolveMemberLabel(roomId);
 
@@ -296,6 +290,10 @@ const MessageList = forwardRef<MessageListHandle, MessageListProps>(function Mes
   }, [reactionTooltipActive, syncReactionTooltipPosition]);
 
   /* ---- Stable callbacks ---- */
+  const openMediaViewer = useCallback((msg: Message, payload: MediaViewerOpenPayload) => {
+    setMediaViewer({ ...payload, roomId: msg.historyRoomId ?? roomId, senderId: msg.sender });
+  }, [roomId]);
+
   const openDirectImage = useCallback(
     (url: string, title: string, senderId: string) => {
       setMediaViewer({
@@ -422,6 +420,8 @@ const MessageList = forwardRef<MessageListHandle, MessageListProps>(function Mes
     if (initialLoading) return;
 
     const continuingTimeline = previous?.roomId === roomId && !previous.initialLoading;
+    if (continuingTimeline && previous.isAtLatest === isAtLatest &&
+        previous.lastId === lastId && previous.lastChatId === lastChatId) return;
     if (!shouldAutoScrollRef.current) {
       // A new tail on the same timeline means messages arrived below the reader.
       // Prepending history, edits, and replacing local echoes don't count.
@@ -699,7 +699,9 @@ const MessageList = forwardRef<MessageListHandle, MessageListProps>(function Mes
     let prevOuterH = outer.clientHeight;
     const pinIfFollowing = () => {
       if (!shouldAutoScrollRef.current) return;
-      scrollToBottom(true);
+      // Keep a pinned viewport flush during layout changes. An actual message
+      // arrival may already be animating toward the latest row.
+      scrollToBottom(scrollAnimationRef.current !== null);
       setAtBottom(true);
     };
 
@@ -721,7 +723,7 @@ const MessageList = forwardRef<MessageListHandle, MessageListProps>(function Mes
       roInner.disconnect();
       roOuter.disconnect();
     };
-  }, [initialLoading, roomId, scrollToBottom]);
+  }, [initialLoading, roomId, scrollToBottom, scrollAnimationRef]);
 
   /* ================================================================ */
   /*  Reaction emoji picker mount                                      */
@@ -801,7 +803,7 @@ const MessageList = forwardRef<MessageListHandle, MessageListProps>(function Mes
     const message = messages[index];
     const previous = messages[index - 1] ?? null;
     const crossedUpgrade = previous?.historyRoomId && previous.historyRoomId !== message.historyRoomId;
-    return Boolean(crossedUpgrade || (!message.historyRoomId && rssArticles[index]) || rssArticles[index - 1])
+    return Boolean(crossedUpgrade || rssArticles?.has(message.eventId) || (previous && rssArticles?.has(previous.eventId)))
       || shouldShowHeader(message, previous);
   };
   let membershipOffset = 0;
@@ -921,7 +923,7 @@ const MessageList = forwardRef<MessageListHandle, MessageListProps>(function Mes
         {hasOlder
           ? loadingOlder
             ? "Loading older messages..."
-            : replyDrawer || rssProvider || hasUpgradeHistory || messages.some(isTimelineNotice) ? (
+            : replyDrawer || rssArticles || hasUpgradeHistory || messages.some(isTimelineNotice) ? (
               <button type="button" onClick={loadOlderPreservingPosition} style={{
                 color: palette.textSecondary,
                 background: "none",
@@ -1013,7 +1015,7 @@ const MessageList = forwardRef<MessageListHandle, MessageListProps>(function Mes
           );
         }
         const isHistorical = !!msg.historyRoomId;
-        const article = isHistorical ? null : rssArticles[i] ?? null;
+        const article = isHistorical ? null : rssArticles?.get(msg.eventId)?.article ?? null;
         const showHeader = showsHeader(i);
         const canEdit = !isHistorical && messageAllowsEdit(msg, userId);
         const canDelete = !isHistorical && messageAllowsDelete(msg, userId, redactionPolicy);
@@ -1041,19 +1043,14 @@ const MessageList = forwardRef<MessageListHandle, MessageListProps>(function Mes
               canReact={canReact}
               isMenuOpen={menu.openId === msg.eventId}
               isReactionPickerOpen={reactionPicker.openId === msg.eventId}
-              onRequestReply={() => onRequestReply(msg)}
+              onRequestReply={onRequestReply}
               onOpenMenu={handleOpenMenu}
               onToggleReactionPicker={handleToggleReactionPicker}
-              onOpenMediaViewer={(payload) => setMediaViewer({
-                ...payload, roomId: msg.historyRoomId ?? roomId, senderId: msg.sender,
-              })}
-              onOpenDirectImage={(url, title) => openDirectImage(url, title, msg.sender)}
+              onOpenMediaViewer={openMediaViewer}
+              onOpenDirectImage={openDirectImage}
               menuAnchorRef={menu.anchorRef}
               reactionPickerAnchorRef={reactionPicker.anchorRef}
-              onReactionChipClick={(key, reactedByMe) => {
-                if (isHistorical) return;
-                void handleReactionChipClick(msg.eventId, key, reactedByMe);
-              }}
+              onReactionChipClick={handleReactionChipClick}
               onReactionChipHover={handleReactionChipHover}
               onReactionChipHoverEnd={handleReactionChipHoverEnd}
               rowHighlight={rowHighlight}
@@ -1062,7 +1059,7 @@ const MessageList = forwardRef<MessageListHandle, MessageListProps>(function Mes
               typography={typography}
               resolvedColorScheme={resolvedColorScheme}
               replyThread={replyDrawer ? null : getReplyThreadPreview(msg, messageByEventId)}
-              onReplyThreadClick={(id) => onReplyPreviewClick(id, msg.historyRoomId)}
+              onReplyThreadClick={onReplyPreviewClick}
               onOpenSenderProfile={onOpenSenderProfile}
               onSenderContextMenu={onSenderContextMenu}
               resolveMemberLabel={resolveMemberLabel}
@@ -1283,4 +1280,4 @@ const MessageList = forwardRef<MessageListHandle, MessageListProps>(function Mes
   );
 });
 
-export default MessageList;
+export default memo(MessageList);

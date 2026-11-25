@@ -7,6 +7,7 @@ import type {
   ThemeTypography,
 } from "../../../theme/types";
 import GiphyPicker from "./GiphyPicker";
+import type { ImageDimensions } from "../../../utils/directImageUrl";
 
 export type ComposerPickerTab = "emoji" | "gif";
 
@@ -22,7 +23,7 @@ interface ComposerMediaPickerPopoverProps {
   resolvedColorScheme: ResolvedColorScheme;
   zIndex: number;
   onPickerTabChange: (tab: ComposerPickerTab) => void;
-  onGifSelect: (gifUrl: string) => void;
+  onGifSelect: (gifUrl: string, dimensions?: ImageDimensions) => void;
 }
 
 function fixedPopoverStyle(bottom: number, right: number, zIndex: number) {

@@ -198,10 +198,11 @@ export function useComposerFileUpload({
         pendingFileRef.current = next;
         setPendingFile(next);
         const controller = new AbortController();
-        preparationRef.current = { uploadId, controller, result: prepareAttachment(next, controller.signal) };
+        const imageMeta = previewUrl ? extractImagePreviewMeta(previewUrl) : undefined;
+        preparationRef.current = { uploadId, controller, result: prepareAttachment(next, controller.signal), imageMeta };
 
-        if (previewUrl) {
-          void extractImagePreviewMeta(previewUrl).then((meta) => {
+        if (imageMeta) {
+          void imageMeta.then((meta) => {
             if (!meta) return;
             const patch: Partial<PendingAttachment> = {
               blurhash: meta.blurhash,

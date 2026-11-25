@@ -9,6 +9,7 @@ import MessageMatrixAudio from "../../../components/MessageMatrixAudio";
 import MessageFileAttachment from "../../../components/MessageFileAttachment";
 import CircularUploadRing from "../../../components/CircularUploadRing";
 import { inferMediaViewerKind } from "../../../utils/mediaViewer";
+import { inlineMediaAspectBoxStyle } from "../../../utils/inlineMediaLayout";
 
 const UPLOAD_RING_SIZE = 16;
 const UPLOAD_RING_STROKE = 2;
@@ -85,11 +86,14 @@ export default function MessageContent({
       >
         <img
           src={msg.localImagePreviewObjectUrl}
+          width={msg.imageWidth}
+          height={msg.imageHeight}
           alt=""
           draggable={false}
           style={{
             maxWidth: "100%",
             maxHeight: 400,
+            ...inlineMediaAspectBoxStyle(msg.imageWidth ?? 0, msg.imageHeight ?? 0, 400),
             height: "auto",
             objectFit: "contain",
             borderRadius: spacingUnit,

@@ -6,13 +6,14 @@ import {
   SearchContextManager,
 } from "@giphy/react-components";
 import type { ThemePalette, ThemeSpacing, ThemeTypography } from "../../../theme/types";
+import { imageDimensions, type ImageDimensions } from "../../../utils/directImageUrl";
 
 interface GiphyPickerProps {
   palette: ThemePalette;
   typography: ThemeTypography;
   spacing: ThemeSpacing;
   apiKey: string;
-  onGifSelect: (gifUrl: string) => void;
+  onGifSelect: (gifUrl: string, dimensions?: ImageDimensions) => void;
 }
 
 function GiphyPickerInner({
@@ -48,8 +49,8 @@ function GiphyPickerInner({
           noLink
           onGifClick={(gif, e) => {
             e.preventDefault();
-            const url = gif.images?.original?.url ?? gif.images?.fixed_height?.url;
-            if (url) onGifSelect(url);
+            const image = gif.images?.original?.url ? gif.images.original : gif.images?.fixed_height;
+            if (image?.url) onGifSelect(image.url, imageDimensions(image.width, image.height));
           }}
         />
       </div>

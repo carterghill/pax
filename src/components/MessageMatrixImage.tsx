@@ -4,6 +4,7 @@ import { convertFileSrc } from "@tauri-apps/api/core";
 import { decode } from "blurhash";
 import { acquireMatrixMedia } from "../features/chat/media";
 import { useTheme } from "../theme/ThemeContext";
+import { inlineMediaAspectBoxStyle } from "../utils/inlineMediaLayout";
 
 const INLINE_IMAGE_MAX_HEIGHT = 400;
 const BLURHASH_W = 32;
@@ -118,9 +119,12 @@ export default function MessageMatrixImage({
     };
   }, [src]);
 
+  const frame = inlineMediaAspectBoxStyle(metaWidth ?? 0, metaHeight ?? 0, INLINE_IMAGE_MAX_HEIGHT);
   if (inline) {
     if (failed || !src) {
-      return <span title={inline.title}>{inline.alt || (failed ? "Image unavailable" : null)}</span>;
+      return <span title={inline.title} style={frame ? { ...frame, display: "inline-block", verticalAlign: "middle" } : undefined}>
+        {inline.alt || (failed ? "Image unavailable" : null)}
+      </span>;
     }
     return (
       <img
@@ -133,7 +137,7 @@ export default function MessageMatrixImage({
         decoding="async"
         draggable={false}
         onError={() => setFailed(true)}
-        style={{ maxWidth: "100%", maxHeight: INLINE_IMAGE_MAX_HEIGHT, objectFit: "contain", verticalAlign: "middle" }}
+        style={{ maxWidth: "100%", maxHeight: INLINE_IMAGE_MAX_HEIGHT, ...frame, height: "auto", objectFit: "contain", verticalAlign: "middle" }}
       />
     );
   }
@@ -168,39 +172,18 @@ export default function MessageMatrixImage({
     );
   }
 
-  const hasMeta =
-    metaWidth != null &&
-    metaHeight != null &&
-    metaWidth > 0 &&
-    metaHeight > 0;
-
   const handleError = () => {
     setFailed(true);
     setErrorDetail("Image could not be displayed (file missing or invalid).");
     setSrc(null);
   };
 
-  let placeholderW: number;
-  let placeholderH: number;
-  if (hasMeta) {
-    if (metaHeight > INLINE_IMAGE_MAX_HEIGHT) {
-      placeholderH = INLINE_IMAGE_MAX_HEIGHT;
-      placeholderW = (metaWidth / metaHeight) * INLINE_IMAGE_MAX_HEIGHT;
-    } else {
-      placeholderW = metaWidth;
-      placeholderH = metaHeight;
-    }
-  } else {
-    placeholderW = INLINE_IMAGE_MAX_HEIGHT;
-    placeholderH = INLINE_IMAGE_MAX_HEIGHT;
-  }
-
   const imgProps = {
     ref: imgRef,
     src: src ?? undefined,
     alt: "",
-    width: hasMeta ? metaWidth : undefined,
-    height: hasMeta ? metaHeight : undefined,
+    width: metaWidth,
+    height: metaHeight,
     decoding: "async" as const,
     draggable: false,
     onLoad: () => setLoaded(true),
@@ -236,6 +219,8 @@ export default function MessageMatrixImage({
       {...wrapperProps}
       style={{
         display: "inline-block",
+        maxWidth: "100%",
+        ...(frame ?? (!loaded ? { width: INLINE_IMAGE_MAX_HEIGHT, aspectRatio: "1" } : {})),
         marginTop: spacing.unit,
         marginBottom: spacing.unit,
         borderRadius: spacing.unit,
@@ -247,10 +232,8 @@ export default function MessageMatrixImage({
       {!loaded && (
         <div
           style={{
-            width: placeholderW,
-            height: placeholderH,
-            maxWidth: "100%",
-            maxHeight: INLINE_IMAGE_MAX_HEIGHT,
+            position: "absolute",
+            inset: 0,
             borderRadius: spacing.unit,
             overflow: "hidden",
             backgroundColor: palette.bgTertiary,
@@ -258,7 +241,6 @@ export default function MessageMatrixImage({
             alignItems: "center",
             justifyContent: "center",
             color: palette.textSecondary,
-            position: "relative",
           }}
           aria-busy
           aria-label="Loading image"
@@ -294,9 +276,8 @@ export default function MessageMatrixImage({
           {...imgProps}
           style={{
             ...imgStyle,
-            ...(loaded
-              ? {}
-              : { position: "absolute", opacity: 0, pointerEvents: "none" }),
+            ...(frame && { position: "absolute", inset: 0, width: "100%", height: "100%", objectFit: "contain" }),
+            ...(!loaded && { position: "absolute", opacity: 0, pointerEvents: "none" }),
           }}
         />
       )}

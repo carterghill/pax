@@ -1,4 +1,4 @@
-import { memo } from "react";
+import { memo, useCallback } from "react";
 import {
   MoreVertical,
   MessageSquare,
@@ -60,14 +60,14 @@ export interface MessageRowProps {
   canReact: boolean;
   isMenuOpen: boolean;
   isReactionPickerOpen: boolean;
-  onRequestReply: () => void;
+  onRequestReply: (message: Message) => void;
   onOpenMenu: (eventId: string) => void;
   onToggleReactionPicker: (eventId: string) => void;
-  onOpenMediaViewer: (payload: MediaViewerOpenPayload) => void;
-  onOpenDirectImage: (url: string, title: string) => void;
+  onOpenMediaViewer: (message: Message, payload: MediaViewerOpenPayload) => void;
+  onOpenDirectImage: (url: string, title: string, senderId: string) => void;
   menuAnchorRef: React.RefObject<HTMLButtonElement | null>;
   reactionPickerAnchorRef: React.RefObject<HTMLButtonElement | null>;
-  onReactionChipClick: (key: string, reactedByMe: boolean) => void;
+  onReactionChipClick: (eventId: string, key: string, reactedByMe: boolean) => void;
   onReactionChipHover: (
     e: React.MouseEvent<HTMLButtonElement>,
     r: MessageReaction,
@@ -83,7 +83,7 @@ export interface MessageRowProps {
     senderLabel: string;
     text: string;
   } | null;
-  onReplyThreadClick: (eventId: string) => void;
+  onReplyThreadClick: (eventId: string, sourceRoomId?: string) => void;
   onOpenSenderProfile?: (senderUserId: string) => void;
   onSenderContextMenu?: (event: React.MouseEvent, message: Message) => void;
   /** Resolve a user MXID to a display name (for mention pills). */
@@ -125,6 +125,10 @@ const MessageRow = memo(function MessageRow({
   onSenderContextMenu,
   resolveMemberLabel,
 }: MessageRowProps) {
+  const openDirectImage = useCallback(
+    (url: string, title: string) => onOpenDirectImage(url, title, msg.sender),
+    [onOpenDirectImage, msg.sender],
+  );
   const { rowRef, preview } = useRssArticlePreview(rssArticle);
   const article = rssArticle;
   const openArticleThread = article && onOpenRssThread
@@ -260,7 +264,7 @@ const MessageRow = memo(function MessageRow({
         {replyThread ? (
           <button
             type="button"
-            onClick={() => onReplyThreadClick(replyThread.targetEventId)}
+            onClick={() => onReplyThreadClick(replyThread.targetEventId, msg.historyRoomId)}
             title="Jump to original message"
             style={{
               display: "block",
@@ -342,8 +346,8 @@ const MessageRow = memo(function MessageRow({
             spacingUnit={spacingUnit}
             palette={palette}
             typography={typography}
-            onOpenMediaViewer={onOpenMediaViewer}
-            onOpenDirectImage={onOpenDirectImage}
+            onOpenMediaViewer={(payload) => onOpenMediaViewer(msg, payload)}
+            onOpenDirectImage={openDirectImage}
             onOpenSenderProfile={onOpenSenderProfile}
             resolveMemberLabel={resolveMemberLabel}
           />
@@ -369,7 +373,7 @@ const MessageRow = memo(function MessageRow({
                     ? `Remove your ${r.key} reaction`
                     : `React with ${r.key}`
                 }
-                onClick={() => onReactionChipClick(r.key, r.reactedByMe)}
+                onClick={() => { if (!msg.historyRoomId) onReactionChipClick(msg.eventId, r.key, r.reactedByMe); }}
                 style={{
                   display: "inline-flex",
                   alignItems: "center",
@@ -473,7 +477,7 @@ const MessageRow = memo(function MessageRow({
                     title={openArticleThread ? "Reply in thread" : "Reply"}
                     aria-label={openArticleThread ? "Reply in thread" : "Reply"}
                     onMouseDown={(e) => e.preventDefault()}
-                    onClick={openArticleThread ?? onRequestReply}
+                    onClick={openArticleThread ?? (() => onRequestReply(msg))}
                     style={{
                       ...segBtn,
                       backgroundColor: palette.bgTertiary,

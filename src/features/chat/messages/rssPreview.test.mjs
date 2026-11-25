@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { loadRssArticlePreview } from "./rssPreview.ts";
+import { cachedRssArticlePreview, loadRssArticlePreview } from "./rssPreview.ts";
 
 const feedUrl = "https://example.org/feed";
 const article = {
@@ -66,4 +66,22 @@ test("leaving a row drops late image results", async (t) => {
   await respond(image, "late thumbnail data");
 
   assert.equal(publish.mock.callCount(), 1);
+});
+
+test("a returning article row has its cached metadata and images on the first render", async (t) => {
+  const respond = mockPreviews(t);
+  const url = "https://example.org/returning";
+  const image = "https://example.org/returning.png";
+  const illustrated = { ...article, image };
+  const cancel = loadRssArticlePreview(url, feedUrl, url, () => {});
+  await respond(url, illustrated);
+  await respond(image, "cached thumbnail");
+  cancel();
+
+  const expected = { article: illustrated, images: { image: "cached thumbnail" } };
+  assert.deepEqual(cachedRssArticlePreview(url), expected);
+  const updates = [];
+  loadRssArticlePreview(url, feedUrl, url, (value) => updates.push(value));
+  await new Promise(setImmediate);
+  assert.deepEqual(updates, [expected]);
 });

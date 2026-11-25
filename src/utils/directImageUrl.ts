@@ -6,6 +6,33 @@ export function normalizeImageSrcHref(href: string): string | null {
   return null;
 }
 
+export type ImageDimensions = { width: number; height: number };
+
+export function imageDimensions(width: unknown, height: unknown): ImageDimensions | undefined {
+  const w = Number(width);
+  const h = Number(height);
+  if (Number.isSafeInteger(w) && w > 0 && Number.isSafeInteger(h) && h > 0) {
+    return { width: w, height: h };
+  }
+}
+
+// Older URL-only messages acquire dimensions on their first successful load.
+const measuredImages = new Map<string, ImageDimensions>();
+
+export function measuredImageDimensions(src: string) {
+  return measuredImages.get(src);
+}
+
+export function rememberImageDimensions(image: HTMLImageElement) {
+  const src = image.getAttribute("src");
+  const size = imageDimensions(image.naturalWidth, image.naturalHeight);
+  if (!src || !size) return;
+  measuredImages.delete(src);
+  measuredImages.set(src, size);
+  const oldest = measuredImages.keys().next();
+  if (measuredImages.size > 256 && !oldest.done) measuredImages.delete(oldest.value);
+}
+
 /** Path ends in a common static image extension (direct file URLs, not HTML pages). */
 export function hrefLooksLikeDirectImageUrl(href: string): boolean {
   const abs = normalizeImageSrcHref(href);

@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useLayoutEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { listen } from "@tauri-apps/api/event";
 import { getMessages, getMessagesAroundEvent } from "../features/chat/api";
 import type { Message } from "../types/matrix";
@@ -115,6 +115,9 @@ export function useRoomUpgradeHistory(
     if (predecessorIds.includes(source)) await load(source, eventId);
   }, [load, predecessorIds]);
 
-  const messages = predecessorIds.slice().reverse().flatMap((id) => pages[id]?.messages ?? []);
-  return { messages: projectMessages(messages, ignoredUsers, ignoreListRevision), hasOlder: !!nextRoom, loadOlder, loadAround, loading, error };
+  const messages = useMemo(() => {
+    const earlier = predecessorIds.slice().reverse().flatMap((id) => pages[id]?.messages ?? []);
+    return projectMessages(earlier, ignoredUsers, ignoreListRevision);
+  }, [predecessorIds, pages, ignoredUsers, ignoreListRevision]);
+  return { messages, hasOlder: !!nextRoom, loadOlder, loadAround, loading, error };
 }

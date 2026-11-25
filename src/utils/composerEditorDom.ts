@@ -1,5 +1,5 @@
 import type { Message } from "../types/matrix";
-import { normalizeImageSrcHref } from "./directImageUrl";
+import { imageDimensions, normalizeImageSrcHref, type ImageDimensions } from "./directImageUrl";
 import { MATRIX_BODY_MXID_RE_GLOBAL, mentionDisplayName, mentionPillLabel } from "./matrixBodyMxid";
 import { formatMatrixMarkdown, isMatrixMediaUri, matrixUserHref, matrixUserIdFromHref, parseMatrixMessageHtml } from "./matrixMessageHtml";
 
@@ -205,6 +205,7 @@ export function serializeComposerEditor(
   resolveMemberLabel: (userId: string) => string,
 ): ComposerMessageContent {
   const userIds = new Set<string>();
+  const imageSizes = new Map<string, ImageDimensions>();
   let room = false;
 
   function visit(node: Node, formatted: boolean, allowMentions: boolean): string {
@@ -215,6 +216,10 @@ export function serializeComposerEditor(
 
     if (tag === "IMG") {
       const url = el.getAttribute("data-url") ?? "";
+      const img = el as HTMLImageElement;
+      const size = imageDimensions(img.naturalWidth, img.naturalHeight)
+        ?? imageDimensions(img.getAttribute("width"), img.getAttribute("height"));
+      if (size && normalizeImageSrcHref(url)) imageSizes.set(url, size);
       const alt = el.getAttribute("alt") ?? "";
       return isMatrixMediaUri(url) ? `![${alt.replace(/[\\\[\]]/g, "\\$&")}](${url})` : url;
     }
@@ -249,6 +254,8 @@ export function serializeComposerEditor(
     if (tag === "PRE") return `\`\`\`\n${inner}\n\`\`\``;
     if (tag === "A") {
       const href = el.getAttribute("href") ?? "";
+      const size = imageDimensions(el.dataset.paxWidth, el.dataset.paxHeight);
+      if (size) imageSizes.set(href, size);
       return `[${inner}](${href})`;
     }
     if (tag === "HR") return "\n---\n";
@@ -282,7 +289,7 @@ export function serializeComposerEditor(
       .join("").replace(/\u200b/g, "").trim();
 
   const body = markdown(false);
-  const formattedBody = formatMatrixMarkdown(body, userIds.size > 0 ? markdown(true) : body);
+  const formattedBody = formatMatrixMarkdown(body, userIds.size > 0 ? markdown(true) : body, imageSizes);
   return { body, formattedBody, mentions: { userIds: [...userIds], room } };
 }
 
@@ -350,7 +357,7 @@ export function fillComposerEditorForEdit(
   mentionPills: FillComposerMentionPills,
 ): void {
   const userIds = new Set(message.mentionedUserIds);
-  const fragment = message.formattedBody && userIds.size > 0
+  const fragment = message.formattedBody
     ? parseMatrixMessageHtml(message.formattedBody)
     : null;
   let hasMentionLinks = false;
@@ -375,6 +382,12 @@ export function fillComposerEditorForEdit(
     root.replaceChildren(fragment);
   } else {
     fillComposerEditorFromMarkdown(root, message.body, imgStyle);
+    const sizes = new Map(Array.from(fragment?.querySelectorAll<HTMLAnchorElement>("a[data-pax-width]") ?? [],
+      (link) => [link.getAttribute("href"), imageDimensions(link.dataset.paxWidth, link.dataset.paxHeight)]));
+    for (const img of root.querySelectorAll("img[data-url]")) {
+      const size = sizes.get(img.getAttribute("data-url"));
+      if (size) Object.assign(img, size);
+    }
   }
   replaceBareMxidsWithPillsInComposer(root, mentionPills.getDisplayName, mentionPills.makeSpan,
     (userId) => userId === "@room" ? Boolean(message.mentionsRoom) : userIds.has(userId),
@@ -423,12 +436,14 @@ export function insertImageAtSelection(
   href: string,
   imgStyle: { borderRadius: number; maxWidth: string },
   onImageLayout?: () => void,
+  dimensions?: ImageDimensions,
 ): void {
   const src = normalizeImageSrcHref(href);
   if (!src) return;
   const img = document.createElement("img");
   img.setAttribute("data-url", href);
   img.src = src;
+  if (dimensions) Object.assign(img, dimensions);
   img.alt = "";
   img.contentEditable = "false";
   img.draggable = false;
