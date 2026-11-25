@@ -264,6 +264,7 @@ export default function MainLayout({
   } | null>(null);
   /** DM composer before the Matrix room exists (first send creates the room). */
   const [pendingDm, setPendingDm] = useState<{ peerUserId: string; displayNameHint: string } | null>(null);
+  const [composerFocusRoomId, setComposerFocusRoomId] = useState<string | null>(null);
   const pendingDmPeerProfile = useMatrixUserProfile(pendingDm?.peerUserId ?? null);
   /** Carries DM metadata across the gap between room creation and sync populating isDirect. */
   const [dmTransitionHint, setDmTransitionHint] = useState<{
@@ -276,6 +277,16 @@ export default function MainLayout({
   const spaceKey = activeSpaceId ?? "";
   const selectedRoomId = activeRoomBySpace[spaceKey] ?? null;
   const activeRoomId = selectedRoomId ? getRoom(selectedRoomId)?.id ?? selectedRoomId : null;
+
+  const clearComposerFocusRequest = useCallback(() => setComposerFocusRoomId(null), []);
+  const onComposerAutoFocus = composerFocusRoomId !== null && composerFocusRoomId === activeRoomId
+    ? clearComposerFocusRequest : undefined;
+
+  useEffect(() => {
+    if (composerFocusRoomId !== null && (activeRoomId !== composerFocusRoomId || discoverOpen)) {
+      setComposerFocusRoomId(null);
+    }
+  }, [activeRoomId, composerFocusRoomId, discoverOpen]);
 
   const isMobile = useIsMobile();
   const [mobileNavDrawerOpen, setMobileNavDrawerOpen] = useState(false);
@@ -935,27 +946,13 @@ export default function MainLayout({
           && normalizeUserId(target) === peerNorm;
       });
       const existingDm = matchingChats.find(isOneToOneChatUi) ?? matchingChats[0];
-      if (existingDm) {
-        const room = getRoom(existingDm.id) ?? existingDm;
-        const parentSpaceId =
-          room.parentSpaceIds.find((pid) => joinedSpaceIdSet.has(pid)) ?? null;
-        startTransition(() => {
-          setPendingDm(null);
-          setActiveSpaceId(parentSpaceId);
-          setActiveRoomBySpace((prev) => ({
-            ...prev,
-            [parentSpaceId ?? ""]: room.id,
-          }));
-        });
-        if (isMobile) setMobileNavDrawerOpen(false);
-        return;
-      }
-      const draftId = pendingDmRoomId(peerUserId);
-      startTransition(() => {
-        setPendingDm({ peerUserId, displayNameHint });
-        setActiveSpaceId(null);
-        setActiveRoomBySpace((prev) => ({ ...prev, "": draftId }));
-      });
+      const room = existingDm ? getRoom(existingDm.id) ?? existingDm : null;
+      const targetId = room?.id ?? pendingDmRoomId(peerUserId);
+      const parentSpaceId = room?.parentSpaceIds.find((pid) => joinedSpaceIdSet.has(pid)) ?? null;
+      setPendingDm(room ? null : { peerUserId, displayNameHint });
+      setActiveSpaceId(parentSpaceId);
+      setActiveRoomBySpace((prev) => ({ ...prev, [parentSpaceId ?? ""]: targetId }));
+      setComposerFocusRoomId(targetId);
       if (isMobile) setMobileNavDrawerOpen(false);
     },
     [spaces, roomsBySpace, getRoom, joinedSpaceIdSet, isMobile, setMobileNavDrawerOpen],
@@ -1592,6 +1589,7 @@ export default function MainLayout({
             ) : showingDraftDm && pendingDm ? (
               <ChatView
                 draftDm={pendingDm}
+                onComposerAutoFocus={onComposerAutoFocus}
                 userId={userId}
                 userMenuWidth={userMenuWidth}
                 isMobile={isMobile}
@@ -1624,6 +1622,7 @@ export default function MainLayout({
             ) : activeRoom ? (
               <ChatView
                 room={activeRoom}
+                onComposerAutoFocus={onComposerAutoFocus}
                 userId={userId}
                 userMenuWidth={userMenuWidth}
                 isMobile={isMobile}

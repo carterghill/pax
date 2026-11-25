@@ -92,6 +92,8 @@ export default function ComposerInputRow({
   const composerFontSize = emojiOnlyComposer
     ? typography.fontSizeBase * EMOJI_ONLY_DISPLAY_SCALE
     : typography.fontSizeBase;
+  const verticalPadding = spacing.unit * 3;
+  const textPadding = `${verticalPadding}px ${spacing.unit * 2}px`;
 
   return (
     <div
@@ -145,7 +147,7 @@ export default function ComposerInputRow({
               left: 0,
               top: 0,
               right: 0,
-              padding: `${spacing.unit * 3}px ${spacing.unit * 2}px ${spacing.unit * 3}px ${spacing.unit * 2}px`,
+              padding: textPadding,
               pointerEvents: "none",
               color: palette.textSecondary,
               fontSize: composerFontSize,
@@ -182,7 +184,9 @@ export default function ComposerInputRow({
             fontSize: composerFontSize,
             fontFamily: `${typography.fontFamily}, var(--pax-twemoji-font-stack)`,
             lineHeight: typography.lineHeight,
-            padding: `${spacing.unit * 3}px ${spacing.unit * 2}px ${spacing.unit * 3}px ${spacing.unit * 2}px`,
+            padding: textPadding,
+            // Reserve a full caret line even while the empty editor is read-only during permission loading.
+            minHeight: Math.ceil(composerFontSize * typography.lineHeight + 2 * verticalPadding),
             maxHeight: composerMaxHeightPx,
             overflowY: "hidden",
             boxSizing: "border-box",

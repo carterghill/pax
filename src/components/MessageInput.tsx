@@ -49,6 +49,8 @@ export type { EditingMessageRef, MessageFileSendBridge };
 interface MessageInputProps {
   roomId: string;
   roomName: string;
+  /** Requests focus once the editor is writable. Called when the request is fulfilled. */
+  onAutoFocus?: () => void;
   onMessageSent: (reply?: SentThreadReply) => void;
   onSendError?: (error: string | null) => void;
   thread?: MessageThreadTarget;
@@ -83,6 +85,7 @@ function usesNativeCameraPicker() {
 export default function MessageInput({
   roomId,
   roomName,
+  onAutoFocus,
   onMessageSent,
   onSendError,
   thread,
@@ -120,6 +123,17 @@ export default function MessageInput({
   const [hasComposerMedia, setHasComposerMedia] = useState(false);
   const [sending, setSending] = useState(false);
   const editorRef = useRef<HTMLDivElement>(null);
+  useLayoutEffect(() => {
+    const editor = editorRef.current;
+    if (!onAutoFocus || interactionLocked || !editor) return;
+    editor.focus({ preventScroll: true });
+    const selection = window.getSelection();
+    if (selection && !editor.contains(selection.anchorNode)) {
+      selection.collapse(editor, editor.childNodes.length);
+    }
+    onAutoFocus();
+  }, [interactionLocked, onAutoFocus]);
+
   const rootRef = useRef<HTMLDivElement>(null);
   const { palette, typography, spacing, resolvedColorScheme } = useTheme();
   const composerScope = JSON.stringify([selfUserId, roomId, thread?.rootEventId]);

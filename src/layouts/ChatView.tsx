@@ -58,6 +58,7 @@ interface ChatViewProps {
   userMenuWidth: number;
   onUserMenuWidthChange: (width: number) => void;
   onStartDirectMessage: (peerUserId: string, displayNameHint: string) => void;
+  onComposerAutoFocus?: () => void;
   onStartCall?: (video: boolean) => void;
   onCallMember?: (userId: string) => void;
   callUnavailable?: string;
@@ -176,6 +177,7 @@ export default function ChatView({
   userMenuWidth,
   onUserMenuWidthChange,
   onStartDirectMessage,
+  onComposerAutoFocus,
   onStartCall,
   onCallMember,
   callUnavailable,
@@ -640,6 +642,7 @@ export default function ChatView({
           <div style={{ position: "relative", flexShrink: 0, zIndex: 1 }}>
             <MessageInput
               key={`draft-${draftDm.peerUserId}`}
+              onAutoFocus={onComposerAutoFocus}
               roomId=""
               roomName={title}
               draftDmPeerUserId={draftDm.peerUserId}
@@ -876,6 +879,7 @@ export default function ChatView({
             />
             <MessageInput
               key={activeRoom.id}
+              onAutoFocus={onComposerAutoFocus}
               roomId={activeRoom.id}
               roomName={activeRoom.name}
               allowWindowFileDrop={!activeThread}
