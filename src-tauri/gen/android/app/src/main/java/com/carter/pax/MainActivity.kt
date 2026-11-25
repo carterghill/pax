@@ -139,6 +139,18 @@ class MainActivity : TauriActivity() {
 
   inner class PaxBridge {
     @JavascriptInterface
+    fun getShowMessagePreviews(): Boolean = PaxMessagePreview.enabled(this@MainActivity)
+
+    @JavascriptInterface
+    fun setShowMessagePreviews(enabled: Boolean) = PaxMessagePreview.setEnabled(this@MainActivity, enabled)
+
+    @JavascriptInterface
+    fun showMessageNotification(roomId: String, eventId: String, sender: String, roomLabel: String?, message: String?) {
+      val body = PaxMessagePreview.notificationBody(PaxMessagePreview.enabled(this@MainActivity), message, null)
+      PaxMessageNotifications.post(this@MainActivity, roomId, eventId, sender, body, subText = roomLabel)
+    }
+
+    @JavascriptInterface
     fun setBadgeCount(count: Int) = PaxNotificationBadge.sync(this@MainActivity, count)
 
     @JavascriptInterface

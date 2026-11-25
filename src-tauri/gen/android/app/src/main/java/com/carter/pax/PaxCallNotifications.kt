@@ -23,7 +23,7 @@ import java.util.UUID
 internal object PaxCallPush {
     init { System.loadLibrary("pax_lib") }
 
-    external fun resolve(dataDir: String, roomId: String, eventId: String): String?
+    external fun resolve(dataDir: String, roomId: String, eventId: String?): String?
     external fun decline(dataDir: String, roomId: String, callId: String, matrixRingEventId: String): Boolean
 }
 

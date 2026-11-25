@@ -13,16 +13,18 @@ use jni::{
 use matrix_sdk::{
     authentication::matrix::MatrixSession,
     deserialized_responses::TimelineEvent,
+    encryption::{BackupDownloadStrategy, EncryptionSettings},
     ruma::{EventId, OwnedUserId, RoomId, UserId},
     Client, Room, SessionMeta,
 };
 use serde_json::{json, Value};
 use tokio::sync::Mutex;
+use tokio::time::{timeout_at, Instant};
 
 use crate::{
     commands::{
         auth::{persist_refreshed_tokens, read_credentials_at, CREDENTIALS_FILENAME},
-        direct_calls, group_calls, matrix_voip,
+        direct_calls, group_calls, matrix_voip, messages::retry_timeline_decryption,
     },
     crypto_store::{self, OpenMode},
     voice_presence::now_ms,
@@ -76,6 +78,10 @@ pub(crate) async fn saved_client(base: &Path) -> Option<Client> {
     let client = Client::builder()
         .homeserver_url(&credentials.homeserver)
         .store_config(store)
+        .with_encryption_settings(EncryptionSettings {
+            backup_download_strategy: BackupDownloadStrategy::AfterDecryptionFailure,
+            ..Default::default()
+        })
         .handle_refresh_tokens()
         .build()
         .await
@@ -101,20 +107,65 @@ async fn push_client(base: &Path) -> Option<Client> {
     saved_client(base).await
 }
 
-async fn inspect_event(base: PathBuf, room_id: String, event_id: String) -> Option<Value> {
+async fn resolve_push(base: PathBuf, room_id: String, event_id: Option<String>) -> Option<Value> {
     let room_id = RoomId::parse(room_id).ok()?;
-    let event_id = EventId::parse(event_id).ok()?;
-    let _store = COLD_STORE.lock().await;
-    let client = push_client(&base).await?;
-    let room = client.get_room(&room_id)?;
-    let context = room
-        .event_with_context(&event_id, true, 24u32.into(), None)
+    let deadline = Instant::now() + Duration::from_secs(4);
+    let (_store, room, is_direct) = timeout_at(deadline, async {
+        let store = COLD_STORE.lock().await;
+        let room = push_client(&base).await?.get_room(&room_id)?;
+        let is_direct = room.is_direct().await.ok();
+        Some((store, room, is_direct))
+    })
+    .await
+    .ok()??;
+
+    // Plaintext pushes can use the cached room info alone. Keep that info
+    // available when an encrypted event cannot be resolved before the deadline.
+    let outcome = match event_id.and_then(|id| EventId::parse(id).ok()) {
+        Some(id) => timeout_at(deadline, inspect_event(&room, &id))
+            .await
+            .ok()
+            .flatten(),
+        None => None,
+    };
+    let mut outcome = outcome.unwrap_or_else(|| json!({ "kind": "room" }));
+    if matches!(outcome["kind"].as_str(), Some("message" | "room")) {
+        outcome["isDirect"] = json!(is_direct);
+        let label = room.name()
+            .or_else(|| room.cached_display_name().map(|name| name.to_string()))
+            .or_else(|| room.canonical_alias().map(|alias| alias.to_string()));
+        outcome["roomName"] = json!(label.unwrap_or_default());
+    }
+    Some(outcome)
+}
+
+async fn inspect_event(room: &Room, event_id: &EventId) -> Option<Value> {
+    let mut context = room
+        .event_with_context(event_id, true, 24u32.into(), None)
         .await
         .ok()?;
-    let event = context.event.as_ref()?;
-    if let Some(outcome) = group_calls::push_event(&room, event, &context.events_after, &context.state).await { return Some(outcome); }
+    let event = context.event.as_mut()?;
+    if event.kind.is_utd() {
+        retry_timeline_decryption(
+            room,
+            std::slice::from_mut(event),
+            &Default::default(),
+            &mut None,
+        )
+        .await;
+        if !event.kind.is_utd() {
+            // A key arrived during the grace period. Re-evaluate the decrypted
+            // event before deciding whether this push should notify or ring.
+            if let Some(actions) = room.event_push_actions(event.raw()).await.ok().flatten() {
+                event.set_push_actions(actions);
+            }
+        }
+    }
+    if let Some(outcome) = group_calls::push_event(room, event, &context.events_after, &context.state).await {
+        return Some(outcome);
+    }
     if let Some(outcome) =
-        matrix_voip::call_push_event(&room, event, &context.events_before, &context.events_after)
+        matrix_voip::call_push_event(room, event, &context.events_before, &context.events_after)
             .await
     {
         return Some(outcome);
@@ -122,14 +173,14 @@ async fn inspect_event(base: PathBuf, room_id: String, event_id: String) -> Opti
 
     if event.raw().get_field::<&str>("type").ok().flatten() == Some("com.carter.pax.direct_call") {
         let ignored = json!({ "kind": "ignore" });
-        let Some(peer) = direct_calls::direct_call_peer(&room).await else {
+        let Some(peer) = direct_calls::direct_call_peer(room).await else {
             return Some(ignored);
         };
-        if is_ignored(&client, &peer).await {
+        if is_ignored(&room.client(), &peer).await {
             return Some(ignored);
         }
         return direct_calls::call_push_event(
-            &room,
+            room,
             &peer,
             event,
             &context.events_before,
@@ -139,7 +190,7 @@ async fn inspect_event(base: PathBuf, room_id: String, event_id: String) -> Opti
         .await
         .or(Some(ignored));
     }
-    message_push_event(&room, event).await
+    message_push_event(room, event).await
 }
 
 async fn is_ignored(client: &Client, sender: &UserId) -> bool {
@@ -180,7 +231,6 @@ async fn message_push_event(room: &Room, event: &TimelineEvent) -> Option<Value>
     Some(json!({
         "kind": "message",
         "sender": sender_name.as_deref().unwrap_or(sender.as_str()),
-        "roomName": room.cached_display_name().map(|name| name.to_string()).unwrap_or_default(),
         "preview": preview.unwrap_or_default(),
         "silent": !actions.iter().any(|action| action.sound().is_some()),
     }))
@@ -197,16 +247,12 @@ pub extern "system" fn Java_com_carter_pax_PaxCallPush_resolve(
     let run = || -> Option<jstring> {
         let base = PathBuf::from(String::from(env.get_string(&base).ok()?));
         let room_id: String = env.get_string(&room_id).ok()?.into();
-        let event_id: String = env.get_string(&event_id).ok()?.into();
-        let value = runtime()?.block_on(async {
-            tokio::time::timeout(
-                Duration::from_secs(4),
-                inspect_event(base, room_id, event_id),
-            )
-            .await
-            .ok()
-            .flatten()
-        })?;
+        let event_id = if event_id.is_null() {
+            None
+        } else {
+            Some(env.get_string(&event_id).ok()?.into())
+        };
+        let value = runtime()?.block_on(resolve_push(base, room_id, event_id))?;
         Some(env.new_string(value.to_string()).ok()?.into_raw())
     };
     std::panic::catch_unwind(std::panic::AssertUnwindSafe(run))

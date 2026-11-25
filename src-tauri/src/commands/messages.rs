@@ -69,7 +69,7 @@ use super::{
 
 const TIMELINE_KEY_WAIT: Duration = Duration::from_millis(750);
 
-pub(super) async fn retry_timeline_decryption(
+pub(crate) async fn retry_timeline_decryption(
     room: &Room,
     events: &mut [TimelineEvent],
     ignored: &IgnoredUserIds,

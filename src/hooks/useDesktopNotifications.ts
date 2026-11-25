@@ -5,6 +5,7 @@ import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 import { useSound } from "react-sounds";
 import type { Message, Room } from "../types/matrix";
 import { isOneToOneChatUi } from "../utils/dmDisplay";
+import { androidMessagePreviews } from "../utils/messageNotificationPreviews";
 import { useNotificationSettings, type NotificationLevel } from "./useNotificationSettings";
 
 /* ------------------------------------------------------------------ */
@@ -269,7 +270,10 @@ export function useDesktopNotifications({
 
       if (cancelled || ignoredUsersRef.current.has(message.sender)) return;
       const room = getRoomRef.current(roomId);
-      const title = formatTitle(room, message.senderName || "");
+      const previews = androidMessagePreviews();
+      const title = previews
+        ? message.senderName || message.sender
+        : formatTitle(room, message.senderName || "");
       // Attach a payload that can be fished out by the click handler.
       // The plugin's click event doesn't round-trip custom data well,
       // so we stash the most-recent-notification's roomId for the click
@@ -280,11 +284,17 @@ export function useDesktopNotifications({
       };
 
       try {
-        await invoke("notify_send", {
-          title: truncate(title, 80),
-          body: truncate(message.body ?? "", 200),
-          iconPath: null,
-        });
+        if (previews?.showMessageNotification) {
+          previews.showMessageNotification(
+            roomId, message.eventId, title, isDm ? null : room?.name.trim() || null,
+            message.decryptionFailed ? null : message.body,
+          );
+        } else {
+          const body = previews && (!previews.getShowMessagePreviews() || message.decryptionFailed || !message.body?.trim())
+            ? "New message"
+            : truncate(message.body ?? "", 200);
+          await invoke("notify_send", { title: truncate(title, 80), body, iconPath: null });
+        }
         void playNotificationRef.current()
           .catch((err) =>
             console.warn(

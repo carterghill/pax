@@ -1,6 +1,7 @@
 import CallPreferenceSelect from "./CallPreferenceSelect";
 import { useEffect, useState } from "react";
 import { useTheme } from "../theme/ThemeContext";
+import { androidMessagePreviews } from "../utils/messageNotificationPreviews";
 import {
   useNotificationSettings,
   type NotificationLevel,
@@ -95,6 +96,10 @@ export default function NotificationSettingsPanel({
   scopeId,
 }: NotificationSettingsPanelProps) {
   const { palette, typography, spacing } = useTheme();
+  const previews = scope === "global" ? androidMessagePreviews() : undefined;
+  const [showMessagePreviews, setShowMessagePreviews] = useState(
+    () => previews?.getShowMessagePreviews() ?? true,
+  );
   const {
     notificationSettings,
     unreadSettings,
@@ -229,6 +234,27 @@ export default function NotificationSettingsPanel({
   return (
     <div style={{ display: "flex", flexDirection: "column", gap: spacing.unit * 5 }}>
       {scope !== "space" && <CallPreferenceSelect scope={scope} id={scopeId} />}
+      {previews && (
+        <div>
+          <h3 style={sectionHeading}>Message previews</h3>
+          <p style={sectionDescription}>
+            Turn off to show “New message” in notifications on this device.
+          </p>
+          <label style={radioRowBase}>
+            <input
+              type="checkbox"
+              checked={showMessagePreviews}
+              onChange={(event) => {
+                const enabled = event.target.checked;
+                previews.setShowMessagePreviews(enabled);
+                setShowMessagePreviews(enabled);
+              }}
+              style={{ accentColor: palette.accent, marginTop: 2 }}
+            />
+            Show message text in notifications
+          </label>
+        </div>
+      )}
       {/* ============ Notification level ============ */}
       <div>
         <h3 style={sectionHeading}>Notification level</h3>
