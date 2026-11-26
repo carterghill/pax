@@ -84,6 +84,10 @@ To validate against a homeserver:
 
 Local regression checks: `npm run build` and, from `src-tauri`, `cargo test --lib --offline`. Pax integration tests start a local loopback HTTP server and need permission to bind a port. They exercise real Secret Storage/backup encryption and restoration on a fresh device, interrupted setup, and rejection of malformed discovery and recovery records. The encryption tests also exercise key persistence, encrypted transfer to a new device, account isolation, and guards against replacing existing recovery data. These checks do not replace the homeserver test above.
 
+## Desktop message notifications
+
+While Pax is running, incoming messages that earn a notification or highlight badge show a banner, including keyword matches and unread messages in unmuted DMs. This also applies while the room is focused. The first sync establishes the unread baseline silently. The macOS `tauri dev` executable displays a temporary native panel because it runs outside an application bundle. Packaged desktop builds send banners through Tauri’s notification plugin.
+
 ## Incoming call notifications
 
 Pax prefers LiveKit for direct calls when the peer has advertised support and the room's LiveKit service can issue a token. For other direct calls, Pax uses the Matrix two-party VoIP protocol with native WebRTC audio, optional camera video, and the homeserver's TURN service when available. The member menu places a two-party Matrix call in the current room and addresses the invitation to the selected member. The phone button in a group chat joins its MatrixRTC voice session and sends an `org.matrix.msc4075.rtc.notification` to the other joined members. Group chats use the same LiveKit service as voice channels.

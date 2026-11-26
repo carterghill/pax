@@ -395,10 +395,11 @@ export default function MainLayout({
     [currentHomeserver, customDiscoverServers]
   );
 
-  // Desktop notifications.  The hook watches `room-message`, gates by
-  // per-room level + focus, and dispatches via the notification plugin.
-  // It also fires a `pax-notification-clicked` CustomEvent on click-to-focus.
-  useDesktopNotifications({ userId, activeRoomId, getRoom });
+  useDesktopNotifications({
+    userId,
+    activeRoomId: discoverOpen || settingsOpen || mobileNavDrawerOpen ? null : activeRoomId,
+    getRoom,
+  });
 
   // Click-to-focus: when the user clicks a notification, jump to that room
   // (and scroll to the notified event when `detail.eventId` is present).

@@ -1,5 +1,5 @@
 import { useEffect, useRef } from "react";
-import { invoke } from "@tauri-apps/api/core";
+import { invoke, isTauri } from "@tauri-apps/api/core";
 import { useIgnoredUsers } from "../context/IgnoredUsersContext";
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 import { useSound } from "react-sounds";
@@ -116,35 +116,7 @@ export interface DesktopNotificationsOptions {
   getRoom: (roomId: string) => Room | null;
 }
 
-/**
- * Subscribes to `room-message` events and dispatches desktop notifications
- * according to the user's configured notification level.
- *
- * Mention detection uses the structured `m.mentions` data from the event
- * (piped through the `room-message` payload as `mentionsMe` / `roomPing`),
- * which is the same data the server uses for push-rule highlight evaluation.
- * This keeps desktop notifications aligned with the red-badge mention count
- * that uses `highlight_count` / `num_unread_mentions`.
- *
- * DM promotion mirrors `effectiveMentionCount`: in a non-muted DM, every
- * incoming message is treated as notification-worthy for levels that care
- * about mentions (`allMentions`, `userMentions`), because the server doesn't
- * set highlights for plain DM text but the whole point of a DM is that
- * every message is addressed to you.
- *
- * Suppression logic:
- *   - Own messages never notify.
- *   - If the message is in the currently-active room AND the window is
- *     focused, don't notify — the user is looking right at it.
- *   - Otherwise, consult the room's effective level and structured mention
- *     data via `shouldNotifyForLevel`.
- *
- * The hook also handles the plugin's click action (`notification`), which
- * focuses the main window and emits `pax-notification-clicked` with the
- * room id.  MainLayout listens for that event and switches the active
- * room — kept here (emit) + there (consume) so this hook doesn't reach
- * into MainLayout's state directly.
- */
+/** Play the desktop alert sound and handle local mobile alerts. */
 export function useDesktopNotifications({
   userId,
   activeRoomId,
@@ -209,18 +181,17 @@ export function useDesktopNotifications({
 
   // Permission check + message subscription.
   useEffect(() => {
-    if (!userId) return;
+    if (!userId || !isTauri()) return;
 
     let cancelled = false;
     let permissionGranted = false;
-    const unlisteners: UnlistenFn[] = [];
+    let unlisten: UnlistenFn | undefined;
 
-    // Best-effort "which room did the user just click to open?" — the
-    // plugin's click event doesn't round-trip custom data well, so we
-    // stash the most-recent notification target for the native click handler.
-    const lastClickNotificationRef = {
-      current: null as { roomId: string; eventId: string } | null,
-    };
+    function playSound() {
+      void playNotificationRef.current().catch((error) =>
+        console.warn("[useDesktopNotifications] notification sound failed:", error),
+      );
+    }
 
     async function resolveLevel(roomId: string): Promise<NotificationLevel> {
       try {
@@ -274,15 +245,6 @@ export function useDesktopNotifications({
       const title = previews
         ? message.senderName || message.sender
         : formatTitle(room, message.senderName || "");
-      // Attach a payload that can be fished out by the click handler.
-      // The plugin's click event doesn't round-trip custom data well,
-      // so we stash the most-recent-notification's roomId for the click
-      // handler to use.
-      lastClickNotificationRef.current = {
-        roomId,
-        eventId: message.eventId,
-      };
-
       try {
         if (previews?.showMessageNotification) {
           previews.showMessageNotification(
@@ -296,14 +258,7 @@ export function useDesktopNotifications({
           await invoke("notify_send", { title: truncate(title, 80), body, iconPath: null });
         }
         // Android's notification channel handles sound and vibration in the current ringer mode.
-        if (previews) return;
-        void playNotificationRef.current()
-          .catch((err) =>
-            console.warn(
-              "[useDesktopNotifications] notification sound failed:",
-              err,
-            ),
-          );
+        if (!previews) playSound();
       } catch (e) {
         console.warn("[useDesktopNotifications] notify_send failed:", e);
       }
@@ -313,62 +268,25 @@ export function useDesktopNotifications({
       // A signed-in Android app needs permission even when Firebase handles delivery.
       const android = (window as Window & { PaxAndroid?: { requestNotificationPermission?(): void } }).PaxAndroid;
       android?.requestNotificationPermission?.();
-      try {
-        if (await invoke<boolean>("push_gateway_configured")) return;
-      } catch {
-        /* fall through — desktop or unknown; keep native notification path */
-      }
-      if (cancelled) return;
-
-      try {
-        permissionGranted = await invoke<boolean>("notify_supported");
-      } catch {
-        permissionGranted = false;
-      }
-      if (cancelled) return;
-
-      const offMsg = await listen<RoomMessagePayload>(
-        "room-message",
-        (e) => {
-          if (cancelled) return;
-          handleMessage(e.payload);
-        },
-      );
-      unlisteners.push(offMsg);
-
-      // Plugin click action → focus window + let MainLayout know which
-      // room to jump to.  The plugin's `notification` event fires on
-      // click; payload isn't reliably round-tripped, so we use
-      // `lastClickNotificationRef` as a best-effort hint (last notification
-      // shown — good enough for "I clicked the toast that just popped").
-      const offClick = await listen("notification", () => {
+      const delivery = await invoke<"desktop" | "mobilePush" | "mobileLocal">("message_notification_delivery");
+      if (cancelled || delivery === "mobilePush") return;
+      if (delivery === "desktop") {
+        unlisten = await listen<string>("desktop-message-notified", ({ payload }) => {
+          if (!cancelled && payload === userId) playSound();
+        }, { target: "main" });
+      } else {
+        permissionGranted = await invoke<boolean>("notify_supported").catch(() => false);
         if (cancelled) return;
-        invoke("focus_main_window").catch(() => {
-          /* best effort */
+        unlisten = await listen<RoomMessagePayload>("room-message", ({ payload }) => {
+          if (!cancelled) void handleMessage(payload);
         });
-        const target = lastClickNotificationRef.current;
-        if (target) {
-          const detail: { roomId: string; eventId?: string } = {
-            roomId: target.roomId,
-            eventId: target.eventId,
-          };
-          window.dispatchEvent(
-            new CustomEvent("pax-notification-clicked", { detail }),
-          );
-        }
-      });
-      unlisteners.push(offClick);
-    })();
+      }
+      if (cancelled) unlisten();
+    })().catch((error) => console.warn("[useDesktopNotifications] setup failed:", error));
 
     return () => {
       cancelled = true;
-      for (const off of unlisteners) {
-        try {
-          off();
-        } catch {
-          /* ignore */
-        }
-      }
+      unlisten?.();
     };
   }, [userId]);
 }

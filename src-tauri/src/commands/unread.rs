@@ -342,7 +342,7 @@ pub async fn emit_unread_snapshot_if_changed(
     unread_projection: &UnreadProjectionCache,
     pending_reads: &super::unavailable_messages::PendingUnavailableReads,
     app: &AppHandle,
-) {
+) -> HashMap<OwnedRoomId, u64> {
     // Snapshot the raw-message map first so we hold its lock briefly; the
     // matrix-sdk room reads are synchronous below.
     let raw_map: HashMap<OwnedRoomId, u64> = raw_unread.lock().await.clone();
@@ -371,6 +371,7 @@ pub async fn emit_unread_snapshot_if_changed(
         // from `get_rooms`.
     }
 
+    let mut badge_increases = HashMap::new();
     for (room_id, new_state) in snapshots {
         let changed = match cache.get(&room_id) {
             Some(prev) => *prev != new_state,
@@ -378,6 +379,12 @@ pub async fn emit_unread_snapshot_if_changed(
         };
         if !changed {
             continue;
+        }
+        let previous = cache.get(&room_id);
+        let increase = new_state.notifications.saturating_sub(previous.map_or(0, |s| s.notifications))
+            .max(new_state.mentions.saturating_sub(previous.map_or(0, |s| s.mentions)));
+        if increase > 0 {
+            badge_increases.insert(room_id.clone(), increase);
         }
         cache.insert(room_id.clone(), new_state.clone());
 
@@ -387,6 +394,7 @@ pub async fn emit_unread_snapshot_if_changed(
         };
         let _ = app.emit("room-unread-changed", payload);
     }
+    badge_increases
 }
 
 async fn unread_snapshots(

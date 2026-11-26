@@ -2481,6 +2481,8 @@ pub async fn start_sync(
     let reconcile_state_arc = state_arc.clone();
     let reconcile_gate_for_loop = reconcile_gate.clone();
 
+    #[cfg(desktop)]
+    let notification_session = state.notifications.session();
     // Spawn the continuous sync loop in the background.
     // Uses sync_once in a manual loop so we can read `desired_presence` on each
     // iteration and set the sync's `set_presence` accordingly:
@@ -2572,6 +2574,8 @@ pub async fn start_sync(
                 presence_count,
             );
 
+            #[cfg(desktop)]
+            let live = first_sync_done;
             if !first_sync_done {
                 first_sync_done = true;
                 reconcile_state_arc.sync_ready.store(true, Ordering::Release);
@@ -2606,7 +2610,7 @@ pub async fn start_sync(
             // reads (RwLock) — cheap even for hundreds of rooms.  See
             // `commands::unread` for why we poll instead of subscribing to
             // `room_info_notable_update_receiver`.
-            super::unread::emit_unread_snapshot_if_changed(
+            let badge_increases = super::unread::emit_unread_snapshot_if_changed(
                 &client,
                 &unread_cache,
                 &raw_unread,
@@ -2615,6 +2619,15 @@ pub async fn start_sync(
                 &app,
             )
             .await;
+
+            #[cfg(desktop)]
+            if live {
+                super::notifications::desktop::dispatch(
+                    &app, &notification_session, &client, &response, &badge_increases,
+                );
+            }
+            #[cfg(mobile)]
+            let _ = badge_increases;
 
             let voice_rooms = crate::voice_presence::changed_rooms(&client, &response);
             if !voice_rooms.is_empty() {

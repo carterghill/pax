@@ -703,7 +703,7 @@ pub fn run() {
             // --- Desktop notifications ---
             commands::notifications::notify_supported,
             commands::notifications::notify_send,
-            commands::notifications::focus_main_window,
+            commands::notifications::message_notification_delivery,
             // --- Push notifications (Android) ---
             commands::push::register_pusher,
             commands::push::unregister_pusher,

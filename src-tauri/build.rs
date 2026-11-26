@@ -72,6 +72,13 @@ fn main() {
             println!("cargo:rustc-link-lib=framework=CallKit");
             println!("cargo:rustc-link-lib=framework=PushKit");
         } else {
+            let source = "src/commands/notifications/macos_dev.m";
+            println!("cargo:rerun-if-changed={source}");
+            cc::Build::new()
+                .file(source)
+                .flag("-fobjc-arc")
+                .flag("-fblocks")
+                .compile("pax_dev_message_banner");
             let source = "src/webview_recovery.m";
             println!("cargo:rerun-if-changed={source}");
             cc::Build::new()

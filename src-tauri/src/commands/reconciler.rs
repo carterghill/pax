@@ -375,6 +375,53 @@ impl NotificationSession {
         self.control.lock().unwrap().revision == snapshot.revision
     }
 
+    /// Banners must be deliverable from a completed sync even while the remote
+    /// push-rule reconciliation is offline or rebuilding its account-wide snapshot.
+    #[cfg(desktop)]
+    pub(super) async fn banner_level(
+        &self,
+        room: &matrix_sdk::Room,
+        is_dm: bool,
+    ) -> Result<NotificationLevel, String> {
+        let id = room.room_id().as_str();
+        let cached = {
+            let control = self.control.lock().unwrap();
+            if let Some(level) = control
+                .snapshot
+                .as_ref()
+                .and_then(|snapshot| snapshot.levels.get(id))
+            {
+                return Ok(*level);
+            }
+            control.settings.clone()
+        };
+        let client = room.client();
+        let settings = match cached {
+            Some(settings) => settings,
+            None => client
+                .account()
+                .account_data_raw(super::pax_settings::NOTIFICATION_SETTINGS_TYPE.into())
+                .await
+                .map_err(|e| e.to_string())?
+                .map(|raw| serde_json::from_str::<NotificationSettings>(raw.json().get()))
+                .transpose()
+                .map_err(|e| e.to_string())?
+                .unwrap_or_default(),
+        };
+        let parents = if !settings.spaces.is_empty() && !settings.rooms.contains_key(id) {
+            index_parent_spaces(&load_space_graph(&client).await?)
+        } else {
+            ParentSpaces::new()
+        };
+        Ok(
+            inherited_level(id, &settings, &parents).unwrap_or(if is_dm {
+                NotificationLevel::All
+            } else {
+                NotificationLevel::AllMentions
+            }),
+        )
+    }
+
     pub(super) async fn snapshot(
         &self,
         state: &AppState,
