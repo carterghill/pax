@@ -1,0 +1,13 @@
+pkgname=pax
+pkgver=${PAX_VERSION:?}
+pkgrel=1
+pkgdesc='Pax desktop Matrix client'
+arch=('aarch64' 'x86_64')
+depends=('alsa-lib' 'gtk3' 'webkit2gtk-4.1' 'libayatana-appindicator'
+         'libxcb' 'libxss' 'gst-plugins-base' 'gst-plugins-good'
+         'gst-plugins-bad' 'gst-plugin-pipewire' 'gst-libav')
+options=('!strip' '!debug')
+
+package() {
+    cp -a --no-preserve=ownership "$startdir/payload/." "$pkgdir/"
+}

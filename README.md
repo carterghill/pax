@@ -14,6 +14,14 @@ On macOS or Linux, run `du -sh src-tauri/target` to check disk usage. For an opt
 
 To reset the whole desktop debug profile with Cargo alone, run `cargo clean --profile dev --dry-run` from `src-tauri` to preview the cleanup. This includes packaged debug apps under `target/debug/bundle`, so copy any you want to keep before rerunning without `--dry-run`. The next clean build downloads the WebRTC library again when using the default configuration.
 
+## Linux release packages
+
+Run `npm run build:linux` from the checkout. It writes four release files to `src-tauri/target/linux-packages/`: Debian packages for `arm64` and `amd64`, and pacman packages for `aarch64` and `x86_64`. The command publishes the files after both builds succeed.
+
+Run the command in a terminal. On elementary OS and Ubuntu it offers to install missing Docker or QEMU support through APT, requesting `sudo` when needed. It runs a small BusyBox container to check the second architecture before compiling. Accept the setup prompts to continue directly into the build. An unattended build requires a working Docker engine with emulation already configured.
+
+Each architecture builds in a separate Debian 12 container using the repository's npm and Cargo lockfiles. The first run downloads the builder images and system packages. Allow time and disk space for two release compilations, especially the emulated one.
+
 ## Linux media dependencies
 
 On Debian-based Linux, install the Pax `.deb` with APT (for example, `sudo apt install ./pax_0.1.0_arm64.deb`) so it resolves the GStreamer dependencies. When running Pax from source, use `npm run setup:linux-media` before `npm start`. The setup command reads the same dependency list and uses APT to install missing packages. Restart Pax if it was already running.

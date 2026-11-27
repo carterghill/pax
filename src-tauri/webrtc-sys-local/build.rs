@@ -310,10 +310,16 @@ fn main() {
                 }
             }
 
-            builder
-                .flag("-Wno-changes-meaning")
-                .flag("-Wno-deprecated-declarations")
-                .flag("-std=c++20");
+            // The SDK declares a Network() method with an unqualified Network return
+            // type. GCC 12 requires -fpermissive for this; newer GCC can target it.
+            if builder.get_compiler().is_like_gnu() {
+                if builder.is_flag_supported("-Wchanges-meaning").unwrap() {
+                    builder.flag("-Wno-changes-meaning");
+                } else {
+                    builder.flag("-fpermissive");
+                }
+            }
+            builder.flag("-Wno-deprecated-declarations").flag("-std=c++20");
         }
         "macos" => {
             println!("cargo:rustc-link-lib=framework=Foundation");
