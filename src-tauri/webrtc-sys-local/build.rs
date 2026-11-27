@@ -192,7 +192,8 @@ fn main() {
 
             println!("cargo:rerun-if-env-changed=CUDA_PATH");
 
-            if cuda_include_dir.join("cuda.h").exists() {
+            // The Windows toolkit libraries above are for the x64 target.
+            if target_arch == "x86_64" && cuda_include_dir.join("cuda.h").exists() {
                 println!("cargo:rustc-link-search=native={}", cuda_lib_dir.display());
                 println!("cargo:rustc-link-lib=dylib=cuda");
 
@@ -216,7 +217,7 @@ fn main() {
                     // avoiding struct/function redefinition errors.  winsock2.h
                     // from webrtc provides all the same types.
                     .define("_WINSOCKAPI_", None);
-            } else {
+            } else if target_arch == "x86_64" {
                 println!("cargo:warning=CUDA not found at {}; building without NVENC hardware encoding", cuda_home.display());
             }
             // ─────────────────────────────────────────────────────────

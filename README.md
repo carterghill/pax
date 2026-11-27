@@ -14,7 +14,27 @@ On macOS or Linux, run `du -sh src-tauri/target` to check disk usage. For an opt
 
 To reset the whole desktop debug profile with Cargo alone, run `cargo clean --profile dev --dry-run` from `src-tauri` to preview the cleanup. This includes packaged debug apps under `target/debug/bundle`, so copy any you want to keep before rerunning without `--dry-run`. The next clean build downloads the WebRTC library again when using the default configuration.
 
-## Linux release packages
+## Desktop release builds
+
+Run `npm ci` from the checkout to install the JavaScript dependencies. `npm run build` type-checks the frontend and writes its production assets to `dist/`. Use a platform command to package the desktop app.
+
+| Command | Run on | Release output |
+| --- | --- | --- |
+| `npm run build:mac` | macOS | A native `.app` and `.dmg` for the build Mac under `src-tauri/target/release/bundle/`. |
+| `npm run build:linux` | Linux with Docker | Debian and pacman packages for ARM64 and x86_64 under `src-tauri/target/linux-packages/`. |
+| `npm run build:windows` | Windows ARM64 or x64 | An MSI and a setup EXE per architecture under `src-tauri/target/<target>/release/bundle/`. |
+
+### Windows setup
+
+In Visual Studio Installer, enable **Desktop development with C++**, the Windows SDK, and the MSVC C++ build tools for **both x64/x86 and ARM64**. Run the following command once from the checkout to add both targets to the active Rust toolchain.
+
+```powershell
+rustup target add x86_64-pc-windows-msvc aarch64-pc-windows-msvc
+```
+
+Run `npm run build:windows` from either Windows machine. It builds `x86_64-pc-windows-msvc` first and `aarch64-pc-windows-msvc` second. For a typical Intel or AMD PC, share the installer labeled `x64`. For a Windows on Arm PC, share the one labeled `arm64`. Each target's `msi/` and `nsis/` folders contain the two installer formats.
+
+### Linux release packages
 
 Run `npm run build:linux` from the checkout. It writes four release files to `src-tauri/target/linux-packages/`: Debian packages for `arm64` and `amd64`, and pacman packages for `aarch64` and `x86_64`. The command publishes the files after both builds succeed.
 
