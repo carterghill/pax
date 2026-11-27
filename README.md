@@ -22,7 +22,7 @@ Run `npm ci` from the checkout to install the JavaScript dependencies. `npm run 
 | --- | --- | --- |
 | `npm run build:mac` | macOS | A native `.app` and `.dmg` for the build Mac under `src-tauri/target/release/bundle/`. |
 | `npm run build:linux` | Linux with Docker | Debian and pacman packages for ARM64 and x86_64 under `src-tauri/target/linux-packages/`. |
-| `npm run build:windows` | Windows ARM64 or x64 | An MSI and a setup EXE per architecture under `src-tauri/target/<target>/release/bundle/`. |
+| `npm run build:windows` | Windows ARM64 or x64 | An MSI and a setup EXE per architecture in `release/windows/`. |
 
 ### Windows setup
 
@@ -32,7 +32,7 @@ In Visual Studio Installer, enable **Desktop development with C++**, the Windows
 rustup target add x86_64-pc-windows-msvc aarch64-pc-windows-msvc
 ```
 
-Run `npm run build:windows` from either Windows machine. It builds `x86_64-pc-windows-msvc` first and `aarch64-pc-windows-msvc` second. For a typical Intel or AMD PC, share the installer labeled `x64`. For a Windows on Arm PC, share the one labeled `arm64`. Each target's `msi/` and `nsis/` folders contain the two installer formats.
+Run `npm run build:windows` from either Windows machine. After both builds succeed, open `release/windows/`. For a typical Intel or AMD PC, share the installer labeled `x64`. For a Windows on Arm PC, share the one labeled `arm64`.
 
 ### Linux release packages
 

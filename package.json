@@ -11,6 +11,7 @@
     "build:mac": "tauri build --bundles app,dmg",
     "build:linux": "bash scripts/linux/build.sh",
     "build:windows": "tauri build --target x86_64-pc-windows-msvc && tauri build --target aarch64-pc-windows-msvc",
+    "postbuild:windows": "node scripts/collect-windows-installers.mjs",
     "test:attachments": "node --test src/data/AttachmentLease.test.mjs",
     "test:composer": "node --test src/features/chat/composer/clipboardImage.test.mjs",
     "test:unavailable-messages": "node --test src/features/chat/messages/unavailableMessages.test.mjs",
