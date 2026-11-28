@@ -16,13 +16,13 @@ To reset the whole desktop debug profile with Cargo alone, run `cargo clean --pr
 
 ## Desktop release builds
 
-Run `npm ci` from the checkout to install the JavaScript dependencies. `npm run build` type-checks the frontend and writes its production assets to `dist/`. Use a platform command to package the desktop app.
+Run `npm ci` from the checkout to install the JavaScript dependencies. For development, run `npm start` and keep that terminal open while Pax uses Vite at `http://localhost:1420`. `npm run build` type-checks the frontend and writes its production assets to `dist/`. The platform commands below embed those assets in the desktop app.
 
 | Command | Run on | Release output |
 | --- | --- | --- |
 | `npm run build:mac` | macOS | A native `.app` and `.dmg` for the build Mac under `src-tauri/target/release/bundle/`. |
 | `npm run build:linux` | Linux with Docker | Debian and pacman packages for ARM64 and x86_64 under `src-tauri/target/linux-packages/`. |
-| `npm run build:windows` | Windows ARM64 or x64 | An MSI and a setup EXE per architecture in `release/windows/`. |
+| `npm run build:windows` | Windows ARM64 or x64 | Standard x64 and ARM64 setup EXEs in `release/windows/`, plus an NVENC setup EXE for each architecture when `cuda.h` is available. |
 
 ### Windows setup
 
@@ -32,7 +32,11 @@ In Visual Studio Installer, enable **Desktop development with C++**, the Windows
 rustup target add x86_64-pc-windows-msvc aarch64-pc-windows-msvc
 ```
 
-Run `npm run build:windows` from either Windows machine. After both builds succeed, open `release/windows/`. For a typical Intel or AMD PC, share the installer labeled `x64`. For a Windows on Arm PC, share the one labeled `arm64`.
+Run `npm run build:windows` from either Windows machine. It checks for `cuda.h` beside `package.json`, then under `CUDA_PATH\include`. If the header is missing, the terminal offers to download it before compilation. Answer **Y** to build all four installers, or press **Enter** to build the two standard installers.
+
+To install the header separately, run `npm run setup:cuda-header`. This downloads NVIDIA's pinned Windows CUDA package from PyPI, verifies its SHA-256 checksum, and extracts just `cuda.h` into the checkout. The same header works for both architectures. In unattended builds, run the setup command first if you want NVENC. Otherwise a missing header selects the two standard installers automatically.
+
+Open `release/windows/` after the command finishes. Choose `x64` for an Intel or AMD PC and `arm64` for a Windows on Arm PC. The regular `-setup.exe` works without NVIDIA drivers. Choose `-nvenc-setup.exe` for a machine with a compatible NVIDIA GPU and driver to enable NVIDIA hardware video encoding. The end user's PC only needs the driver for that variant. Both variants install the same Pax app.
 
 ### Linux release packages
 

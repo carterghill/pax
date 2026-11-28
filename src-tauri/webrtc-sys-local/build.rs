@@ -16,6 +16,8 @@ use std::path::Path;
 use std::path::PathBuf;
 use std::{env, path, process::Command};
 
+mod windows_nvenc;
+
 /// CUDA toolkit root containing `include/cuda.h`.
 ///
 /// Linux distros use different defaults: NVIDIA's installer uses `/usr/local/cuda`;
@@ -183,19 +185,15 @@ fn main() {
             //println!("cargo:rustc-link-lib=dylib=va_win32");
 
             // ── NVIDIA NVENC hardware encoding ──────────────────────
-            let cuda_home = PathBuf::from(
-                env::var("CUDA_PATH")
-                    .unwrap_or_else(|_| "C:\\Program Files\\NVIDIA GPU Computing Toolkit\\CUDA\\v13.2".into())
-            );
-            let cuda_include_dir = cuda_home.join("include");
-            let cuda_lib_dir = cuda_home.join("lib").join("x64");
-
-            println!("cargo:rerun-if-env-changed=CUDA_PATH");
-
-            // The Windows toolkit libraries above are for the x64 target.
-            if target_arch == "x86_64" && cuda_include_dir.join("cuda.h").exists() {
-                println!("cargo:rustc-link-search=native={}", cuda_lib_dir.display());
-                println!("cargo:rustc-link-lib=dylib=cuda");
+            let machine = match target_arch.as_str() {
+                "x86_64" => Some("X64"),
+                "aarch64" => Some("ARM64"),
+                _ => None,
+            };
+            if let Some((machine, cuda_include_dir)) =
+                machine.and_then(|m| windows_nvenc::include_dir().map(|include| (m, include)))
+            {
+                link_windows_cuda_driver(machine);
 
                 builder
                     .include(&cuda_include_dir)
@@ -217,8 +215,6 @@ fn main() {
                     // avoiding struct/function redefinition errors.  winsock2.h
                     // from webrtc provides all the same types.
                     .define("_WINSOCKAPI_", None);
-            } else if target_arch == "x86_64" {
-                println!("cargo:warning=CUDA not found at {}; building without NVENC hardware encoding", cuda_home.display());
             }
             // ─────────────────────────────────────────────────────────
 
@@ -409,6 +405,25 @@ fn main() {
     if target_os.as_str() == "android" {
         copy_libwebrtc_jar(&PathBuf::from(Path::new(&webrtc_dir)));
     }
+}
+
+fn link_windows_cuda_driver(machine: &str) {
+    // Generate an import library for the target CPU. The NVIDIA driver supplies
+    // the implementation on the user's PC, so the build only needs cuda.h.
+    let definition = "src/nvidia/windows_cuda.def";
+    let out = PathBuf::from(env::var_os("OUT_DIR").unwrap());
+    let library = out.join("pax_cuda_driver.lib");
+    println!("cargo:rerun-if-changed={definition}");
+    let status = cc::Build::new().get_archiver()
+        .arg("/NOLOGO")
+        .arg(format!("/MACHINE:{machine}"))
+        .arg(format!("/DEF:{definition}"))
+        .arg(format!("/OUT:{}", library.display()))
+        .status()
+        .expect("run MSVC librarian to generate the CUDA driver import library");
+    assert!(status.success(), "could not generate {}", library.display());
+    println!("cargo:rustc-link-search=native={}", out.display());
+    println!("cargo:rustc-link-lib=dylib=pax_cuda_driver");
 }
 
 fn copy_libwebrtc_jar(webrtc_dir: &PathBuf) {

@@ -36,7 +36,7 @@
  #endif
  
  // NVDEC is gated separately from NVENC because nvcuvid.lib (Video Codec SDK)
- // is not bundled with the CUDA Toolkit.  NVENC only needs cuda.lib.
+ // is a separate dependency from the CUDA driver used by NVENC.
  #if defined(USE_NVIDIA_VIDEO_DECODER)
  #include "nvidia/nvidia_decoder_factory.h"
  #endif

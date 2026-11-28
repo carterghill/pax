@@ -2,6 +2,9 @@
 /// `cargo:rustc-env`. The source code then reads them with `option_env!()`.
 use std::path::PathBuf;
 
+#[path = "webrtc-sys-local/windows_nvenc.rs"]
+mod windows_nvenc;
+
 /// Match webrtc-sys-local: find CUDA toolkit with `include/cuda.h` on Linux.
 fn linux_cuda_toolkit_root() -> Option<PathBuf> {
     println!("cargo:rerun-if-env-changed=CUDA_HOME");
@@ -147,17 +150,12 @@ fn main() {
     let target_arch = std::env::var("CARGO_CFG_TARGET_ARCH").unwrap_or_default();
 
     match target_os.as_str() {
-        "windows" if target_arch == "x86_64" => {
-            println!("cargo:rerun-if-env-changed=CUDA_PATH");
-            let cuda_home =
-                std::path::PathBuf::from(std::env::var("CUDA_PATH").unwrap_or_else(|_| {
-                    r"C:\Program Files\NVIDIA GPU Computing Toolkit\CUDA\v13.2".into()
-                }));
-            if cuda_home.join("include").join("cuda.h").exists() {
+        "windows" if matches!(target_arch.as_str(), "x86_64" | "aarch64") => {
+            if windows_nvenc::include_dir().is_some() {
                 println!("cargo:rustc-cfg=has_nvenc");
                 println!("cargo:warning=Pax: NVENC hardware encoding enabled");
             } else {
-                println!("cargo:warning=Pax: CUDA not found — NVENC unavailable, non-NVIDIA GPUs will use VP9");
+                println!("cargo:warning=Pax: building without NVENC hardware encoding");
             }
         }
         "linux" => {

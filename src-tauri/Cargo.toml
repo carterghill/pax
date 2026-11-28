@@ -13,6 +13,10 @@ incremental = false
 # Keep file and line numbers for dependency backtraces and full debug info for Pax.
 debug = "line-tables-only"
 
+# Keep the two Windows installer variants in separate Cargo and Tauri output directories.
+[profile.release-nvenc]
+inherits = "release"
+
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
 [lib]

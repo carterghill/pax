@@ -71,7 +71,9 @@ NvEncoder::NvEncoder(NV_ENC_DEVICE_TYPE eDeviceType,
 
 void NvEncoder::LoadNvEncApi() {
 #if defined(_WIN32)
-#if defined(_WIN64)
+#if defined(_M_ARM64) || defined(__aarch64__)
+  HMODULE hModule = LoadLibrary(TEXT("nvEncodeAPIa64.dll"));
+#elif defined(_WIN64)
   HMODULE hModule = LoadLibrary(TEXT("nvEncodeAPI64.dll"));
 #else
   HMODULE hModule = LoadLibrary(TEXT("nvEncodeAPI.dll"));
